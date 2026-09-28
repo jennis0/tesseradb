@@ -880,7 +880,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       content: target === null ? [] : ['a name'],
       target
     });
-  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)]};
+  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)], subtopics: [row('subtopics', 41n)]};
 
   /**
    * Answers as the server does: the artifacts of every layer named, and on a point request a
@@ -899,10 +899,10 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     return {...r, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
   }
 
-  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = []) {
+  async function open(traces: {kind: string; fields: Record<string, number | string>}[] = [], declared: Meta = LAYERED) {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {client, viewport} = fakeClient(answer, LAYERED);
+    const {client, viewport} = fakeClient(answer, declared);
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}, instruments: {onTrace: (kind, fields) => traces.push({kind, fields})}});
     await clock.advance(1);
     const settle = async () => {
@@ -950,6 +950,17 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(layersOf(a.colourServed)).toEqual(['topics']);
     // The coloured cluster is named by the label attached to it.
     expect(a.colourServed.map((x) => artifactName(x, a.attached))).toEqual(['a name']);
+  });
+
+  it('keeps a drawn dependent layer that declares geometry on the point path, and drops only its labels', async () => {
+    // `subtopics` depends on `topics` and draws clusters of its own, so it is not a label layer.
+    const declared: Meta = {...LAYERED, layers: [...LAYERED.layers.slice(0, 2), drawn('subtopics', {depsOn: ['topics']}), ...LAYERED.layers.slice(2)]};
+    const {store, settle, asked} = await open([], declared);
+    store.setLayers(['topics']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    for (const r of asked().filter((x) => x.k !== 0)) expect(r.layers).toEqual(['topics', 'subtopics']);
+    expect(Object.keys(store.get('marks').bands[0]!.membership).sort()).toEqual(['subtopics', 'topics']);
   });
 
   it('draws a layer with its labels and colours by another, and each surface sees its own', async () => {

@@ -1499,12 +1499,14 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * The layers a point request names, each putting a membership column on every band: those
-   * {@link layersAsked} names, less the layers attached to another (a clustering's labels), whose
-   * columns nothing reads. Their rows come from the channel's requests.
+   * {@link layersAsked} names, less the label layers (a layer that depends on another and declares
+   * no geometry, as a clustering's topic labels), whose columns nothing reads. The first layer
+   * drawn and the colour layer are always kept. A label layer's rows come from the channel.
    */
   function pointLayers(): string[] {
-    const attached = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-    return layersAsked().filter((l) => !attached.has(l));
+    const kept = new Set([layersOn[0], colourLayer()]);
+    const labels = new Set(meta?.layers.filter((l) => l.depsOn.length > 0 && l.computedContent.length === 0 && l.shape === null && !kept.has(l.name)).map((l) => l.name) ?? []);
+    return layersAsked().filter((l) => !labels.has(l));
   }
 
   /**
