@@ -660,7 +660,7 @@ async fn a_table_read_through_its_cursor_is_the_whole_table() {
     let f = fixture().await;
     let token = token_for(&f.server, &["1"]).await;
     let groupings = json!([
-        { "cells": { "depth": 32 } },
+        { "cells": { "depth": 10 } },
         { "by": { "field": "archive", "top": 2 }, "cells": { "depth": 8 } },
         { "by": { "layer": LAYER, "top": 3 } },
     ]);
@@ -753,7 +753,7 @@ async fn every_refusal_has_its_status() {
     let (_, first) = aggregate_ok(
         &f.server,
         &token,
-        &json!({ "view": "s0", "groupings": [{ "cells": { "depth": 32 } }], "page_rows": 10,
+        &json!({ "view": "s0", "groupings": [{ "cells": { "depth": 10 } }], "page_rows": 10,
                  "pages": 1 }),
     )
     .await;
@@ -768,6 +768,8 @@ async fn every_refusal_has_its_status() {
         (json!({ "view": "s0", "groupings": [{ "unknown": 1 }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }), None),
+        (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 4, "area": [5.0, 0.0, 1.0, 9.0] } }] }), None),
+        (json!({ "view": "s0", "groupings": [{ "cells": { "depth": 4, "area": [0.0, 0.0, 1.0] } }] }), None),
         (json!({ "view": "s0", "groupings": [{ "cells": { "zoom": 3 } }] }), None),
         (by(json!({ "top": 2 })), None),
         (by(json!({ "field": "archive", "layer": LAYER, "top": 2 })), None),
@@ -835,31 +837,25 @@ async fn refusal_detail(server: &TestServer, token: &str, field: &str) -> String
     body["detail"].as_str().unwrap().replace(field, "<field>")
 }
 
-/// **A request without cells takes its slot from the viewport's gate, and one with cells from the
-/// bulk-read lane**: each is shed with its own gate full and served with the other's full.
+/// **Every request takes its slot from the viewport's gate**, with cells or without: each is shed
+/// with that gate full and served with the bulk-read lane full.
 #[tokio::test]
-async fn a_request_is_admitted_by_whether_it_asks_for_cells() {
+async fn every_request_is_admitted_as_the_viewport_is() {
     let f = fixture_with_gates(ComputeGate::new(1, 0, 250), ComputeGate::for_bulk_reads(1), |_| {})
         .await;
     let token = token_for(&f.server, &["0"]).await;
     let counts = json!({ "view": "s0", "groupings": [{}, { "by": { "field": "archive", "top": 2 } }] });
     let cells = json!({ "view": "s0", "groupings": [{}, { "cells": { "depth": 6 } }] });
-
-    let held = hold(&f.server.state.compute_gate).await;
-    let resp = post(&f.server, "/v1/aggregate", &token, &counts).await;
-    assert!(resp.headers().contains_key("retry-after"));
-    assert_eq!(refused(resp, 429).await, "backpressure");
-    aggregate_ok(&f.server, &token, &cells).await;
-    drop(held);
-
-    let held = hold(&f.server.state.bulk_gate).await;
-    let started = Instant::now();
-    let resp = post(&f.server, "/v1/aggregate", &token, &cells).await;
-    assert!(resp.headers().contains_key("retry-after"));
-    assert_eq!(refused(resp, 429).await, "backpressure");
-    assert!(started.elapsed() < Duration::from_secs(5), "a cell request waited for the lane");
-    aggregate_ok(&f.server, &token, &counts).await;
-    drop(held);
+    for body in [&counts, &cells] {
+        let held = hold(&f.server.state.compute_gate).await;
+        let resp = post(&f.server, "/v1/aggregate", &token, body).await;
+        assert!(resp.headers().contains_key("retry-after"));
+        assert_eq!(refused(resp, 429).await, "backpressure", "{body}");
+        drop(held);
+        let held = hold(&f.server.state.bulk_gate).await;
+        aggregate_ok(&f.server, &token, body).await;
+        drop(held);
+    }
 }
 
 /// Both permits of `gate`, once the request before has let them go.
@@ -877,18 +873,18 @@ async fn hold(gate: &ComputeGate) -> tessera_server::state::GatePermits {
 }
 
 /// **A client that goes away stops the work and frees the slot.** The response is far larger
-/// than the sockets buffer, so its producer waits on the reader holding the bulk lane's only slot,
-/// and a second cell request is shed; once the reader goes, one is served well inside the stall
-/// budget the producer would otherwise wait out.
+/// than the sockets buffer, so its producer waits on the reader holding the viewport's only slot,
+/// and a viewport is shed; once the reader goes, a viewport is served well inside the stall budget
+/// the producer would otherwise wait out.
 #[tokio::test]
 async fn a_client_that_goes_away_stops_the_work() {
-    let f = fixture_with_gates(generous_test_gate(), ComputeGate::for_bulk_reads(1), |limits| {
+    let f = fixture_with(ComputeGate::new(1, 0, 250), |limits| {
         limits.stream_write_stall_ms = 120_000;
     })
     .await;
     let token = token_for(&f.server, &["0"]).await;
     let groupings: Vec<Value> = (0..16)
-        .map(|_| json!({ "by": { "field": "archive", "top": 3 }, "cells": { "depth": 32 } }))
+        .map(|_| json!({ "by": { "field": "archive", "top": 3 }, "cells": { "depth": 10 } }))
         .collect();
     let mut reader = post(
         &f.server,
@@ -900,8 +896,8 @@ async fn a_client_that_goes_away_stops_the_work() {
     assert_eq!(reader.status().as_u16(), 200);
     assert!(reader.chunk().await.unwrap().is_some());
 
-    let small = json!({ "view": "s0", "groupings": [{ "cells": { "depth": 1 } }] });
-    let resp = post(&f.server, "/v1/aggregate", &token, &small).await;
+    let viewport = json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 0 });
+    let resp = post(&f.server, "/v1/viewport", &token, &viewport).await;
     assert_eq!(
         refused(resp, 429).await,
         "backpressure",
@@ -911,7 +907,7 @@ async fn a_client_that_goes_away_stops_the_work() {
     drop(reader);
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let resp = post(&f.server, "/v1/aggregate", &token, &small).await;
+        let resp = post(&f.server, "/v1/viewport", &token, &viewport).await;
         if resp.status().as_u16() == 200 {
             break;
         }
@@ -932,7 +928,7 @@ async fn a_trailer_says_when_a_table_was_counted_over_a_changed_corpus() {
     let token = token_for(&f.server, &["0"]).await;
     let mut body = json!({
         "view": "s0",
-        "groupings": [{ "cells": { "depth": 32 } }],
+        "groupings": [{ "cells": { "depth": 10 } }],
         "page_rows": 100,
         "pages": 1,
     });
@@ -960,6 +956,149 @@ async fn a_trailer_says_when_a_table_was_counted_over_a_changed_corpus() {
     assert!(after.trailer.get("recomposed").is_none(), "{}", after.trailer);
 }
 
+/// **The cell limit counts the cells at a depth in an area**, under the default of 1,048,576: the
+/// whole view at depth 10 is accepted and at 11 refused, one detail naming the count, the limit
+/// and the deepest depth that fits; a small area at depth 20 is accepted and lists only its
+/// cells; and a grouping with several groups is held to the same count as one with none.
+#[tokio::test]
+async fn the_cell_limit_counts_the_cells_of_the_area() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["0"]).await;
+    let whole = |depth: u8, by: Option<Value>| {
+        let mut grouping = json!({ "cells": { "depth": depth } });
+        if let Some(by) = by {
+            grouping["by"] = by;
+        }
+        json!({ "view": "s0", "groupings": [grouping] })
+    };
+    for by in [None, Some(json!({ "field": "archive", "top": 3 }))] {
+        aggregate_ok(&f.server, &token, &whole(10, by.clone())).await;
+        let resp = post(&f.server, "/v1/aggregate", &token, &whole(11, by.clone())).await;
+        assert_eq!(resp.status().as_u16(), 422);
+        let detail = resp.json::<Value>().await.unwrap()["detail"].as_str().unwrap().to_string();
+        for part in ["4194304", "1048576", "max_aggregate_cells", "depth 10"] {
+            assert!(detail.contains(part), "{detail}");
+        }
+    }
+
+    // A small area at depth 20 is under the limit, grouped or not.
+    let area = [100.0, 100.0, 100.5, 100.5];
+    aggregate_ok(
+        &f.server,
+        &token,
+        &json!({ "view": "s0", "groupings": [
+            { "cells": { "depth": 20, "area": area } },
+            { "cells": { "depth": 20, "area": area }, "by": { "field": "archive", "top": 3 } },
+        ] }),
+    )
+    .await;
+}
+
+/// **An area lists only its own cells**: the rows of a table over an area are the whole view's
+/// rows whose cells lie in it, at the viewport's depths and past them, and its head is the
+/// whole set's.
+#[tokio::test]
+async fn an_area_lists_only_its_own_cells() {
+    let f = fixture().await;
+    let token = token_for(&f.server, &["1"]).await;
+    let area = [120.0, 250.5, 610.0, 580.0];
+    for depth in [3u8, 7, 10] {
+        let body = |area: Option<[f64; 4]>| {
+            let mut cells = json!({ "depth": depth });
+            if let Some(area) = area {
+                cells["area"] = json!(area);
+            }
+            json!({ "view": "s0", "reference": {}, "groupings": [
+                { "cells": cells.clone() },
+                { "by": { "field": "archive", "top": 2 }, "cells": cells },
+            ] })
+        };
+        let (_, all) = aggregate_ok(&f.server, &token, &body(None)).await;
+        let (_, some) = aggregate_ok(&f.server, &token, &body(Some(area))).await;
+        let tiles: HashSet<u64> = if depth <= 7 {
+            viewport_tiles_in(&f.server, &token, depth, area).await
+        } else {
+            HashSet::new()
+        };
+        for grouping in 0..2 {
+            let within: Vec<AggregateRow> = table(std::slice::from_ref(&some), grouping);
+            let whole = table(std::slice::from_ref(&all), grouping);
+            assert!(!within.is_empty() && within.len() < whole.len(), "depth {depth}");
+            let kept: Vec<AggregateRow> = whole
+                .into_iter()
+                .filter(|row| within.iter().any(|w| w.cell == row.cell))
+                .collect();
+            assert_eq!(within, kept, "depth {depth}: an area's cell counts all of its items");
+            if depth <= 7 {
+                assert!(within.iter().all(|row| tiles.contains(&row.cell.unwrap())));
+            }
+            assert_eq!(some.tables[grouping as usize].0, all.tables[grouping as usize].0);
+        }
+    }
+}
+
+/// The tiles a viewport lists for `bbox` at `zoom`, empty ones included.
+async fn viewport_tiles_in(server: &TestServer, token: &str, zoom: u8, bbox: [f64; 4]) -> HashSet<u64> {
+    let resp = post(
+        server,
+        "/v1/viewport",
+        token,
+        &json!({ "view": "s0", "zoom": zoom, "bbox": bbox, "k": 0 }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    decode_viewport_frames(&resp.bytes().await.unwrap())
+        .tiles
+        .iter()
+        .map(|t| t.0)
+        .collect()
+}
+
+/// **A large table continues through the cursor within the response budget**: with the budget cut
+/// to 64 KiB in pages of 16 KiB, every page's Arrow bytes stay under the page budget, every
+/// response's under its budget, and the pages joined are the table read in one response.
+#[tokio::test]
+async fn a_large_table_continues_through_the_cursor_within_the_budget() {
+    let f = fixture_with(generous_test_gate(), |limits| {
+        limits.aggregate_response_bytes = 64 << 10;
+        limits.aggregate_page_bytes = 16 << 10;
+    })
+    .await;
+    let roomy = fixture().await;
+    let token = token_for(&f.server, &["0"]).await;
+    let body = json!({ "view": "s0", "reference": {}, "groupings": [
+        { "cells": { "depth": 10 } },
+        { "by": { "field": "archive", "top": 3 }, "cells": { "depth": 10 } },
+    ] });
+    let responses = read_all(&f.server, &token, &body).await;
+    assert!(responses.len() > 1, "the table spans responses");
+    for response in &responses[..responses.len() - 1] {
+        assert_eq!(response.trailer["ended_by"], "budget_bytes");
+    }
+    for response in &responses {
+        let mut bytes = 0;
+        for (_, pages) in &response.tables {
+            for (batch, _) in pages {
+                // The bytes the columns use, not the decoded message they share.
+                let page: usize = batch
+                    .columns()
+                    .iter()
+                    .map(|c| c.to_data().get_slice_memory_size().unwrap())
+                    .sum();
+                assert!(page <= 16 << 10, "a page of {page} bytes");
+                bytes += page;
+            }
+        }
+        assert!(bytes <= 64 << 10, "a response of {bytes} bytes");
+    }
+    let roomy_token = token_for(&roomy.server, &["0"]).await;
+    let (_, whole) = aggregate_ok(&roomy.server, &roomy_token, &body).await;
+    assert_eq!(whole.trailer["next"], Value::Null, "the default budget holds it in one response");
+    for grouping in 0..2 {
+        assert_eq!(table(&responses, grouping), table(std::slice::from_ref(&whole), grouping));
+    }
+}
+
 /// **`/v1/meta` publishes the route's limits** beside the page ceilings.
 #[tokio::test]
 async fn meta_publishes_the_limits() {
@@ -985,4 +1124,5 @@ async fn meta_publishes_the_limits() {
     assert_eq!(selection["max_aggregate_groupings"], 7);
     assert_eq!(selection["max_aggregate_top"], 70);
     assert_eq!(selection["max_aggregate_named"], 700);
+    assert_eq!(selection["max_aggregate_cells"], 1 << 20, "the default: every cell at depth 10");
 }

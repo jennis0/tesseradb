@@ -42,6 +42,16 @@ pub const DEFAULT_MAX_AGGREGATE_TOP: u32 = 1_000;
 /// The most values or artifacts one aggregate grouping may name.
 pub const DEFAULT_MAX_AGGREGATE_NAMED: u32 = 1_000;
 
+/// The most cells one aggregate grouping's cell level may list: every cell at depth 10.
+pub const DEFAULT_MAX_AGGREGATE_CELLS: u64 = 1 << 20;
+
+/// Bytes one aggregate response may carry.
+pub const DEFAULT_AGGREGATE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Arrow bytes per page of an aggregate response, a quarter of its response, so at most one built
+/// page waits for the client beside the one being built.
+pub const DEFAULT_AGGREGATE_PAGE_BYTES: usize = 4 * 1024 * 1024;
+
 pub const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
 
 pub const DEFAULT_REGION_CACHE_BYTES: u64 = 256 * 1024 * 1024;

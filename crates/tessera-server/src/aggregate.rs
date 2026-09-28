@@ -2,9 +2,10 @@
 //! of exact counts per grouping, framed as `/v1/items` frames its pages with a table head before
 //! each table's first page in a response.
 //!
-//! A request whose groupings have no cells runs under the viewport's admission, since it is sent
-//! beside viewport requests; one with cells runs in the bulk-read lane. Either is held to the bulk
-//! reads' page and response budgets and ends with a cursor where they cut it.
+//! It is sent beside viewport requests, so it runs under the viewport's admission. Its response is
+//! held to its own byte budget, `serve.aggregate_response_bytes`, in pages of
+//! `serve.aggregate_page_bytes`, and to the bulk reads' time budget, and ends with a cursor where
+//! they cut it; a cell level lists at most `selection.max_aggregate_cells` cells.
 
 use std::sync::Arc;
 
@@ -15,7 +16,8 @@ use serde_json::Value;
 
 use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRefused, AggregateRequest, AggregateSink, By,
-    CancelToken, EngineError, Grouping, PageEnd, Pick, RecordsSink, RecordsTrailer, Reference,
+    CancelToken, EngineError, Grouping, PageEnd, Pick, RecordsLimits, RecordsSink, RecordsTrailer,
+    Reference,
     SinkResult, TableHead,
 };
 use tessera_wire::table_head_frame;
@@ -23,7 +25,7 @@ use tessera_wire::table_head_frame;
 use crate::error::ApiError;
 use crate::records::{bulk_read, limits, view_and_filter, CompressionReq, FrameSink, Lane, Opening, Read};
 use crate::state::{ApiJson, AppState, ViewerSession};
-use crate::viewer::{category_column, CategoryColumn, FilterParser};
+use crate::viewer::{category_column, check_bbox, CategoryColumn, FilterParser};
 
 /// The request body. Every field but `view` and `groupings` may be left out; an unknown one is a
 /// `422`.
@@ -80,6 +82,9 @@ struct ByReq {
 #[serde(deny_unknown_fields)]
 struct CellsReq {
     depth: u64,
+    /// As the viewport's `bbox`; absent is the view's whole extent.
+    #[serde(default)]
+    area: Option<[f64; 4]>,
 }
 
 /// The table heads and pages of an aggregate response. It has no head frame of its own: the
@@ -127,17 +132,10 @@ pub(crate) async fn aggregate(
     ApiJson(req): ApiJson<AggregateReq>,
 ) -> Result<Response, ApiError> {
     let compression = req.compression;
-    // A table without cells holds at most its listed groups and `rest` and `none`; one with
-    // cells can hold a row per item, so it takes the bulk reads' admission and memory budget.
-    let lane = if req.groupings.iter().any(|g| g.cells.is_some()) {
-        Lane::Bulk
-    } else {
-        Lane::Compute
-    };
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_aggregate(state, session, req, cancel, sink)
     };
-    bulk_read(state, session, lane, "aggregate", "", compression, read).await
+    bulk_read(state, session, Lane::Compute, "aggregate", "", compression, read).await
 }
 
 fn run_aggregate(
@@ -182,11 +180,16 @@ fn run_aggregate(
         page_rows: req.page_rows,
         pages: req.pages,
         cursor: req.cursor.as_deref(),
-        limits: limits(state),
+        limits: RecordsLimits {
+            max_page_bytes: state.limits.aggregate_page_bytes,
+            response_bytes: state.limits.aggregate_response_bytes,
+            ..limits(state)
+        },
         caps: AggregateCaps {
             groupings: state.limits.max_aggregate_groupings,
             top: state.limits.max_aggregate_top,
             named: state.limits.max_aggregate_named,
+            cells: state.limits.max_aggregate_cells,
         },
         cancel: Some(cancel),
     };
@@ -222,9 +225,18 @@ fn grouping_of(
         None => None,
         Some(by) => Some(by_of(meta, view, session, by)?),
     };
+    let area = match &grouping.cells {
+        Some(CellsReq {
+            area: Some(area), ..
+        }) => {
+            check_bbox("area", area)?;
+            Some(*area)
+        }
+        _ => None,
+    };
     let cells = match &grouping.cells {
         None => None,
-        Some(CellsReq { depth }) => match u8::try_from(*depth) {
+        Some(CellsReq { depth, .. }) => match u8::try_from(*depth) {
             Ok(cells) if cells <= 32 => Some(cells),
             _ => {
                 return Err(ApiError::Contract(format!(
@@ -234,7 +246,7 @@ fn grouping_of(
             }
         },
     };
-    Ok(Grouping { by, cells })
+    Ok(Grouping { by, cells, area })
 }
 
 fn by_of(

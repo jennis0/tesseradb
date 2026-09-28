@@ -327,6 +327,22 @@ struct RawServe {
     ///
     /// Default: `1000`.
     max_aggregate_named: Option<u32>,
+    /// The most cells one aggregate grouping's cell level may list: the cells at its depth in its
+    /// area, however many groups share them. A request asking for more is refused with 422.
+    ///
+    /// Default: `1048576`.
+    max_aggregate_cells: Option<u64>,
+    /// The most bytes one `POST /v1/aggregate` response carries before it ends with a cursor to
+    /// resume from. It runs under the viewport's admission, so this bounds what each one holds.
+    /// A value below `aggregate_page_bytes` is refused.
+    ///
+    /// Default: `16777216` (16 MiB).
+    aggregate_response_bytes: Option<usize>,
+    /// The most bytes one page of an aggregate response holds, as Arrow before compression. `0`
+    /// is refused.
+    ///
+    /// Default: `4194304` (4 MiB).
+    aggregate_page_bytes: Option<usize>,
     /// The most seconds a write asking to wait until it is visible, and `/control/flush`, wait
     /// before answering `visible: false`.
     ///
@@ -546,6 +562,12 @@ pub struct Config {
     pub max_aggregate_top: u32,
     /// The longest named list of an aggregate grouping.
     pub max_aggregate_named: u32,
+    /// The most cells an aggregate grouping's cell level may list.
+    pub max_aggregate_cells: u64,
+    /// Bytes one aggregate response may carry; at least `aggregate_page_bytes`.
+    pub aggregate_response_bytes: usize,
+    /// An aggregate page's Arrow bytes, before compression.
+    pub aggregate_page_bytes: usize,
     pub region_cache_bytes: u64,
     /// Add `stage_ns` to a viewport response's trailer; does nothing in a binary built without
     /// `bench-timing`.
@@ -793,6 +815,23 @@ fn parse(text: &str) -> Result<Config> {
         .stream_deadline_ms
         .unwrap_or(DEFAULT_STREAM_DEADLINE_MS);
     let bulk_response_ms = serve.bulk_response_ms.unwrap_or(DEFAULT_BULK_RESPONSE_MS);
+    let aggregate_page_bytes = serve
+        .aggregate_page_bytes
+        .unwrap_or(DEFAULT_AGGREGATE_PAGE_BYTES);
+    if aggregate_page_bytes == 0 {
+        return Err(ConfigError::Zero {
+            key: "serve.aggregate_page_bytes",
+        });
+    }
+    let aggregate_response_bytes = serve
+        .aggregate_response_bytes
+        .unwrap_or(DEFAULT_AGGREGATE_RESPONSE_BYTES);
+    if aggregate_response_bytes < aggregate_page_bytes {
+        return Err(ConfigError::AggregateResponseBelowPage {
+            response_bytes: aggregate_response_bytes,
+            page_bytes: aggregate_page_bytes,
+        });
+    }
 
     let ingest = raw.ingest;
     let ingest_admission = ingest
@@ -901,6 +940,11 @@ fn parse(text: &str) -> Result<Config> {
         max_aggregate_named: serve
             .max_aggregate_named
             .unwrap_or(DEFAULT_MAX_AGGREGATE_NAMED),
+        max_aggregate_cells: serve
+            .max_aggregate_cells
+            .unwrap_or(DEFAULT_MAX_AGGREGATE_CELLS),
+        aggregate_response_bytes,
+        aggregate_page_bytes,
         region_cache_bytes: serve
             .region_cache_bytes
             .unwrap_or(DEFAULT_REGION_CACHE_BYTES),

@@ -272,11 +272,13 @@ async fn meta(
             // `POST /v1/items`' page ceilings: rows, and Arrow bytes before compression.
             "max_page_rows": state.limits.max_page_rows,
             "max_page_bytes": state.limits.max_page_bytes,
-            // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top` and
-            // named list. Its pages are held to the two page ceilings above.
+            // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top`,
+            // named list and cells.
             "max_aggregate_groupings": state.limits.max_aggregate_groupings,
             "max_aggregate_top": state.limits.max_aggregate_top,
             "max_aggregate_named": state.limits.max_aggregate_named,
+            // The most cells one grouping's cell level may list: its depth's cells in its area.
+            "max_aggregate_cells": state.limits.max_aggregate_cells,
         },
         // The layers this principal may know exist, with what each declared. Never a layer's
         // artifact count, which counts objects the principal may not see, and never its gate
@@ -1133,6 +1135,17 @@ fn run_viewport_stream(
     // `sink` drops here, after the state stores, releasing the channel sender and the slot permit.
 }
 
+/// Refuses a bbox that is not `[x0, y0, x1, y1]` with `x0 <= x1`, `y0 <= y1`, all finite; `name`
+/// is the key that carried it.
+pub(crate) fn check_bbox(name: &str, bbox: &[f64; 4]) -> Result<(), ApiError> {
+    if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+        return Err(ApiError::Contract(format!(
+            "{name} must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite"
+        )));
+    }
+    Ok(())
+}
+
 async fn viewport(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
@@ -1144,13 +1157,7 @@ async fn viewport(
 
     // Exactly one of `bbox` and `tiles`.
     match (&req.bbox, &req.tiles) {
-        (Some(bbox), None) => {
-            if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
-                return Err(ApiError::Contract(
-                    "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-                ));
-            }
-        }
+        (Some(bbox), None) => check_bbox("bbox", bbox)?,
         (None, Some(tiles)) => {
             // A prefix carries no depth, so one with bits above `zoom` is refused rather than
             // masked off.
