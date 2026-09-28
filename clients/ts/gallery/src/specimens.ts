@@ -318,6 +318,21 @@ export const SECTIONS: Section[] = [
           await until(() => !!shadow(el, '[part="tick"] mark'), 'marked suggestions');
         }
       },
+      {
+        state: 'category checklist, switched to the highlight, the filter kept',
+        build: () =>
+          make(
+            'tessera-filter',
+            {
+              store: store({
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.CV', 'cs.LG']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
+                  suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}
+                })
+              })
+            },
+            {column: 'field', verb: 'highlight'}
+          )
+      },
       {state: 'category typeahead, loading', build: () => make('tessera-filter', {store: store()}, {column: 'field'})},
       {
         state: 'category typeahead, refused',
@@ -345,7 +360,7 @@ export const SECTIONS: Section[] = [
       {state: 'nothing filterable', build: () => make('tessera-filter-panel', {store: store({meta: {...META, filterOperands: []}})})},
       {state: 'every control empty', build: () => make('tessera-filter-panel', {store: store({filters: filtersOf(emptyDraft(), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}})})})},
       {
-        state: 'a field filtered to two values with one highlighted',
+        state: 'a field filtered to two values with one highlighted, the highlight chip pressed',
         build: () =>
           make('tessera-filter-panel', {
             store: store({
@@ -353,7 +368,13 @@ export const SECTIONS: Section[] = [
                 suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}
               })
             })
-          })
+          }),
+        // Pressing the highlight chip switches the field's control to the highlight.
+        ready: async (el) => {
+          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+          (shadow(el, '[part="chip"][data-verb="highlight"] [part="edit"]') as HTMLButtonElement).click();
+          await until(() => shadow(el, 'tessera-filter[column="field"]')?.getAttribute('verb') === 'highlight', 'the field control on the highlight');
+        }
       },
       {
         state: 'clauses applied: filter, highlight and member chips',

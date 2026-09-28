@@ -41,7 +41,6 @@ export {
   composeFilters,
   emptyDraft,
   isPopulated,
-  withVerb,
   withoutClause,
   type ClauseVerb,
   type ColumnDraft,

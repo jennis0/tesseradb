@@ -343,6 +343,66 @@ describe('<tessera-filter> on a keyword column', () => {
   });
 });
 
+describe('<tessera-filter> switched between filter and highlight', () => {
+  const drafts = (store: ReturnType<typeof fakeStore>) => store.calls.filter((c) => c.name === 'setFilters').map((c) => c.args[0] as FilterDraft);
+  const switchTo = (host: HTMLElement, verb: string) => (deep(host, `[part="verb"] [data-verb="${verb}"]`) as HTMLButtonElement).click();
+
+  it('edits a text column’s highlight and leaves its filter, sending typing still waiting before a switch', async () => {
+    vi.useFakeTimers();
+    const host = await mount('<tessera-filter column="title"></tessera-filter>');
+    const el = host.querySelector('tessera-filter') as TesseraFilter;
+    const store = fakeStore({meta: META, status: status({})});
+    const filter = {title: {family: 'text' as const, query: 'graph', mode: 'all' as const}};
+    store.set('filters', {draft: {filter, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0});
+    el.store = store;
+    await settle(host);
+    const changes: unknown[] = [];
+    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+
+    switchTo(host, 'highlight');
+    await settle(host);
+    expect(deep(host, '[part="verb"] [data-verb="highlight"]')!.getAttribute('aria-pressed')).toBe('true');
+    const entry = () => deep(host, '[part="entry"]') as HTMLInputElement;
+    expect(entry().value).toBe('');
+    entry().value = 'guidance';
+    entry().dispatchEvent(new Event('input'));
+    // Switching back sends the typing at once, to the position it was typed in.
+    switchTo(host, 'filter');
+    await settle(host);
+    expect(drafts(store)).toEqual([{filter, highlight: {title: {family: 'text', query: 'guidance', mode: 'all'}}}]);
+    expect(changes).toEqual([{column: 'title', verb: 'highlight', expr: {title: {match: 'guidance'}}}]);
+    expect(entry().value).toBe('graph');
+    await vi.runAllTimersAsync();
+    expect(drafts(store)).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it('edits a date range and a category’s values in the highlight position', async () => {
+    const host = await mount('<tessera-filter column="submitted_at" verb="highlight"></tessera-filter><tessera-filter column="archive" verb="highlight"></tessera-filter>');
+    const [dates, archive] = [...host.querySelectorAll('tessera-filter')] as TesseraFilter[];
+    const store = fakeStore({meta: META, status: status({})});
+    const filter = {archive: {family: 'category' as const, keys: ['cs']}, submitted_at: {family: 'numeric' as const, gte: null, lte: null}};
+    const values = [{code: 1, key: 'cs', title: 'CS', match: {field: 'key' as const, start: 0, len: 0}}, {code: 2, key: 'math', title: 'Maths', match: {field: 'key' as const, start: 0, len: 0}}];
+    store.set('filters', {draft: {filter, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {archive: {q: '', values, more: false}}, suggestErrors: {}, suggestEpoch: 0});
+    dates!.store = store;
+    archive!.store = store;
+    await settle(host);
+
+    const from = dates!.shadowRoot!.querySelector('[part="entry"]') as HTMLInputElement;
+    from.value = '2020-01-01';
+    from.dispatchEvent(new Event('change'));
+    expect(drafts(store).at(-1)!.highlight['submitted_at']).toEqual({family: 'numeric', gte: Date.UTC(2020, 0, 1) * 1000, lte: null});
+    expect(drafts(store).at(-1)!.filter).toEqual(filter);
+
+    // The highlight holds nothing yet, so no value is ticked although the filter holds one.
+    const ticks = [...archive!.shadowRoot!.querySelectorAll<HTMLInputElement>('[part="tick"] input')];
+    expect(ticks.map((t) => t.checked)).toEqual([false, false]);
+    ticks[1]!.click();
+    expect(drafts(store).at(-1)!.highlight['archive']).toEqual({family: 'category', keys: ['math']});
+    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['cs']});
+  });
+});
+
 describe('<tessera-filter-panel>', () => {
   it('marks a member_of chip with no label and no served name as unnamed, never by its key', async () => {
     const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
@@ -353,29 +413,6 @@ describe('<tessera-filter-panel>', () => {
     const chip = deep(host, '[part="chip"][data-artifact="4"]')!;
     expect(chip.textContent).toContain(UNNAMED);
     expect(chip.textContent).not.toContain('clusters');
-  });
-
-  /**
-   * The chip's verb says which of the request's two expressions the clause joins, and clicking it
-   * moves the clause with its predicate: the draft sent back carries the same keys.
-   */
-  it('moves a clause between filter and highlight from the chip, keeping its predicate', async () => {
-    const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
-    const store = fakeStore({meta: META, status: status({})});
-    store.set('filters', {
-      draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}},
-      expr: {archive: {in: ['cs']}},
-      highlight: null,
-      members: [],
-      suggestions: {},
-      suggestErrors: {},
-      suggestEpoch: 0
-    });
-    (host.querySelector('tessera-filter-panel') as unknown as {store: unknown}).store = store;
-    await settle(host);
-    (deep(host, '[part="verb"]') as HTMLButtonElement).click();
-    const sent = store.calls.find((c) => c.name === 'setFilters');
-    expect(sent!.args[0]).toEqual({filter: {archive: {family: 'category', keys: []}}, highlight: {archive: {family: 'category', keys: ['cs']}}});
   });
 
   describe('a column both filtered and highlighted', () => {
@@ -397,18 +434,41 @@ describe('<tessera-filter-panel>', () => {
     it('shows two chips, and removing one leaves the other', async () => {
       const {host, chip, sent} = await mountBoth();
       expect(deepAll(host, '[part="chip"]').map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
-      (chip('highlight').querySelector('button:not([part="verb"])') as HTMLButtonElement).click();
+      (chip('highlight').querySelector(':scope > button:last-child') as HTMLButtonElement).click();
       expect(sent()).toEqual({filter: both.filter, highlight: {archive: {family: 'category', keys: []}}});
-      (chip('filter').querySelector('button:not([part="verb"])') as HTMLButtonElement).click();
+      (chip('filter').querySelector(':scope > button:last-child') as HTMLButtonElement).click();
       expect(sent()).toEqual({filter: {...both.filter, archive: {family: 'category', keys: []}}, highlight: both.highlight});
     });
 
-    it('merges a moved clause into the one in the other position, joining the values', async () => {
-      const {chip, sent} = await mountBoth();
-      (chip('highlight').querySelector('[part="verb"]') as HTMLButtonElement).click();
-      expect(sent()).toEqual({filter: {...both.filter, archive: {family: 'category', keys: ['cs.LG', 'cs.CV', 'stat.ML']}}, highlight: {archive: {family: 'category', keys: []}}});
-      (chip('filter').querySelector('[part="verb"]') as HTMLButtonElement).click();
-      expect(sent()).toEqual({filter: {...both.filter, archive: {family: 'category', keys: []}}, highlight: {archive: {family: 'category', keys: ['cs.CV', 'stat.ML', 'cs.LG']}}});
+    it('opens a chip’s control on the chip’s position and focuses it', async () => {
+      const {host, chip} = await mountBoth();
+      const panel = host.querySelector('tessera-filter-panel')!;
+      const control = () => deepAll(host, 'tessera-filter').find((f) => f.getAttribute('column') === 'archive') as TesseraFilter;
+      expect(control().verb).toBe('filter');
+      (chip('highlight').querySelector('[part="edit"]') as HTMLButtonElement).click();
+      await settle(host);
+      await control().updateComplete;
+      expect(control().verb).toBe('highlight');
+      expect(panel.shadowRoot!.activeElement).toBe(control());
+      (chip('filter').querySelector('[part="edit"]') as HTMLButtonElement).click();
+      await settle(host);
+      expect(control().verb).toBe('filter');
+    });
+
+    it('asks for the controls under chips-only, and opens the chip’s control once they show', async () => {
+      const {host, chip} = await mountBoth();
+      const panel = host.querySelector('tessera-filter-panel') as HTMLElement & {chipsOnly: boolean};
+      panel.chipsOnly = true;
+      await settle(host);
+      const asked: unknown[] = [];
+      host.addEventListener('tessera-chipopen', (e) => asked.push((e as CustomEvent).detail));
+      (chip('highlight').querySelector('[part="edit"]') as HTMLButtonElement).click();
+      expect(asked).toEqual([{column: 'archive', verb: 'highlight'}]);
+      panel.chipsOnly = false;
+      await settle(host);
+      await settle(host);
+      const control = deepAll(host, 'tessera-filter').find((f) => f.getAttribute('column') === 'archive') as TesseraFilter;
+      expect(control.verb).toBe('highlight');
     });
 
     it('empties both positions on Clear all', async () => {
@@ -440,11 +500,8 @@ describe('<tessera-filter-panel>', () => {
     await settle(host);
     const chips = deepAll(host, '[part="chip"][data-artifact="546790"]');
     expect(chips.map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
-    (chips[0]!.querySelector('button:not([part="verb"])') as HTMLButtonElement).click();
+    (chips[0]!.querySelector('button') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{...clause, verb: 'highlight'}]);
-    // Moving the highlight onto the filter leaves one clause, in the filter position.
-    (chips[1]!.querySelector('[part="verb"]') as HTMLButtonElement).click();
-    expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{...clause, verb: 'filter'}]);
   });
 
   it('draws a member_of clause as a chip carrying the same verb, and removes it', async () => {
@@ -463,8 +520,9 @@ describe('<tessera-filter-panel>', () => {
     await settle(host);
     const chip = deep(host, '[part="chip"]')!;
     expect(chip.getAttribute('data-verb')).toBe('highlight');
-    (chip.querySelector('[part="verb"]') as HTMLButtonElement).click();
-    expect((store.calls.find((c) => c.name === 'setMembers')!.args[0] as {verb: string}[])[0]!.verb).toBe('filter');
+    expect(chip.querySelector('[part="verb"]')).not.toBeNull();
+    (chip.querySelector('button') as HTMLButtonElement).click();
+    expect(store.calls.find((c) => c.name === 'setMembers')!.args[0]).toEqual([]);
   });
 
 
@@ -481,7 +539,8 @@ describe('<tessera-filter-panel>', () => {
     expect(chips).toHaveLength(1);
     expect(chips[0]!.getAttribute('data-column')).toBe('archive');
     expect(chips[0]!.textContent).toContain('cs');
-    expect(deepAll(host, '[part="verb"]').map((v) => v.getAttribute('data-verb'))).toEqual(['filter']);
+    // A filter chip carries no mark.
+    expect(chips[0]!.querySelector('[part="verb"]')).toBeNull();
     const before = filters[0];
     store.set('status', status({status: 'loading'}));
     await settle(host);

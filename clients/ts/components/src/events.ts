@@ -78,10 +78,10 @@ export type TesseraEventDetails = {
    * edit in a control or a legend row, `expr` is the expression the edited position now composes,
    * null for none, and `verb` names that position (`filter` where absent). Where a chip was
    * removed, `verb` is the position it was in and `expr` is null; after Clear all, `expr` is null.
-   * Where a clause moved between `filter` and `highlight`, `verb` is its new position and `expr` is
-   * absent.
    */
   'tessera-filterchange': {column: string | null; expr?: FilterExpr | null; verb?: ClauseVerb};
+  /** A column's chip was pressed under `chips-only`: its control is to be shown, editing `verb`. */
+  'tessera-chipopen': {column: string; verb: ClauseVerb};
   /** Open was pressed on the item `id`: `fields` is its record's fields. */
   'tessera-open': {id: string; fields: Record<string, unknown>};
   /**

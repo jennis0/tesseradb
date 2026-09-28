@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {activeCount, composeFilters, emptyDraft, withVerb, withoutClause, type FilterDraft} from '../src/filters.js';
+import {activeCount, composeFilters, emptyDraft, withoutClause, type FilterDraft} from '../src/filters.js';
 import {withMember, withMembers, withoutMember, type MemberClause} from '../src/members.js';
 
 describe('an empty draft', () => {
@@ -44,28 +44,12 @@ describe('a column with a filter and a highlight', () => {
     expect(typed.filter.title).toEqual({family: 'text', query: '', mode: 'phrase'});
   });
 
-  it('merges a moved category clause into the one there, joining the keys', () => {
-    const moved = withVerb(both, 'field', 'filter');
-    expect(composeFilters(moved, 'filter')).toEqual({field: {in: ['cs.LG', 'cs.CV']}});
-    expect(composeFilters(moved, 'highlight')).toBeNull();
-
-    const back = withVerb({...both, highlight: {field: {family: 'category', keys: ['stat.ML', 'cs.CV']}}}, 'field', 'highlight');
-    expect(composeFilters(back, 'highlight')).toEqual({field: {in: ['stat.ML', 'cs.CV', 'cs.LG']}});
-    expect(composeFilters(back, 'filter')).toBeNull();
-  });
-
-  it('widens a moved range to span both, an open side staying open', () => {
-    const ranges: FilterDraft = {filter: {year: {family: 'numeric', gte: 2000, lte: 2010}}, highlight: {year: {family: 'numeric', gte: 1995, lte: null}}};
-    expect(composeFilters(withVerb(ranges, 'year', 'filter'), 'filter')).toEqual({year: {range: {gte: 1995}}});
-    const closed: FilterDraft = {filter: {year: {family: 'numeric', gte: 2000, lte: 2010}}, highlight: {year: {family: 'numeric', gte: 2005, lte: 2020}}};
-    expect(composeFilters(withVerb(closed, 'year', 'highlight'), 'highlight')).toEqual({year: {range: {gte: 2000, lte: 2020}}});
-  });
-
-  it('replaces a text clause with the moved one', () => {
-    const texts: FilterDraft = {filter: {title: {family: 'text', query: 'diffusion', mode: 'all'}}, highlight: {title: {family: 'text', query: 'guidance', mode: 'phrase'}}};
-    const moved = withVerb(texts, 'title', 'filter');
-    expect(composeFilters(moved, 'filter')).toEqual({title: {phrase: 'guidance'}});
-    expect(composeFilters(moved, 'highlight')).toBeNull();
+  it('sets one position without changing the other', () => {
+    const edited: FilterDraft = {...both, highlight: {field: {family: 'category', keys: ['stat.ML']}}};
+    expect(composeFilters(edited, 'filter')).toEqual({field: {in: ['cs.LG', 'cs.CV']}});
+    expect(composeFilters(edited, 'highlight')).toEqual({field: {in: ['stat.ML']}});
+    const narrowed: FilterDraft = {...both, filter: {...both.filter, field: {family: 'category', keys: ['cs.CV']}}};
+    expect(composeFilters(narrowed, 'highlight')).toEqual({field: {in: ['cs.CV']}});
   });
 
   it('composes the highlight in the filter position\'s column order, whatever order it was set in', () => {
@@ -75,10 +59,6 @@ describe('a column with a filter and a highlight', () => {
     ]);
     const lit: FilterDraft = {...seeded, highlight: {year: {family: 'numeric', gte: 2000, lte: null}, extra: {family: 'category', keys: ['x']}, field: {family: 'category', keys: ['cs.CV']}}};
     expect(composeFilters(lit, 'highlight')).toEqual({all_of: [{field: {in: ['cs.CV']}}, {year: {range: {gte: 2000}}}, {extra: {in: ['x']}}]});
-  });
-
-  it('moves nothing where the other position holds no clause on the column', () => {
-    expect(withVerb(both, 'title', 'highlight')).toBe(both);
   });
 });
 

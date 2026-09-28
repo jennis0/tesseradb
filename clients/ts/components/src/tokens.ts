@@ -426,7 +426,7 @@ export const chrome = css`
     background: var(--_tessera-highlight-soft);
     color: var(--_tessera-highlight);
   }
-  /* The verb toggle on a chip: the word for where the clause is, clicked to move it. */
+  /* The word on a highlight chip that says where its clause is. */
   .chip .verb {
     display: inline-flex;
     align-items: center;

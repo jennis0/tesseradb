@@ -195,6 +195,13 @@ describe('<tessera-explorer> layouts', () => {
     await settle(host);
     expect(toggle.getAttribute('data-count')).toBe('2');
     expect(deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"]')).toHaveLength(2);
+    // Pressing a chip while the controls are closed opens them.
+    (deepAll(shadow.querySelector('[part="panel"]')!, '[part="chip"][data-verb="highlight"] [part="edit"]')[0] as HTMLButtonElement).click();
+    await settle(host);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(controls()).toHaveLength(2);
+    toggle.click();
+    await settle(host);
     toggle.click();
     await settle(host);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');

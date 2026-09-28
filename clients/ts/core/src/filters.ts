@@ -56,7 +56,8 @@ export type ColumnDraft =
 /**
  * A filter panel's controls in each of the request's two expressions, keyed by the column name the
  * leaf is sent under. A column may have a control in both, so one field can narrow the map to some
- * values and light a few of them. Either record may hold empty controls, which constrain nothing.
+ * values and light a few of them. The two are independent: each composes its own expression, and
+ * the server computes the highlight within what the filter keeps. Either record may hold empty controls, which constrain nothing.
  * {@link emptyDraft} seeds one; {@link composeFilters} turns it into the expressions a request
  * carries.
  *
@@ -172,33 +173,6 @@ export function withoutClause(draft: FilterDraft, column: string, verb: ClauseVe
           ? {family: 'category', keys: []}
           : {family: 'numeric', gte: null, lte: null};
   return {...draft, [verb]: {...draft[verb], [column]: empty}};
-}
-
-/**
- * Returns a draft with `column`'s clause moved from the other position to `verb`, and emptied
- * where it was. Where `verb` already holds a clause on the column, the two are merged: category
- * keys are joined, a numeric range widens to span both (an open side stays open), and a text or
- * keyword clause replaces the one there. Returns `draft` itself where the other position holds no
- * clause on the column.
- *
- * @category Filters
- */
-export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): FilterDraft {
-  const from: ClauseVerb = verb === 'filter' ? 'highlight' : 'filter';
-  const moved = draft[from][column];
-  if (!moved || !isPopulated(moved)) return draft;
-  const held = draft[verb][column];
-  let merged: ColumnDraft = moved;
-  if (held && isPopulated(held)) {
-    if (held.family === 'category' && moved.family === 'category') {
-      merged = {family: 'category', keys: [...held.keys, ...moved.keys.filter((k) => !held.keys.includes(k))]};
-    } else if (held.family === 'numeric' && moved.family === 'numeric') {
-      const wider = (a: number | null, b: number | null, pick: (...n: number[]) => number) => (a === null || b === null ? null : pick(a, b));
-      merged = {family: 'numeric', gte: wider(held.gte, moved.gte, Math.min), lte: wider(held.lte, moved.lte, Math.max)};
-    }
-  }
-  const emptied = withoutClause(draft, column, from);
-  return {...emptied, [verb]: {...emptied[verb], [column]: merged}};
 }
 
 /**

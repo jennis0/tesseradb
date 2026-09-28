@@ -1,7 +1,7 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import {createStore, type Store} from '../src/store.js';
-import {withVerb, type FilterDraft} from '../src/filters.js';
+import type {FilterDraft} from '../src/filters.js';
 import {withMember} from '../src/members.js';
 import type {Artifact, Layer, MembershipColumn, Meta, ViewportPart, ViewportResponse} from '../src/types.js';
 import {artifact, fakeClock, fakeScheduler, layer, meta, response as responseOf, servedResult, tile, view, scalar} from './support.js';
@@ -210,30 +210,6 @@ describe('the drops', () => {
     expect(body.filters ?? null).toBeNull();
     expect(store.get('filters').highlight).toEqual({archive: {in: ['cs']}});
     expect(store.get('filters').expr).toBeNull();
-  });
-
-  it('moves a clause between the two positions without it being re-entered', async () => {
-    const clock = fakeClock();
-    const scheduler = fakeScheduler();
-    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
-    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
-    await clock.advance(600);
-    scheduler.flush();
-
-    const filtered: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}};
-    store.setFilters(filtered);
-    await clock.advance(600);
-    scheduler.flush();
-    expect((viewport.mock.calls.at(-1)![1] as {filters?: unknown}).filters).toEqual({archive: {in: ['cs']}});
-
-    // The predicate is unchanged; only the verb moves.
-    store.setFilters(withVerb(filtered, 'archive', 'highlight'));
-    await clock.advance(600);
-    scheduler.flush();
-    const moved = viewport.mock.calls.at(-1)![1] as {filters?: unknown; highlight?: unknown};
-    expect(moved.filters ?? null).toBeNull();
-    expect(moved.highlight).toEqual({archive: {in: ['cs']}});
-    expect(store.get('filters').draft.highlight['archive']).toEqual({family: 'category', keys: ['cs']});
   });
 
   it('sends a filter and a highlight on one column as both expressions', async () => {

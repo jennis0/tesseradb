@@ -1,7 +1,8 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {activeCount, emptyDraft, isPopulated, withMember, withVerb, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
+import {activeCount, emptyDraft, isPopulated, withoutClause, withoutMember, type ClauseVerb, type ColumnDraft, type MemberClause} from '@tesseradb/client';
+import type {TesseraFilter} from './filter.js';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit, keyTitle} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -16,26 +17,29 @@ const FILTER_PARTS = exportparts('filter');
 /**
  * A `<tessera-filter>` for every column `meta.filterOperands` lists, under the clauses applied, as
  * chips, and a Clear all button. A clause is in one of two positions: a filter narrows the map and
- * every count to the matches, and a highlight keeps the map and lights the matches. A column or an
- * artifact can hold a clause in each, and then has two chips. A highlight chip says "highlight"; a
- * filter chip carries no mark. The controls edit the filter clauses; a highlight shows only as its
- * chip. A `member_of` clause (an artifact chosen on the artifact card or in the hierarchy) is a
+ * every count to the matches, and a highlight lights the matches among what the filter keeps. A
+ * column or an artifact can hold a clause in each. The two are independent: neither changes the
+ * other, and each has its own chip. A highlight chip says "highlight"; a filter chip carries no
+ * mark. A `member_of` clause (an artifact chosen on the artifact card or in the hierarchy) is a
  * chip too.
  *
- * Each chip's toggle moves its clause to the other position. Where that position already holds a
- * clause on the same column, the two merge as `withVerb` says; on the same artifact, the moved
- * clause replaces the one there. Removing a chip empties its clause and leaves the other position's
- * alone. Clear all empties every control in both positions and drops every `member_of` clause.
- * `chips-only` leaves the controls out, and renders nothing while no clause is applied.
+ * Each control has a Filter / Highlight switch choosing which of its column's two clauses it edits.
+ * Pressing a column's chip switches that column's control to the chip's position, scrolls it into
+ * view and focuses it; under `chips-only`, where there are no controls, it fires
+ * `tessera-chipopen` and does the same once the controls are shown. Removing a chip empties its
+ * clause and leaves the other position's alone. Clear all empties every control in both positions
+ * and drops every `member_of` clause. `chips-only` leaves the controls out, and renders nothing
+ * while no clause is applied.
  *
  * @summary Every filter control, with the applied clauses as chips.
  * @tagname tessera-filter-panel
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A
- *   column's chip moved between filter and highlight (with `verb`, its new position), a column's
- *   chip was removed (with `verb`, the position it was in, and `expr` null), or Clear all was
- *   pressed (with `column` and `expr` null). Moving or removing
- *   a `member_of` chip fires nothing. Each inner control fires its own as well.
+ *   column's chip was removed (with `verb`, the position it was in, and `expr` null), or Clear all
+ *   was pressed (with `column` and `expr` null). Removing a `member_of` chip fires nothing. Each
+ *   inner control fires its own as well.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-chipopen']>} tessera-chipopen - A column's chip
+ *   was pressed, naming the column and the position its control is to edit.
  * @csspart title - The heading, holding Clear all at its right.
  * @csspart clear - The Clear all button, shown while any clause is applied.
  * @csspart state - The state line, with `data-state`.
@@ -43,8 +47,8 @@ const FILTER_PARTS = exportparts('filter');
  * @csspart chips - The applied clauses.
  * @csspart chip - One applied clause, with `data-verb` (`filter` or `highlight`) and `data-column`
  *   or `data-artifact`.
- * @csspart verb - The button that moves a clause to the other position: the word "highlight" on a
- *   highlight chip, and on a filter chip the highlight icon, shown on hover or focus.
+ * @csspart edit - The button that is a column chip's text, which opens its control.
+ * @csspart verb - The word "highlight" on a highlight chip.
  * @csspart filter-<part> - A part of an inner `<tessera-filter>`, forwarded under a `filter-`
  *   prefix: `filter-entry`, `filter-tick`, and so on.
  */
@@ -65,15 +69,14 @@ export class TesseraFilterPanel extends TesseraElement {
         gap: 6px;
         margin-bottom: 12px;
       }
-      .chip .verb[data-verb='filter'] {
-        margin: 0;
-        padding: 0 2px;
-        background: none;
-        opacity: 0;
-      }
-      .chip:hover .verb[data-verb='filter'],
-      .chip:focus-within .verb[data-verb='filter'] {
-        opacity: 1;
+      .chip .edit {
+        display: inline-flex;
+        flex: 0 1 auto;
+        align-items: center;
+        gap: 6px;
+        color: inherit;
+        font: inherit;
+        text-align: left;
       }
       [part='chips']:last-child {
         margin-bottom: 0;
@@ -106,36 +109,31 @@ export class TesseraFilterPanel extends TesseraElement {
     }
   }
 
-  /**
-   * The verb toggle a chip carries. A highlight chip is marked with the word; a filter chip, the
-   * usual kind, carries no mark, and its toggle shows on hover or focus as the highlight icon.
-   */
-  private verbToggle(verb: ClauseVerb, label: string, move: () => void) {
-    const other: ClauseVerb = verb === 'filter' ? 'highlight' : 'filter';
-    return html`<button
-      class="verb"
-      part="verb"
-      type="button"
-      data-verb=${verb}
-      aria-label=${`${label}; ${other} instead`}
-      title=${verb === 'filter' ? 'Highlight instead' : 'Filter instead'}
-      @click=${move}
-    >
-      ${verb === 'filter' ? icon('highlight', 12) : html`${icon('highlight', 11)}highlight`}
-    </button>`;
+  /** The mark a highlight chip carries: the word, in the highlight colour. */
+  private mark(verb: ClauseVerb) {
+    return verb === 'highlight' ? html`<span class="verb" part="verb">${icon('highlight', 11)}highlight</span>` : nothing;
   }
 
-  private moveColumn(column: string, to: ClauseVerb): void {
-    const s = this.resolvedStore;
-    if (!s) return;
-    s.setFilters(withVerb(s.get('filters').draft, column, to));
-    emit(this, 'tessera-filterchange', {column, verb: to});
+  /** The chip last pressed, whose control opens once the controls are drawn. */
+  private editing: {column: string; verb: ClauseVerb} | null = null;
+
+  private edit(column: string, verb: ClauseVerb): void {
+    this.editing = {column, verb};
+    if (this.chipsOnly) emit(this, 'tessera-chipopen', {column, verb});
+    else this.requestUpdate();
   }
 
-  private moveMember(clause: MemberClause, to: ClauseVerb): void {
-    const s = this.resolvedStore;
-    if (!s) return;
-    s.setMembers(withMember(withoutMember(s.get('filters').members, clause.layer, clause.artifact, clause.verb), {...clause, verb: to}));
+  protected override updated(): void {
+    if (!this.editing || this.chipsOnly) return;
+    const {column, verb} = this.editing;
+    const control = Array.from(this.renderRoot.querySelectorAll<TesseraFilter>('tessera-filter')).find((f) => f.column === column);
+    if (!control) return;
+    this.editing = null;
+    control.verb = verb;
+    void control.updateComplete.then(() => {
+      control.scrollIntoView({block: 'nearest'});
+      control.focus();
+    });
   }
 
   private clearMember(clause: MemberClause): void {
@@ -193,7 +191,7 @@ export class TesseraFilterPanel extends TesseraElement {
         ? html`<div part="chips">
             ${chips.map(
               ({c, verb, d}) => html`<span part="chip" class="chip" data-verb=${verb} data-column=${c}
-                >${verb === 'highlight' ? this.verbToggle(verb, c, () => this.moveColumn(c, 'filter')) : nothing}${this.chipText(c, d)}${verb === 'filter' ? this.verbToggle(verb, c, () => this.moveColumn(c, 'highlight')) : nothing}<button
+                ><button part="edit" class="edit" type="button" title=${`Edit the ${verb}`} @click=${() => this.edit(c, verb)}>${this.mark(verb)}${this.chipText(c, d)}</button><button
                   type="button"
                   aria-label=${`Remove ${c} ${verb}`}
                   @click=${() => this.clearColumn(c, verb)}
@@ -204,7 +202,7 @@ export class TesseraFilterPanel extends TesseraElement {
             )}
             ${members.map(
               (m) => html`<span part="chip" class="chip" data-verb=${m.verb} data-artifact=${String(m.artifact)}
-                >${m.verb === 'highlight' ? this.verbToggle(m.verb, this.memberText(m), () => this.moveMember(m, 'filter')) : nothing}${this.memberText(m)}${m.verb === 'filter' ? this.verbToggle(m.verb, this.memberText(m), () => this.moveMember(m, 'highlight')) : nothing}<button
+                >${this.mark(m.verb)}${this.memberText(m)}<button
                   type="button"
                   aria-label=${`Remove ${this.memberText(m)}`}
                   @click=${() => this.clearMember(m)}
