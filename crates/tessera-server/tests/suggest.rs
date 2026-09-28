@@ -1,10 +1,11 @@
-//! **`GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
+//! **`/v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
 //!
 //! One gate with `/v1/categories` (`tests/categories.rs` covers that gate's own mechanics in
 //! depth — a public and a derived column, an interleaved narrow principal), so these cases cover
 //! what is new here: the wire shape (`match`, `count`, `more`), the two refusals the enumeration
-//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, and the
-//! per-session admission (`value-suggestion.md` §5.1).
+//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, the
+//! per-session admission (`value-suggestion.md` §5.1), and the `POST` form's counts under a filter
+//! and its compute admission.
 
 mod common;
 
@@ -493,5 +494,182 @@ async fn at_most_one_suggest_in_flight_per_session() {
     // Releasing the slot lets the next request through.
     drop(guard);
     let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a").await;
+    assert_eq!(status, 200, "{body}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `POST` form: counts under a filter
+// ---------------------------------------------------------------------------------------------
+
+async fn post(
+    server: &TestServer,
+    token: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> (u16, reqwest::header::HeaderMap, serde_json::Value) {
+    let resp = server
+        .client
+        .post(server.viewer_url(path))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    (status, headers, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **A filtered count is the items this principal may see in the view that pass the filter and
+/// carry the value**, for a principal who sees everything and one who sees a third, under a filter
+/// over a column with no index, so it is answered by the view's rows, and a region. The values
+/// offered are the `GET` form's, and the region's verdict is in `x-tessera-region`.
+#[tokio::test]
+async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _) = serve(&tmp).await;
+    let departments = ["d01", "d03", "d04"];
+    let (lo, hi) = (100.5, 800.5);
+    let filter = serde_json::json!({ "all_of": [
+        { "department": { "in": departments } },
+        { "region": { "bbox": [lo, lo, hi, hi] } },
+    ] });
+    let passes = |e: u64| {
+        let (x, y) = scatter(e);
+        departments.contains(&department_of(e).as_str())
+            && (lo..=hi).contains(&x)
+            && (lo..=hi).contains(&y)
+    };
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (_, unfiltered) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=&limit=20&counts=true&view=s0")
+                .await;
+        let (status, headers, body) = post(
+            &server,
+            &token,
+            "/v1/categories/archive/suggest",
+            &serde_json::json!({ "q": "", "limit": 20, "counts": true, "view": "s0", "filters": filter }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["x-tessera-region"], "exact");
+        assert_eq!(keys_of(&body), keys_of(&unfiltered), "{terms:?}: {body}");
+        let mut total = 0;
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..N)
+                .filter(|&e| sees(e) && passes(e) && archive_of(e) == key)
+                .count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+            total += expected;
+        }
+        assert!(total > 0, "the filter passes some item for {terms:?}");
+    }
+}
+
+/// **A value the filter excludes is offered with count 0**, and a filter on the counted column
+/// itself narrows the counts to its own values.
+#[tokio::test]
+async fn a_value_the_filter_excludes_is_offered_with_zero() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, _, body) = post(
+        &server,
+        &token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({
+            "q": "", "limit": 20, "counts": true, "view": "s0",
+            "filters": { "archive": { "in": ["cond"] } },
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // The server's `max_suggestions` is 4.
+    assert_eq!(keys_of(&body), ["astro", "cond", "hep", "math"], "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let expected = if value["key"] == "cond" {
+            (0..N).filter(|&e| archive_of(e) == "cond").count() as u64
+        } else {
+            0
+        };
+        assert_eq!(value["count"], expected, "{body}");
+    }
+}
+
+/// `filters` needs `view`, is parsed as the viewport parses it, and without `counts` changes
+/// nothing.
+#[tokio::test]
+async fn the_post_forms_refusals() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let path = "/v1/categories/archive/suggest";
+    let filter = serde_json::json!({ "archive": { "in": ["cond"] } });
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "filters": filter }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": { "nonesuch": { "in": ["x"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, headers, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "view": "s0", "filters": filter }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(headers.get("x-tessera-region").is_none());
+    assert!(body["values"].as_array().unwrap().iter().all(|v| v.get("count").is_none()));
+}
+
+/// **A filtered suggest takes a compute permit and an unfiltered one does not**: with the gate's
+/// one permit held and no queue, the filtered request is shed with `429` and the others are served.
+#[tokio::test]
+async fn a_filtered_suggest_is_subject_to_compute_admission() {
+    let tmp = TempDir::new().unwrap();
+    copy_categories(&tmp);
+    let server = spawn_server_with_config_and_gate(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        default_engine_config(),
+        tessera_server::state::ComputeGate::new(1, 0, 250),
+    )
+    .await;
+    let token = token_for(&server, &["0"]).await;
+    let held = server.state.compute_gate.admit().await.expect("the one permit is free");
+    let path = "/v1/categories/archive/suggest";
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, _, body) =
+        post(&server, &token, path, &serde_json::json!({ "counts": true, "view": "s0" })).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true").await;
+    assert_eq!(status, 200, "{body}");
+    drop(held);
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
 }

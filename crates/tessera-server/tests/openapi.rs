@@ -477,6 +477,7 @@ fn every_closed_dto_is_declared_closed() {
         "Selection",
         "Layer",
         "CategoriesResponse",
+        "SuggestRequest",
         "Pin",
         "ViewportRequest",
         "ItemsRequest",
@@ -911,20 +912,54 @@ async fn suggest_matches_the_description_and_its_own_refusals() {
     let resp = get("/v1/categories/score/suggest?q=a".to_string())
         .await
         .unwrap();
-    assert_refusal(&doc, resp, 404, "unknown").await;
+    assert_refusal_to(&doc, Some(&reqwest::Method::GET), resp, 404, "unknown").await;
     let resp = get("/v1/categories/archive/suggest?q=a&limit=0".to_string())
         .await
         .unwrap();
-    assert_refusal(&doc, resp, 422, "contract").await;
+    assert_refusal_to(&doc, Some(&reqwest::Method::GET), resp, 422, "contract").await;
     let long_q = "x".repeat(257);
     let resp = get(format!("/v1/categories/archive/suggest?q={long_q}"))
         .await
         .unwrap();
-    assert_refusal(&doc, resp, 422, "contract").await;
+    assert_refusal_to(&doc, Some(&reqwest::Method::GET), resp, 422, "contract").await;
     let resp = get("/v1/categories/archive/suggest?q=a&bogus=1".to_string())
         .await
         .unwrap();
-    assert_refusal(&doc, resp, 422, "contract").await;
+    assert_refusal_to(&doc, Some(&reqwest::Method::GET), resp, 422, "contract").await;
+
+    // The `POST` form: a body the description accepts, a page it describes with the region's
+    // verdict, and its own refusal, `filters` without `view`.
+    let post = |body: Value| {
+        assert_valid(&doc, "SuggestRequest", &body);
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/categories/archive/suggest"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+    };
+    let filters = json!({ "all_of": [
+        { "archive": { "in": ["astro", "cond"] } },
+        { "region": { "bbox": [100.0, 100.0, 900.0, 900.0] } },
+    ] });
+    let resp = post(json!({ "q": "", "counts": true, "view": "s0", "filters": filters }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.headers()["x-tessera-region"], "exact");
+    let page: Value = resp.json().await.unwrap();
+    assert_valid(&doc, "SuggestResponse", &page);
+    let hep = page["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["key"] == "hep")
+        .expect("hep is offered");
+    assert_eq!(hep["count"], 0, "the filter excludes hep: {page}");
+    let resp = post(json!({ "q": "", "counts": true, "filters": filters }))
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&reqwest::Method::POST), resp, 422, "contract").await;
 }
 
 #[tokio::test]
@@ -1494,13 +1529,13 @@ async fn every_described_route_requires_its_planes_credential() {
                          every viewer route requires a session token before it reads the request",
                         resp.status()
                     );
-                    assert_refusal(&doc, resp, 401, "bad-credential").await;
+                    assert_refusal_to(&doc, Some(&method), resp, 401, "bad-credential").await;
                 }
                 if kind != Malformed::No {
                     let resp =
                         send_viewer_probe(&f.server, &method, path, kind, Some(token)).await;
                     if with_token == 422 {
-                        assert_refusal(&doc, resp, with_token, "contract").await;
+                        assert_refusal_to(&doc, Some(&method), resp, with_token, "contract").await;
                     } else {
                         assert_eq!(
                             resp.status().as_u16(),
@@ -1516,10 +1551,10 @@ async fn every_described_route_requires_its_planes_credential() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 9,
-        "the viewer plane's gated routes are meta, categories, suggest, viewport, the items read, \
-         items, the artifacts read, artifacts and artifacts/browse; a change to that set belongs \
-         in this test's reasoning, not silently in its count"
+        gated, 10,
+        "the viewer plane's gated operations are meta, categories, suggest's two forms, viewport, \
+         the items read, items, the artifacts read, artifacts and artifacts/browse; a change to \
+         that set belongs in this test's reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -1712,6 +1747,7 @@ fn viewer_body(path: &str) -> Value {
         "/v1/artifacts" => json!({ "view": "s0", "layer": LAYER, "fields": [] }),
         "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
+        "/v1/categories/{column}/suggest" => json!({ "q": "a" }),
         other => panic!(
             "{other} is a described POST route and this test has no request body for it; add \
              one rather than letting a new viewer route go unchecked"

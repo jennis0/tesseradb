@@ -35,7 +35,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
-        .route("/v1/categories/{column}/suggest", get(suggest))
+        .route(
+            "/v1/categories/{column}/suggest",
+            get(suggest).post(suggest_filtered),
+        )
         .route("/v1/viewport", post(viewport))
         .route("/v1/items", post(crate::records::items))
         .route("/v1/items/{tessera_id}", post(item))
@@ -463,6 +466,24 @@ struct SuggestQuery {
     view: Option<String>,
 }
 
+/// `POST /v1/categories/{column}/suggest`'s body: the query string's fields, and a filter.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestBody {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    counts: Option<bool>,
+    #[serde(default)]
+    view: Option<String>,
+    /// The viewport's filter object, parsed against `view`, which it needs. It narrows the counts
+    /// and nothing else.
+    #[serde(default)]
+    filters: Option<serde_json::Value>,
+}
+
 /// `GET /v1/categories/{column}/suggest`: the values whose folded key or title, or a word start in
 /// either, has `q` as a prefix. Who may see a value is decided as for `/v1/categories`. Unknown
 /// parameters and `limit=0` are 422s.
@@ -471,14 +492,41 @@ async fn suggest(
     ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
     ApiQuery(query): ApiQuery<SuggestQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if query.q.len() > 256 {
+) -> Result<Response, ApiError> {
+    let body = SuggestBody {
+        q: query.q,
+        limit: query.limit,
+        counts: query.counts,
+        view: query.view,
+        filters: None,
+    };
+    suggest_page(state, session, column, body).await
+}
+
+/// `POST /v1/categories/{column}/suggest`: the same page, with counts taken under a filter. A
+/// request carrying `filters` runs behind the compute gate, as `/v1/items` does.
+async fn suggest_filtered(
+    State(state): State<Arc<AppState>>,
+    ViewerSession(session): ViewerSession,
+    AxumPath(column): AxumPath<String>,
+    ApiJson(body): ApiJson<SuggestBody>,
+) -> Result<Response, ApiError> {
+    suggest_page(state, session, column, body).await
+}
+
+async fn suggest_page(
+    state: Arc<AppState>,
+    session: Arc<tessera_engine::Session>,
+    column: String,
+    req: SuggestBody,
+) -> Result<Response, ApiError> {
+    if req.q.len() > 256 {
         return Err(ApiError::Contract(format!(
             "q must be at most 256 bytes, got {}",
-            query.q.len()
+            req.q.len()
         )));
     }
-    let limit = match query.limit {
+    let limit = match req.limit {
         Some(0) => {
             return Err(ApiError::Contract(
                 "limit must be at least 1".to_string(),
@@ -487,17 +535,34 @@ async fn suggest(
         Some(n) => n.min(state.limits.max_suggestions),
         None => state.limits.max_suggestions,
     };
-    let counts = query.counts.unwrap_or(false);
+    let counts = req.counts.unwrap_or(false);
 
     let meta = state.engine.meta();
     let visible = session.visible_views();
     let (resolved, view) =
-        resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+        resolve_category_column(&meta, &column, req.view.as_deref(), visible)?;
+    // Parsed before any work, so a refusal is a 422 however busy the server is.
+    let filter = match (&req.filters, &view) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err(ApiError::Contract(
+                "`filters` is evaluated in a view; send `view` as well".to_string(),
+            ))
+        }
+        (Some(value), Some(view)) => {
+            let view = meta
+                .resolve_visible_view(view, visible)
+                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{view}'")))?;
+            Some(
+                FilterParser::new(&meta, view, visible, state.limits.max_region_vertices)
+                    .parse(value)?,
+            )
+        }
+    };
 
     // At most one suggestion walk per session, refused with a 429 before any work runs, so an
-    // undebounced client cannot queue keystrokes. It takes no compute-gate permit; a keystroke
-    // queued behind viewport renders would be useless.
-    let Some(_suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
+    // undebounced client cannot queue keystrokes.
+    let Some(suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
         return Err(ApiError::Backpressure {
             retry_after_s: crate::error::RETRY_AFTER_SECS,
             cause: crate::error::ShedCause::SuggestInFlight,
@@ -506,31 +571,39 @@ async fn suggest(
 
     let walk_budget = state.limits.max_suggestion_walk;
     let max_suggest_set_entities = state.limits.max_suggest_set_entities;
-    let q = query.q.clone();
-    let page = state
-        .blocking(move |state| {
-            let _suggest_guard = _suggest_guard;
-            state
-                .engine
-                .suggest(
-                    &session,
-                    &resolved,
-                    view.as_deref(),
-                    &q,
-                    limit,
-                    counts,
-                    walk_budget,
-                    max_suggest_set_entities,
-                )
-                .map_err(map_engine_error)
-        })
-        .await?
-        .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+    let q = req.q.clone();
+    let gated = filter.is_some();
+    let work = move |state: &AppState| {
+        let _suggest_guard = suggest_guard;
+        state
+            .engine
+            .suggest(
+                &session,
+                &resolved,
+                view.as_deref(),
+                filter.as_ref(),
+                &q,
+                limit,
+                counts,
+                walk_budget,
+                max_suggest_set_entities,
+            )
+            .map_err(map_engine_error)
+    };
+    // A filtered count evaluates the filter over the whole view, so it takes a compute permit as
+    // `/v1/items` does. An unfiltered keystroke does not: queued behind viewport renders it would
+    // be useless.
+    let page = if gated {
+        state.gated(work).await?
+    } else {
+        state.blocking(work).await?
+    }
+    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
-    Ok(Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         // The caller's own spelling, as `/v1/categories` echoes it.
         "column": column,
-        "q": query.q,
+        "q": req.q,
         "values": page.values.iter().map(|v| {
             let mut value = serde_json::json!({
                 "code": v.code,
@@ -549,7 +622,16 @@ async fn suggest(
             value
         }).collect::<Vec<_>>(),
         "more": page.more,
-    })))
+    }));
+    let mut response = axum::response::IntoResponse::into_response(body);
+    if let Some(verdict) = page.region {
+        response.headers_mut().insert(
+            "x-tessera-region",
+            axum::http::HeaderValue::from_str(&verdict.header_value())
+                .expect("a region verdict is a valid header value"),
+        );
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
