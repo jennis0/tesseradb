@@ -53,6 +53,12 @@ export class HeldViews {
     return this.byId.values();
   }
 
+  /** Whether `machinery` is one this holds, rather than one {@link forget} dropped. */
+  holds(machinery: ViewMachinery): boolean {
+    for (const held of this.byId.values()) if (held === machinery) return true;
+    return false;
+  }
+
   /** Name the current view before any view is built. */
   name(id: string): void {
     this.currentId = id;

@@ -19,7 +19,7 @@ const META = meta({
 });
 
 /** What the fake sees of a request. */
-type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
+type FakeRequest = {view?: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
 
 /**
  * A response that answers every tile the request spans, 1,000 items each with the served points on
@@ -1481,6 +1481,163 @@ describe('a store serves one viewer', () => {
     expect(JSON.stringify(asked.filters)).toContain('region');
     expect(JSON.stringify(asked.filters)).toContain('archive');
     expect(showing(store)).toEqual(new Set(['ik-b']));
+  });
+
+  /**
+   * Viewer A behind `t1` and viewer B behind `t2`, each with its own meta, whose identity keys name
+   * the viewer and the view. `hold` leaves a request unanswered; `refuse` refuses it as the server
+   * refuses a filter on a column the viewer cannot reach.
+   */
+  function perViewer(opts: {
+    metaOf: (token: string) => Meta;
+    hold?: (token: string, req: FakeRequest) => boolean;
+    refuse?: (token: string, req: FakeRequest) => boolean;
+    authorise?: () => Promise<{token: string; expiresAt: number}>;
+  }) {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const whose = (token: string): Who => (token === 't1' || token === 't-a' ? 'a' : 'b');
+    const viewport = vi.fn(async (token: string, req: FakeRequest) => {
+      if (opts.refuse?.(token, req)) throw new TesseraError(422, 'bad-filter', 'this principal cannot filter on that column');
+      if (opts.hold?.(token, req)) return new Promise<never>(() => {});
+      const who = whose(token);
+      return {...answerOf(who, req), identityKey: `${who}:${req.view}`};
+    });
+    const {client} = fakeClient(() => response('ck'));
+    Object.assign(client, {viewport, meta: async (token: string) => opts.metaOf(token)});
+    let issued = 0;
+    const authorise = vi.fn(opts.authorise ?? (async () => ({token: `t${++issued}`, expiresAt: (Date.now() + 60_000) / 1000})));
+    const store = createStore({viewerUrl: 'http://viewer', authorise, client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    return {store, viewport, authorise, clock, scheduler};
+  }
+
+  /** Whose answers a store shows, by the viewer each band, tile count, artifact and meta came from. */
+  function whoShows(store: Store, metas: {a: Meta; b: Meta}): Set<Who> {
+    const who = new Set<Who>();
+    const marks = store.get('marks');
+    for (const band of [...marks.bands, ...marks.standIn.map((piece) => piece.band)]) who.add(band.identityKey.split(':')[0] as Who);
+    for (const t of store.get('tiles').tiles) if (t.counts) who.add(t.counts.visible === VIEWERS.a.visible ? 'a' : 'b');
+    for (const a of store.get('artifacts').served) who.add(a.tesseraId === VIEWERS.a.artifact ? 'a' : 'b');
+    if (store.get('meta') === metas.a) who.add('a');
+    if (store.get('meta') === metas.b) who.add('b');
+    return who;
+  }
+
+  const TWO_VIEWS = meta({...SHAPED, views: [...SHAPED.views, view('s1', {quantisation: SHAPED.views[0]!.quantisation})]});
+
+  it('does not trust the first answer on an unvisited view after a renewal, before a held key is matched', async () => {
+    const metas = {a: meta({...TWO_VIEWS}), b: meta({...TWO_VIEWS})};
+    // The ask the renewal sends at once goes unanswered, so the first answer under B's token is on s1.
+    const {store, authorise, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      hold: (token, req) => token === 't2' && req.view === 's0'
+    });
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    const mixed: Set<Who>[] = [];
+    store.subscribe(() => {
+      const who = whoShows(store, metas);
+      if (who.size > 1) mixed.push(who);
+    });
+    await clock.advance(30_000);
+    expect(authorise).toHaveBeenCalledTimes(2);
+    store.setCurrentView('s1');
+    await settled(clock, scheduler);
+
+    expect(mixed).toEqual([]);
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+    expect(store.get('view').id).toBe('s1');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+  });
+
+  it('sees a new key after a renewal although the previous viewer’s filter is refused under the new token', async () => {
+    const metaA = meta({...SHAPED, filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]});
+    const metas = {a: metaA, b: SHAPED};
+    const {store, viewport, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't1' ? metas.a : metas.b),
+      refuse: (token, req) => token === 't2' && JSON.stringify(req.filters ?? null).includes('secret')
+    });
+    await clock.advance(1);
+    store.setFilters({secret: {family: 'category', keys: ['x'], verb: 'filter'}, archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    expect(whoShows(store, metas)).toEqual(new Set(['a']));
+
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+    expect(Object.keys(store.get('filters').draft)).toEqual(['archive']);
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+    expect(JSON.stringify(viewport.mock.calls.at(-1)![1].filters)).not.toContain('secret');
+  });
+
+  it('drops the member_of clauses, a region selected from an artifact and the old colours when the key changes', async () => {
+    const metas = {a: SHAPED, b: meta({...SHAPED})};
+    const {store, clock, scheduler} = perViewer({metaOf: (token) => (token === 't1' ? metas.a : metas.b)});
+    store.setLayers(['l']);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settled(clock, scheduler);
+    store.setMembers([{layer: 'l', artifact: VIEWERS.a.artifact, outside: false, verb: 'filter', label: 'a1'}]);
+    store.select({kind: 'artifact', id: VIEWERS.a.artifact});
+    await settled(clock, scheduler);
+    expect(store.get('artifacts').colours.size).toBeGreaterThan(0);
+
+    const atForget: {colours: number; members: number; region: unknown}[] = [];
+    store.subscribe('meta', (m) => {
+      if (m === null) atForget.push({colours: store.get('artifacts').colours.size, members: store.get('filters').members.length, region: store.get('region')});
+    });
+    await clock.advance(30_000);
+    await settled(clock, scheduler);
+
+    expect(atForget).toEqual([{colours: 0, members: 0, region: null}]);
+    expect(store.get('filters').members).toEqual([]);
+    expect(store.get('region')).toBeNull();
+    expect(whoShows(store, metas)).toEqual(new Set(['b']));
+  });
+
+  it('drops a filter, a layer and a colouring the next viewer’s meta does not list, and a view it does not list', async () => {
+    const hidden = view('hidden', {quantisation: SHAPED.views[0]!.quantisation});
+    const metaA = meta({
+      ...SHAPED,
+      views: [...SHAPED.views, hidden],
+      layers: [...SHAPED.layers, layer('secret-layer', {views: ['s0', 'hidden'], computedContent: ['centroid', 'box']})],
+      declaredScalars: [...SHAPED.declaredScalars, scalar('secretcol', 'u16', {category: {vocabulary: 'b', kind: 'declared', visibility: 'public'}, render: true, homes: ['rendered']})],
+      filterOperands: [...SHAPED.filterOperands, {column: 'secret', family: 'category', operands: ['in']}]
+    });
+    const metas = {a: metaA, b: SHAPED};
+    let signedIn: Who = 'a';
+    const {store, viewport, clock, scheduler} = perViewer({
+      metaOf: (token) => (token === 't-a' ? metas.a : metas.b),
+      authorise: async () => ({token: `t-${signedIn}`, expiresAt: (Date.now() + 3_600_000) / 1000})
+    });
+    await clock.advance(1);
+    store.setCurrentView('hidden');
+    store.setLayers(['l', 'secret-layer']);
+    store.setColourBy('secretcol');
+    store.setFilters({secret: {family: 'category', keys: ['x'], verb: 'filter'}, archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    store.select({kind: 'box', bbox: [0, 0, 50, 50]});
+    await settled(clock, scheduler);
+    expect(store.get('view').id).toBe('hidden');
+    expect(store.get('marks').bands.length).toBeGreaterThan(0);
+
+    signedIn = 'b';
+    store.clear();
+    const asked = viewport.mock.calls.length;
+    await settled(clock, scheduler);
+
+    expect(store.get('meta')).toBe(metas.b);
+    expect(Object.keys(store.get('filters').draft)).toEqual(['archive']);
+    expect(store.get('artifacts').layers).toEqual(['l']);
+    expect(store.get('legend').colourBy).toBeNull();
+    // The view is not offered, so the store opens on the first and drops the camera with it.
+    expect(store.get('view').id).toBe('s0');
+    expect(store.get('region')).toBeNull();
+    expect(viewport.mock.calls.slice(asked).filter((c) => (c[1].k ?? 1) > 0)).toEqual([]);
   });
 
   it('clear() forgets viewer A and serves viewer B from B’s own token and meta', async () => {

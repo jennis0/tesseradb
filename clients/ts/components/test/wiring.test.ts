@@ -147,7 +147,7 @@ describe('configuration after connection', () => {
     expect(disposed).toEqual(built);
   });
 
-  it('keeps its store when the authorise function alone is replaced, and asks the latest one', async () => {
+  it('builds a new store when another authorise function is set, through null in one task too', async () => {
     const {host, el} = await bare('<tessera-store viewer-url="http://127.0.0.1:1"></tessera-store>');
     const asked: string[] = [];
     // An expiry in the past, so the store asks its supplier on every request.
@@ -157,15 +157,27 @@ describe('configuration after connection', () => {
     };
     el.authorise = supplier('first');
     await settle(host);
-    const built = el.activeStore!;
-    const disposed = vi.spyOn(built, 'dispose');
+    const first = el.activeStore!;
+    const firstDisposed = vi.spyOn(first, 'dispose');
     el.authorise = supplier('second');
     await settle(host);
-    expect(el.activeStore).toBe(built);
-    expect(disposed).not.toHaveBeenCalled();
+    const second = el.activeStore!;
+    expect(second).not.toBe(first);
+    expect(firstDisposed).toHaveBeenCalled();
     asked.length = 0;
-    await built.browse({layer: 'x'}).catch(() => {});
+    await second.browse({layer: 'x'}).catch(() => {});
     expect(asked).toEqual(['second']);
+
+    // Cleared and set again before the element updates.
+    const secondDisposed = vi.spyOn(second, 'dispose');
+    el.authorise = null;
+    el.authorise = supplier('third');
+    await settle(host);
+    expect(el.activeStore).not.toBe(second);
+    expect(secondDisposed).toHaveBeenCalled();
+    asked.length = 0;
+    await el.activeStore!.browse({layer: 'x'}).catch(() => {});
+    expect(asked).toEqual(['third']);
     el.dispose();
   });
 

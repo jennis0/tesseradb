@@ -6,7 +6,7 @@ import {tileRectOfBbox, type DepthChoice} from './budget.js';
 import {TesseraClient, type TesseraClientOptions} from './client.js';
 import {ArtifactColours} from './colours.js';
 import type {Composition} from './compose.js';
-import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {dataToWorldXY, gridToWorld, MAX_DEPTH, rectToRequestBbox, WORLD_SIZE} from './coords.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
 import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
 import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
@@ -93,8 +93,9 @@ export type StoreOptions = {
   token?: string;
   /**
    * A function the store calls for a viewer token, and again to renew it before it expires (see
-   * {@link TokenSupplier}). A store serves one viewer. To show the map to another viewer, create a
-   * new store or call {@link Store.clear}; a token renewal for the same viewer keeps what is drawn.
+   * {@link TokenSupplier}). A store serves one viewer: to show another, call {@link Store.clear} or
+   * create a new store, as {@link Store} sets out. Without that, the previous viewer's data stays
+   * published until this supplier is next called, at the renewal, and one answer after it.
    */
   authorise?: TokenSupplier;
   /**
@@ -444,18 +445,27 @@ type Listener = () => void;
  * schedule and publishes what to draw as {@link Projections}. It holds no camera and draws nothing.
  * Every count and artifact it publishes is computed over this viewer's visible set.
  *
- * A store serves one viewer. To show the map to another viewer, create a new store or call
- * {@link Store.clear}; a token renewal for the same viewer keeps what is drawn. Each viewport answer
- * carries an identity key, which the server derives from the viewer, the viewer's visible set and
- * the view. The key also changes for the same viewer after a compaction or a rebuilt bundle.
- * Where an answer's key differs from the one held for its view, the store drops that answer and
- * everything else the server answered: points, frames, counts, artifacts, shapes, records, legend
- * values, typeahead pages, the picked item and opened artifact, the region's counts and `meta`. It
- * keeps the host's inputs: the region's shape, the filters, the `member_of` clauses, the layers,
- * the colouring, the current view and the camera. It then reads `meta` again under the token it
- * holds, drops an input that names a view, layer or column the new `meta` does not list, and asks
- * again for the camera and the region's counts. Nothing answered under the previous key is
- * published or drawn beside an answer under the new one.
+ * A store serves one viewer. To show the map to another viewer, call {@link Store.clear} or create
+ * a new store. A token renewal for the same viewer keeps what is drawn.
+ *
+ * Behind that rule the store checks, as far as it can, that each answer is for the viewer it holds.
+ * Each viewport answer carries an identity key, which the server derives from the credential
+ * presented at authorisation, the viewer's visible set and the view. A renewal whose token was
+ * issued for different credential bytes therefore counts as another viewer, even for the same
+ * person, and the key also changes for the same viewer after a compaction or a rebuilt bundle. The
+ * store drops an answer, and everything the server has answered, where the answer's key differs
+ * from the one held for its view, or where a renewal brought a token no answer has yet matched to a
+ * held key and the answer's view holds none. What it drops: points, frames, counts, artifacts,
+ * shapes, item records, legend values, typeahead pages, the picked item and opened artifact, the
+ * `member_of` clauses, a region selected from an artifact, the region's counts, and `meta`. What it
+ * keeps: a drawn region's shape, the filter controls, the layers, the colouring, the current view
+ * and the camera. It then reads `meta` again under the token it holds, drops a kept input that
+ * names a view, layer or column the new `meta` does not list, and asks again.
+ *
+ * The check runs only on answers. The store calls `authorise` again only when the token it holds
+ * is due for renewal, and asks once as soon as the new token arrives, so without
+ * {@link Store.clear} a previous viewer's data stays published until that renewal and one answer
+ * after it.
  *
  * @category Store
  */
@@ -622,18 +632,19 @@ export interface Store {
    */
   dataXY(worldX: number, worldY: number): [number, number];
   /**
-   * Forget the viewer, to show the map to another one. Drops the token, `meta`, every view's held
-   * tiles and artifacts, the session artifact table, the shapes, item records, legend, typeahead
-   * pages, region and selection, and abandons every request in flight. Publishes the emptied
-   * projections, with `meta` as `null` and `status` as `idle`, before it returns. It then asks
-   * `authorise` for a token, reads `/v1/meta` with it and asks again for the camera. A store given
-   * a fixed `token` keeps it.
+   * Forget the viewer, to show the map to another one; see {@link Store} for the rule. Without this
+   * call a previous viewer's data stays published until the next renewal and one answer after it.
+   * Drops the token, `meta`, every view's held tiles and artifacts, the session artifact table, the
+   * shapes, item records, legend, typeahead pages, `member_of` clauses, region and selection, and
+   * abandons every request in flight. Publishes the emptied projections, with `meta` as `null` and
+   * `status` as `idle`, before it returns. It then asks `authorise` for a token, reads `/v1/meta`
+   * with it and asks again for the camera. A store given a fixed `token` keeps it.
    *
-   * The filters set with `setFilters`, the `member_of` clauses, the layers, the colouring, the
-   * current view and the camera are kept. A filter draft the store seeded from `meta` is seeded
-   * again from the next. A filter control, clause, layer or colouring naming a column or layer the
-   * next `meta` does not list is dropped. Where the next `meta` does not list the current view, the
-   * store opens on its first view and drops the camera.
+   * The filters set with `setFilters`, the layers, the colouring, the current view and the camera
+   * are kept. A filter draft the store seeded from `meta` is seeded again from the next. A filter
+   * control, layer or colouring naming a column or layer the next `meta` does not list is dropped.
+   * Where the next `meta` does not list the current view, the store opens on its first view and
+   * drops the camera.
    */
   clear(): void;
   /**
@@ -715,12 +726,12 @@ export function createStore(options: StoreOptions): Store {
   let awaitingSwitchFrame = false;
 
   const tokens = new TokenSupply(options.authorise, options.token, clock, (changed) => {
-    // A renewal keeps what is held. The counts are asked for again at once under the new token,
-    // so an answer under another identity key reaches `admit` without waiting for the camera.
-    const current = views.current;
-    if (changed && current) {
-      current.replica.expire();
-      current.presenter.reschedule();
+    // A renewal keeps what is held. Until an answer under the new token confirms a key held, `admit`
+    // does not trust an answer on a view that holds no key, and one ask goes out at once so the key
+    // is seen without waiting for the camera.
+    if (changed && identities.size > 0) {
+      unconfirmed = tokens.current;
+      void askIdentity();
     }
     // A warm-up that failed for want of a token runs again now there is one.
     if (meta === null) void ready().catch(() => {});
@@ -732,6 +743,8 @@ export function createStore(options: StoreOptions): Store {
    * principal's, or the same viewer's after a compaction or a rebuilt bundle.
    */
   const identities = new Map<string, string>();
+  /** A token a renewal brought, until an answer under it matches a key in {@link identities}. */
+  let unconfirmed: string | null = null;
 
   const colours = new ArtifactColours(table, options.palette ?? 'positional', (map, palette) =>
     replaceProjection('artifacts', {...projections.artifacts, colours: map, palette})
@@ -877,15 +890,15 @@ export function createStore(options: StoreOptions): Store {
     if (!q) throw new Error(`the bundle declares no view '${id}'`);
     /** Assigned below; the fetch reads it. */
     let ownPresenter: Presenter | null = null;
-    /** Assigned below. Machinery a `clear` dropped is never current again. */
+    /** Assigned below. Machinery {@link forgetAnswers} dropped is never current again. */
     let own: ViewMachinery | null = null;
     const current = () => own !== null && views.current === own;
     /**
-     * Whether an answer may be held: for the current view, where {@link admit} keeps it; for another
-     * view, while the store still holds this machinery.
+     * Whether an answer asked for under `token` may be held: for the current view, where
+     * {@link admit} keeps it; for another view, while the store still holds this machinery.
      */
-    const admitted = (identityKey: string): boolean =>
-      current() ? admit(id, identityKey) : [...views.all()].includes(own!);
+    const admitted = (identityKey: string, token: string): boolean =>
+      current() ? admit(id, identityKey, token) : own !== null && views.holds(own);
 
     const built = new Replica(
       async (req, signal, background, onPart) => {
@@ -910,11 +923,11 @@ export function createStore(options: StoreOptions): Store {
           background,
           onPart &&
             ((part) => {
-              if (!admitted(part.identityKey)) throw viewerChanged();
+              if (!admitted(part.identityKey, tok)) throw identityChanged();
               return onPart(part);
             })
         );
-        if (!admitted(response.identityKey)) throw viewerChanged();
+        if (!admitted(response.identityKey, tok)) throw identityChanged();
         return response;
       },
       q,
@@ -985,21 +998,42 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Every viewport answer, on the point path and the artifact channel, passes through here before
-   * anything in it is held. An answer under another identity key than the one held for its view is
-   * another principal's, or the same viewer's after a compaction or a rebuilt bundle. The store then
-   * drops what the server answered, `meta` among it, keeps the host's inputs and its token, and
-   * reads `meta` again; see {@link forgetAnswers}.
+   * anything in it is held, with the token it was asked under. The store runs
+   * {@link forgetAnswers} where the answer's identity key differs from the one held for its view,
+   * and where a renewal brought a token no answer has yet matched to a held key and the answer's
+   * view holds none, since that key could be another viewer's.
    *
    * @returns Whether the answer may be held. False drops it: the machinery that asked is gone.
    */
-  function admit(view: string, identityKey: string): boolean {
+  function admit(view: string, identityKey: string, token: string): boolean {
     const held = identities.get(view);
-    if (held !== undefined && held !== identityKey) {
+    const unchecked = held === undefined && unconfirmed !== null && identities.size > 0;
+    if ((held !== undefined && held !== identityKey) || unchecked) {
       forgetAnswers();
       return false;
     }
+    if (held !== undefined && token === unconfirmed) unconfirmed = null;
     identities.set(view, identityKey);
     return true;
+  }
+
+  /**
+   * Asks for the current view's identity key under a token a renewal brought: counts only, one tile
+   * at depth 0, with no filter, highlight or layer, so nothing set for the previous viewer can have
+   * it refused. A refusal leaves the next answer to {@link admit}.
+   */
+  async function askIdentity(): Promise<void> {
+    const current = views.current;
+    const q = frameOrNull();
+    if (!current || !q) return;
+    const view = views.id;
+    try {
+      const tok = await tokens.get();
+      const response = await client.viewport(tok, {view, zoom: 0, bbox: rectToRequestBbox({x0: 0, y0: 0, x1: 0, y1: 0}, 0, q), k: 0, layers: []});
+      if (!disposed && views.current === current) admit(view, response.identityKey, tok);
+    } catch {
+      // The point path and the channel still pass their answers through `admit`.
+    }
   }
 
   async function warm(): Promise<void> {
@@ -1046,7 +1080,8 @@ export function createStore(options: StoreOptions): Store {
 
     layersOn = drawnOnly(layerClosure(meta.layers, layersOn));
     traceUnknownColourLayer();
-    views.enter(views.id);
+    // The layers as `meta` resolved them, published with the view's artifacts.
+    onArtifacts(views.enter(views.id).channel.current);
 
     if (queuedView) {
       const q = queuedView;
@@ -1059,22 +1094,20 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * After `meta` is read again, drop the host's inputs that name what it no longer offers: filter
-   * controls on columns it does not list, `member_of` clauses and layers on layers it does not
-   * list, and a colouring by a column or layer it does not list.
+   * controls on columns it does not list, layers it does not list, and a colouring by a column or
+   * layer it does not list.
    */
   function dropUnoffered(m: Meta): void {
     const columns = new Set(m.filterOperands.map((f) => f.column));
     const layerNames = new Set(m.layers.map((l) => l.name));
-    const {draft, members} = projections.filters;
+    const {draft} = projections.filters;
     const keptDraft = Object.fromEntries(Object.entries(draft).filter(([column]) => columns.has(column)));
-    const keptMembers = members.filter((c) => layerNames.has(c.layer));
-    if (Object.keys(keptDraft).length !== Object.keys(draft).length || keptMembers.length !== members.length) {
+    if (Object.keys(keptDraft).length !== Object.keys(draft).length) {
       replaceProjection('filters', {
         ...projections.filters,
         draft: keptDraft,
         expr: composeFilters(keptDraft, 'filter'),
-        highlight: composeFilters(keptDraft, 'highlight'),
-        members: keptMembers
+        highlight: composeFilters(keptDraft, 'highlight')
       });
     }
     layersOn = layersOn.filter((name) => layerNames.has(name));
@@ -1614,58 +1647,57 @@ export function createStore(options: StoreOptions): Store {
   let filtersSet = false;
 
   function clear(): void {
-    forgetViewer('viewer');
+    tokens.forget();
+    region.drop();
+    forgetAnswers();
   }
 
   /**
    * Drop what the server answered: points, frames, counts, artifacts, shapes, records, legend
-   * values, typeahead pages, the picked item and opened artifact, the region's held marks and
-   * counts, and `meta`. The region's shape, the filters, the `member_of` clauses, the layers, the
-   * colouring, the current view and the camera are the host's and are kept, except where the next
-   * `meta` no longer offers the view, layer or column they name. The store reads `meta` again under
-   * the token it holds and asks again for the camera, the region's counts with it.
+   * values, typeahead pages, the picked item and opened artifact, the `member_of` clauses, a region
+   * drawn from an artifact, the region's held marks and counts, and `meta`. The store reads `meta`
+   * again under the token it holds and asks again for the camera, the region's counts with it. What
+   * is kept is listed on {@link Store}.
    */
   function forgetAnswers(): void {
-    forgetViewer('answers');
-  }
-
-  /**
-   * Drop what is held, publish the emptied projections, and read `meta` again, after which the
-   * camera is asked for again. `viewer` also drops the supplied token and the region, as
-   * {@link clear} documents; `answers` is {@link forgetAnswers}.
-   */
-  function forgetViewer(what: 'viewer' | 'answers'): void {
     clears += 1;
+    unconfirmed = null;
     suggestions.reset();
     for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.reset();
       held.replica.reset();
     }
-    // Each view is built again from the next viewer's meta.
+    // Each view is built again from the meta read next.
     views.forget();
     bandBudget = new BandBudget(bandBudget.budgetBytes);
     identities.clear();
     table.clear();
+    colours.refresh();
     shapes.forget('all');
     records.forget();
     clearSelection();
     contentKeyAtFrame = '';
     colourAsked.clear();
     awaitingSwitchFrame = false;
-    if (what === 'viewer') tokens.forget();
     replaceProjection('view', noFrame(views.id));
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});
     replaceProjection('tiles', {tiles: []});
-    // The region's shape is placed against the view's frame, so it is published before `meta` goes.
-    if (what === 'viewer') region.drop();
+    // An artifact's id may name nothing under the next key. A drawn shape is placed against the
+    // view's frame, so it is published before `meta` goes.
+    if (region.selected?.kind === 'artifact') region.drop();
     else region.loading(projections.marks);
+    // A clause names an artifact by an id the next key may not reach, and carries its served label.
+    // A seeded draft names the previous viewer's scoped columns.
+    replaceProjection('filters', {
+      ...projections.filters,
+      members: [],
+      ...(filtersSet ? {} : {draft: {}, expr: null, highlight: null})
+    });
+    legend.clear();
     meta = null;
     warming = null;
     replaceProjection('meta', null);
-    // A seeded draft names the previous viewer's scoped columns.
-    if (!filtersSet) replaceProjection('filters', {...projections.filters, draft: {}, expr: null, highlight: null});
-    legend.clear();
     replaceProjection('status', {...NO_STATUS});
     publishReplica(null);
     void ready().catch(() => {});
@@ -1679,8 +1711,8 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /** Thrown into an answer {@link admit} refused, so nothing in it is held. */
-  function viewerChanged(): Error {
-    return new DOMException('the viewer changed; the store asks again', 'AbortError');
+  function identityChanged(): Error {
+    return new DOMException('the identity key changed; the store asks again', 'AbortError');
   }
 
   /** Set by `dispose`: an answer that lands afterwards writes nothing. */

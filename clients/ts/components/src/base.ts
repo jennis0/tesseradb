@@ -13,7 +13,7 @@ import {storeContext} from './context.js';
 export type StoreSource = 'property' | 'context' | 'own' | 'detached';
 
 /** What an own store was built from; a change in any of these rebuilds it. */
-type OwnConfig = {viewerUrl: string; token: string; supplied: boolean};
+type OwnConfig = {viewerUrl: string; token: string; authorise: TokenSupplier | null};
 
 /**
  * What every element shares: how it finds its store, and how it follows it.
@@ -22,8 +22,8 @@ type OwnConfig = {viewerUrl: string; token: string; supplied: boolean};
  * element built its own store is not adopted); else, for the map, the explorer and
  * `<tessera-store>`, its own store from `viewer-url` and `token` or an `authorise` property; else
  * detached, which renders nothing. An own store is built once those attributes suffice, and
- * replaced when `viewer-url` or `token` changes or `authorise` is set or cleared. A store handed in
- * by property or context is not disposed here.
+ * replaced when `viewer-url`, `token` or the `authorise` function changes. A store handed in by
+ * property or context is not disposed here.
  *
  * Disconnecting does not dispose the store. Frameworks disconnect and reconnect elements to
  * reorder them, and JupyterLab scrolls notebook cells out of the DOM; a new store each time would
@@ -48,9 +48,8 @@ export abstract class TesseraElement extends LitElement {
   @property() accessor token = '';
   /**
    * A token supplier, used in place of `token`, which the store calls to renew the token before it
-   * expires. The store calls whichever function is set at the time, so replacing the function (an
-   * inline arrow in a framework's render) does not rebuild the store; setting or clearing it does.
-   * A different principal needs a new `token`, a new `viewer-url` or a new element.
+   * expires. Setting another function builds a new store, since a store serves one viewer (see
+   * `Store` in `@tesseradb/client`), so a framework keeps the function stable across renders.
    */
   @property({attribute: false}) accessor authorise: TokenSupplier | null = null;
 
@@ -106,9 +105,9 @@ export abstract class TesseraElement extends LitElement {
    */
   private resolve(): void {
     const wanted: OwnConfig | null =
-      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, supplied: this.authorise !== null} : null;
+      this.canBuildOwn && this.viewerUrl && (this.token || this.authorise) ? {viewerUrl: this.viewerUrl, token: this.token, authorise: this.authorise} : null;
     const held = this.ownConfig;
-    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.supplied === held.supplied;
+    const same = wanted !== null && held !== null && wanted.viewerUrl === held.viewerUrl && wanted.token === held.token && wanted.authorise === held.authorise;
     const old = this.ownStore;
     let next: Store | null = null;
     let source: StoreSource = 'detached';
@@ -119,7 +118,7 @@ export abstract class TesseraElement extends LitElement {
       next =
         old && same
           ? old
-          : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.supplied ? {authorise: () => this.authorise!()} : {token: wanted.token})});
+          : createStore({viewerUrl: wanted.viewerUrl, ...(wanted.authorise ? {authorise: wanted.authorise} : {token: wanted.token})});
       source = 'own';
     } else if (this.contextStore) {
       next = this.contextStore;

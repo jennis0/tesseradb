@@ -203,10 +203,10 @@ export type ArtifactChannelOptions = {
   /** How long the view must be quiet before a promotion goes out. See {@link PROMOTE_IDLE_MS}. */
   promoteIdleMs?: number;
   /**
-   * Called with each response's identity key before anything in the response is held. False drops
-   * the response.
+   * Called with each response's identity key, and the token it was asked under, before anything in
+   * the response is held. False drops the response.
    */
-  admit?(identityKey: string): boolean;
+  admit?(identityKey: string, token: string): boolean;
 };
 
 /** @internal */
@@ -596,7 +596,7 @@ export class ArtifactChannel {
       );
       if (this.promoting !== signal) return;
       this.promoting = null;
-      if (this.opts.admit?.(response.identityKey) === false) return;
+      if (this.opts.admit?.(response.identityKey, token) === false) return;
       if (
         this.heldUnder &&
         (this.heldUnder.identityKey !== response.identityKey || this.heldUnder.contentKey !== response.contentKey)
@@ -682,7 +682,7 @@ export class ArtifactChannel {
       if (this.inFlight !== signal) return;
       let response = await ask(token, identityAsk ? 'identity' : null);
       if (this.inFlight !== signal) return;
-      if (this.opts.admit?.(response.identityKey) === false) return;
+      if (this.opts.admit?.(response.identityKey, token) === false) return;
       let drawn: Artifact[] | null = null;
       const identityRows = response.result.artifactsIdentity;
       if (identityRows !== null) drawn = this.resolveIdentity(identityRows, response);
@@ -692,7 +692,7 @@ export class ArtifactChannel {
         if (identityRows !== null) {
           response = await ask(token, null);
           if (this.inFlight !== signal) return;
-          if (this.opts.admit?.(response.identityKey) === false) return;
+          if (this.opts.admit?.(response.identityKey, token) === false) return;
         }
         drawn = this.hold(response.result.artifacts, response.identityKey, response.contentKey);
         // Only an unfiltered response marks a scope held whole: a filtered response's rows answer a

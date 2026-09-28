@@ -1,4 +1,4 @@
-import {BandBudget, BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import {BandBudget, BandCache, bandSplitter, tableCleared, type Band, type Resolved} from './bands.js';
 import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
@@ -210,11 +210,6 @@ export class Replica {
     this.validatedAt = Number.NEGATIVE_INFINITY;
   }
 
-  /** Makes the next plan answered wholly from held bands ask for counts, as after `revalidateAfterMs`. */
-  expire(): void {
-    this.validatedAt = Number.NEGATIVE_INFINITY;
-  }
-
   /**
    * The `x-tessera-region` verdict the last response carried, or `null` where it carried none. A
    * frame derived from held bands has no response, so the store reads the verdict here. `reset`
@@ -351,6 +346,7 @@ export class Replica {
      */
     background = false
   ): Promise<ReplicaFrame> {
+    const generation = this.opts.table?.generation;
     const plan =
       this.opts.cache === false
         ? {fetch: [want], wanted: rectArea(want), novel: rectArea(want)}
@@ -390,7 +386,7 @@ export class Replica {
         background,
         async (part) => {
           piece.parts += 1;
-          for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
+          for (const band of await this.absorb(part, depth, k, generation, startedAt)) piece.landed.push(band);
         }
       );
       // The loop below may throw on an earlier piece while this one is in flight; this keeps this
@@ -410,7 +406,7 @@ export class Replica {
       // A streamed piece has stored its points already and its response carries none, so only its
       // keys are observed. A transport that answered whole is absorbed here.
       if (piece.parts === 0) {
-        for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
+        for (const band of await this.absorb(response, depth, k, generation, piece.startedAt)) piece.landed.push(band);
       } else {
         this.observe(response);
       }
@@ -490,9 +486,13 @@ export class Replica {
     arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string},
     depth: number,
     k: number,
+    /** The table's generation when the fetch began. An arrival after a clear holds nothing. */
+    generation: number | undefined,
     /** The touch time every band of one piece shares: the piece's start. */
     at: number = this.now()
   ): Promise<Band[]> {
+    const table = this.opts.table;
+    if (table && table.generation !== generation) throw tableCleared();
     this.observe(arrival);
     const contentKey = this.contentKey;
 
@@ -510,6 +510,8 @@ export class Replica {
     let slices = 0;
     let longestSliceMs = 0;
     while (!splitter.done()) {
+      // A clear during the yield below ends this arrival: its ordinals name nothing now.
+      if (table && table.generation !== generation) throw tableCleared();
       const started = performance.now();
       const slice = splitter.step(started + ABSORB_SLICE_MS);
       const took = performance.now() - started;

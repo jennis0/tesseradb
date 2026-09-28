@@ -202,13 +202,14 @@ type ResponseNaming = {
   mark: Uint8Array;
 };
 
-function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
+function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; generation: number; release: () => void} {
   // Parent links and centroids come from this response's artifacts frame, so a band can be coloured
   // from the response that carried it.
   const frameOf = new Map<string, {parentIds: readonly bigint[]; centroid: readonly [number, number] | null; rung: number}>();
   for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentIds: a.parentIds, centroid: a.centroid, rung: a.rung});
   const naming: ResponseNaming[] = [];
   const held: Uint32Array[] = [];
+  const generation = table.generation;
   for (const [layer, column] of Object.entries(result.membership)) {
     const refs: ArtifactRef[] = [];
     for (let d = 0; d < column.ids.length; d++) {
@@ -226,7 +227,9 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
   }
   return {
     naming,
+    generation,
     release: () => {
+      if (table.generation !== generation) return;
       for (const ordinals of held) table.release(ordinals);
     }
   };
@@ -259,6 +262,11 @@ function remapBand(n: ResponseNaming, from: number, to: number, table: SessionAr
   return {ordinals, distinct};
 }
 
+/** Thrown where a response is split or stored after the table it was named in was cleared. */
+export function tableCleared(): Error {
+  return new DOMException('the artifact table was cleared under this response; it is asked for again', 'AbortError');
+}
+
 /**
  * Splits a response into one band per tile, in slices, so a large response does not block the
  * thread that draws: each `step` builds bands until its deadline and the caller yields between
@@ -281,6 +289,8 @@ export function bandSplitter(
   return {
     done: () => i >= result.tiles.length,
     step(deadline: number): Band[] {
+      // The response's ordinals were named under a generation of the table a clear has ended.
+      if (named && table!.generation !== named.generation) throw tableCleared();
       const bands: Band[] = [];
       // The clock is read every 64 tiles; once per band would be a noticeable share of the work.
       while (i < result.tiles.length) {

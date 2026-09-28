@@ -12,8 +12,9 @@ import type {Store} from './store.js';
  * and calls again before a request where the token has 5 seconds or less left. Concurrent requests
  * share one call. A rejection refuses the request that was waiting for the token.
  *
- * A store serves one viewer. To show the map to another viewer, create a new store or call
- * {@link Store.clear}; a token renewal for the same viewer keeps what is drawn.
+ * A store serves one viewer: to show another, call {@link Store.clear} or create a new store, as
+ * {@link Store} sets out. Without that, the previous viewer's data stays published until this
+ * supplier is next called, at the renewal, and one answer after it.
  *
  * @category Store
  */

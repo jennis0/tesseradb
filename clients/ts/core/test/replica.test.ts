@@ -2,7 +2,8 @@ import {describe, expect, it} from 'vitest';
 import {Replica} from '../src/replica.js';
 import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
-import {response, result, tile} from './support.js';
+import {response, result, settle, tile} from './support.js';
+import {SessionArtifactTable} from '../src/artifactTable.js';
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
@@ -236,5 +237,45 @@ describe('Replica.fetchRegion', () => {
     // The held bands went with the old key, so the first region is cold again.
     const back = await r.fetchRegion(rect(0, 0, 1, 1), 3, 500);
     expect(back.plan.novel).toBe(4);
+  });
+});
+
+describe('an arrival and the artifact table it names artifacts in', () => {
+  it('holds nothing from an arrival that lands after the table is cleared', async () => {
+    const table = new SessionArtifactTable();
+    /** One point on one tile, a member of artifact `100 + id` on layer `l`. */
+    const part = (prefix: bigint, id: bigint) => ({
+      result: result({
+        tiles: [tile(prefix, 1n, {served: 1n})],
+        ids: BigUint64Array.of(id),
+        codes: new BigUint64Array(1),
+        positions: new Float64Array(2),
+        world: new Float32Array(2),
+        membership: {l: {index: Uint16Array.of(1), ids: BigUint64Array.of(100n + id)}}
+      }),
+      identityKey: 'ik',
+      contentKey: 'ck'
+    });
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    const r = new Replica(
+      async (_req, _signal, _background, onPart) => {
+        await onPart!(part(0n, 1n));
+        await gate;
+        await onPart!(part(1n, 2n));
+        return response(result());
+      },
+      Q,
+      {view: 's', now: () => 0, revalidateAfterMs: Infinity, table}
+    );
+    const fetched = r.fetchRegion(world(1), 1, 10).catch((error: unknown) => error);
+    await settle();
+    expect(table.live).toBe(1);
+
+    // The store forgets while the second part is on its way.
+    table.clear();
+    open();
+    expect(((await fetched) as Error).name).toBe('AbortError');
+    expect(table.live).toBe(0);
   });
 });
