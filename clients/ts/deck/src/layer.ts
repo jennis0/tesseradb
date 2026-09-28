@@ -3,6 +3,7 @@ import {BitmapLayer, LineLayer, PolygonLayer, ScatterplotLayer, TextLayer} from 
 import {
   CLUSTER_PREFIX,
   NO_ORDINAL,
+  artifactName,
   WORLD_SIZE,
   gridToWorld,
   gridToWorldXY,
@@ -628,11 +629,10 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
   // A dependent layer's artifacts (a clustering's topic labels) are drawn beneath their target's
   // name and are not candidates of their own.
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-  const topicOf = attachedTopics(a, meta);
   const front = frontier(a, level);
   const named = placed
     .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
-    .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
+    .filter((x) => artifactName(x, a.attached) !== null)
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
   let smallest = Number.POSITIVE_INFINITY;
@@ -647,10 +647,10 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
   for (const artifact of named) {
     const count = Number(artifact.maskedCount);
     const size = labelSize(count, smallest, largest);
-    const attached = topicOf.get(artifact.tesseraId) ?? null;
     // An artifact with no text takes its topic as the name; one with both draws the topic beneath.
-    const name = artifactName(artifact) ?? attached!;
-    const topic = artifactName(artifact) === null ? null : attached;
+    const name = artifactName(artifact, a.attached)!;
+    const attached = a.attached.get(artifact.tesseraId) ?? null;
+    const topic = attached === name ? null : attached;
     const countText = count.toLocaleString('en-GB');
     // The placed box is the wrapped block as drawn.
     const lines = wrapLabel(name);
@@ -667,21 +667,6 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
     });
   }
   return {candidates, byId};
-}
-
-/** Whether an artifact carries a text to draw: its first supplied content, non-empty. */
-export function hasText(a: Artifact): boolean {
-  return (a.content[0] ?? '').length > 0;
-}
-
-/**
- * What to call an artifact: its supplied text, else null. A key such as `hdb-2422486` is an
- * identifier, and drawn as a name it would read as the cluster's name. A caller with a row to fill
- * draws a neutral placeholder and shows the key under a field labelled as the key.
- */
-export function artifactName(a: Artifact): string | null {
-  const text = a.content[0];
-  return text !== undefined && text.length > 0 ? text : null;
 }
 
 /** Whether an artifact's outline is its served shape or its box. */
@@ -713,27 +698,6 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
     return {parts: [[[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]]], source: 'box'};
   }
   return null;
-}
-
-/**
- * The text of a dependent layer's artifacts (a clustering's topic labels), keyed by the served
- * `target` each names. The server serves a dependent artifact only with its target in the same
- * response, so every one attaches.
- */
-export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<bigint, string> {
-  const topicOf = new Map<bigint, string>();
-  if (!meta) return topicOf;
-  const dependent = new Set(meta.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name));
-  for (const t of a.served) {
-    if (!dependent.has(t.layer) || t.content.length === 0 || t.target === null) continue;
-    topicOf.set(t.target, t.content[0]!);
-  }
-  return topicOf;
-}
-
-/** What to call a served artifact: its own text, else an attached topic, else null ({@link artifactName}). */
-export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string | null {
-  return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
 }
 
 /**

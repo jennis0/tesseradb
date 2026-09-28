@@ -909,8 +909,17 @@ paths:
         **Three forms.** With neither `parent` nor `q` it returns the layer's roots, the artifacts
         with no served parent. `parent` returns the artifacts naming that one among their parents,
         with the named artifact's own served parents in `parents`, which is `[]` in the other two
-        forms. `q` returns the artifacts whose key, or first supplied text content, contains it,
-        ignoring case. Both together is `422`.
+        forms. `q` returns the artifacts whose key or `name` contains it, ignoring case. Both
+        together is `422`.
+
+        **Names.** A row's `name` is the artifact's own first supplied text. An artifact with none,
+        such as a cluster whose topic is published in a separate label layer, is named by the first
+        text of an artifact attached to it that `POST /v1/artifacts` would serve this principal
+        when reading that label layer. Label layers are taken in the order `/v1/meta` lists them;
+        within one, by level, then artifacts with a key in key order, then those without in
+        publication order, which is the order the viewport's artifacts frame serves a level in. A
+        label this principal would not be served names nothing and matches no `q`, and `filters`
+        does not change a name.
 
         **Visibility first.** Every artifact served has passed its own existence criterion,
         evaluated over the form's whole candidate set before `limit` and `cursor` apply, so a
@@ -2987,7 +2996,7 @@ components:
               pattern: "^[0-9]+$"
         q:
           type: string
-          description: The search form. The layer's artifacts whose key, or first supplied text content, contains this, ignoring case. Not with `parent`.
+          description: The search form. The layer's artifacts whose `key` or `name`, as the row carries it for this principal, contains this, ignoring case. Not with `parent`.
         filters:
           description: The viewport's filter. Each row then carries `matched_count`, the members this principal can see that match, and the page is ordered by it. Which artifacts are served, and their `masked_count`, do not change, and a row whose `matched_count` is zero is still served.
           allOf:
@@ -3027,7 +3036,7 @@ components:
           description: The publisher's key, where one was supplied.
         name:
           type: string
-          description: The artifact's first supplied text content, where this principal may read it; absent where the first content is an authored shape, which is not text. An artifact whose content cannot be served is left off the page.
+          description: The artifact's first supplied text content where it has one; otherwise the first text of an artifact attached to it that `POST /v1/artifacts` would serve this principal, chosen in the order the route description gives. Absent where neither gives text. An authored shape is not text. An artifact whose own content cannot be served is left off the page.
         masked_count:
           type: integer
           description: How many of this artifact's members this principal can see. Not its size, and not changed by `filters`.

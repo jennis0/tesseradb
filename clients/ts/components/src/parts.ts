@@ -52,8 +52,8 @@ export const PARTS = {
     ...STATE
   ],
   'layer-picker': ['entry', 'name', 'note', 'title', ...STATE],
-  filter: ['entry', 'label', 'mode', 'more', 'tick', 'values', 'refusal'],
-  'filter-panel': ['chip', 'chips', 'clear', 'title', 'verb', ...STATE],
+  filter: ['entry', 'label', 'mode', 'more', 'tick', 'values', 'refusal', 'verb'],
+  'filter-panel': ['chip', 'chips', 'clear', 'edit', 'title', 'verb', ...STATE],
   hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
   'artifact-list': ['count', 'item', 'items', 'more', 'name', 'title', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],

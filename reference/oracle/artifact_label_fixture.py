@@ -19,6 +19,14 @@ principals `1` and `1, 2` differ by one term.
 * `sealed` names a default label, `9`, so its unlabelled artifact is served only to a holder of `9`.
 * `names` depends on `teams`: each artifact is attached to a team, carries no members of its own,
   and is served exactly where its team is.
+* `titles` depends on `teams` too, and each of its artifacts has members of its own, so it is
+  served only where its team is and one of its own members is visible. `x-one` holds only points
+  carrying `2`, so principal `1` is served `t-one` and not the title naming it. `x-open` names
+  `t-open`, which `names` also names and which is listed first. `x-late-b` and `x-late-a` both
+  name `t-late` and are published in that order.
+* A browse row of `teams` carries no text of its own, so its name is the text of the first
+  served artifact attached to it: the layers in the order `/v1/meta` lists them, and within one
+  layer by level, then by key, which is the order the viewport serves a level in.
 * `gated` is behind its own layer label, `2`, and its artifacts carry labels too: a principal needs
   both.
 
@@ -46,6 +54,7 @@ SEED = 20260923
 TEAMS = "teams"
 SEALED = "sealed"
 NAMES = "names"
+TITLES = "titles"
 GATED = "gated"
 #: The label no point carries, and `sealed`'s default.
 UNCARRIED = "9"
@@ -77,6 +86,14 @@ NAME_ROWS: list[tuple[str, str, str]] = [
     ("n-open", "t-open", "Open"),
     ("n-two", "t-two", "Two"),
     ("n-uncarried", "t-uncarried", "Uncarried"),
+]
+
+#: `(key, team, text, members)` per artifact of `titles`.
+TITLE_ROWS: list[tuple[str, str, str, list[int]]] = [
+    ("x-open", "t-open", "Open, titled", list(range(0, 10))),
+    ("x-one", "t-one", "Firstly", list(range(50, 60))),
+    ("x-late-b", "t-late", "Late, by b", list(range(120, 130))),
+    ("x-late-a", "t-late", "Late, by a", list(range(120, 130))),
 ]
 
 #: `(key, members, labels)` per artifact of `gated`.
@@ -141,7 +158,30 @@ def served(terms: list[str]) -> Served:
     for key, team, _ in NAME_ROWS:
         if (TEAMS, team) in passing:
             out[(NAMES, key)] = (passing[(TEAMS, team)][0], None, team)
+    for key, team, _, members in TITLE_ROWS:
+        count = len(visible & set(members))
+        if (TEAMS, team) in passing and count >= 1:
+            out[(TITLES, key)] = (count, None, team)
     return out
+
+
+def browse_names(terms: list[str]) -> dict[str, str | None]:
+    """The `name` of each served team's browse row: the text of the first served artifact
+    attached to it, by layer name, then level (0 on every layer here), then key, or `None`."""
+    out = served(terms)
+    texts = {(NAMES, key): text for key, _, text in NAME_ROWS}
+    texts |= {(TITLES, key): text for key, _, text, _ in TITLE_ROWS}
+    names: dict[str, str | None] = {}
+    for (layer, key) in out:
+        if layer != TEAMS:
+            continue
+        attached = sorted(
+            (label_layer, label_key)
+            for (label_layer, label_key), (_, _, target) in out.items()
+            if target == key
+        )
+        names[key] = texts[attached[0]] if attached else None
+    return names
 
 
 def _write_points(path: Path) -> None:
@@ -245,6 +285,15 @@ def _config(with_layers: bool) -> str:
         ) + '\n  [[layer.content.supplied]]\n  name = "name"\n  type = "text"\n'
         '  require_member_visibility = "inherited"\n',
     )
+    text += _layer_toml(
+        TITLES, visibility="public", field=None, default="inherited", kind="flat",
+        extra=f'depends_on = ["{TEAMS}"]\n' + _inline(
+            {"key": key, "members": members, "attached_layer": TEAMS, "attached_key": team,
+             "contents": [[text]]}
+            for key, team, text, members in TITLE_ROWS
+        ) + '\n  [[layer.content.supplied]]\n  name = "title"\n  type = "text"\n'
+        '  require_member_visibility = "inherited"\n',
+    )
     return text
 
 
@@ -299,6 +348,10 @@ def publish(server) -> None:
             NAMES, "flat", "inherited", field=None, depends_on=[TEAMS],
             supplied=[{"name": "name", "type": "text", "require_member_visibility": "inherited"}],
         ),
+        _declaration(
+            TITLES, "flat", "inherited", field=None, depends_on=[TEAMS],
+            supplied=[{"name": "title", "type": "text", "require_member_visibility": "inherited"}],
+        ),
     ):
         response = server.register_layer(declaration)
         assert response.status_code == 201, response.text
@@ -321,6 +374,16 @@ def publish(server) -> None:
         artifacts=[
             {"key": key, "attached_to": {"layer": TEAMS, "key": team}, "content": [{"values": [text]}]}
             for key, team, text in NAME_ROWS
+        ],
+    )
+    assert response.status_code == 201, response.text
+    response = server.publish_artifacts(
+        TITLES,
+        field=JOIN_FIELD,
+        artifacts=[
+            {"key": key, "members": [str(m) for m in members],
+             "attached_to": {"layer": TEAMS, "key": team}, "content": [{"values": [text]}]}
+            for key, team, text, members in TITLE_ROWS
         ],
     )
     assert response.status_code == 201, response.text

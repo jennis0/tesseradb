@@ -37,19 +37,26 @@
 //! and browse has none, so the row route's own predicate is run over every row of the view rather
 //! than over a request's ranges. Served naively its `matched_count` would be silently zero, which
 //! is the failure decision 0104 exists to prevent.
+//!
+//! A row without text of its own takes its name from an attached label. The label layers are read
+//! on the first row that needs one, and a label is looked up only for the rows of a page, or for
+//! the candidates of a search whose key does not match, through an index from target to label
+//! kept with the label level's row form, so a page does not walk the label layer.
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-
-use tessera_types::layer::HierarchyKind;
+use tessera_types::layer::{HierarchyKind, RegisteredLayer};
 use tessera_types::{EntityId, TesseraId};
 
+use crate::artifacts::{ArtifactVerdict, ArtifactView};
 use crate::compose::compose;
-use crate::filter::FilterExpr;
-use crate::layer_read::{check_level, LayerRefusal};
-use crate::viewport::{response_rungs, segments_with_row_bases};
+use crate::compose::EffectiveMask;
 use crate::error::Result;
+use crate::filter::FilterExpr;
+use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
+use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext};
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
@@ -60,8 +67,7 @@ pub enum BrowseForm {
     /// `parent` given: the artifacts naming it among their parents, with the requested artifact's
     /// own served parents beside them.
     Children(TesseraId),
-    /// `q` given: the artifacts whose key, or whose first supplied text content, contains `q`
-    /// case-insensitively.
+    /// `q` given: the artifacts whose key or [`BrowseRow::name`] contains `q` case-insensitively.
     Search(String),
 }
 
@@ -123,10 +129,12 @@ pub struct BrowseRow {
     pub tessera_id: TesseraId,
     /// The publisher's own key, where they supplied one.
     pub key: Option<String>,
-    /// The artifact's **first supplied text content**, where this principal may read it — the
-    /// containment rule's own answer, so a viewer who holds no content's generating set entire is
-    /// served no artifact at all rather than this field empty. `None` where the first content is
-    /// an authored shape, which is not text.
+    /// The artifact's first supplied text content where it has one, and otherwise the first text
+    /// of an artifact attached to it that `POST /v1/artifacts` would serve this principal. Label
+    /// layers are taken in the order `/v1/meta` lists layers; within one, by level, then keyed
+    /// artifacts by key, then keyless ones by publication, which is the order the viewport's
+    /// frame serves a level in and the same for a built level and a published one. `None` where
+    /// neither gives text.
     pub name: Option<String>,
     /// `|membership ∩ M_auth|`, computed per request and never precomputed (C8). **It never moves
     /// with the filter.**
@@ -299,7 +307,7 @@ impl crate::Engine {
             denied,
             generation.buffered_rows(view),
         );
-        let served = crate::viewport::ServedView {
+        let served_view = crate::viewport::ServedView {
             session,
             generation: &generation,
             name: view,
@@ -316,7 +324,10 @@ impl crate::Engine {
         // this design adds.
         let filter_rows = match &req.filter {
             None => None,
-            Some(expr) => Some(self.whole_view_filter_rows(&served, &mask, expr, &None)?.0),
+            Some(expr) => Some(
+                self.whole_view_filter_rows(&served_view, &mask, expr, &None)?
+                    .0,
+            ),
         };
 
         // **The gate, over every artifact of every level of the layer, before any page.** Every
@@ -331,12 +342,12 @@ impl crate::Engine {
         let shard = generation.bundle.manifest.identity.shard_id;
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
-            let mut level_read = self.read_level(&served, &mask, &layer, walked, false);
+            let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false);
             if let Some(filter_rows) = &filter_rows {
                 level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
             }
             let rows = &level_read.rows;
-            let view_of = level_read.view(self, &served, &mask, &layer, &|_| false);
+            let view_of = level_read.view(self, &served_view, &mask, &layer, &|_| false);
             for ordinal in 0..rows.len() as u32 {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     continue;
@@ -364,7 +375,13 @@ impl crate::Engine {
                         level_read.matched_count(ordinal, &mask, filter_rows),
                     );
                 }
-                names.insert((walked, ordinal), content.first_text().map(str::to_string));
+                names.insert(
+                    (walked, ordinal),
+                    content
+                        .first_text()
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string),
+                );
                 keys.insert(
                     (walked, ordinal),
                     self.write
@@ -413,10 +430,119 @@ impl crate::Engine {
             response_rungs(&parents_of)
         };
 
+        // **The layers attached to this one that this principal reads**, each level under this
+        // request's mask, and each artifact of them judged by the viewport's own verdict with the
+        // viewport's dependency hook. They are read on the first row that has no text of its own,
+        // and a name is looked up only for a row that needs one: the rows of a page, and the
+        // candidates of a search whose key does not match.
+        let reachable = self.reachable_layers(session);
+        let ctx = DependencyContext::new(&served_view, &mask, &reachable);
+        let dependency_served = self.dependency_gate(&ctx);
+        let label_layers: OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>> = OnceCell::new();
+        let label_views: OnceCell<Vec<Vec<ArtifactView<'_, EffectiveMask>>>> = OnceCell::new();
+        let attached_name = |level: u32, ordinal: u32| -> Option<String> {
+            let target = layer.runs[level as usize]
+                .entity_of(u64::from(ordinal))
+                .map(EntityId::new)?;
+            let layers = label_layers.get_or_init(|| {
+                reachable
+                    .names()
+                    .filter_map(|name| self.readable_layer(session, &generation, name, view).ok())
+                    .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
+                    .map(|label| {
+                        let levels = (0..label.runs.len() as u32)
+                            .map(|level| self.read_level(&served_view, &mask, &label, level, false))
+                            .collect();
+                        (label, levels)
+                    })
+                    .collect()
+            });
+            let views = label_views.get_or_init(|| {
+                layers
+                    .iter()
+                    .map(|(label, levels)| {
+                        levels
+                            .iter()
+                            .map(|read| {
+                                read.view(self, &served_view, &mask, label, &dependency_served)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            });
+            layers
+                .iter()
+                .zip(views)
+                .find_map(|((label, levels), views)| {
+                    levels.iter().zip(views).find_map(|(read, view)| {
+                        // An edge naming an entity the target slot no longer holds is into an
+                        // artifact since republished over.
+                        let mut attached: Vec<u32> = read
+                            .rows
+                            .records()
+                            .attached_to(req.layer, level, ordinal)
+                            .filter(|&at| {
+                                read.rows.attachment(at).is_some_and(|a| a.entity == target)
+                            })
+                            .collect();
+                        // The viewport's order within a level: by key, then the keyless by ordinal.
+                        if attached.len() > 1 {
+                            let name = label.declaration.name.as_str();
+                            let keyed: Vec<(Option<String>, u32)> =
+                                self.write.live().with_artifacts(|store| {
+                                    attached
+                                        .iter()
+                                        .map(|&at| {
+                                            (
+                                                store
+                                                    .get(name, read.level, at)
+                                                    .and_then(|r| r.key.clone()),
+                                                at,
+                                            )
+                                        })
+                                        .collect()
+                                });
+                            let mut keyed = keyed;
+                            keyed.sort_unstable_by(|(a, at), (b, bt)| {
+                                (a.is_none(), a, at).cmp(&(b.is_none(), b, bt))
+                            });
+                            attached = keyed.into_iter().map(|(_, at)| at).collect();
+                        }
+                        attached.into_iter().find_map(|at| {
+                            let entity = label.runs[read.level as usize]
+                                .entity_of(u64::from(at))
+                                .map(EntityId::new)?;
+                            let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at)
+                            else {
+                                return None;
+                            };
+                            read.content(self, &generation, label, at, entity, rank)?
+                                .first_text()
+                                .filter(|text| !text.is_empty())
+                                .map(str::to_string)
+                        })
+                    })
+                })
+        };
+        let resolved: RefCell<HashMap<(u32, u32), Option<String>>> = RefCell::default();
+        let name_of = |g: &Gated| -> Option<String> {
+            let at = (g.level, g.ordinal);
+            if let Some(name) = resolved.borrow().get(&at) {
+                return name.clone();
+            }
+            let name = names
+                .get(&at)
+                .cloned()
+                .flatten()
+                .or_else(|| attached_name(g.level, g.ordinal));
+            resolved.borrow_mut().insert(at, name.clone());
+            name
+        };
+
         let row_of = |g: &Gated| BrowseRow {
             tessera_id: g.tessera_id,
             key: keys.get(&(g.level, g.ordinal)).cloned().flatten(),
-            name: names.get(&(g.level, g.ordinal)).cloned().flatten(),
+            name: name_of(g),
             masked_count: g.masked_count,
             matched_count: filtered.get(&(g.level, g.ordinal)).copied(),
             rung: if levelled {
@@ -488,14 +614,12 @@ impl crate::Engine {
                         .iter()
                         .enumerate()
                         .filter(|(_, g)| {
+                            let found = |text: Option<String>| {
+                                text.is_some_and(|text| text.to_lowercase().contains(&needle))
+                            };
                             g.level == level
-                                && [
-                                    keys.get(&(g.level, g.ordinal)).cloned().flatten(),
-                                    names.get(&(g.level, g.ordinal)).cloned().flatten(),
-                                ]
-                                .iter()
-                                .flatten()
-                                .any(|text| text.to_lowercase().contains(&needle))
+                                && (found(keys.get(&(g.level, g.ordinal)).cloned().flatten())
+                                    || found(name_of(g)))
                         })
                         .map(|(at, _)| at)
                         .collect(),

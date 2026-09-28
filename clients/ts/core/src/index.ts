@@ -41,14 +41,14 @@ export {
   composeFilters,
   emptyDraft,
   isPopulated,
-  withVerb,
+  withoutClause,
   type ClauseVerb,
   type ColumnDraft,
-  type ColumnPredicate,
   type FilterDraft,
   type TextMode
 } from './filters.js';
 export {browsableLayers, colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries, type LayerEntry} from './layers.js';
+export {artifactName} from './names.js';
 export {memberKey, memberLeaf, memberOf, withMember, withMembers, withoutMember, type MemberClause} from './members.js';
 
 export {GRID32, MAX_DEPTH, WORLD_SIZE, dataToWorldXY, gridToWorld, gridToWorldXY} from './coords.js';

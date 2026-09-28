@@ -23,6 +23,7 @@ pub(super) fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
             parents: vec![Vec::new(); sets.len()],
             declared: vec![Vec::new(); sets.len()],
             access: Vec::new(),
+            attached_by: Default::default(),
         },
         MembershipRows {
             rows: sets.iter().map(|s| Some(Arc::new(Bitmap::of(s)))).collect(),
@@ -68,6 +69,7 @@ pub(super) fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) ->
             parents: vec![Vec::new()],
             declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             access: Vec::new(),
+            attached_by: Default::default(),
         },
         MembershipRows {
             rows: vec![Some(Arc::new(Bitmap::of(members)))],

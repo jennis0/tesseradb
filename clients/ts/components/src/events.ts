@@ -75,11 +75,13 @@ export type TesseraEventDetails = {
   'tessera-displaychange': {points: boolean; radius: number | null; pointOpacity: number | null; density: DensityMode; densityColours: DensityColours | null; densityStrength: number};
   /**
    * A filter changed. `column` is the column whose control changed, or null for Clear all. After an
-   * edit in a control, `expr` is the expression the controls now compose, null for none. Where a
-   * chip was removed or Clear all pressed, `expr` is null. Where a clause moved between `filter`
-   * and `highlight`, `verb` is its new position and `expr` is absent.
+   * edit in a control or a legend row, `expr` is the expression the edited position now composes,
+   * null for none, and `verb` names that position (`filter` where absent). Where a chip was
+   * removed, `verb` is the position it was in and `expr` is null; after Clear all, `expr` is null.
    */
   'tessera-filterchange': {column: string | null; expr?: FilterExpr | null; verb?: ClauseVerb};
+  /** A column's chip was pressed under `chips-only`: its control is to be shown, editing `verb`. */
+  'tessera-chipopen': {column: string; verb: ClauseVerb};
   /** Open was pressed on the item `id`: `fields` is its record's fields. */
   'tessera-open': {id: string; fields: Record<string, unknown>};
   /**

@@ -15,6 +15,7 @@ import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
 import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
+import {attachedTextOf} from './names.js';
 import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
@@ -324,6 +325,12 @@ export type ArtifactsProjection = {
   /** The forest `served` forms through its parent links. */
   lineage: ServedLineage;
   /**
+   * The text of each attached artifact the channel serves (a clustering's topic labels), keyed by
+   * the artifact it is attached to, over the drawn layers and the colour layer. The names
+   * {@link artifactName} gives the artifacts in `served` and `colourServed`.
+   */
+  attached: ReadonlyMap<bigint, string>;
+  /**
    * `idle` before the first answer and while no layer is asked for; `loading` while a request is
    * out; `shown` when `served` answers the current camera; `refused` when the request was refused,
    * `served` then being empty.
@@ -554,8 +561,9 @@ export interface Store {
   /**
    * Colour points by a declared column, by `cluster:<layer>` for a layer {@link colourLayers} lists,
    * or `null` for uniform. Publishes `legend`. Colouring by a layer fetches its artifacts into
-   * `artifacts.colourServed` without drawing them. A `cluster:` layer that `meta` does not list as
-   * one that can colour is named in no request, and the points draw uniform.
+   * `artifacts.colourServed`, and its labels into `artifacts.attached`, without drawing them. A
+   * `cluster:` layer that `meta` does not list as one that can colour is named in no request, and
+   * the points draw uniform.
    */
   setColourBy(column: string | null): void;
   /**
@@ -804,10 +812,10 @@ export function createStore(options: StoreOptions): Store {
     view: noFrame(''),
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], colourServed: [], lineage: servedLineage([]), attached: new Map(), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: colours.palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
-    filters: {draft: {}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+    filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
@@ -912,7 +920,7 @@ export function createStore(options: StoreOptions): Store {
         // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
         // channel's, so a point's membership names an artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
-        const layers = req.k === 0 ? [] : layersAsked();
+        const layers = req.k === 0 ? [] : pointLayers();
         const response = await client.viewport(
           tok,
           {
@@ -1083,7 +1091,8 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('meta', meta);
     replaceProjection('view', {...projections.view, id: views.id});
     // One empty control per operand set the bundle publishes.
-    if (Object.keys(projections.filters.draft).length === 0) {
+    const held = projections.filters.draft;
+    if (Object.keys(held.filter).length === 0 && Object.keys(held.highlight).length === 0) {
       const draft = emptyDraft(meta.filterOperands);
       replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight')});
     }
@@ -1111,8 +1120,10 @@ export function createStore(options: StoreOptions): Store {
     const columns = new Set(m.filterOperands.map((f) => f.column));
     const layerNames = new Set(m.layers.map((l) => l.name));
     const {draft} = projections.filters;
-    const keptDraft = Object.fromEntries(Object.entries(draft).filter(([column]) => columns.has(column)));
-    if (Object.keys(keptDraft).length !== Object.keys(draft).length) {
+    const kept = (controls: FilterDraft['filter']) => Object.fromEntries(Object.entries(controls).filter(([column]) => columns.has(column)));
+    const keptDraft: FilterDraft = {filter: kept(draft.filter), highlight: kept(draft.highlight)};
+    const count = (d: FilterDraft) => Object.keys(d.filter).length + Object.keys(d.highlight).length;
+    if (count(keptDraft) !== count(draft)) {
       replaceProjection('filters', {
         ...projections.filters,
         draft: keptDraft,
@@ -1295,6 +1306,7 @@ export function createStore(options: StoreOptions): Store {
       served,
       colourServed: coloured === null ? [] : state.artifacts.filter((a) => a.layer === coloured),
       lineage: servedLineage(served),
+      attached: attachedTextOf(state.artifacts, meta?.layers ?? []),
       status: state.status,
       refusal: state.refusal,
       version: state.version,
@@ -1310,15 +1322,15 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Publish the colour coverage of the bands in view, and fetch the colour-stale ones again, once
-   * per served-set version. A band is colour-stale when it has no membership column for a layer
-   * asked for, or names an ordinal that resolves to no colour. It resolves against the colours,
-   * which cover every artifact the table holds, so a band fetched under a coarser cut is still
-   * coloured. In view is the visible box: the point path also fetches a margin, whose bands name
+   * per served-set version. A band is colour-stale when it has no membership column for a layer a
+   * point request names ({@link pointLayers}), or names an ordinal that resolves to no colour. It
+   * resolves against the colours, which cover every artifact the table holds, so a band fetched
+   * under a coarser cut is still coloured. In view is the visible box: the point path also fetches a margin, whose bands name
    * artifacts the channel did not serve for this view.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
-    const layers = layersAsked();
+    const layers = pointLayers();
     const machinery = views.current;
     if (!machinery || a.status !== 'shown' || layers.length === 0) {
       if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
@@ -1476,12 +1488,25 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * The layers a viewport request names: the drawn layers with their closure, and the colour
-   * layer alone. The colour layer's dependents are not asked for, since nothing of it is drawn.
+   * The layers the artifact channel asks for: the drawn layers and the colour layer, each with its
+   * closure, so the colour layer's labels name the legend's rows.
    */
   function layersAsked(): string[] {
     const coloured = colourLayer();
-    return coloured === null || layersOn.includes(coloured) ? layersOn : [...layersOn, coloured];
+    if (coloured === null || layersOn.includes(coloured) || !meta) return layersOn;
+    return [...layersOn, ...drawnOnly(layerClosure(meta.layers, [coloured])).filter((l) => !layersOn.includes(l))];
+  }
+
+  /**
+   * The layers a point request names, each putting a membership column on every band: those
+   * {@link layersAsked} names, less the label layers (a layer that depends on another and declares
+   * no geometry, as a clustering's topic labels), whose columns nothing reads. The first layer
+   * drawn and the colour layer are always kept. A label layer's rows come from the channel.
+   */
+  function pointLayers(): string[] {
+    const kept = new Set([layersOn[0], colourLayer()]);
+    const labels = new Set(meta?.layers.filter((l) => l.depsOn.length > 0 && l.computedContent.length === 0 && l.shape === null && !kept.has(l.name)).map((l) => l.name) ?? []);
+    return layersAsked().filter((l) => !labels.has(l));
   }
 
   /**
@@ -1702,7 +1727,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('filters', {
       ...projections.filters,
       members: [],
-      ...(filtersSet ? {} : {draft: {}, expr: null, highlight: null})
+      ...(filtersSet ? {} : {draft: emptyDraft([]), expr: null, highlight: null})
     });
     legend.clear();
     meta = null;

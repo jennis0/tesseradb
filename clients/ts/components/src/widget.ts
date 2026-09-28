@@ -126,8 +126,9 @@ function tokenSupplier(model: WidgetModel, onMessage: (cb: (msg: KernelMessage) 
 }
 
 /**
- * The store's draft for the `filters` traitlet's expression, which is in the wire's form. This
- * inverts `composeFilters` for the shapes a draft can hold: one leaf per column, joined by
+ * The store's draft for the `filters` traitlet's expression, which is in the wire's form, with every
+ * control in the `filter` position and none in `highlight`. This inverts `composeFilters` for the
+ * shapes a draft can hold: one leaf per column, joined by
  * `all_of` at the top. Anything else (`any_of`, `none_of`, a nested `all_of`, two leaves on one
  * column, an unknown column, an operator the column's family cannot hold) throws with a reason,
  * which goes to the kernel as an `error` message. `null` is no filter.
@@ -146,19 +147,15 @@ export function draftOf(expr: FilterExpr | null, operands: FilterOperandSet[]): 
     }
     if (seen.has(column)) throw new Error(`two leaves on ${column}; the widget holds one per column`);
     seen.add(column);
-    const control = draft[column];
+    const control = draft.filter[column];
     if (!control) throw new Error(`${column} is not a filterable column of this view`);
-    draft[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
+    draft.filter[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
   }
   return draft;
 }
 
-/**
- * One leaf back into a control, keeping the control's `verb`: naming a column in `filters` does
- * not move a clause out of the highlight position.
- */
+/** One leaf back into a control of the family `control` has. */
 function controlOf(column: string, control: ColumnDraft, op: Record<string, unknown>): ColumnDraft {
-  const {verb} = control;
   const names = Object.keys(op);
   if (names.length !== 1) throw new Error(`${column}: an operator has exactly one key; got ${names.join(', ')}`);
   const name = names[0]!;
@@ -166,30 +163,30 @@ function controlOf(column: string, control: ColumnDraft, op: Record<string, unkn
   const bad = () => new Error(`${column}: a ${control.family} column cannot hold ${name}`);
   switch (control.family) {
     case 'text': {
-      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase', verb};
-      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all', verb};
+      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase'};
+      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all'};
       if (name === 'match' && value && typeof value === 'object') {
         const m = value as {query: string; minimum_should_match?: number};
-        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all', verb};
+        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all'};
       }
       throw bad();
     }
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
-        return {family: control.family, needle: value, op: name, verb};
+        return {family: control.family, needle: value, op: name};
       }
       throw bad();
     }
     case 'category': {
-      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String), verb};
-      if (name === 'eq') return {family: 'category', keys: [String(value)], verb};
+      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String)};
+      if (name === 'eq') return {family: 'category', keys: [String(value)]};
       throw bad();
     }
     case 'numeric': {
       if (name === 'range' && value && typeof value === 'object') {
         const r = value as {gte?: number; lte?: number; gt?: number; lt?: number};
         if (r.gt !== undefined || r.lt !== undefined) throw new Error(`${column}: the widget's range is inclusive (gte, lte)`);
-        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null, verb};
+        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null};
       }
       throw bad();
     }
@@ -267,7 +264,8 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     // expression when meta arrives.
     if (!meta) return;
     try {
-      store.setFilters(draftOf(expr, meta.filterOperands));
+      // The traitlet is the `filters` expression, so the highlight is kept.
+      store.setFilters({...draftOf(expr, meta.filterOperands), highlight: store.get('filters').draft.highlight});
     } catch (e) {
       report('filters', e);
     }

@@ -1,10 +1,11 @@
-import {css, html, nothing, type TemplateResult} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {
   composeFilters,
   emptyDraft,
   isPopulated,
+  type ClauseVerb,
   type ColumnDraft,
   type FilterOperandSet,
   type MatchSpan,
@@ -33,18 +34,23 @@ const TYPING_DEBOUNCE_MS = 350;
  * typeahead over `/v1/categories/{column}/suggest`. A number is two inputs, and a date two date
  * inputs. A keyword column is a text box with its operator (`contains`, `prefix` or `eq`).
  *
- * Typing is sent 350 ms after the last keystroke; a choice is sent at once. Each change replaces
- * the column's control in the store's filter draft (`Store.setFilters`). A category value typed
- * and entered is added whether or not it was suggested; a key the viewer cannot see matches
- * nothing, as a key that does not exist does. The host carries `data-on` while the control holds a
- * value.
+ * A Filter / Highlight switch beside the caption sets `verb`, the position the control edits: the
+ * column's filter clause or its highlight clause. The two are separate clauses; the control shows
+ * the one in its position and leaves the other alone.
+ *
+ * Typing is sent 350 ms after the last keystroke; a choice is sent at once, and so is typing still
+ * waiting when the position is switched. Each change replaces the column's control in the
+ * control's position of the store's draft (`Store.setFilters`). A category value typed and entered
+ * is added whether or not it was suggested; a key the viewer cannot see matches nothing, as a key
+ * that does not exist does. The host carries `data-on` while the control holds a value.
  *
  * @summary One filter control, drawn by the column's type.
  * @tagname tessera-filter
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - The
- *   control changed, with the column and the composed filter expression.
+ *   control changed, with the column, its position and the expression that position composes.
  * @csspart label - The column's name, as a caption.
+ * @csspart verb - The Filter / Highlight switch: two buttons with `data-verb` and `aria-pressed`.
  * @csspart entry - A text, number or date input.
  * @csspart mode - The text column's word toggle, or the keyword column's operator select.
  * @csspart values - The checklist, or the typeahead's suggestions.
@@ -61,11 +67,30 @@ export class TesseraFilter extends TesseraElement {
       :host {
         display: block;
       }
+      .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
       [part='label'] {
         display: block;
-        margin-bottom: 8px;
         font-weight: 600;
         color: var(--_tessera-ink);
+      }
+      .seg[part='verb'] {
+        margin-top: 0;
+        height: 22px;
+        flex: none;
+      }
+      .seg[part='verb'] button {
+        padding: 0 7px;
+        font-size: 11px;
+      }
+      .seg[part='verb'] button[data-verb='highlight'][aria-pressed='true'] {
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       .ctl-row {
         display: flex;
@@ -143,6 +168,8 @@ export class TesseraFilter extends TesseraElement {
   @property() accessor column = '';
   /** The column's operands, for a host that sets them itself in place of the store's `meta`. */
   @property({attribute: false}) accessor operand: FilterOperandSet | null = null;
+  /** The position the control edits: the column's `filter` clause or its `highlight` clause. */
+  @property({reflect: true}) accessor verb: ClauseVerb = 'filter';
 
   /** @internal */
   @state() accessor draft: ColumnDraft | null = null;
@@ -159,6 +186,8 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor shape: 'checklist' | 'lookahead' | null = null;
   private sent: ColumnDraft | null = null;
   private typing: ReturnType<typeof setTimeout> | null = null;
+  /** The change `typing` is waiting to send, so a switch of position can send it first. */
+  private pending: (() => void) | null = null;
   /**
    * The last `q` this element asked the store's typeahead for. Store changes arrive for every
    * projection, and re-asking on each would keep re-arming the store's debounce so no request went
@@ -208,7 +237,7 @@ export class TesseraFilter extends TesseraElement {
   protected override onStoreChange(): void {
     // Re-seed from the store only when its draft changed underneath (a clear all, or the first
     // meta), not while the user's own edit is in flight.
-    const stored = this.resolvedStore?.get('filters').draft[this.column] ?? null;
+    const stored = this.resolvedStore?.get('filters').draft[this.verb][this.column] ?? null;
     if (stored && stored !== this.sent && JSON.stringify(stored) !== JSON.stringify(this.draft)) {
       this.draft = structuredClone(stored);
       this.sent = stored;
@@ -234,6 +263,24 @@ export class TesseraFilter extends TesseraElement {
     super.onStoreChange();
   }
 
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    // A new position shows that position's clause, once any typing for the old one is sent.
+    if (changed.has('verb') && changed.get('verb') !== undefined) {
+      if (this.typing) clearTimeout(this.typing);
+      this.pending?.();
+      this.draft = null;
+      this.sent = null;
+    }
+  }
+
+  /** Moves focus to the control's first input, or its first value in a checklist. */
+  override focus(options?: FocusOptions): void {
+    const target = this.renderRoot.querySelector<HTMLElement>('#ctl, [part="values"] input, [part="values"] button');
+    if (target) target.focus(options);
+    else super.focus(options);
+  }
+
   protected override updated(): void {
     if (this.draft && isPopulated(this.draft)) this.setAttribute('data-on', '');
     else this.removeAttribute('data-on');
@@ -244,23 +291,29 @@ export class TesseraFilter extends TesseraElement {
    * this operand, which also sets a keyword control's starting operator.
    */
   private currentDraft(o: FilterOperandSet): ColumnDraft | null {
-    return this.draft ?? this.resolvedStore?.get('filters').draft[this.column] ?? emptyDraft([o])[o.column] ?? null;
+    return this.draft ?? this.resolvedStore?.get('filters').draft[this.verb][this.column] ?? emptyDraft([o]).filter[o.column] ?? null;
   }
 
   private change(next: ColumnDraft, immediate: boolean): void {
     this.draft = next;
     if (this.typing) clearTimeout(this.typing);
+    const {column, verb} = this;
     const apply = () => {
       this.typing = null;
+      this.pending = null;
       const s = this.resolvedStore;
       if (!s) return;
-      const draft = {...s.get('filters').draft, [this.column]: next};
+      const held = s.get('filters').draft;
+      const draft = {...held, [verb]: {...held[verb], [column]: next}};
       this.sent = next;
       s.setFilters(draft);
-      emit(this, 'tessera-filterchange', {column: this.column, expr: composeFilters(draft)});
+      emit(this, 'tessera-filterchange', {column, verb, expr: composeFilters(draft, verb)});
     };
     if (immediate) apply();
-    else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
+    else {
+      this.pending = apply;
+      this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
+    }
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -274,7 +327,14 @@ export class TesseraFilter extends TesseraElement {
     const label = checklist
       ? html`<span part="label" class="muted" id="ctl-label">${columnCaption(this.column)}</span>`
       : html`<label part="label" class="muted" for="ctl">${columnCaption(this.column)}</label>`;
-    return html`${label}${this.body(o, draft)}`;
+    const verbs: [ClauseVerb, string][] = [
+      ['filter', 'Filter'],
+      ['highlight', 'Highlight']
+    ];
+    const toggle = html`<div class="seg" part="verb" role="group" aria-label=${`${columnCaption(this.column)}: edit the filter or the highlight`}>
+      ${verbs.map(([v, t]) => html`<button type="button" data-verb=${v} aria-pressed=${this.verb === v ? 'true' : 'false'} @click=${() => (this.verb = v)}>${t}</button>`)}
+    </div>`;
+    return html`<div class="head">${label}${toggle}</div>${this.body(o, draft)}`;
   }
 
   private body(o: FilterOperandSet, draft: ColumnDraft) {

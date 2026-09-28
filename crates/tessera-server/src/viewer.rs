@@ -1462,8 +1462,8 @@ struct BrowseReq {
     /// parents in `parents`. A `tessera_id`, as a number or its decimal string.
     #[serde(default)]
     parent: Option<serde_json::Value>,
-    /// The search form: the layer's artifacts whose key, or whose first supplied text content,
-    /// contains this case-insensitively.
+    /// The search form: the layer's artifacts whose key or served `name` contains this
+    /// case-insensitively.
     #[serde(default)]
     q: Option<String>,
     /// The viewport's filter object. Rows then carry `matched_count` and are ordered by it;

@@ -545,7 +545,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
     await clock.advance(600);
     scheduler.flush();
 
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     await clock.advance(600);
     scheduler.flush();
     const askedV0 = asked('v0').length;
@@ -567,7 +567,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
     store.setLayers(['l']);
     await clock.advance(1);
     // Filtered, so the channel asks the server rather than answering from scopes it holds whole.
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     await shown(store, clock, scheduler);
     await clock.advance(1000);
     scheduler.flush();
@@ -590,7 +590,7 @@ describe('what a filter change, a switch and a clear leave behind', () => {
     store.setLayers(['l']);
     await clock.advance(1);
     // Filtered, so the channel asks the server rather than answering from scopes it holds whole.
-    store.setFilters({archive: {family: 'category', keys: ['cs'], verb: 'filter'}});
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
     await shown(store, clock, scheduler);
     await clock.advance(1000);
     scheduler.flush();
