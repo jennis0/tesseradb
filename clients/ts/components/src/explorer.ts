@@ -754,7 +754,9 @@ export class TesseraExplorer extends TesseraElement {
     const sheetFooter = html`<div class="sheet-footer">
       <button class="btn" type="button" @click=${() => {
         const meta = s?.get('meta');
-        if (s && meta) s.setFilters(emptyDraft(meta.filterOperands));
+        if (!s || !meta) return;
+        s.setFilters(emptyDraft(meta.filterOperands));
+        s.setMembers([]);
       }}>Clear</button>
       <button class="btn primary" type="button" @click=${() => (this.sheet = null)}>${matchedText}</button>
     </div>`;

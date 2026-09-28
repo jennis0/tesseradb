@@ -53,8 +53,9 @@ type Picking = {column: string; key: string; title: string};
  * the value to the column's filter, which may hold several; the rows left out empty their swatch.
  * Highlight picks the value out without changing any count; the other rows grey. The two are
  * separate clauses and a row can have both pressed: filtered to two values with one highlighted,
- * the map shows the two and picks out the one. Both go through the store's filters, so the chips are the ones `<tessera-filter-panel>` shows. The
- * buttons appear only where the column can be filtered by value.
+ * the map shows the two and picks out the one. Both go through the store's filters, so the chips
+ * are the ones `<tessera-filter-panel>` shows. The buttons appear only where `meta` offers the
+ * column's `in` operator.
  *
  * The swatch opens a colour picker: the palette's colours and a lighter row, a custom area with a
  * hue bar and a hex field, and Reset, which gives the value its palette colour back. A choice
@@ -627,14 +628,19 @@ export class TesseraLegend extends TesseraElement {
   private applyVerb(column: string, key: string, verb: ClauseVerb): void {
     const s = this.resolvedStore;
     if (!s) return;
+    if (!this.offers(column, 'category', 'in')) return;
     const draft = s.get('filters').draft;
-    if (draft.filter[column]?.family !== 'category') return;
     const held = draft[verb][column];
     const was = held?.family === 'category' ? held.keys : [];
     const keys = was.includes(key) ? was.filter((k) => k !== key) : [...was, key];
     const next: FilterDraft = {...draft, [verb]: {...draft[verb], [column]: {family: 'category', keys}}};
     s.setFilters(next);
-    emit(this, 'tessera-filterchange', {column, expr: composeFilters(next)});
+    emit(this, 'tessera-filterchange', {column, verb, expr: composeFilters(next, verb)});
+  }
+
+  /** Whether `meta` offers `op` on `column` as a column of `family`. */
+  private offers(column: string, family: 'category' | 'numeric', op: 'in' | 'range'): boolean {
+    return this.resolvedStore?.get('meta')?.filterOperands.some((o) => o.column === column && o.family === family && o.operands.includes(op)) ?? false;
   }
 
   /**
@@ -645,8 +651,8 @@ export class TesseraLegend extends TesseraElement {
   private applyRange(column: Column, gte: number | null, lte: number | null): void {
     const s = this.resolvedStore;
     if (!s) return;
+    if (!this.offers(column.name, 'numeric', 'range')) return;
     const draft = s.get('filters').draft;
-    if (draft.filter[column.name]?.family !== 'numeric') return;
     const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
     const round = (v: number | null) => (v === null ? null : whole ? Math.round(v) : Number(v.toPrecision(6)));
     const [lo, hi] = gte !== null && lte !== null && gte > lte ? [lte, gte] : [gte, lte];
@@ -744,7 +750,7 @@ export class TesseraLegend extends TesseraElement {
   private categoryRows(s: Store, column: string, values: CategoryValue[], ranks: Record<number, number>, colouring: Colouring, counts: Record<string, Masked> | undefined): TemplateResult {
     const meta = s.get('meta');
     const {draft} = s.get('filters');
-    const filterable = draft.filter[column]?.family === 'category' && (meta?.filterOperands.some((o) => o.column === column && o.operands.includes('in')) ?? false);
+    const filterable = this.offers(column, 'category', 'in');
     const keysIn = (verb: ClauseVerb) => {
       const held = draft[verb][column];
       return held?.family === 'category' ? held.keys : [];
@@ -814,7 +820,7 @@ export class TesseraLegend extends TesseraElement {
       return n.toLocaleString('en-GB', {maximumFractionDigits: 2});
     };
     const held = s.get('filters').draft.filter[column.name];
-    const filterable = held?.family === 'numeric' && (s.get('meta')?.filterOperands.some((o) => o.column === column.name && o.operands.includes('range')) ?? false);
+    const filterable = this.offers(column.name, 'numeric', 'range');
     const at = (v: number) => Math.min(1, Math.max(0, fractionOf(v, domain, colouring.scale, ramp.diverging)));
     const valueAt = (t: number) => valueAtFraction(t, domain, colouring.scale, ramp.diverging);
     // The filter's own bounds, `null` where an end is open. A bound outside the values drawn keeps

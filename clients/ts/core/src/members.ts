@@ -7,9 +7,9 @@ import type {FilterExpr, MemberOfOperand} from './types.js';
  * A `member_of` clause names one artifact of one layer and asks for its members. It composes like
  * any other leaf and sits in `filters` or in `highlight` alike, so narrowing the map to a cluster
  * and lighting that cluster's members are one clause in two positions, and an artifact can hold a
- * clause in each at once. A drawn `region` asks about a shape and
- * this asks about membership; for an artifact whose members are spread across the map, its shape
- * is the map's outline and the two differ.
+ * clause in each at once. A drawn `region` asks about a shape and this asks about membership; for
+ * an artifact whose members are spread across the map, its shape is the map's outline and the two
+ * differ.
  */
 
 /**

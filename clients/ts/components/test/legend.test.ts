@@ -89,15 +89,18 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     press(host, 'cs.LG', 'filter');
     expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.CV']});
     expect(changes).toEqual([
-      {column: 'field', expr: {field: {in: ['cs.LG']}}},
-      {column: 'field', expr: {field: {in: ['cs.LG', 'cs.CV']}}},
-      {column: 'field', expr: {field: {in: ['cs.CV']}}}
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.LG']}}},
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.LG', 'cs.CV']}}},
+      {column: 'field', verb: 'filter', expr: {field: {in: ['cs.CV']}}}
     ]);
   });
 
   it('highlights a value without filtering, and greys the other rows', async () => {
     const {host, store} = await mountLegend('field');
+    const changes: unknown[] = [];
+    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
     press(host, 'cs.CV', 'highlight');
+    expect(changes).toEqual([{column: 'field', verb: 'highlight', expr: {field: {in: ['cs.CV']}}}]);
     expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
     await answer(host, store);
     expect(['cs.LG', 'cs.CV', 'hep-th'].map((k) => entry(host, k).getAttribute('data-state'))).toEqual(['dim', 'lit', 'dim']);
@@ -122,6 +125,16 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
 
     // Taking the value out of the filter leaves the highlight.
     press(host, 'cs.CV', 'filter');
+    expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG']});
+    expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
+  });
+
+  it('offers the verbs from the published operands, with no filter control seeded', async () => {
+    const {host, store} = await mountLegend('field');
+    store.set('filters', filtersOf({filter: {}, highlight: {field: {family: 'category', keys: ['cs.CV']}}}));
+    await settle(host);
+    expect(entry(host, 'cs.CV').querySelector('[part="highlight"]')!.getAttribute('aria-pressed')).toBe('true');
+    press(host, 'cs.LG', 'filter');
     expect(sent(store)!.filter['field']).toEqual({family: 'category', keys: ['cs.LG']});
     expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
   });

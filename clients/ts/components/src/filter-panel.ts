@@ -25,8 +25,8 @@ const FILTER_PARTS = exportparts('filter');
  * Each chip's toggle moves its clause to the other position. Where that position already holds a
  * clause on the same column, the two merge as `withVerb` says; on the same artifact, the moved
  * clause replaces the one there. Removing a chip empties its clause and leaves the other position's
- * alone. Clear all empties every control in both positions and drops every `member_of` clause. `chips-only` leaves the controls out, and renders nothing while no
- * clause is applied.
+ * alone. Clear all empties every control in both positions and drops every `member_of` clause.
+ * `chips-only` leaves the controls out, and renders nothing while no clause is applied.
  *
  * @summary Every filter control, with the applied clauses as chips.
  * @tagname tessera-filter-panel

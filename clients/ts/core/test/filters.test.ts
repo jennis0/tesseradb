@@ -68,6 +68,15 @@ describe('a column with a filter and a highlight', () => {
     expect(composeFilters(moved, 'highlight')).toBeNull();
   });
 
+  it('composes the highlight in the filter position\'s column order, whatever order it was set in', () => {
+    const seeded = emptyDraft([
+      {column: 'field', family: 'category', operands: ['in']},
+      {column: 'year', family: 'numeric', operands: ['range']}
+    ]);
+    const lit: FilterDraft = {...seeded, highlight: {year: {family: 'numeric', gte: 2000, lte: null}, extra: {family: 'category', keys: ['x']}, field: {family: 'category', keys: ['cs.CV']}}};
+    expect(composeFilters(lit, 'highlight')).toEqual({all_of: [{field: {in: ['cs.CV']}}, {year: {range: {gte: 2000}}}, {extra: {in: ['x']}}]});
+  });
+
   it('moves nothing where the other position holds no clause on the column', () => {
     expect(withVerb(both, 'title', 'highlight')).toBe(both);
   });

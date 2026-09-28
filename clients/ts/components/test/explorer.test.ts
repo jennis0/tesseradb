@@ -146,6 +146,15 @@ describe('<tessera-explorer> narrow layout', () => {
     expect(shadow.querySelector('[part="sheet"]')).toBeNull();
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
   });
+
+  it('clears the controls and the member_of clauses from the filters sheet', async () => {
+    const {host, shadow, store} = await explorer();
+    tabs(shadow)[0]!.click();
+    await settle(host);
+    (shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
+    expect(store.calls.filter((c) => c.name === 'setMembers').map((c) => c.args[0])).toEqual([[]]);
+  });
 });
 
 describe('<tessera-explorer> detail', () => {

@@ -119,7 +119,7 @@ function operatorOf(draft: ColumnDraft): FilterOperator {
 
 /**
  * Composes the populated controls in one position into a filter expression: `null` for none, the
- * bare leaf for one, and `all_of` over the leaves for several, in the position's key order. A draft
+ * bare leaf for one, and `all_of` over the leaves for several, in the draft's column order. A draft
  * that constrains nothing therefore sends the same request as no filter.
  *
  * @param verb - The position to compose. Defaults to `filter`.
@@ -128,10 +128,13 @@ function operatorOf(draft: ColumnDraft): FilterOperator {
  */
 export function composeFilters(draft: FilterDraft, verb: ClauseVerb = 'filter'): FilterExpr | null {
   const leaves: FilterExpr[] = [];
-  // The draft is seeded in `/v1/meta`'s declaration order, so leaves follow the schema and two
-  // sessions filtering alike send the same body.
-  for (const [column, control] of Object.entries(draft[verb])) {
-    if (!isPopulated(control)) continue;
+  // The filter position is seeded in `/v1/meta`'s declaration order, and both positions follow it,
+  // so two sessions filtering alike send the same body. A column the seed lacks comes after, in the
+  // order it was added.
+  const controls = draft[verb];
+  for (const column of new Set([...Object.keys(draft.filter), ...Object.keys(controls)])) {
+    const control = controls[column];
+    if (!control || !isPopulated(control)) continue;
     leaves.push({[column]: operatorOf(control)} as FilterExpr);
   }
   if (leaves.length === 0) return null;
@@ -200,10 +203,10 @@ export function withVerb(draft: FilterDraft, column: string, verb: ClauseVerb): 
 
 /**
  * A draft with one empty control per filterable column in `operands` (`Meta.filterOperands`), each
- * in the `filter` position, and none in the `highlight` position. A column gets a control only where it publishes the operator the
- * control sends: `match` for text (the control starts in mode `all`), `in` for category and `range`
- * for numeric. A keyword control starts on whichever of `eq`, `prefix` and `contains` the column
- * publishes first.
+ * in the `filter` position, and none in the `highlight` position. A column gets a control only
+ * where it publishes the operator the control sends: `match` for text (the control starts in mode
+ * `all`), `in` for category and `range` for numeric. A keyword control starts on whichever of `eq`,
+ * `prefix` and `contains` the column publishes first.
  *
  * A group-scoped column is keyed by its bare name, which the server answers only under a view of
  * its group or a group sharing its views. To filter it under another view, re-key the control as
