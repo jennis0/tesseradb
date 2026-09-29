@@ -12,12 +12,12 @@ import {chrome, tokens} from './tokens.js';
 
 /**
  * The clusters on screen at the level the map draws, as a flat list, largest first: each row its
- * colour, its name, its parent's name in grey, and its exact count under the store's filters. The list is the colouring
- * layer's served artifacts while the points are coloured by a layer, else the drawn layers'.
- * `level` is the level the map draws at: on a layer that declares levels the rows are that level's
- * artifacts, the deepest served where `level` is unset; on any other layer they are the deepest
- * artifact served in each branch at or above `level`, every branch's deepest where it is unset. An
- * artifact with no name shows a placeholder; a key is never shown.
+ * colour, its name, its parent's name in grey, and its exact count under the store's filters. The
+ * list is the colouring layer's served artifacts while the points are coloured by a layer, else the
+ * drawn layers'. `level` is the level the map draws at: on a layer that declares levels the rows
+ * are that level's artifacts, the deepest served where `level` is unset; on any other layer they
+ * are the deepest artifact served in each branch at or above `level`, every branch's deepest where
+ * it is unset. An artifact with no name shows a placeholder; a key is never shown.
  *
  * Pressing a row fires `tessera-artifactfit`, which `<tessera-explorer>` answers by fitting its map
  * to the artifact. Hovering or focusing a row shows its Highlight and Filter buttons, which put a
@@ -29,6 +29,7 @@ import {chrome, tokens} from './tokens.js';
  * artifact. A count is over the artifact's whole membership that passes the filters, not the part
  * in view; the view decides only whether an artifact is listed. Until the answer lands the rows
  * show no count and are ordered by their masked counts.
+ *
  *
  * @summary The clusters on screen at the level drawn, with their counts.
  * @tagname tessera-artifact-list

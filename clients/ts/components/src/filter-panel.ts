@@ -33,12 +33,12 @@ const MODES: [ClauseVerb, string][] = [
 
 /**
  * The filter controls under a Filters heading with Clear all, and a Filter / Highlight switch that
- * counts the clauses in each position. A clause is in one of two positions: a filter narrows the map and every count
- * to the matches, and a highlight lights the matches among what the filter keeps. A column or an
- * artifact can hold a clause in each. The two are independent: neither changes the other, and each
- * has its own chip under `chips-only`. A highlight chip carries the highlight mark and colour; a
- * filter chip carries none. A `member_of` clause (a cluster chosen in a cluster field, on the
- * artifact card or in the hierarchy) is a chip too.
+ * counts the clauses in each position. A clause is in one of two positions: a filter narrows the
+ * map and every count to the matches, and a highlight lights the matches among what the filter
+ * keeps. A column or an artifact can hold a clause in each. The two are independent: neither
+ * changes the other, and each has its own chip under `chips-only`. A highlight chip carries the
+ * highlight mark and colour; a filter chip carries none. A `member_of` clause (a cluster chosen in
+ * a cluster field, on the artifact card or in the hierarchy) is a chip too.
  *
  * The fields are the filterable columns and the layers whose clusters can be filtered by: every
  * layer `meta` lists for the current view that attaches to no other. A layer's field is a
@@ -53,13 +53,16 @@ const MODES: [ClauseVerb, string][] = [
  * positions; a column in `pinned` stays, since the host lists it. Enter in the search box adds the
  * first match not yet listed and never takes one off.
  *
- * Pressing a column's chip sets `mode` to the chip's position and opens, scrolls to and focuses
- * the column's control; under `chips-only`, where there are no controls, it fires
- * `tessera-chipopen` instead, for a host to show them with {@link TesseraFilterPanel.show}.
- * Removing a chip empties its clause and leaves the other position's alone. Clear all empties
- * every control in both positions and drops every `member_of` clause. `chips-only` renders the
- * heading and the chips without the controls, and nothing while no clause is applied;
- * `controls-only` leaves the heading out.
+ * Pressing a column's chip sets `mode` to the chip's position and opens, scrolls to and focuses the
+ * column's control; under `chips-only`, where there are no controls, it fires `tessera-chipopen`
+ * instead, for a host to show them with {@link TesseraFilterPanel.show}. Removing a chip empties
+ * its clause and leaves the other position's alone. Clear all empties every control in both
+ * positions and drops every `member_of` clause. `chips-only` renders the heading and the chips
+ * without the controls, and nothing while no clause is applied; `controls-only` leaves the heading
+ * out.
+ *
+ * A `member_of` clause on a layer with no field here, one that attaches to another layer or one of
+ * another view, is still applied, so it is listed under "Also applied" as a chip that takes it off.
  *
  * @summary The filter controls, and the applied clauses as chips.
  * @tagname tessera-filter-panel

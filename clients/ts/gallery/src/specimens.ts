@@ -57,12 +57,16 @@ function store(over: Partial<Projections> = {}, answered = true): FakeStore {
   return s;
 }
 
-/** The corpus's figures: 16,431,000 papers, the fields shared out by rank, each artifact its masked count. */
+/**
+ * The corpus's figures: 16,431,000 papers, the fields shared out by rank, each artifact its masked
+ * count. A `member_of` or a by-artifact count takes an artifact's own listed members and not its
+ * descendants', and the corpus lists every paper under its topic alone, so an area counts 0.
+ */
 const CORPUS_TOTAL = 16_431_000;
 const FIELD_SHARES = [0.29, 0.22, 0.14, 0.09, 0.06, 0.05, 0.045, 0.035, 0.03, 0.02, 0.015];
 const ARTIFACT_COUNTS = new Map<string, number>([
   ...[...Array(10).keys()].map((i) => [TOPIC(i).tesseraId.toString(), Number(TOPIC(i).maskedCount)] as [string, number]),
-  ...[0, 1, 2].map((i) => [AREA(i).tesseraId.toString(), Number(AREA(i).maskedCount)] as [string, number]),
+  ...[0, 1, 2].map((i) => [AREA(i).tesseraId.toString(), 0] as [string, number]),
   ...[...VENUES.roots, ...VENUES.conferences].map((r) => [r.tesseraId.toString(), Number(r.maskedCount)] as [string, number])
 ]);
 const fieldCount = (key: string) => Math.round(CORPUS_TOTAL * (FIELD_SHARES[MANY_FIELDS.findIndex((f) => f.key === key)] ?? 0.004));
