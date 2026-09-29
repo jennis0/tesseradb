@@ -1,17 +1,18 @@
 import {describe, expect, it, vi} from 'vitest';
 import {TesseraError} from '../src/client.js';
 import type {ClauseVerb} from '../src/filters.js';
+import type {FilterExpr} from '../src/types.js';
 import {Suggestions, type SuggestState} from '../src/suggestions.js';
 import type {SuggestResult} from '../src/types.js';
 import {fakeClock} from './support.js';
 
-type Ask = (column: string, q: string, verb: ClauseVerb, signal: AbortSignal) => Promise<SuggestResult>;
+type Ask = (column: string, q: string, filters: FilterExpr | null, signal: AbortSignal) => Promise<SuggestResult>;
 
 /** A typeahead over `ask`, and the state it last published. */
-function typeahead(ask: Ask) {
+function typeahead(ask: Ask, filtersFor: (column: string, verb: ClauseVerb) => FilterExpr | null = () => null) {
   const clock = fakeClock();
   let state: SuggestState = {suggestions: {}, suggestErrors: {}, suggestEpoch: 0};
-  const part = new Suggestions(clock, ask, (next) => (state = next));
+  const part = new Suggestions(clock, filtersFor, ask, (next) => (state = next));
   return {clock, part, state: () => state};
 }
 
@@ -27,7 +28,7 @@ describe('the category typeahead', () => {
     part.suggest('admin4', 'mac', 'filter');
     await clock.advance(200);
     expect(ask).toHaveBeenCalledTimes(1);
-    expect(ask).toHaveBeenCalledWith('admin4', 'mac', 'filter', expect.any(AbortSignal));
+    expect(ask).toHaveBeenCalledWith('admin4', 'mac', null, expect.any(AbortSignal));
     expect(state().suggestions['admin4']).toEqual({q: 'mac', verb: 'filter', values: [], more: false, total: null});
   });
 
@@ -85,7 +86,7 @@ describe('the category typeahead', () => {
       await clock.advance(10);
     }
     expect(ask).toHaveBeenCalledTimes(1);
-    expect(ask).toHaveBeenCalledWith('admin4', 'fr', 'filter', expect.any(AbortSignal));
+    expect(ask).toHaveBeenCalledWith('admin4', 'fr', null, expect.any(AbortSignal));
     expect(state().suggestions['admin4']).toEqual({q: 'fr', verb: 'filter', values: [], more: false, total: null});
   });
 
@@ -162,11 +163,11 @@ describe('the category typeahead', () => {
 
   it('keeps the page its position asked for, with the total the server counted over', async () => {
     const ask = vi.fn(async (column: string, q: string) => ({...ok(column, q), total: 1234}));
-    const {clock, part, state} = typeahead(ask);
+    const {clock, part, state} = typeahead(ask, (_column, verb) => ({archive: {in: [verb]}}));
 
     part.suggest('archive', 'c', 'highlight');
     await clock.advance(200);
-    expect(ask).toHaveBeenCalledWith('archive', 'c', 'highlight', expect.any(AbortSignal));
+    expect(ask).toHaveBeenCalledWith('archive', 'c', {archive: {in: ['highlight']}}, expect.any(AbortSignal));
     expect(state().suggestions['archive']).toEqual({q: 'c', verb: 'highlight', values: [], more: false, total: 1234});
 
     // The same q from the other position is another question.
@@ -174,39 +175,6 @@ describe('the category typeahead', () => {
     await clock.advance(200);
     expect(ask).toHaveBeenCalledTimes(2);
     expect(state().suggestions['archive']?.verb).toBe('filter');
-  });
-
-  it('asks again on refresh, cancelling the request in flight and keeping the page until the new one lands', async () => {
-    const asks: {signal: AbortSignal; resolve: (v: SuggestResult) => void}[] = [];
-    const ask = vi.fn(
-      (_column: string, _q: string, _verb: ClauseVerb, signal: AbortSignal) =>
-        new Promise<SuggestResult>((resolve) => asks.push({signal, resolve}))
-    );
-    const {clock, part, state} = typeahead(ask);
-
-    part.suggest('archive', 'c', 'filter');
-    await clock.advance(200);
-    asks[0]!.resolve({...ok('archive', 'c'), total: 10});
-    await clock.advance(1);
-
-    part.suggest('archive', 'co', 'filter');
-    await clock.advance(200);
-    expect(asks).toHaveLength(2);
-    part.refresh();
-    expect(asks[1]!.signal.aborted).toBe(true);
-    // The held page stays while the refreshed ask is waiting.
-    expect(state().suggestions['archive']?.total).toBe(10);
-    await clock.advance(200);
-    expect(asks).toHaveLength(3);
-    expect(ask).toHaveBeenLastCalledWith('archive', 'co', 'filter', expect.any(AbortSignal));
-
-    // The cancelled request's answer is dropped; the refreshed one lands.
-    asks[1]!.resolve({...ok('archive', 'co'), total: 99});
-    await clock.advance(1);
-    expect(state().suggestions['archive']?.total).toBe(10);
-    asks[2]!.resolve({...ok('archive', 'co'), total: 4});
-    await clock.advance(1);
-    expect(state().suggestions['archive']).toEqual({q: 'co', verb: 'filter', values: [], more: false, total: 4});
   });
 
   it('publishes the server’s detail when an ask is still shed after its retries', async () => {

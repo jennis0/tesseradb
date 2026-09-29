@@ -552,11 +552,19 @@ export interface Store {
    * filter clause, so each value counts what choosing it as well would add; in `highlight` it is the
    * whole of it, so a value the filter excludes counts 0. A refusal lands in
    * `filters.suggestErrors[column]`. A call repeating the `q` and `verb` last asked for does nothing;
-   * any other call, and any change of filter or region, asks again and cancels the request before.
-   * An ask the server sheds (`429`) is retried after the wait it gives, at least 0.25 s, up to five
-   * times. Waits for `/v1/meta`.
+   * any other call asks again and cancels the column's request before. A change of filter or region
+   * asks again for each column whose request would carry another filter, keeping its page until the
+   * new one lands. Requests are sent one at a time, since the server runs one suggestion per
+   * session. An ask the server sheds (`429`) is retried after the wait it gives, at least 0.25 s, up
+   * to five times; an ask from the box then reports `backpressure`, and one from a change of filter
+   * keeps the page it had. Waits for `/v1/meta`.
    */
   suggest(column: string, q: string, verb: ClauseVerb): void;
+  /**
+   * Stop asking for `column`'s suggestions and drop its page and refusal, so a change of filter no
+   * longer asks for it. A control calls this when its box is emptied and when it goes away.
+   */
+  forgetSuggestions(column: string): void;
   /**
    * Draw these layers, each with its closure ({@link layerClosure}); `[]` draws none. Filter layers
    * are dropped from the list. A layer newly named is fetched at once. Publishes `artifacts`. Called
@@ -778,9 +786,9 @@ export function createStore(options: StoreOptions): Store {
 
   const suggestions = new Suggestions(
     clock,
-    async (column, q, verb, signal) => {
+    (column, verb) => (verb === 'highlight' ? requestFilters() : filtersWithout(column)),
+    async (column, q, filters, signal) => {
       const asked = await viewed();
-      const filters = verb === 'highlight' ? requestFilters() : filtersWithout(column);
       return client.suggest(asked.token, column, q, {view: asked.view, counts: true, ...(filters === null ? {} : {filters}), signal});
     },
     (state) => replaceProjection('filters', {...projections.filters, ...state})
@@ -1811,6 +1819,7 @@ export function createStore(options: StoreOptions): Store {
     setFilters,
     setMembers,
     suggest: (column, q, verb) => suggestions.suggest(column, q, verb),
+    forgetSuggestions: (column) => suggestions.forget(column),
     setLayers,
     setColourBy,
     setPalette: (kind) => colours.setPalette(kind),
