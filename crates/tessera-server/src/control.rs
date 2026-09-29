@@ -2466,16 +2466,19 @@ async fn grow_memberships(
             let mut body: GrowBody = artifact_json(&body, "growth")?;
             let mut lists = Vec::with_capacity(body.artifacts.len() * 2);
             for (index, artifact) in body.artifacts.iter_mut().enumerate() {
-                for (list, value) in [
-                    ("members", artifact.members.take()),
-                    ("leaving", artifact.leaving.take()),
+                // Members joining a generating set are refused whole, as a publication's
+                // generating set is; one leaving it that names nothing leaves nothing.
+                let generating = artifact.rank.is_some();
+                for (list, value, whole) in [
+                    ("members", artifact.members.take(), generating),
+                    ("leaving", artifact.leaving.take(), false),
                 ] {
                     let what = format!("artifact {index}'s `{list}`");
                     lists.push(MemberList {
                         artifact: index,
                         list: list.to_string(),
                         table: member_table(&what, value)?.unwrap_or_default(),
-                        whole: false,
+                        whole,
                     });
                 }
             }

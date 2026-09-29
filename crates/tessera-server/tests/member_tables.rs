@@ -181,6 +181,60 @@ async fn a_generating_set_member_naming_nothing_refuses_the_request() {
     count(&server, 0).await;
 }
 
+/// Members joining a generating set through a growth are refused whole in the same way, strict or
+/// not; a member leaving it that names nothing is listed and the rest apply.
+#[tokio::test]
+async fn a_generating_set_grown_by_a_member_naming_nothing_or_two_refuses_the_request() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut layer = flat_layer(LAYER);
+    layer["content"]["supplied"] =
+        json!([{ "name": "topic", "type": "text", "require_member_visibility": "all" }]);
+    register(&server, layer).await;
+    let (status, body) = put(
+        &server,
+        false,
+        json!([{
+            "key": "a",
+            "members": { "id": [0, 1, 2] },
+            "content": [{ "values": ["t"], "generated_from": { "id": [0, 1] } }],
+        }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let patch = |body: Value| {
+        server
+            .client
+            .patch(artifacts_url(&server, false))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let three = tessera_id_of(&server, 3);
+    for (members, status) in [
+        (json!({ "id": [2, 999_999] }), 404),
+        (json!({ "id": [2, 4], "tessera_id": [null, three.to_string()] }), 409),
+    ] {
+        let resp = patch(json!({ "artifacts": [{ "key": "a", "rank": 0, "members": members }] }))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), status);
+    }
+    let resp = patch(json!({ "artifacts": [
+        { "key": "a", "rank": 0, "leaving": { "id": [1, 999_999] } }
+    ] }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["artifacts"][0]["left"], 1, "{body}");
+    assert_eq!(
+        body["refused"],
+        json!([{ "artifact": 0, "list": "leaving", "row": 1, "reason": "names_no_item" }])
+    );
+}
+
 /// The shape of a table is checked before anything is resolved.
 #[tokio::test]
 async fn a_malformed_table_is_refused_whole() {

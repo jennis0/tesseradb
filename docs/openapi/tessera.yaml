@@ -2302,7 +2302,9 @@ paths:
 
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
-        is `404` or `409` at the first instead.
+        is `404` or `409` at the first instead. On a row with a `rank`, a member joining the
+        generating set refuses the request so whether strict or not, as a publication's
+        `generated_from` does.
 
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
