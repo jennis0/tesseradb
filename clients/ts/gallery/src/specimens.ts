@@ -622,7 +622,7 @@ function mapSpecimens(): Specimen[] {
     {
       state: 'coloured by field, sized by citations on a log scale, the uncited as rings',
       wide: true,
-      build: (ctx) => map(sizedStore(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {min: 1.5, max: 9, scale: 'log'}), {'size-by': 'citations'}),
+      build: (ctx) => map(sizedStore(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations', missing: {citations: true}})}), {min: 1.5, max: 9, scale: 'log'}), {'size-by': 'citations'}),
       ready: ready(true)
     },
     {state: 'highlight active (cs.CV lit)', wide: true, build: (ctx) => map(mapStore(ctx, 'field', {highlight: (m) => m.field === 2})), ready: ready(true)},
@@ -780,13 +780,13 @@ function explorerSpecimens(): Specimen[] {
     {
       state: 'sized by citations on a log scale, with the Size key, 1440 × 900',
       pinned: 1440,
-      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
+      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations', missing: {citations: true}})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
       ready
     },
     {
       state: 'sized by citations, the Size by menu open, 1440 × 900',
       pinned: 1440,
-      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
+      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations', missing: {citations: true}})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
       ready: async (el) => {
         await ready(el);
         shadow(el, '[part="layers-toggle"]')?.click();
