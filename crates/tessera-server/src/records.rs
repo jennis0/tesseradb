@@ -7,7 +7,8 @@
 //! from the viewport and item routes, and on a blocking thread that streams each page as it is
 //! built. A client that goes away cancels the engine through the body's guard. The stream deadline
 //! cancels it too, and the engine then ends the response with a short page and a trailer, so a
-//! read cut by the deadline resumes from that trailer's cursor.
+//! read cut by the deadline resumes from that trailer's cursor. `POST /v1/aggregate` is served by
+//! the same machinery under the viewport's admission.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,32 +100,32 @@ enum OrderReq {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CompressionReq {
+pub(crate) enum CompressionReq {
     Zstd,
 }
 
 /// What the handler needs to answer, sent when the engine delivers the head.
-struct Opening {
+pub(crate) struct Opening {
     /// Absent only when the response was cancelled before its first page opened the view.
-    identity_key: Option<[u8; 16]>,
-    region: Option<RegionVerdict>,
-    /// The head frame: the body's first bytes.
-    head: Vec<u8>,
+    pub(crate) identity_key: Option<[u8; 16]>,
+    pub(crate) region: Option<RegionVerdict>,
+    /// The head frame, the body's first bytes; empty on a route whose body has no head frame.
+    pub(crate) head: Vec<u8>,
     /// Microseconds from admission to the head, sent as `x-tessera-server-us`.
-    server_us: u64,
+    pub(crate) server_us: u64,
 }
 
 /// The engine's [`RecordsSink`]: the head to the handler, then each page as a records frame and a
 /// page end. The engine's batches carry `tessera_id` and the named columns only.
-struct FrameSink {
-    producer: Producer<Opening>,
+pub(crate) struct FrameSink {
+    pub(crate) producer: Producer<Opening>,
     /// Held until the response ends: a bulk read computes for its whole length.
     _permits: GatePermits,
     compression: RecordsCompression,
     /// The head's name for the count before the filter: `visible` items, `served` artifacts.
     served_as: &'static str,
     /// Taken after admission, so blocking-pool wait counts in `server_us`.
-    start: Instant,
+    pub(crate) start: Instant,
     /// A batch the IPC writer refused, for the log; the engine sees only a closed sink.
     unwritable: Option<arrow::error::ArrowError>,
 }
@@ -180,8 +181,7 @@ pub(crate) async fn items(
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_items(state, session, req, cancel, sink)
     };
-    bulk_read(state, session, "items", "visible", compression, read)
-    .await
+    bulk_read(state, session, Lane::Bulk, "items", "visible", compression, read).await
 }
 
 /// `POST /v1/artifacts`.
@@ -194,16 +194,25 @@ pub(crate) async fn artifacts(
     let read = move |state: &AppState, session: &tessera_engine::Session, cancel, sink: &mut _| {
         run_artifacts(state, session, req, cancel, sink)
     };
-    bulk_read(state, session, "artifacts", "served", compression, read)
-    .await
+    bulk_read(state, session, Lane::Bulk, "artifacts", "served", compression, read).await
 }
 
-/// Admit a bulk read, run `read` on a blocking thread under the stream deadline, and answer with
-/// its head once the engine sends one. `read` answers the engine's trailer, or its refusal, and
-/// the view it read for the log.
-async fn bulk_read(
+/// The admission a paged read runs under.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Lane {
+    /// `serve.bulk_admission`, apart from the viewport's.
+    Bulk,
+    /// The viewport's gate, for a read sent beside viewport requests.
+    Compute,
+}
+
+/// Admit a paged read on `lane`, run `read` on a blocking thread under the stream deadline, and
+/// answer with its head once the engine sends one. `read` answers the engine's trailer, or its
+/// refusal, and the view it read for the log. The permits are held until the response ends.
+pub(crate) async fn bulk_read(
     state: Arc<AppState>,
     session: Arc<tessera_engine::Session>,
+    lane: Lane,
     route: &'static str,
     served_as: &'static str,
     compression: Option<CompressionReq>,
@@ -215,7 +224,11 @@ async fn bulk_read(
     // the response body.
     let cancel = CancelToken::new();
     let cancel_guard = CancelGuard::new(cancel.clone());
-    let (permits, admission_us) = state.bulk_gate.admit().await?;
+    let gate = match lane {
+        Lane::Bulk => &state.bulk_gate,
+        Lane::Compute => &state.compute_gate,
+    };
+    let (permits, admission_us) = gate.admit().await?;
     let start = Instant::now();
 
     // The stream deadline cancels the engine, which ends the response with a trailer; the sender
@@ -251,7 +264,11 @@ async fn bulk_read(
         let _timer = timer;
         match read(&closure_state, &session, cancel, &mut sink) {
             Read::Refused(e) => sink.producer.refuse(e),
-            Read::Ran { view, outcome } => finish(route, &view, outcome, sink),
+            Read::Ran {
+                view,
+                outcome,
+                recomposed,
+            } => finish(route, &view, outcome, recomposed, sink),
         }
     }));
 
@@ -267,11 +284,14 @@ async fn bulk_read(
 }
 
 /// What a route's producer did: refused before the engine ran, or ran it for `view`.
-enum Read {
+pub(crate) enum Read {
     Refused(ApiError),
     Ran {
         view: String,
         outcome: Result<RecordsTrailer, EngineError>,
+        /// Whether a page counted a different state of the corpus from the page before it, sent
+        /// as the trailer's `recomposed` where true. Only an aggregate read reports it.
+        recomposed: bool,
     },
 }
 
@@ -281,17 +301,21 @@ fn finish(
     route: &str,
     view: &str,
     outcome: Result<RecordsTrailer, EngineError>,
+    recomposed: bool,
     mut sink: FrameSink,
 ) {
     match outcome {
         Ok(trailer) => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "pages": trailer.pages,
                 "rows": trailer.rows,
                 "next": trailer.next,
                 "ended_by": trailer.ended_by.as_str(),
                 "stream_us": sink.start.elapsed().as_micros() as u64,
             });
+            if recomposed {
+                json["recomposed"] = true.into();
+            }
             sink.producer
                 .finish(trailer_frame(json.to_string().as_bytes()));
         }
@@ -321,7 +345,7 @@ fn finish(
 }
 
 /// The view a request names, as this principal reaches it, and its filter parsed against it.
-fn view_and_filter<'m>(
+pub(crate) fn view_and_filter<'m>(
     state: &AppState,
     meta: &'m tessera_engine::viewport::EngineMeta,
     session: &tessera_engine::Session,
@@ -346,7 +370,7 @@ fn view_and_filter<'m>(
     Ok((view, filter))
 }
 
-fn limits(state: &AppState) -> RecordsLimits {
+pub(crate) fn limits(state: &AppState) -> RecordsLimits {
     RecordsLimits {
         max_page_rows: state.limits.max_page_rows,
         max_page_bytes: state.limits.max_page_bytes,
@@ -388,6 +412,7 @@ fn run_items(
     Read::Ran {
         view: view.id.clone(),
         outcome: state.engine.items_stream(session, request, sink),
+        recomposed: false,
     }
 }
 
@@ -432,5 +457,6 @@ fn run_artifacts(
     Read::Ran {
         view: view.id.clone(),
         outcome: state.engine.artifacts_stream(session, request, sink),
+        recomposed: false,
     }
 }

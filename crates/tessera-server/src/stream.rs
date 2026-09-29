@@ -265,9 +265,9 @@ impl<T> Pending<T> {
 }
 
 impl Opened {
-    /// The response body: `first`, then the producer's frames.
+    /// The response body: `first`, where it holds any bytes, then the producer's frames.
     pub(crate) fn into_body(mut self, first: Vec<u8>) -> Body {
-        self.0.first = Some(Bytes::from(first));
+        self.0.first = (!first.is_empty()).then(|| Bytes::from(first));
         Body::from_stream(self.0)
     }
 }

@@ -16,8 +16,8 @@ reference/.venv/bin/pytest conformance/suite -v
 §3, §12.2, build-order row 1): the read battery's `Query`/`Recorded`/`Canonical` types, the one
 response-canonicalisation implementation, and a recorder that issues a battery against a live
 server. The canary comparator below is refactored onto it — there is deliberately no second copy.
-`/v1/region` rides the battery as an explicitly marked absence (it is not in the router), pinned by
-a test that fails the day the route lands. ⊘ The driver, stages and entitlements of §12.3 (rows 2–3)
+The region breakdown rides the battery as one `/v1/aggregate` query over a drawn region.
+⊘ The driver, stages and entitlements of §12.3 (rows 2–3)
 are not built; what exists is the battery, the canonicalisation, and the tests that pin them —
 including the property everything downstream rests on, that recording one battery twice against
 unchanged state compares equal.

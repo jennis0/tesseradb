@@ -9,8 +9,8 @@ pub mod tiler;
 
 pub use frame::{snap_outward, AlignedSquare, Snap, MAX_ZOOM_OFFSET};
 pub use morton::{
-    cell, fixed32, interleave, interleave_bits, morton_of, split32, tiles_for_bbox,
-    tiles_for_bbox_count, unfixed, unfixed32, unsplit32, Bounds, Tile,
+    cell, cells_for_bbox, fixed32, interleave, interleave_bits, morton_of, split32, tiles_for_bbox,
+    tiles_for_bbox_count, unfixed, unfixed32, unsplit32, Bounds, CellRect, Tile,
 };
 pub use projection::{Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 pub use tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};

@@ -15,8 +15,8 @@
 //! [`common::decode_viewport_frames`] and by the two worked decodes under `clients/ts/wire-example`
 //! and `reference/examples`. It asserts the route's headers and its framing outcomes (a `k = 0`
 //! request yields no points frame; `layers: []` yields no artifacts frame) and validates the
-//! request body only. `POST /v1/items` is framed the same way, and its three JSON frames are
-//! validated against their schemas.
+//! request body only. `POST /v1/items`, `POST /v1/artifacts` and `POST /v1/aggregate` are framed
+//! the same way, and their JSON frames are validated against their schemas.
 
 mod common;
 
@@ -448,6 +448,7 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/readyz",
             "/session/authorise",
             "/session/revoke",
+            "/v1/aggregate",
             "/v1/artifacts",
             "/v1/artifacts/browse",
             "/v1/artifacts/{tessera_id}",
@@ -483,6 +484,9 @@ fn every_closed_dto_is_declared_closed() {
         "ItemsHead",
         "ArtifactsRequest",
         "ArtifactsHead",
+        "AggregateRequest",
+        "Grouping",
+        "AggregateTableHead",
         "PageEnd",
         "RecordsTrailer",
         "ItemRequest",
@@ -1322,6 +1326,140 @@ async fn the_items_read_matches_the_description_with_its_refusals() {
     }
 }
 
+/// `POST /v1/aggregate`: the request shape, the described headers, the table heads, page ends and
+/// trailer against their schemas, a read resumed from its cursor, and the refusals.
+#[tokio::test]
+async fn the_aggregate_read_matches_the_description_with_its_refusals() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let post = |body: Value, tok: &str| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/aggregate"))
+            .bearer_auth(tok)
+            .json(&body)
+            .send()
+    };
+
+    let body = json!({
+        "view": "s0",
+        "filters": { "region": { "bbox": [0.0, 0.0, 600.0, 1000.0] } },
+        "reference": {},
+        "groupings": [
+            {},
+            { "by": { "field": "archive", "top": 2 } },
+            { "by": { "field": "archive", "values": ["hep", "astro"] }, "cells": { "depth": 8 } },
+            { "by": { "layer": LAYER, "top": 5 } },
+            { "by": { "layer": LAYER, "artifacts": [f.artifacts[1].clone(), 7] } },
+            { "cells": { "depth": 10 } },
+            { "cells": { "depth": 20, "area": [100.0, 100.0, 100.4, 100.4] } },
+        ],
+        "page_rows": 50,
+        "pages": 4,
+        "compression": "zstd",
+    });
+    assert_valid(&doc, "AggregateRequest", &body);
+    let resp = post(body.clone(), token).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()["content-type"].to_str().unwrap(),
+        "application/octet-stream"
+    );
+    let headers = doc["paths"]["/v1/aggregate"]["post"]["responses"]["200"]["headers"]
+        .as_object()
+        .unwrap();
+    for (name, spec) in headers {
+        if spec["required"].as_bool() == Some(true) {
+            assert!(resp.headers().contains_key(name.as_str()), "{name}");
+        }
+    }
+    assert!(resp.headers().contains_key("x-tessera-identity-key"));
+    assert_eq!(resp.headers()["x-tessera-region"], "exact");
+    let decoded = decode_aggregate(&resp.bytes().await.unwrap());
+    assert!(!decoded.tables.is_empty());
+    for (head, pages) in &decoded.tables {
+        assert_valid(&doc, "AggregateTableHead", head);
+        for (_, end) in pages {
+            assert_valid(&doc, "PageEnd", end);
+        }
+    }
+    assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
+    let mut cursor = decoded.trailer["next"].as_str().unwrap().to_string();
+
+    // The rest of the read, from the cursor, to its end.
+    let mut resumed = 0;
+    loop {
+        let mut next = body.clone();
+        next["cursor"] = json!(cursor);
+        next["pages"] = json!(1);
+        assert_valid(&doc, "AggregateRequest", &next);
+        let resp = post(next, token).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let decoded = decode_aggregate(&resp.bytes().await.unwrap());
+        for (head, pages) in &decoded.tables {
+            assert_valid(&doc, "AggregateTableHead", head);
+            resumed += usize::from(head["resumed"] == true);
+            for (_, end) in pages {
+                assert_valid(&doc, "PageEnd", end);
+            }
+        }
+        assert_valid(&doc, "RecordsTrailer", &decoded.trailer);
+        match decoded.trailer["next"].as_str() {
+            Some(next) => cursor = next.to_string(),
+            None => break,
+        }
+    }
+    assert!(resumed > 0, "a response continued a table");
+
+    // Refusals.
+    for body in [
+        json!({ "view": "s0", "groupings": [] }),
+        json!({ "view": "s0", "groupings": [{}], "unknown": 1 }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "archive" } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "score", "top": 1 } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": LAYER, "top": 1, "level": 0 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 300 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 11 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 3, "area": [9.0, 0.0, 1.0, 1.0] } }] }),
+        json!({ "view": "s0", "groupings": [{}], "cursor": "not-a-cursor" }),
+    ] {
+        let resp = post(body, token).await.unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+    let resp = post(json!({ "view": "no-such-view", "groupings": [{}] }), token)
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = post(json!({ "view": "s0", "groupings": [{}] }), "not-a-token")
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 401, "bad-credential").await;
+
+    // The request schema refuses what the server refuses.
+    for body in [
+        json!({ "view": "s0", "groupings": [{}], "unknown": 1 }),
+        json!({ "view": "s0" }),
+        json!({ "groupings": [{}] }),
+        json!({ "view": "s0", "groupings": [] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 33 } }] }),
+        json!({ "view": "s0", "groupings": [{ "cells": { "depth": 3, "area": [0.0, 0.0, 1.0] } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "archive" } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "archive", "top": 0 } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "archive", "values": [] } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "a", "layer": "b", "top": 1 } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "a", "top": 1, "values": ["x"] } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "field": "a", "artifacts": [1] } }] }),
+        json!({ "view": "s0", "groupings": [{ "by": { "layer": "a", "values": ["x"] } }] }),
+        json!({ "view": "s0", "groupings": [{}], "reference": { "a": 1, "b": 2 } }),
+        json!({ "view": "s0", "groupings": [{}], "compression": "gzip" }),
+    ] {
+        assert_invalid(&doc, "AggregateRequest", &body);
+    }
+}
+
 #[tokio::test]
 async fn artifacts_match_the_description_with_one_refusal_shape() {
     let doc = description();
@@ -1516,10 +1654,10 @@ async fn every_described_route_requires_its_planes_credential() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 9,
+        gated, 10,
         "the viewer plane's gated routes are meta, categories, suggest, viewport, the items read, \
-         items, the artifacts read, artifacts and artifacts/browse; a change to that set belongs \
-         in this test's reasoning, not silently in its count"
+         items, the artifacts read, artifacts, artifacts/browse and the aggregate; a change to \
+         that set belongs in this test's reasoning, not silently in its count"
     );
     assert_eq!(
         probes, 2,
@@ -1712,6 +1850,7 @@ fn viewer_body(path: &str) -> Value {
         "/v1/artifacts" => json!({ "view": "s0", "layer": LAYER, "fields": [] }),
         "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
+        "/v1/aggregate" => json!({ "view": "s0", "groupings": [{}] }),
         other => panic!(
             "{other} is a described POST route and this test has no request body for it; add \
              one rather than letting a new viewer route go unchecked"
