@@ -490,8 +490,8 @@ filters and selected region, asking again when either changes. The Python client
 `Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
 Both follow the cursor until the result is whole.
 
-**Not built yet:** the command-line client does not call this route; a caller of it uses HTTP
-directly.
+There is no command-line command for this route. It is reached over HTTP and through the
+TypeScript and Python clients.
 
 ## What is not built
 

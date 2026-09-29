@@ -226,9 +226,10 @@ the items the selection counts.
 
 The store sends a reference only where the component registered one, as a filter expression or as
 the whole visible set. It chooses no grouping. `selection.aggregate` sends the selection's filters
-and box as the request's `filters`, so its first grouping's total is the selection's count.
+and box as the request's `filters`, so every grouping's total is the selection's count.
 
-**Not built yet:** the command-line client does not call this route.
+There is no command-line command for this route. It is reached over HTTP and through the
+TypeScript and Python clients.
 
 ## Not built
 
