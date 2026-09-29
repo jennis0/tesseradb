@@ -75,7 +75,7 @@ describe('TesseraClient.suggest', () => {
       seenInit = init;
       return jsonResponse(
         200,
-        {column: 'archive', q: 'a', values: [{code: 11, key: 'astro', match: {field: 'key', start: 0, len: 1}, count: 0}], more: false},
+        {column: 'archive', q: 'a', values: [{code: 11, key: 'astro', match: {field: 'key', start: 0, len: 1}, count: 0}], more: false, total: 40},
         {'x-tessera-region': 'cover; depth=12'}
       );
     });
@@ -92,25 +92,26 @@ describe('TesseraClient.suggest', () => {
       q: 'a',
       values: [{code: 11, key: 'astro', title: null, match: {field: 'key', start: 0, len: 1}, count: 0}],
       more: false,
+      total: 40,
       region: {exact: false, depth: 12}
     });
   });
 
-  it('surfaces a 429 as a typed superseded result, never a thrown error', async () => {
+  it('surfaces a 429 as a typed shed result, never a thrown error', async () => {
     vi.stubGlobal(
       'fetch',
       async () => jsonResponse(429, {error: 'backpressure', detail: 'one suggest in flight', retry_after_s: 2}, {'Retry-After': '2'})
     );
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 2, detail: 'one suggest in flight'});
+    expect(result).toEqual({status: 'shed', retryAfterS: 2, detail: 'one suggest in flight'});
   });
 
   it('falls back to the Retry-After header when a 429 body will not parse', async () => {
     vi.stubGlobal('fetch', async () => new Response('not json', {status: 429, headers: {'Retry-After': '3'}}));
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 3, detail: null});
+    expect(result).toEqual({status: 'shed', retryAfterS: 3, detail: null});
   });
 
   it('throws TesseraError for a real refusal, e.g. 500 fail-closed on a derived column', async () => {

@@ -718,7 +718,7 @@ export class TesseraClient {
    * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
    * its request. Without `filters` this is a `GET`; with it, a `POST` carrying the same fields.
    *
-   * Every `429` the server answers is returned as `{status: 'superseded', retryAfterS, detail}`
+   * Every `429` the server answers is returned as `{status: 'shed', retryAfterS, detail}`
    * rather than thrown; {@link SuggestResult} lists the causes.
    *
    * @param column - As for {@link TesseraClient.categories}.
@@ -726,7 +726,7 @@ export class TesseraClient {
    * @param opts.limit - The page size, capped at `selection.maxSuggestions`, which is also the
    *   default.
    * @param opts.counts - `true` adds each value's count of the items carrying it that this
-   *   principal may see.
+   *   principal may see, and the page's `total`, the number of items the counts are taken over.
    * @param opts.view - As for `categories`, and the view `filters` is evaluated in.
    * @param opts.filters - The filter expression the viewport takes. Each count is then of the items
    *   in `view` that pass it. It changes nothing else: a value it excludes is offered with count
@@ -775,7 +775,7 @@ export class TesseraClient {
       } catch {
         // A non-JSON 429 (a proxy's) still yields a retryable outcome from the header alone.
       }
-      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1, detail};
+      return {status: 'shed', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1, detail};
     }
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawSuggest;
@@ -791,6 +791,7 @@ export class TesseraClient {
         ...(v.count !== undefined ? {count: v.count} : {})
       })),
       more: body.more,
+      ...(body.total !== undefined ? {total: body.total} : {}),
       ...regionOf(response)
     };
   }
@@ -1153,6 +1154,7 @@ type RawSuggest = {
     count?: number;
   }[];
   more: boolean;
+  total?: number;
 };
 
 /** `{region}` where the response carries `x-tessera-region`, and nothing otherwise. */

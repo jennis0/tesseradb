@@ -620,6 +620,12 @@ export type SuggestPage = {
    * `selection.maxSuggestionWalk` values. There is no cursor; a longer query narrows the answer.
    */
   more: boolean;
+  /**
+   * The number of items the counts are taken over: those this principal can see, in the request's
+   * view where it named one, passing its `filters` where it sent them. A value's share is `count /
+   * total`. Present only when the request set `counts: true`.
+   */
+  total?: number;
   /** The verdict on the counts' `region` leaves (`x-tessera-region`), present only where the request's `filters` carried one and asked for counts. */
   region?: RegionVerdict;
 };
@@ -627,7 +633,7 @@ export type SuggestPage = {
 /**
  * The outcome of {@link TesseraClient.suggest}. `status: 'ok'` carries the page.
  *
- * `status: 'superseded'` is any `429` the server answered, returned rather than thrown: the
+ * `status: 'shed'` is any `429` the server answered, returned rather than thrown: the
  * request was shed and may be sent again after `retryAfterS` seconds. `detail` is the server's
  * reason. Usually the session's previous suggestion is still running, since a session has one in
  * flight at a time. A request with `view` and `counts` can also be shed by compute admission, or
@@ -637,7 +643,7 @@ export type SuggestPage = {
  */
 export type SuggestResult =
   | ({status: 'ok'} & SuggestPage)
-  | {status: 'superseded'; retryAfterS: number; detail: string | null};
+  | {status: 'shed'; retryAfterS: number; detail: string | null};
 
 /**
  * The body of `POST /v1/viewport`, as {@link TesseraClient.viewport} takes it. Send exactly one of
