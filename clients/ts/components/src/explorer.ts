@@ -8,7 +8,7 @@ import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tes
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import './hierarchy.js';
 import {TesseraElement, columnCaption, emit} from './base.js';
-import {sizingOf} from './colouring.js';
+import {sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -58,7 +58,7 @@ const SIZE_SCALES: readonly {scale: SizeScale; label: string}[] = [
   {scale: 'rank', label: 'Rank'}
 ];
 /** The range of the size sliders, radii in pixels. */
-const SIZE_RANGE = {min: 0.5, max: 12, step: 0.5} as const;
+const SIZE_RANGE = {min: 1, max: 12, step: 0.5} as const;
 /** A radius as the popover shows it. */
 const px = (n: number) => n.toLocaleString('en-GB', {maximumFractionDigits: 1});
 
@@ -803,8 +803,13 @@ export class TesseraExplorer extends TesseraElement {
   private seenArtifact: object | null = null;
   private resize: ResizeObserver | null = null;
 
+  /** Stops following the size choices of the store adopted last, which the Display section shows. */
+  private unwatchChoices: (() => void) | null = null;
+
   protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
+    this.unwatchChoices?.();
+    this.unwatchChoices = store ? watchChoices(store, () => this.requestUpdate()) : null;
   }
 
   protected override onStoreChange(): void {
@@ -1121,16 +1126,17 @@ export class TesseraExplorer extends TesseraElement {
     </div>`;
   }
 
-  /** The number column the points are sized by, or null for one size: the explorer's own choice where it made one, else the store's. */
+  /**
+   * The number column the points are sized by, or null for one size, as the store draws them. The
+   * explorer's own properties only send changes on, through its map.
+   */
   private get sizedBy(): string | null {
-    if (this.sizeBy !== '') return this.sizeBy === 'none' ? null : this.sizeBy;
     return this.resolvedStore?.get('legend').sizeBy ?? null;
   }
 
-  /** The size range and scale: the explorer's own where set, else the choices every element over the store shares. */
+  /** The size range and scale the map draws with: the choices every element over the store shares. */
   private get sizing(): Sizing {
-    const shared = sizingOf(this.resolvedStore);
-    return {min: this.sizeMin ?? shared.min, max: this.sizeMax ?? shared.max, scale: this.sizeScale || shared.scale};
+    return sizingOf(this.resolvedStore);
   }
 
   /** The columns Size by offers: the rendered number columns, in declaration order. */
@@ -1149,7 +1155,7 @@ export class TesseraExplorer extends TesseraElement {
     const {min, max, step} = SIZE_RANGE;
     const choice = html`<span id="size-by-label">Size by</span>
       <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`} ?disabled=${disabled}
-        @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
+        @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)} @keydown=${this.onSizeByKey}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
     if (sizeBy === null) {
       if (this.hideSize) return choice;
       return html`${choice}<label for="point-size">Size</label>
@@ -1186,27 +1192,49 @@ export class TesseraExplorer extends TesseraElement {
       this.changeSize({sizeBy: value === '' ? null : value});
       void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
     };
+    // One entry is in the tab order, the one focused last, as in a radio group.
     const keys = (e: KeyboardEvent, i: number) => {
       const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="size-option"]'));
       const next = {ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1}[e.key];
       if (e.key === 'Escape') {
         e.stopPropagation();
-        this.sizeMenuOpen = false;
-        void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+        this.closeSizeMenu(true);
         return;
       }
       if (next === undefined) return;
       e.preventDefault();
+      items.forEach((item, j) => (item.tabIndex = j === next ? 0 : -1));
       items[next]?.focus();
     };
-    return html`<div part="size-menu" class="size-menu" popover="manual" role="menu" aria-labelledby="size-menu-label">
+    const checked = Math.max(0, options.findIndex((o) => (o.value || null) === sizeBy));
+    return html`<div part="size-menu" class="size-menu" popover="manual" role="menu" aria-labelledby="size-menu-label" @focusout=${this.onSizeMenuFocusOut}>
       <div class="hd" id="size-menu-label">Size by</div>
       ${options.map(
         (o, i) => html`<button part="size-option" type="button" role="menuitemradio" data-value=${o.value} aria-checked=${(o.value || null) === sizeBy ? 'true' : 'false'}
-          @click=${() => choose(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
+          tabindex=${i === checked ? '0' : '-1'} @click=${() => choose(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
       )}
     </div>`;
   }
+
+  /** Close the Size by menu, putting focus back on its button with `refocus`. */
+  private closeSizeMenu(refocus: boolean): void {
+    this.sizeMenuOpen = false;
+    if (refocus) void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+  }
+
+  /** The arrow keys on the Size by button open its menu, as a menu button's do. */
+  private onSizeByKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    this.sizeMenuOpen = true;
+  };
+
+  /** Focus leaving the Size by menu, by Tab or otherwise, closes it; Tab goes on from where focus went. */
+  private onSizeMenuFocusOut = (e: FocusEvent): void => {
+    const to = e.relatedTarget as Node | null;
+    if (to && (e.currentTarget as HTMLElement).contains(to)) return;
+    this.closeSizeMenu(false);
+  };
 
   /** A press in the Layers popover outside the Size by button closes the Size by menu. */
   private onPopoverPress = (e: PointerEvent): void => {
@@ -1215,14 +1243,22 @@ export class TesseraExplorer extends TesseraElement {
     if (button && !e.composedPath().includes(button)) this.sizeMenuOpen = false;
   };
 
-  /** Apply a change to Size by, the size range or the scale, and report all four as they now stand. */
+  /**
+   * Send a change to Size by, the size range or the scale through the explorer's properties to its
+   * map, and report all four as they will stand.
+   */
   private changeSize(patch: {sizeBy?: string | null; min?: number; max?: number; scale?: SizeScale}): void {
+    const now = this.sizing;
     if (patch.sizeBy !== undefined) this.sizeBy = patch.sizeBy ?? 'none';
     if (patch.min !== undefined) this.sizeMin = patch.min;
     if (patch.max !== undefined) this.sizeMax = patch.max;
     if (patch.scale !== undefined) this.sizeScale = patch.scale;
-    const {min, max, scale} = this.sizing;
-    emit(this, 'tessera-sizechange', {sizeBy: this.sizedBy, min, max, scale});
+    emit(this, 'tessera-sizechange', {
+      sizeBy: patch.sizeBy !== undefined ? patch.sizeBy : this.sizedBy,
+      min: patch.min ?? now.min,
+      max: patch.max ?? now.max,
+      scale: patch.scale ?? now.scale
+    });
   }
 
   /** Apply a change made in the Display section, and report every setting as it now stands. */
