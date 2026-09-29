@@ -76,17 +76,37 @@ impl Table {
 #[serde(transparent)]
 pub(crate) struct WireTable(BTreeMap<String, Vec<Cell>>);
 
-/// One cell of an address: `null`, a string, or an integer.
+/// One cell of an address: `null`, a string, an integer, or any other value, which names nothing
+/// and is refused only in a column that names items.
 #[derive(Debug, Clone)]
 pub(crate) struct Cell(Option<AddressValue>);
 
 impl<'de> serde::Deserialize<'de> for Cell {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Cell, D::Error> {
         struct Visitor;
-        impl serde::de::Visitor<'_> for Visitor {
+        impl<'de> serde::de::Visitor<'de> for Visitor {
             type Value = Cell;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a string, an integer or null")
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E>(self, value: bool) -> Result<Cell, E> {
+                Ok(Cell(Some(AddressValue::Other(value.to_string()))))
+            }
+            fn visit_f64<E>(self, value: f64) -> Result<Cell, E> {
+                Ok(Cell(Some(AddressValue::Other(format!(
+                    "the number {value}"
+                )))))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Cell, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(Cell(Some(AddressValue::Other("a list".to_string()))))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Cell, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Cell(Some(AddressValue::Other("an object".to_string()))))
             }
             fn visit_unit<E>(self) -> Result<Cell, E> {
                 Ok(Cell(None))
@@ -200,6 +220,7 @@ fn tessera_id_of(value: AddressValue) -> Result<TesseraId, ApiError> {
             .map_err(|_| refuse(format!("'{text}'"))),
         // A JSON number loses `u64` precision past 2^53 in JavaScript.
         AddressValue::Integer(n) => Err(refuse(format!("the number {n}"))),
+        AddressValue::Other(shown) => Err(refuse(shown)),
     }
 }
 

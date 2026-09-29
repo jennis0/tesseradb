@@ -2103,9 +2103,10 @@ pub(crate) fn report_identity_disk(
 ///   decisions routed by row, 8 bytes a row and field; and, in a file carrying several fields and
 ///   setting values, the candidates' sort at 12 bytes a row and field.
 /// - **The rows decided against each other**, in a file carrying several fields, beside its unset
-///   keys: the decisions as they are read and deleted with the sort of the items rows name, 8
-///   bytes a row; that sort with the sort of the rows it refuses; or the candidates' sort with a
-///   bit a row and field.
+///   keys and the candidates' sort: the decisions as they are read and deleted with the sort of
+///   the items rows name, 8 bytes a row; that sort as it is drained with each row's link to the
+///   row before it naming its item, 12 bytes a row in the candidates' sort; or that sort as it is
+///   drained, with a bit a row and field and a bit a row.
 /// - **The values set**, one field at a time: every field's unset keys or the runs made from them,
 ///   beside one field's copy of its own, or of its holdings as a changed value is removed from
 ///   them.
@@ -2163,18 +2164,21 @@ pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u6
                     true => rows.saturating_mul(8),
                     false => 0,
                 };
-                let walk = decisions.saturating_add(named);
-                // Each row's link to the row before it naming its item, and a bit per row.
-                let chains = match one_row_per_item {
-                    true => rows.saturating_mul(4).saturating_add(rows / 8),
+                // Each row's link to the row before it naming its item, filed with the candidates.
+                let links = match one_row_per_item {
+                    true => rows.saturating_mul(12),
                     false => 0,
                 };
-                let linked = named.saturating_add(chains);
-                let claimed = candidates
+                let walk = decisions.saturating_add(named);
+                let linked = named.saturating_add(links);
+                let claimed = (candidates.saturating_add(links))
                     .saturating_mul(2)
                     .saturating_add(rows * fields / 8)
-                    .saturating_add(chains);
-                entry.saturating_add(walk.max(linked).max(claimed))
+                    .saturating_add(rows / 8);
+                entry
+                    .saturating_add(candidates)
+                    .saturating_add(walk.max(linked))
+                    .max(entry.saturating_add(claimed))
             }
             false => 0,
         };

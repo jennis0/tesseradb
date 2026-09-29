@@ -149,6 +149,22 @@ pub fn check_attribute(
     })
 }
 
+/// The most attributes one schema may declare unique: a row's unique fields are numbered in 16
+/// bits, one number kept back.
+pub const UNIQUE_FIELDS_MAX: usize = 65_535;
+
+/// Check that a schema declaring `unique` attributes unique holds no more than
+/// [`UNIQUE_FIELDS_MAX`].
+pub fn check_unique_fields(unique: usize) -> Result<(), String> {
+    match unique <= UNIQUE_FIELDS_MAX {
+        true => Ok(()),
+        false => Err(format!(
+            "{unique} attributes are declared unique and a schema holds at most \
+             {UNIQUE_FIELDS_MAX}; declare the rest without `unique`"
+        )),
+    }
+}
+
 fn unique_refused(name: &str) -> String {
     format!(
         "attribute '{name}': `unique` applies to keyword, integer and timestamp columns; declare \
@@ -283,6 +299,12 @@ mod tests {
 
     fn widths(name: &str) -> Option<ScalarType> {
         (name == "dept").then_some(ScalarType::U8)
+    }
+
+    #[test]
+    fn a_schema_holds_at_most_65535_unique_fields() {
+        assert!(check_unique_fields(UNIQUE_FIELDS_MAX).is_ok());
+        assert!(check_unique_fields(UNIQUE_FIELDS_MAX + 1).is_err());
     }
 
     #[test]

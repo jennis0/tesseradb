@@ -2212,13 +2212,17 @@ async fn changes_match_the_description() {
         json!({ "field": "id", "value": member(5), "op": "suppress" }),
         json!({ "op": "suppress" }),
         json!({ "op": "suppress", "match": { "tessera_id": 12345 } }),
-        json!({ "op": "suppress", "match": { "id": [member(5)] } }),
         json!({ "op": "suppress", "match": { "id": member(5) }, "unknown": 1 }),
     ] {
         assert_invalid(&doc, "ChangeItem", &item);
         let resp = changes(&json!([item])).await.unwrap();
         assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
     }
+    // The schema takes any value under a key, since it cannot tell a unique field from a key
+    // naming nothing; the server refuses a list in a unique field's column.
+    let listed = json!([{ "op": "suppress", "match": { "id": [member(5)] } }]);
+    let resp = changes(&listed).await.unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
     let resp = changes(&json!({ "op": "suppress" })).await.unwrap();
     assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
 }

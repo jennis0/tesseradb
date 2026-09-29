@@ -262,6 +262,14 @@ fn compile(request: &AttributeRequest, manifest: &Manifest) -> Result<CompiledAt
                 .map(|v| v.width)
         },
     )?;
+    if column.unique {
+        let others = manifest
+            .declared_scalars
+            .iter()
+            .filter(|d| d.unique && d.name != name)
+            .count();
+        tessera_store::declaration::check_unique_fields(others + 1)?;
+    }
     let Some(group) = group else {
         return Ok(CompiledAttribute::Entity(DeclaredScalar {
             name: name.to_string(),

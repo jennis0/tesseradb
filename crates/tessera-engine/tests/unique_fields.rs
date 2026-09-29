@@ -583,6 +583,55 @@ fn an_invisible_holder_answers_as_absent() {
     );
 }
 
+/// **A cell of a type its unique field does not hold refuses the call, and a column naming nothing
+/// takes a cell of any type.** A keyword field refuses an integer, as a build refuses an integer
+/// column for it; an integer field refuses a fraction; a column that is no unique field is
+/// ignored whatever it holds.
+#[test]
+fn an_address_cell_is_checked_against_its_field_alone() {
+    use tessera_engine::{AddressTable, AddressValue};
+    let fx = fixture();
+    let engine = engine_over(&fx);
+    let table = |columns: Vec<(&str, AddressValue)>| AddressTable {
+        rows: 1,
+        tessera_id: None,
+        columns: columns
+            .into_iter()
+            .map(|(name, cell)| (name.to_string(), vec![Some(cell)]))
+            .collect(),
+    };
+    for (what, columns) in [
+        ("an integer for a keyword", vec![("doi", AddressValue::Integer(10))]),
+        (
+            "a fraction for an integer",
+            vec![("gid", AddressValue::Other("the number 1.5".to_string()))],
+        ),
+        (
+            "a boolean for a keyword",
+            vec![("doi", AddressValue::Other("true".to_string()))],
+        ),
+    ] {
+        let refused = engine.name_items(&table(columns));
+        assert!(
+            matches!(refused, Err(tessera_engine::EngineError::AddressMalformed(_))),
+            "{what}: {refused:?}"
+        );
+    }
+    let named = engine
+        .name_items(&table(vec![
+            ("doi", AddressValue::Text(doi_of(4))),
+            ("score", AddressValue::Other("the number 0.5".to_string())),
+            ("flags", AddressValue::Other("a list".to_string())),
+            ("rank", AddressValue::Integer(3)),
+        ]))
+        .expect("columns naming nothing are ignored");
+    assert_eq!(
+        named.verdicts,
+        vec![tessera_lifecycle::resolve::Verdict::Names(built(&engine, 4))]
+    );
+    assert_eq!(named.ignored, ["score", "flags", "rank"]);
+}
+
 /// **A row giving an item a value another live or suppressed item holds names both, and is
 /// refused**, whether the holder is built, buffered or flushed, and so is a batch setting one value
 /// twice. A deleted holder names nothing, so its value may be given again. A row whose values name

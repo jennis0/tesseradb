@@ -7,9 +7,11 @@
 //! refused row, whole. The service is restarted before it is compared, so what it answers is what
 //! its write-ahead log replays.
 //!
-//! The corpus has two views' points, an attribute file whose rows can carry a `tessera_id`, an
-//! access relation, which the service is sent as a batch naming each item once with its labels,
-//! and a members file, which it is sent as one publication.
+//! The corpus has three views' points, two of them a view group's; an attribute file whose rows
+//! can carry a `tessera_id`; a group-scoped attribute's file, whose rows for each view of the
+//! group the service is sent as one batch naming that view; an access relation, which the service
+//! is sent as a batch naming each item once with its labels; and a members file, which it is sent
+//! as one publication.
 //!
 //! Items are compared by the values they hold, since the two paths number them independently.
 //! Corpora are drawn from a seed over one or two unique fields with small value ranges, so values
@@ -71,6 +73,9 @@ struct Rows {
     b: Option<Vec<Option<String>>>,
     xy: Option<Vec<(f64, f64)>>,
     score: Option<Vec<i64>>,
+    /// A group-scoped attribute's rows: the key of the view each row is for, and its value.
+    which: Option<Vec<String>>,
+    grade: Option<Vec<i64>>,
     tessera_id: Option<Vec<Option<String>>>,
     /// `rid`, a unique field only the points carry, one value per row, which no file edits: the
     /// access relation names items by it.
@@ -116,6 +121,15 @@ impl Rows {
         if let Some(score) = &self.score {
             columns.push(("score", Arc::new(Int64Array::from(score[..n].to_vec()))));
         }
+        if let Some(which) = &self.which {
+            columns.push((
+                "which",
+                Arc::new(StringArray::from_iter_values(which[..n].iter())),
+            ));
+        }
+        if let Some(grade) = &self.grade {
+            columns.push(("grade", Arc::new(Int64Array::from(grade[..n].to_vec()))));
+        }
         if let Some(tessera_id) = &self.tessera_id {
             columns.push((
                 "tessera_id",
@@ -145,7 +159,7 @@ impl Rows {
         let rows: Vec<Value> = (0..self.len())
             .map(|i| {
                 let mut row = serde_json::Map::new();
-                if let Some(a) = self.a[i] {
+                if let Some(Some(a)) = self.a.get(i) {
                     row.insert("a".into(), json!(a));
                 }
                 if let Some(rid) = &self.rid {
@@ -161,6 +175,9 @@ impl Rows {
                 if let Some(score) = &self.score {
                     row.insert("score".into(), json!(score[i]));
                 }
+                if let Some(grade) = &self.grade {
+                    row.insert("grade".into(), json!(grade[i]));
+                }
                 if let Some(Some(id)) = self.tessera_id.as_ref().map(|t| &t[i]) {
                     row.insert("tessera_id".into(), json!(id));
                 }
@@ -168,6 +185,28 @@ impl Rows {
             })
             .collect();
         Value::Array(rows)
+    }
+
+    /// The rows for the view whose key is `key`, as one ingest batch naming that view; and each
+    /// batch row's file row.
+    fn of_view(&self, key: &str) -> (Rows, Vec<usize>) {
+        let which = self
+            .which
+            .as_ref()
+            .expect("a scoped file names each row's view");
+        let rows: Vec<usize> = (0..self.len()).filter(|i| which[*i] == key).collect();
+        let selected = Rows {
+            rid: self
+                .rid
+                .as_ref()
+                .map(|rid| rows.iter().map(|i| rid[*i]).collect()),
+            grade: self
+                .grade
+                .as_ref()
+                .map(|grade| rows.iter().map(|i| grade[*i]).collect()),
+            ..Rows::default()
+        };
+        (selected, rows)
     }
 
     /// The members as one publication: an artifact per key, in the order keys first appear, its
@@ -266,17 +305,24 @@ impl Rows {
     }
 }
 
-/// A seeded corpus: two views' points, an attribute file and a members file. The attribute
-/// file's own column is declared unique, so it owes no item a row: a build refuses a corpus in
-/// which an item has no row in a source of a column that is not.
+/// A seeded corpus: three views' points, an attribute file, a group-scoped attribute's file and a
+/// members file. The attribute file's own column is declared unique, so it owes no item a row: a
+/// build refuses a corpus in which an item has no row in a source of a column that is not.
 struct Corpus {
     two_fields: bool,
     world: Rows,
     near: Rows,
+    far: Rows,
     notes: Rows,
+    grades: Rows,
     relation: Rows,
     members: Rows,
 }
+
+/// The views, each as the build's report and the service name it; the last two are the views of
+/// the group `g`, by their keys.
+const VIEWS: [&str; 3] = ["world", "g:near", "g:far"];
+const GROUP_KEYS: [&str; 2] = ["near", "far"];
 
 impl Corpus {
     fn draw(seed: u64) -> Corpus {
@@ -319,12 +365,12 @@ impl Corpus {
         // one everyone holds. A build gives an item the relation names nothing no label at all,
         // where the service gives it the view's default, so every item is named. More rows give
         // some the narrower term too, and a few name nothing.
-        let mut rid: Vec<u64> = (1000..1040).chain(2000..2020).collect();
+        let mut rid: Vec<u64> = (1000..1040).chain(2000..2020).chain(3000..3020).collect();
         let mut term: Vec<u32> = (0..rid.len())
             .map(|i| if i % 5 == 0 { TERM } else { EVERYONE })
             .collect();
         for _ in 0..12 {
-            rid.push([1000, 2000, 3000][d.next(3) as usize] + d.next(40));
+            rid.push([1000, 2000, 4000][d.next(3) as usize] + d.next(40));
             term.push(TERM);
         }
         let relation = Rows {
@@ -334,11 +380,36 @@ impl Corpus {
         };
         let mut members = rows(&mut d, 40, 50, false);
         members.key = Some((0..40).map(|_| format!("k{}", d.next(4))).collect());
+        let mut far = rows(&mut d, 20, 60, true);
+        far.rid = Some((3000..3020).collect());
+        // The grades name items by the `rid` of a row of the view each is for, so every item a
+        // grade names has a row in that view: a service refuses a scoped value for an item with
+        // no row in the view, where a build keeps it. A `rid` past the view's rows, or of a row
+        // refused, names nothing, and one named twice in a view is one item twice.
+        let which: Vec<usize> = (0..30).map(|_| d.next(2) as usize).collect();
+        let grades = Rows {
+            rid: Some(
+                which
+                    .iter()
+                    .map(|&view| [2000, 3000][view] + d.next(24))
+                    .collect(),
+            ),
+            which: Some(
+                which
+                    .iter()
+                    .map(|&view| GROUP_KEYS[view].to_string())
+                    .collect(),
+            ),
+            grade: Some((0..30).map(|i| 500 + i).collect()),
+            ..Rows::default()
+        };
         Corpus {
             two_fields,
             world,
             near,
+            far,
             notes,
+            grades,
             relation,
             members,
         }
@@ -349,7 +420,9 @@ impl Corpus {
         std::fs::create_dir_all(dir).unwrap();
         self.world.write(&dir.join("world.parquet"), empty);
         self.near.write(&dir.join("near.parquet"), empty);
+        self.far.write(&dir.join("far.parquet"), empty);
         self.notes.write(&dir.join("notes.parquet"), empty);
+        self.grades.write(&dir.join("grades.parquet"), empty);
         self.relation.write(&dir.join("access.parquet"), empty);
         self.members.write(&dir.join("members.parquet"), empty);
         let b = if self.two_fields {
@@ -362,7 +435,9 @@ impl Corpus {
 [sources]
 world   = "world.parquet"
 near    = "near.parquet"
+far     = "far.parquet"
 notes   = "notes.parquet"
+grades  = "grades.parquet"
 access  = "access.parquet"
 members = "members.parquet"
 
@@ -375,11 +450,19 @@ name             = "world"
 extent           = {{ min = 0.0, max = 100.0 }}
 point_visibility = {{ source = "access", default = "public" }}
 
-[[view]]
-name             = "near"
-source           = "near"
+[[view_group]]
+name             = "g"
 extent           = {{ min = 0.0, max = 100.0 }}
+visibility       = "public"
 point_visibility = {{ source = "access", default = "public" }}
+
+[[view_group.view]]
+key    = "near"
+source = "near"
+
+[[view_group.view]]
+key    = "far"
+source = "far"
 
 [[attribute]]
 name   = "a"
@@ -397,9 +480,16 @@ type   = "i64"
 unique = true
 source = "notes"
 
+[[attribute]]
+name   = "grade"
+type   = "i64"
+scope  = {{ group = "g" }}
+source = "grades"
+fields = {{ view = "which" }}
+
 [[layer]]
 name                      = "{LAYER}"
-views                     = ["world", "near"]
+views                     = ["world", "g"]
 membership                = "enumerated"
 value_set                 = "open"
 hierarchy                 = {{ kind = "flat" }}
@@ -422,7 +512,7 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     let registry = config.build_views().expect("the views compile");
     let anchor = config.anchor_view(&registry).expect("an anchor");
     let acquired = config.acquire().expect("the files acquire");
-    let views = registry
+    let views: Vec<tessera_build::ViewArgs> = registry
         .iter()
         .map(|view| {
             let acquired = tessera_build::config::acquire_view(view).expect("the view acquires");
@@ -443,6 +533,22 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
             }
         })
         .collect();
+    let scoped_attributes = config
+        .scoped_attributes
+        .iter()
+        .map(|scoped| tessera_build::ScopedColumnFamily {
+            attribute: scoped.attribute.clone(),
+            group: scoped.group.clone(),
+            views: registry
+                .iter()
+                .enumerate()
+                .filter(|(_, view)| view.group.as_ref().is_some_and(|g| g.group == scoped.group))
+                .map(|(index, _)| index)
+                .collect(),
+            source: scoped.source.clone(),
+        })
+        .collect();
+    let groups = config.group_registry(&registry, &views);
     let mut layers = config.layers.clone();
     for layer in &mut layers {
         layer.views = Config::expand_layer_views(&registry, &layer.views);
@@ -450,8 +556,8 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
     BuildArgs {
         views,
         anchor,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
+        groups,
+        scoped_attributes,
         attribute_sources: acquired.attribute_sources,
         out: out.to_path_buf(),
         limit: None,
@@ -585,8 +691,16 @@ async fn send(
     answer
 }
 
-/// What one principal sees of one view: each item's values and position, in a sorted list.
-type Seen = Vec<(Option<u64>, Option<String>, Option<i64>, i64, i64)>;
+/// What one principal sees of one view: each item's values, its value of the group-scoped
+/// `grade` in a view of the group, and its position, in a sorted list.
+type Seen = Vec<(
+    Option<u64>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    i64,
+    i64,
+)>;
 
 async fn seen(
     server: &TestServer,
@@ -595,10 +709,13 @@ async fn seen(
     two_fields: bool,
     filters: Option<Value>,
 ) -> Seen {
-    let fields = match two_fields {
-        true => json!(["a", "b", "score"]),
-        false => json!(["a", "score"]),
-    };
+    let mut fields = vec!["a", "score"];
+    if two_fields {
+        fields.push("b");
+    }
+    if view != "world" {
+        fields.push("grade");
+    }
     let mut body = json!({
         "view": view,
         "fields": fields,
@@ -632,6 +749,9 @@ async fn seen(
             let score = batch.column_by_name("score").unwrap();
             let score = arrow::compute::cast(score, &arrow::datatypes::DataType::Int64).unwrap();
             let score = score.as_any().downcast_ref::<Int64Array>().unwrap();
+            let grade = batch
+                .column_by_name("grade")
+                .map(|g| arrow::compute::cast(g, &arrow::datatypes::DataType::Int64).unwrap());
             let x = batch.column_by_name("tessera:x").unwrap();
             let x = x.as_any().downcast_ref::<Float64Array>().unwrap();
             let y = batch.column_by_name("tessera:y").unwrap();
@@ -641,10 +761,15 @@ async fn seen(
                     let b = b.as_any().downcast_ref::<StringArray>().unwrap();
                     (!b.is_null(i)).then(|| b.value(i).to_string())
                 });
+                let grade = grade.as_ref().and_then(|g| {
+                    let g = g.as_any().downcast_ref::<Int64Array>().unwrap();
+                    (!g.is_null(i)).then(|| g.value(i))
+                });
                 out.push((
                     (!a.is_null(i)).then(|| a.value(i)),
                     b,
                     (!score.is_null(i)).then(|| score.value(i)),
+                    grade,
                     (x.value(i) * 1e6).round() as i64,
                     (y.value(i) * 1e6).round() as i64,
                 ));
@@ -665,7 +790,7 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
     for terms in PRINCIPALS {
         let token = token_for(server, terms).await;
         let who = terms.join("+");
-        for view in ["world", "near"] {
+        for view in VIEWS {
             let items = seen(server, &token, view, two_fields, None).await;
             out.insert(format!("{who} {view} items"), json!(items));
 
@@ -729,7 +854,8 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
     for (source, object, rows, view) in [
         ("world", "view 'world'", &corpus.world, Some("world")),
-        ("near", "view 'near'", &corpus.near, Some("near")),
+        ("near", "view 'g:near'", &corpus.near, Some("g:near")),
+        ("far", "view 'g:far'", &corpus.far, Some("g:far")),
         ("notes", "attribute source 'notes'", &corpus.notes, None),
     ] {
         let refuses = !reported(&report, object).is_empty();
@@ -747,6 +873,34 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         .await;
         let what = format!("seed {seed}: {source}");
         assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
+        tick(&ingested).await;
+    }
+
+    // The group-scoped attribute's file, each view's rows as one batch naming that view.
+    for key in GROUP_KEYS {
+        let view = format!("g:{key}");
+        let object = format!("attribute 'grade' in view '{view}'");
+        let (rows, file_rows) = corpus.grades.of_view(key);
+        let refuses = !reported(&report, &object).is_empty();
+        let answer = send(
+            &ingested,
+            reqwest::Method::POST,
+            "/control/ingest",
+            Some(&view),
+            &rows.ingest_body(),
+            refuses,
+            &format!("{seed}-grades-{key}"),
+        )
+        .await;
+        let of_file = |entry: &Value| vec![file_rows[entry["row"].as_u64().unwrap() as usize]];
+        let what = format!("seed {seed}: the grades of {view}");
+        assert_refused_alike(
+            &report,
+            &object,
+            &listed(&answer, of_file),
+            &corpus.grades,
+            &what,
+        );
         tick(&ingested).await;
     }
 
@@ -819,7 +973,15 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         assert_eq!(Some(value), right.get(what), "seed {seed}: {what}");
     }
     assert_eq!(left.len(), right.len());
-    for view in ["world", "near"] {
+    let graded = GROUP_KEYS.iter().any(|key| {
+        left[&format!("0+7 g:{key} items")]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| !item[3].is_null())
+    });
+    assert!(graded, "seed {seed}: a view of the group serves a grade");
+    for view in VIEWS {
         let items = left[&format!("0+7 {view} items")].as_array().unwrap().len();
         let everyone = left[&format!("0 {view} items")].as_array().unwrap().len();
         assert!(

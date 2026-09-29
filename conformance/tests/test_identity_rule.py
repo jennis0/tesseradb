@@ -657,10 +657,10 @@ def test_a_match_key_naming_nothing_is_ignored_and_a_match_left_empty_names_no_i
     verdicts = check_changes(
         dep,
         [
-            {"op": "suppress", "match": {"tessera_id": str(items[0]), "colour": "red"}},
+            {"op": "suppress", "match": {"tessera_id": str(items[0]), "colour": "red", "weight": 0.5}},
             {"op": "suppress", "match": {"colour": "blue"}},
             {"op": "suppress", "match": {}},
-            {"op": "suppress", "match": {"code": v[items[1]]["code"], "size": 3}},
+            {"op": "suppress", "match": {"code": v[items[1]]["code"], "size": 3, "tags": [True, {}]}},
         ],
     )
     assert verdicts == [

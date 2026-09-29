@@ -1548,7 +1548,7 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
                     field.name()
                 )));
             }
-            columns.push((field.name().clone(), MemberColumn::of(field, column)?));
+            columns.push((field.name().clone(), MemberColumn::of(field, column)));
         }
         for (row, range) in ranges.into_iter().enumerate() {
             if keys.is_null(row) {
@@ -1632,25 +1632,28 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
     ))
 }
 
-/// One column of an Arrow member struct: text, or an integer of any width.
+/// One column of an Arrow member struct: text, an integer of any width, or a column of another
+/// type, which names nothing and is refused only where it would name items.
 enum MemberColumn {
     Text(arrow::array::StringArray),
     LargeText(arrow::array::LargeStringArray),
     Signed(arrow::array::Int64Array),
     Unsigned(arrow::array::UInt64Array),
+    /// Unsigned integers read as their decimal text: a `tessera_id` column, which a read sends as
+    /// uint64.
+    Decimal(arrow::array::UInt64Array),
+    /// A column of any other type, and how a refusal shows its values.
+    Other(arrow::array::ArrayRef, String),
 }
 
 impl MemberColumn {
-    fn of(
-        field: &arrow::datatypes::Field,
-        column: &arrow::array::ArrayRef,
-    ) -> Result<Self, ApiError> {
+    fn of(field: &arrow::datatypes::Field, column: &arrow::array::ArrayRef) -> Self {
         use arrow::array::{Int64Array, LargeStringArray, StringArray, UInt64Array};
         use arrow::datatypes::DataType;
         let widened = |to: &DataType| {
             arrow::compute::cast(column, to).expect("an integer widens to its 64-bit type")
         };
-        Ok(match field.data_type() {
+        match field.data_type() {
             DataType::Utf8 => MemberColumn::Text(
                 column
                     .as_any()
@@ -1675,22 +1678,18 @@ impl MemberColumn {
                 )
             }
             DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                MemberColumn::Unsigned(
-                    widened(&DataType::UInt64)
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .expect("uint64")
-                        .clone(),
-                )
+                let column = widened(&DataType::UInt64)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .expect("uint64")
+                    .clone();
+                match field.name() == "tessera_id" {
+                    true => MemberColumn::Decimal(column),
+                    false => MemberColumn::Unsigned(column),
+                }
             }
-            other => {
-                return Err(ApiError::Contract(format!(
-                    "growth body: member column '{}' is {other}; a member column is utf8 or an \
-                     integer type",
-                    field.name()
-                )))
-            }
-        })
+            other => MemberColumn::Other(column.clone(), format!("a {other} value")),
+        }
     }
 
     fn cell(&self, at: usize) -> Option<tessera_engine::AddressValue> {
@@ -1708,6 +1707,12 @@ impl MemberColumn {
             }
             MemberColumn::Unsigned(c) => {
                 (!c.is_null(at)).then(|| AddressValue::Integer(i128::from(c.value(at))))
+            }
+            MemberColumn::Decimal(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
+            }
+            MemberColumn::Other(c, shown) => {
+                (!c.is_null(at)).then(|| AddressValue::Other(shown.clone()))
             }
         }
     }
