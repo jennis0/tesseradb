@@ -581,11 +581,11 @@ export interface Store {
   setColourBy(column: string | null): void;
   /**
    * Size points by a declared number column, or `null` for one size. Publishes `legend`, whose
-   * `domains` and `samples` then accumulate the column from the marks drawn. A `render` column
-   * arrives with every point, so choosing one sends no request. A column that is a category or is
-   * not rendered sizes nothing.
+   * `domains` and `missing` then accumulate the column from the marks drawn, and with `rank` set
+   * `samples` too, for sizing by rank. A `render` column arrives with every point, so choosing one
+   * sends no request. A column that is a category, not a number or not rendered sizes nothing.
    */
-  setSizeBy(column: string | null): void;
+  setSizeBy(column: string | null, options?: {rank?: boolean}): void;
   /**
    * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
    * use does nothing.
@@ -1641,8 +1641,8 @@ export function createStore(options: StoreOptions): Store {
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
-  function setSizeBy(column: string | null): void {
-    legend.setSizeBy(column);
+  function setSizeBy(column: string | null, options: {rank?: boolean} = {}): void {
+    legend.setSizeBy(column, options.rank ?? false);
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 

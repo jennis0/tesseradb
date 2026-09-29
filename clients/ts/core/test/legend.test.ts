@@ -70,21 +70,47 @@ describe('the size legend', () => {
     return {legend, get: () => published!};
   };
 
-  it('takes the size column’s range and a sorted sample of its values from the marks drawn, apart from colour', () => {
+  it('takes the size column’s range and, by rank, a sorted sample of its values from the marks drawn, apart from colour', () => {
     const {legend, get} = sizeLegend();
     legend.setColourBy('archive');
-    legend.setSizeBy('citations');
+    legend.setSizeBy('citations', true);
     legend.accumulate(citationFrame([4, 0, null, 1000, 12]), [ARCHIVE, CITATIONS]);
     expect(get().sizeBy).toBe('citations');
     expect(get().colourBy).toBe('archive');
     expect(get().domains.citations).toEqual({min: 0, max: 1000});
-    // A point with no value takes no part in either.
+    // A point with no value takes no part in either, and is noted.
     expect(get().samples.citations).toEqual({values: [0, 4, 12, 1000], seen: 4});
+    expect(get().missing.citations).toBe(true);
+  });
+
+  it('keeps no sample under a linear or log scale, and starts one from the frame when switched to rank', () => {
+    const {legend, get} = sizeLegend();
+    legend.setSizeBy('citations');
+    const frame = citationFrame([4, 0, 7]);
+    legend.accumulate(frame, [CITATIONS]);
+    expect(get().samples).toEqual({});
+    expect(get().domains.citations).toEqual({min: 0, max: 7});
+    expect(get().missing.citations).toBeUndefined();
+    legend.setSizeBy('citations', true);
+    legend.accumulate(frame, [CITATIONS]);
+    expect(get().samples.citations).toEqual({values: [0, 4, 7], seen: 3});
+  });
+
+  it('notes a point whose value is NaN or infinite as one with no value', () => {
+    const {legend, get} = sizeLegend();
+    const SCORE = scalar('score', 'f64', {render: true, homes: ['rendered']});
+    legend.setSizeBy('score');
+    const scores = (values: number[]) => ({...citationFrame([]), exact: [band(2, 1n, values.length, {scalars: {score: {arrowType: 'f64' as const, values: Float64Array.from(values)}}})]});
+    legend.accumulate(scores([1, 2]), [SCORE]);
+    expect(get().missing.score).toBeUndefined();
+    legend.accumulate(scores([1, Infinity, 3]), [SCORE]);
+    expect(get().missing.score).toBe(true);
+    expect(get().domains.score).toEqual({min: 1, max: 3});
   });
 
   it('counts each band once, and publishes a new sample only once the marks seen have doubled', () => {
     const {legend, get} = sizeLegend();
-    legend.setSizeBy('citations');
+    legend.setSizeBy('citations', true);
     const frame = citationFrame([1, 2, 3, 4]);
     legend.accumulate(frame, [CITATIONS]);
     const first = get().samples.citations;
@@ -99,7 +125,7 @@ describe('the size legend', () => {
 
   it('holds at most 1,024 values, drawn from every mark seen', () => {
     const {legend, get} = sizeLegend();
-    legend.setSizeBy('citations');
+    legend.setSizeBy('citations', true);
     legend.accumulate(citationFrame(Array.from({length: 10_000}, (_, i) => i)), [CITATIONS]);
     const sample = get().samples.citations!;
     expect(sample.seen).toBe(10_000);
@@ -111,10 +137,11 @@ describe('the size legend', () => {
 
   it('sizes nothing by a category column, and keeps the size column through a clear', () => {
     const {legend, get} = sizeLegend();
-    legend.setSizeBy('archive');
+    legend.setSizeBy('archive', true);
     legend.accumulate(frameOf(), [ARCHIVE]);
     expect(get().samples).toEqual({});
-    legend.setSizeBy('citations');
+    expect(get().domains).toEqual({});
+    legend.setSizeBy('citations', true);
     legend.accumulate(citationFrame([3]), [CITATIONS]);
     legend.clear();
     expect(get().sizeBy).toBe('citations');

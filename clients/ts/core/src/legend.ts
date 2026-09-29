@@ -1,5 +1,5 @@
 import type {Composition} from './compose.js';
-import {ValueReservoir, countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks, type ValueSample} from './encoding.js';
+import {ValueReservoir, countCodesCached, countCodesInPiece, extendRanks, lacksValues, sizesPoints, widenDomain, widenDomainOver, type Domain, type Ranks, type ValueSample} from './encoding.js';
 import type {Masked} from './counts.js';
 import {refusalOf, type Refusal} from './presented.js';
 import type {CategoryValue, DeclaredScalar} from './types.js';
@@ -14,9 +14,9 @@ export const CLUSTER_PREFIX = 'cluster:';
 
 /**
  * The legend of the colour and size columns, accumulated from the marks drawn, which are drawn from
- * this viewer's visible set. A category column gets ranks and names, a numeric column a domain, a
- * column sized by a sample of its values too, and colouring by `cluster:<layer>` accumulates
- * nothing. {@link Store.clear} empties it and keeps `colourBy` and `sizeBy`.
+ * this viewer's visible set. A category column gets ranks and names, a numeric column a domain, the
+ * column sized by whether any point lacks a value and, sized by rank, a sample of its values, and
+ * colouring by `cluster:<layer>` accumulates nothing. {@link Store.clear} empties it and keeps `colourBy` and `sizeBy`.
  *
  * @category Projections
  */
@@ -29,8 +29,10 @@ export type LegendProjection = {
   ranks: Record<string, Ranks>;
   /** The numeric range per column, widened as marks arrive and never narrowed. */
   domains: Record<string, Domain>;
-  /** A sample of the values drawn per column sized by, for sizing by rank. */
+  /** A sample of the values drawn per column sized by rank. */
   samples: Record<string, ValueSample>;
+  /** Per column sized by, whether a point drawn had no finite value, and so drew as a ring. */
+  missing: Record<string, boolean>;
   /** The codes drawn, per category column, with their names as `/v1/categories` resolves them. */
   categories: Record<string, CategoryValue[]>;
   /** The refusal per category column whose names could not be fetched. A refused column is not asked again. */
@@ -48,7 +50,7 @@ export type LegendProjection = {
 };
 
 /** The legend with nothing accumulated and nothing chosen. */
-export const EMPTY_LEGEND: LegendProjection = {ranks: {}, domains: {}, samples: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null};
+export const EMPTY_LEGEND: LegendProjection = {ranks: {}, domains: {}, samples: {}, missing: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null};
 
 /**
  * The legend of the colour and size columns, accumulated from the marks drawn: ranks and names for
@@ -57,8 +59,12 @@ export const EMPTY_LEGEND: LegendProjection = {ranks: {}, domains: {}, samples: 
  */
 export class Legend {
   private state: LegendProjection = EMPTY_LEGEND;
-  /** The reservoir behind each column's sample, emptied with the samples by {@link clear}. */
-  private reservoirs = new Map<string, ValueReservoir>();
+  /** Whether the size column is sized by rank, and so sampled. */
+  private rank = false;
+  /** The reservoir behind the size column's sample while it is sized by rank. */
+  private reservoir: ValueReservoir | null = null;
+  /** The size column's bands already looked at for points with no value. */
+  private scanned = new WeakSet<object>();
   /** Moved by {@link clear}, so names asked for before it are not taken. */
   private epoch = 0;
   private disposed = false;
@@ -81,7 +87,11 @@ export class Legend {
     return this.state.sizeBy;
   }
 
-  setSizeBy(column: string | null): void {
+  /** Size by `column`, keeping a sample of its values where `rank` is set. */
+  setSizeBy(column: string | null, rank = false): void {
+    if (column !== this.state.sizeBy) this.scanned = new WeakSet();
+    if (column !== this.state.sizeBy || rank !== this.rank) this.reservoir = column !== null && rank ? new ValueReservoir() : null;
+    this.rank = rank;
     this.set({...this.state, sizeBy: column});
   }
 
@@ -91,10 +101,11 @@ export class Legend {
     const colour = colourBy && !colourBy.startsWith(CLUSTER_PREFIX) ? columns.find((c) => c.name === colourBy) : undefined;
     if (colour?.category) this.accumulateCodes(frame, colour.name);
     else if (colour) this.widen(frame, colour.name);
-    const size = columns.find((c) => c.name === this.state.sizeBy && !c.category);
+    const size = columns.find((c) => c.name === this.state.sizeBy && sizesPoints(c));
     if (size) {
       if (size !== colour) this.widen(frame, size.name);
-      this.sample(frame, size.name);
+      this.scanMissing(frame, size.name);
+      if (this.reservoir) this.sample(frame, size.name, this.reservoir);
     }
   }
 
@@ -131,13 +142,22 @@ export class Legend {
     }
   }
 
-  /** Offer the frame's exact bands to the column's sample, and publish it when it has grown enough. */
-  private sample(frame: Composition, name: string): void {
-    let reservoir = this.reservoirs.get(name);
-    if (!reservoir) {
-      reservoir = new ValueReservoir();
-      this.reservoirs.set(name, reservoir);
+  /** Note whether a point drawn lacks a value; a band without the column draws every point as one. */
+  private scanMissing(frame: Composition, name: string): void {
+    if (this.state.missing[name]) return;
+    for (const band of frame.exact) {
+      if (this.scanned.has(band)) continue;
+      this.scanned.add(band);
+      const values = band.scalars[name];
+      if (band.ids.length > 0 && (!values || lacksValues(values))) {
+        this.set({...this.state, missing: {...this.state.missing, [name]: true}});
+        return;
+      }
     }
+  }
+
+  /** Offer the frame's exact bands to the column's sample, and publish it when it has grown enough. */
+  private sample(frame: Composition, name: string, reservoir: ValueReservoir): void {
     for (const band of frame.exact) {
       const values = band.scalars[name];
       if (values) reservoir.offer(values);
@@ -149,7 +169,8 @@ export class Legend {
   /** Forget everything accumulated, keeping the colour and size columns. */
   clear(): void {
     this.epoch += 1;
-    this.reservoirs.clear();
+    this.reservoir = this.state.sizeBy !== null && this.rank ? new ValueReservoir() : null;
+    this.scanned = new WeakSet();
     this.set({...EMPTY_LEGEND, colourBy: this.state.colourBy, sizeBy: this.state.sizeBy});
   }
 

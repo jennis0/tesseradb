@@ -11,7 +11,20 @@
  * does not narrow, so a pan does not recolour the map, and it resets when the identity key changes.
  */
 import type {StandInPiece} from './compose.js';
-import type {CategoryValue, ScalarColumn} from './types.js';
+import type {ArrowType, CategoryValue, DeclaredScalar, ScalarColumn} from './types.js';
+
+/** The storage types whose values are numbers: every integer and float width. */
+const NUMBER_TYPES: ReadonlySet<ArrowType> = new Set(['u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'f32', 'f64']);
+
+/**
+ * Whether a declared column can size points: it arrives with each point (`render`), is a number
+ * type, and is not a category, whose codes are labels.
+ *
+ * @internal
+ */
+export function sizesPoints(column: DeclaredScalar): boolean {
+  return column.render && column.category === null && NUMBER_TYPES.has(column.arrowType);
+}
 
 /**
  * The range of one numeric column's values among the marks drawn, for a colour ramp. The store's
@@ -58,7 +71,7 @@ export function hasValue(column: ScalarColumn, i: number): boolean {
  * @internal
  */
 export function numericValues(column: ScalarColumn): ArrayLike<number> | null {
-  if (column.arrowType === 'bool' || column.arrowType === 'utf8') return null;
+  if (!NUMBER_TYPES.has(column.arrowType) && column.arrowType !== 'timestamp_us') return null;
   const values = column.values as ArrayLike<number | bigint>;
   const wide = column.arrowType === 'u64' || column.arrowType === 'i64' || column.arrowType === 'timestamp_us';
   if (!wide && !column.present) return column.values as ArrayLike<number>;
@@ -106,6 +119,33 @@ export function widenDomainOver(
   return {min: Math.min(held.min, min), max: Math.max(held.max, max)};
 }
 
+/** {@link lacksValues} memoised per column, since bands do not change. */
+const heldLacks = new WeakMap<object, boolean>();
+
+/**
+ * Whether any point of `column` has no finite value: no value at all, or NaN or an infinity, which
+ * a size cannot place and draws as a point with no value.
+ *
+ * @internal
+ */
+export function lacksValues(column: ScalarColumn): boolean {
+  let held = heldLacks.get(column);
+  if (held === undefined) {
+    const values = numericValues(column);
+    held = false;
+    if (values) {
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i]!)) {
+          held = true;
+          break;
+        }
+      }
+    }
+    heldLacks.set(column, held);
+  }
+  return held;
+}
+
 /**
  * A uniform sample of one numeric column's values among the marks drawn, for sizing points by
  * rank. The store's `legend` projection holds one per column sized by, in `samples`. A value's rank
@@ -117,7 +157,10 @@ export function widenDomainOver(
 export type ValueSample = {
   /** Up to {@link SAMPLE_SIZE} finite values, drawn uniformly from the marks seen, in ascending order. */
   values: readonly number[];
-  /** How many marks with a finite value the sample was drawn from. */
+  /**
+   * How many marks with a finite value the sample was drawn from. It grows with each sample
+   * published, so it tells one sample from the next.
+   */
   seen: number;
 };
 
