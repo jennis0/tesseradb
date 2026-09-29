@@ -63,7 +63,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
-    legend: {ranks: {}, domains: {}, samples: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null},
+    legend: {ranks: {}, domains: {}, samples: {}, missing: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     ...overrides
   };

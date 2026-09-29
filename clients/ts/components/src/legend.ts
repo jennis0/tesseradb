@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type LegendProjection, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
-import {NEUTRAL} from '@tesseradb/client/internal';
+import {NEUTRAL, sizesPoints} from '@tesseradb/client/internal';
 import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale, type Sizing} from '@tesseradb/deck';
 import {
   UNMAPPED,
@@ -9,15 +9,16 @@ import {
   colourOfFraction,
   colourOfRank,
   css as rgb,
+  drawnSizing,
   fractionOf,
   hexOf,
+  hollowRadius,
   lighter,
   paletteValues,
   radiusAt,
   rgbOfHex,
   sizeEncodingOf,
   sizeFraction,
-  sizesPoints,
   valueAtFraction,
   valueAtSize,
   type SizeEncoding
@@ -93,11 +94,12 @@ type Picking = {column: string; key: string; title: string};
  * `<tessera-layer-picker>`'s.
  *
  * While the store sizes the points by a number column, a Size section follows, headed by the
- * column's name: four circles at round values across the range drawn, each drawn at the radius the
- * map gives that value, the last marked `+` where larger values are drawn. Under the rank scale the
- * circles stand at the values a quarter of the way along the sample of values drawn, and a note
- * says the sizes are by rank among the points drawn. The size choices are made in the explorer's
- * Layers popover or on the map.
+ * column's name: up to four filled circles at round values across the range drawn, each at the
+ * radius the map gives that value, the last marked `+` where larger values are drawn. Under the
+ * rank scale the middle two stand at values a third and two thirds of the way along the sample of
+ * values drawn, and a note says the sizes are by rank among the points drawn. Where a point drawn
+ * has no value, a ring labelled "No value" follows, drawn as the map draws such a point. The size
+ * choices are made in the explorer's Layers popover or on the map.
  *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
@@ -144,14 +146,16 @@ type Picking = {column: string; key: string; title: string};
  * @csspart range-high - The handle of the range's high end, a slider.
  * @csspart value - The ramp's lowest and highest values, beneath its ends.
  * @csspart range-value - The range's ends, beneath the ramp, while a range is set.
- * @csspart size - The Size section, while the points are sized by a column.
+ * @csspart size - The Size section, while the points are sized by a column, with `data-state`:
+ *   `shown`, `empty` before a value is drawn, or `unavailable` where the column is not a rendered
+ *   number.
  * @csspart size-title - The Size section's heading.
  * @csspart size-by - The name of the column the points are sized by, in that heading.
  * @csspart size-key - The row of circles.
- * @csspart size-entry - One circle and its value.
+ * @csspart size-entry - One circle and its value, with `data-missing` on the "No value" ring.
  * @csspart size-value - A circle's value.
- * @csspart size-note - "By rank among the points drawn" under the rank scale, "Nothing in view"
- *   before a value is drawn, or "Column unavailable" where the column is not a rendered number.
+ * @csspart size-note - What the Size section notes, with `data-note`: `rank` under the rank scale,
+ *   `empty` before a value is drawn, or `unavailable` where the column is not a rendered number.
  * @csspart colour-popover - The colour picker, while it is open.
  * @csspart choice - A colour in the picker's palette rows, with `aria-pressed`.
  * @csspart sv - The picker's saturation and brightness area, a slider in two directions.
@@ -440,8 +444,12 @@ export class TesseraLegend extends TesseraElement {
       }
       [part='size-entry'] .circle {
         box-sizing: border-box;
-        border: 1.5px solid var(--_tessera-ink-2);
+        border: 1px solid var(--_tessera-ink-2);
         border-radius: 50%;
+        background: color-mix(in srgb, var(--_tessera-ink-2) 22%, transparent);
+      }
+      [part='size-entry'][data-missing] .circle {
+        background: none;
       }
       [part='size-value'],
       [part='size-note'] {
@@ -898,20 +906,29 @@ export class TesseraLegend extends TesseraElement {
     if (name === null) return nothing;
     const column = meta.declaredScalars.find((c) => c.name === name);
     const caption = columnCaption(name);
-    const note = (text: string) => html`<span part="size-note">${text}</span>`;
-    const panel = (body: unknown) =>
-      html`<div part="size" class="panel"><h2 part="size-title"><span>Size</span><span part="size-by" title=${caption}>${caption}</span></h2>${body}</div>`;
-    if (!column || !sizesPoints(column)) return panel(note('Column unavailable'));
-    const encoding = sizeEncodingOf(meta, legend, sizing.scale);
-    if (encoding.kind === 'none' || encoding.kind === 'pending') return panel(note('Nothing in view'));
+    const note = (kind: string, text: string) => html`<span part="size-note" data-note=${kind}>${text}</span>`;
+    const panel = (state: string, body: unknown) =>
+      html`<div part="size" class="panel" data-state=${state}><h2 part="size-title"><span>Size</span><span part="size-by" title=${caption}>${caption}</span></h2>${body}</div>`;
+    if (!column || !sizesPoints(column)) return panel('unavailable', note('unavailable', 'Column unavailable'));
+    const drawn = drawnSizing(sizing);
+    const encoding = sizeEncodingOf(meta, legend, drawn.scale);
+    const domain = legend.domains[column.name];
+    const keyed = encoding.kind !== 'none' && encoding.kind !== 'pending' && domain !== undefined;
+    const missing = legend.missing[column.name] === true;
+    if (!keyed && !missing) return panel('empty', note('empty', 'Nothing in view'));
     const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
-    const entries = sizeKey(encoding, sizing, whole);
-    return panel(html`<div part="size-key" role="list" aria-label=${`Sizes of ${caption}`}>
-        ${entries.map(
-          (e) => html`<div part="size-entry" role="listitem"><span class="circle" style=${`width:${(e.radius * 2).toFixed(1)}px;height:${(e.radius * 2).toFixed(1)}px`}></span><span part="size-value">${e.label}</span></div>`
-        )}
-      </div>
-      ${encoding.kind === 'rank' ? note('By rank among the points drawn') : nothing}`);
+    const entries = keyed ? sizeKey(encoding, domain, drawn, (n) => formatNumber(n, whole)) : [];
+    const circle = (radius: number) => `width:${(radius * 2).toFixed(1)}px;height:${(radius * 2).toFixed(1)}px`;
+    return panel(
+      'shown',
+      html`<div part="size-key" role="list" aria-label=${`Sizes of ${caption}`}>
+          ${entries.map((e) => html`<div part="size-entry" role="listitem"><span class="circle" style=${circle(e.radius)}></span><span part="size-value">${e.label}</span></div>`)}
+          ${missing
+            ? html`<div part="size-entry" role="listitem" data-missing><span class="circle" style=${circle(hollowRadius(drawn))}></span><span part="size-value">No value</span></div>`
+            : nothing}
+        </div>
+        ${keyed && encoding.kind === 'rank' ? note('rank', 'By rank among the points drawn') : nothing}`
+    );
   }
 
   /** The rows of a category column: swatch, name, the two verbs and the count. */
@@ -989,11 +1006,7 @@ export class TesseraLegend extends TesseraElement {
   private numeric(s: Store, column: Column, domain: {min: number; max: number}, colouring: Colouring): TemplateResult {
     const ramp = RAMPS[colouring.ramp];
     const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11, colouring.ramp, colouring.reverse))).join(', ');
-    const fmt = (n: number) => {
-      if (column.arrowType === 'timestamp_us') return dateText(n);
-      if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
-      return n.toLocaleString('en-GB', {maximumFractionDigits: 2});
-    };
+    const fmt = (n: number) => (column.arrowType === 'timestamp_us' ? dateText(n) : formatNumber(n, false));
     const held = s.get('filters').draft.filter[column.name];
     const filterable = this.offers(column.name, 'numeric', 'range');
     const at = (v: number) => Math.min(1, Math.max(0, fractionOf(v, domain, colouring.scale, ramp.diverging)));
@@ -1412,31 +1425,48 @@ export class TesseraLegend extends TesseraElement {
   }
 }
 
+/**
+ * A number as the legend prints it: in exponent form from a million up and below a thousandth,
+ * else to two decimal places at 1 or more and three significant figures below 1. With `whole`,
+ * rounded to a whole number first, for an integer column.
+ */
+function formatNumber(n: number, whole: boolean): string {
+  const v = whole ? Math.round(n) : n;
+  const size = Math.abs(v);
+  if (size >= 1e6 || (v !== 0 && size < 1e-3)) return v.toExponential(2);
+  return v.toLocaleString('en-GB', size >= 1 ? {maximumFractionDigits: 2} : {maximumSignificantDigits: 3});
+}
+
 /** A circle in the Size section: the radius the map gives its value, and the value as text. */
 type SizeEntry = {radius: number; label: string};
 
 /**
- * Four circles at round values across what `encoding` sizes by: at the start, a third and two thirds
- * of the way, and the end, each rounded to one significant figure. The last is rounded down and
- * marked `+` where larger values are drawn, and drawn at the largest size. A range of one value is
- * one circle.
+ * Up to four circles at round values across `domain`, the range drawn: its start, the values a
+ * third and two thirds of the way under `encoding`, and its end. The middle two are rounded to one
+ * significant figure, or kept as they are where rounding would take them out of order or out of
+ * the range. The last is the end rounded down to one figure, marked `+` where larger values are
+ * drawn and drawn at the largest size, or the end itself where rounding would put it out of order.
+ * A value printing as the one before it is left out.
  */
-function sizeKey(encoding: SizeEncoding, sizing: Sizing, whole: boolean): SizeEntry[] {
-  const low = valueAtSize(0, encoding)!;
-  const high = valueAtSize(1, encoding)!;
-  const text = (v: number) => v.toLocaleString('en-GB', {maximumFractionDigits: whole ? 0 : 2});
-  if (low === high) return [{radius: radiusAt(sizeFraction(low, encoding), sizing), label: text(low)}];
-  const out: SizeEntry[] = [];
-  const seen = new Set<number>();
-  for (const t of [0, 1 / 3, 2 / 3]) {
-    const v = t === 0 ? low : oneFigure(valueAtSize(t, encoding)!, Math.round);
-    if (seen.has(v) || v >= high) continue;
-    seen.add(v);
-    out.push({radius: radiusAt(sizeFraction(v, encoding), sizing), label: text(v)});
+function sizeKey(encoding: SizeEncoding, domain: {min: number; max: number}, sizing: Sizing, text: (n: number) => string): SizeEntry[] {
+  const {min: low, max: high} = domain;
+  const entry = (v: number, radius = radiusAt(sizeFraction(v, encoding), sizing)): SizeEntry => ({radius, label: text(v)});
+  if (low === high) return [entry(low)];
+  const out = [entry(low)];
+  let previous = low;
+  const between = (v: number) => v > previous && v < high && text(v) !== out.at(-1)!.label;
+  for (const t of [1 / 3, 2 / 3]) {
+    const raw = valueAtSize(t, encoding)!;
+    const rounded = oneFigure(raw, Math.round);
+    const v = between(rounded) ? rounded : raw;
+    if (!between(v)) continue;
+    out.push(entry(v));
+    previous = v;
   }
-  const top = oneFigure(high, Math.floor);
-  const last = seen.has(top) ? high : top;
-  out.push({radius: sizing.max, label: last < high ? `${text(last)}+` : text(last)});
+  const floored = oneFigure(high, Math.floor);
+  const top = floored > previous && text(floored) !== out.at(-1)!.label ? floored : high;
+  if (text(top) === out.at(-1)!.label) return out;
+  out.push({radius: sizing.max, label: top < high ? `${text(top)}+` : text(top)});
   return out;
 }
 

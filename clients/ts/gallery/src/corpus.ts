@@ -383,6 +383,7 @@ export function legendOf(colourBy: string | null, over: Partial<LegendProjection
       year: {min: 1991, max: 2025}
     },
     samples: {citations: {values: CITATION_SAMPLE, seen: MARKS.length}},
+    missing: {},
     categories: {field: FIELDS},
     categoryErrors: {},
     colourBy,
