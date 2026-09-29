@@ -8,7 +8,8 @@ from one of them by its own criterion.
 What is asserted, and by which second reader:
 
 - **Every row is the artifacts frame's own row.** The page's `tessera_id`, `key` and `masked_count`
-  are compared against what a zoom-0 viewport serves the same principal — the artifacts frame being
+  are compared against what a zoom-0 viewport serves the same principal, and `child_count` against
+  how many of the frame's artifacts name the row among their `parent_ids` — the artifacts frame being
   the reader that already exists for those numbers — so a browse that computed its counts a second
   way is caught rather than ratified.
 - **The gate runs before the page.** The artifact withheld from the narrow principal is absent from
@@ -104,6 +105,8 @@ def test_a_page_is_the_artifacts_frames_own_rows(browse_server):
                 assert row.get("key") == frame[tid].key
                 assert "matched_count" not in row, "no filter, no question"
                 assert row["parent_ids"] == [], "a flat layer names no parent"
+                children = sum(1 for a in frame.values() if int(tid) in a.parent_ids)
+                assert row["child_count"] == children == 0, f"{layer}/{tid}: a flat layer has no children"
             assert out["parents"] == [], "`parents` is the children form's"
             # The total order, as a property: count descending, then identifier ascending.
             keyed = [(-row["masked_count"], int(row["tessera_id"])) for row in out["artifacts"]]

@@ -126,6 +126,9 @@ def test_browse_and_artifact_agree_on_one_annotation(db):
     assert record["layer"] == "clusters"
     assert record["key"] == "c0"
     assert record["masked_count"] == int(one["masked_count"]) == 20
+    # A flat layer's annotation has no children.
+    assert one["child_count"] == 0
+    assert viewer.browse_artifacts("map", "clusters", parent=one["tessera_id"])["artifacts"] == []
 
 
 def test_an_artifact_a_principal_may_not_see_is_not_found(db):
