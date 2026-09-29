@@ -23,7 +23,7 @@ import {
   valueAtSize,
   type SizeEncoding
 } from '@tesseradb/deck/internal';
-import {HeldAggregate, countsByKey} from './aggregate.js';
+import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit} from './base.js';
 import {colouringOf, setColouring, sizingOf, watchChoices, withValueColour} from './colouring.js';
 import {radioKeys} from './display.js';
@@ -1514,25 +1514,17 @@ function countSpec(s: Store | null): AggregateSpec | null {
   if (!s || !meta) return null;
   const colourBy = s.get('legend').colourBy;
   if (colourBy === null) return null;
-  const {maxAggregateNamed: named, maxAggregateGroupings: groupings} = meta.selection;
   const layer = clusterLayerOf(colourBy);
   if (layer) {
-    const levelled = (meta.layers.find((l) => l.name === layer)?.levels.length ?? 0) > 1;
-    const byLevel = new Map<number, bigint[]>();
-    for (const a of s.get('artifacts').colourServed) {
-      if (a.layer !== layer) continue;
-      const at = levelled ? a.rung : -1;
-      byLevel.set(at, [...(byLevel.get(at) ?? []), a.tesseraId]);
-    }
-    if (byLevel.size === 0) return null;
-    return {
-      groupings: [...byLevel]
-        .sort(([x], [y]) => x - y)
-        .slice(0, groupings)
-        .map(([level, ids]) => ({by: {layer, ...(level < 0 ? {} : {level}), artifacts: ids.sort((x, y) => (x < y ? -1 : x > y ? 1 : 0)).slice(0, named)}}))
-    };
+    const declared = meta.layers.find((l) => l.name === layer);
+    const served = s.get('artifacts').colourServed.filter((a) => a.layer === layer);
+    if (!declared || served.length === 0) return null;
+    return {groupings: artifactGroupings(declared, served, meta.selection)};
   }
   const values = meta.declaredScalars.some((c) => c.name === colourBy && c.category && c.render) ? s.get('legend').categories[colourBy] : undefined;
   if (!values || values.length === 0) return null;
-  return {groupings: [{by: {field: colourBy, values: values.map((v) => v.key).sort().slice(0, named)}}]};
+  // The values in the order the legend lists them, by rank, so the first counted are the first shown.
+  const ranks = s.get('legend').ranks[colourBy] ?? {};
+  const listed = [...values].sort((x, y) => (ranks[x.code] ?? Number.MAX_SAFE_INTEGER) - (ranks[y.code] ?? Number.MAX_SAFE_INTEGER));
+  return {groupings: [{by: {field: colourBy, values: listed.slice(0, meta.selection.maxAggregateNamed).map((v) => v.key).sort()}}]};
 }

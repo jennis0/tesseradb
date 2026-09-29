@@ -1,9 +1,9 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {artifactName, withMember, withoutMember, type AggregateSpec, type BrowseRow, type ClauseVerb, type Layer, type MemberClause, type Refusal} from '@tesseradb/client';
+import {artifactName, withMember, withoutMember, type BrowseRow, type ClauseVerb, type Layer, type MemberClause, type Refusal} from '@tesseradb/client';
 import {refusalOf} from '@tesseradb/client/internal';
-import {HeldAggregate, countsByKey} from './aggregate.js';
+import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {FloatingList} from './float.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -255,12 +255,16 @@ export class TesseraClusterFilter extends TesseraElement {
     const level = this.levels(layer)[0];
     this.browse({limit: TOP_LEVEL_ROWS, ...(level === undefined ? {} : {level})})
       .then((page) => {
-        if (epoch === this.epoch) this.tops = page.artifacts.map((r) => this.offer(r));
+        if (epoch !== this.epoch) return;
+        this.tops = page.artifacts.map((r) => this.offer(r));
+        this.refusal = null;
       })
       .catch((error: unknown) => {
         if (epoch !== this.epoch) return;
         this.refusal = refusalOf(error);
         this.tops = [];
+        // Asked again the next time the list opens.
+        this.fetchedFor = '';
       });
   }
 
@@ -275,6 +279,7 @@ export class TesseraClusterFilter extends TesseraElement {
         if (epoch !== this.epoch || this.search.trim() !== q) return;
         const offers = pages.flatMap((p) => p.artifacts.map((r) => this.offer(r)));
         this.found = {q, offers, more: pages.some((p) => p.next !== null)};
+        this.refusal = null;
         const walkable = layer.hierarchy.kind === 'nested' || layer.hierarchy.kind === 'dag';
         for (const o of offers) void this.walk(o, walkable, epoch);
       })
@@ -377,9 +382,16 @@ export class TesseraClusterFilter extends TesseraElement {
   protected override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
     this.floating.update();
+    // Counted only while the list is open: a closed list shows no counts, so asks for none.
     const layer = this.declared();
-    const offers = this.listed() ?? [];
-    this.counts.set(this.resolvedStore, layer && offers.length > 0 ? countSpec(layer, offers, this.verb, this.resolvedStore?.get('meta')?.selection) : null);
+    const limits = this.resolvedStore?.get('meta')?.selection;
+    const offers = this.listOpen ? (this.listed() ?? []) : [];
+    this.counts.set(
+      this.resolvedStore,
+      layer && limits && offers.length > 0
+        ? {groupings: artifactGroupings(layer, offers.map((o) => o.row), limits), ...(this.verb === 'filter' ? {withoutMembersOf: layer.name} : {})}
+        : null
+    );
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -460,27 +472,6 @@ export class TesseraClusterFilter extends TesseraElement {
         : nothing;
     return html`<div class="head"><label part="label" for="ctl">${title}</label></div>${box}${note}${chips}`;
   }
-}
-
-/**
- * The aggregate counting `offers`: one grouping per level on a layer with several, named by
- * `tesseraId`. In the filter position the layer's own filter clauses are left out.
- */
-function countSpec(layer: Layer, offers: Offer[], verb: ClauseVerb, limits: {maxAggregateNamed: number; maxAggregateGroupings: number} | undefined): AggregateSpec {
-  const levelled = layer.levels.length > 1;
-  const byLevel = new Map<number, bigint[]>();
-  for (const o of offers) {
-    const at = levelled ? o.row.rung : -1;
-    byLevel.set(at, [...(byLevel.get(at) ?? []), o.row.tesseraId]);
-  }
-  const named = limits?.maxAggregateNamed ?? 1000;
-  return {
-    groupings: [...byLevel]
-      .sort(([x], [y]) => x - y)
-      .slice(0, limits?.maxAggregateGroupings ?? 16)
-      .map(([level, ids]) => ({by: {layer: layer.name, ...(level < 0 ? {} : {level}), artifacts: [...new Set(ids)].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0)).slice(0, named)}})),
-    ...(verb === 'filter' ? {withoutMembersOf: layer.name} : {})
-  };
 }
 
 attachContextRoot();

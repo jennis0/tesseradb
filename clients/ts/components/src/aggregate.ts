@@ -1,6 +1,9 @@
-import type {AggregateEntry, AggregateSpec, AggregateTable, Store} from '@tesseradb/client';
+import type {AggregateEntry, AggregateSpec, AggregateTable, Grouping, Layer, Meta, Store} from '@tesseradb/client';
 
-/** One listed group of an aggregate table: its key (an artifact's `tessera_id` in decimal), title and count. */
+/**
+ * One listed group of an aggregate table: its key (a vocabulary key for a field, an artifact's
+ * `tessera_id` in decimal for a layer), its title (a field value's, else `null`) and its count.
+ */
 export type GroupCount = {key: string; title: string | null; count: number};
 
 /**
@@ -33,6 +36,35 @@ export function countsByKey(entry: AggregateEntry | undefined): Map<string, numb
   const out = new Map<string, number>();
   for (const table of result.tables) for (const g of listedGroups(table)) out.set(g.key, g.count);
   return out;
+}
+
+/**
+ * Whether the aggregate route addresses `layer` by level: it requires a level on a layer that
+ * declares several and refuses one on a layer that declares one or none.
+ */
+export function countedByLevel(layer: Pick<Layer, 'levels'>): boolean {
+  return layer.levels.length > 1;
+}
+
+/**
+ * The groupings that count `artifacts` of `layer` by name: one per level where the route addresses
+ * the layer by level, else one. The artifacts are taken in the order given, and the first
+ * `maxAggregateNamed` of each level and the first `maxAggregateGroupings` levels met are counted,
+ * so what is counted is what is listed first. The ids are sorted within a grouping only so that one
+ * set always makes one request.
+ */
+export function artifactGroupings(layer: Pick<Layer, 'name' | 'levels'>, artifacts: readonly {tesseraId: bigint; rung: number}[], limits: Meta['selection']): Grouping[] {
+  const byLevel = new Map<number, bigint[]>();
+  for (const a of artifacts) {
+    const at = countedByLevel(layer) ? a.rung : -1;
+    if (!byLevel.has(at) && byLevel.size >= limits.maxAggregateGroupings) continue;
+    const ids = byLevel.get(at) ?? [];
+    if (ids.length < limits.maxAggregateNamed && !ids.includes(a.tesseraId)) ids.push(a.tesseraId);
+    byLevel.set(at, ids);
+  }
+  return [...byLevel]
+    .sort(([x], [y]) => x - y)
+    .map(([level, ids]) => ({by: {layer: layer.name, ...(level < 0 ? {} : {level}), artifacts: [...ids].sort((x, y) => (x < y ? -1 : x > y ? 1 : 0))}}));
 }
 
 let registered = 0;

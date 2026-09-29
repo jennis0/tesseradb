@@ -76,6 +76,40 @@ describe('<tessera-cluster-filter> with the box empty', () => {
   });
 });
 
+describe('<tessera-cluster-filter> asking', () => {
+  it('keeps its counts registered only while its list is open', async () => {
+    const {host, store, box} = await mountField();
+    store.setBrowse('roots', {artifacts: [row(1n, 'Physics')], parents: [], next: null});
+    box().dispatchEvent(new Event('focus'));
+    await settle(host);
+    expect(registered(store).size).toBe(1);
+    box().dispatchEvent(new Event('blur'));
+    await settle(host);
+    expect(registered(store).size).toBe(0);
+  });
+
+  it('asks for the top-level clusters again on the next open after a refusal, and drops the refusal once answered', async () => {
+    const {host, store, box} = await mountField();
+    const answered = store.browse;
+    let fail = true;
+    store.browse = (async (req: never) => {
+      if (fail) throw {code: 'backpressure', detail: 'busy'};
+      return answered(req);
+    }) as never;
+    store.setBrowse('roots', {artifacts: [row(1n, 'Physics')], parents: [], next: null});
+    box().dispatchEvent(new Event('focus'));
+    await settle(host);
+    expect(deep(host, '[part="refusal"]')).not.toBeNull();
+    box().dispatchEvent(new Event('blur'));
+    fail = false;
+    box().dispatchEvent(new Event('focus'));
+    await settle(host);
+    await settle(host);
+    expect(deep(host, '[part="refusal"]')).toBeNull();
+    expect(names(host)).toEqual(['Physics']);
+  });
+});
+
 describe('<tessera-cluster-filter> typing', () => {
   it('searches the names, shows each match’s nearest parents as its path, and a pick adds a member_of clause named by the cluster', async () => {
     const {host, store, box} = await mountField();
