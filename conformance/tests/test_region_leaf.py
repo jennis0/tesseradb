@@ -284,12 +284,12 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
     # Suppressed: served to the broad principal a moment ago, and an empty operand from the ack.
     before, _ = matched_sum(server, broad, withheld)
     assert before == strip.masked_count
-    resp = server.changes([{"tessera_id": str(strip.tessera_id), "op": "suppress"}])
+    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}])
     assert resp.status_code in (200, 202), resp.text
     body_suppressed, head_suppressed = bytes_of(broad, withheld)
     body_unknown_broad, head_unknown_broad = bytes_of(broad, unknown)
     assert body_suppressed == body_unknown_broad and head_suppressed == head_unknown_broad
-    resp = server.changes([{"tessera_id": str(strip.tessera_id), "op": "unsuppress"}])
+    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}])
     assert resp.status_code in (200, 202), resp.text
     after, _ = matched_sum(server, broad, withheld)
     assert after == before

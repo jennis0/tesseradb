@@ -324,7 +324,8 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
         assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
         CLUSTERS,
-        artifacts=[{"key": "c-hit", "members": inside}],
+        artifacts=[{"key": "c-hit", "members": {"tessera_id": inside}}],
+        strict=True,
     )
     assert resp.status_code in (200, 201, 202), resp.text
     resp = server.publish_artifacts(
@@ -332,11 +333,12 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
         artifacts=[
             {
                 "key": "label-hit",
-                "members": outside[:10],
+                "members": {"tessera_id": outside[:10]},
                 "content": [{"values": ["hit"]}],
                 "attached_to": {"layer": CLUSTERS, "level": 0, "key": "c-hit"},
             }
         ],
+        strict=True,
     )
     assert resp.status_code in (200, 201, 202), resp.text
 

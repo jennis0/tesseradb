@@ -678,15 +678,9 @@ class Server:
             timeout=10,
         )
 
-    def change(self, tessera_id: int | str, op: str) -> requests.Response:
-        """One `/control/changes` item, addressed by the item's `tessera_id`."""
-        item = {"tessera_id": str(tessera_id), "op": op}
-        return requests.post(
-            f"{self.control_base}/control/changes",
-            headers={"Authorization": f"Bearer {self.operator_credential}"},
-            json=[item],
-            timeout=10,
-        )
+    def change(self, tessera_id: int | str, op: str, *, strict: bool = False) -> requests.Response:
+        """One `/control/changes` item, naming the item by its `tessera_id`."""
+        return self.changes([{"op": op, "match": {"tessera_id": str(tessera_id)}}], strict=strict)
 
     def browse(self, token: str, **body) -> requests.Response:
         """`POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) — the raw response, not
@@ -708,26 +702,33 @@ class Server:
             timeout=30,
         )
 
-    def publish_artifacts(self, layer: str, **body) -> requests.Response:
-        """`PUT /control/layers/{name}/artifacts` — one publication into one level."""
+    def publish_artifacts(self, layer: str, *, strict: bool = False, **body) -> requests.Response:
+        """`PUT /control/layers/{name}/artifacts` — one publication into one level. `strict`
+        refuses the whole publication at its first refused member."""
         return requests.put(
             f"{self.control_base}/control/layers/{layer}/artifacts",
+            params={"strict": str(strict).lower()},
             headers={"Authorization": f"Bearer {self.operator_credential}"},
             json=body,
             timeout=60,
         )
 
-    def changes(self, items: list[dict]) -> requests.Response:
+    def changes(self, items: list[dict], *, strict: bool = False) -> requests.Response:
+        """`POST /control/changes`. `strict` refuses the whole request at its first refused item;
+        without it, refused items are listed in the answer and the rest applied."""
         return requests.post(
             f"{self.control_base}/control/changes",
+            params={"strict": str(strict).lower()},
             headers={"Authorization": f"Bearer {self.operator_credential}"},
             json=items,
             timeout=10,
         )
 
-    def ingest(self, body: bytes, batch_id: str) -> requests.Response:
+    def ingest(self, body: bytes, batch_id: str, *, strict: bool = False) -> requests.Response:
+        """An Arrow ingest batch. `strict` refuses the whole batch at its first refused row."""
         return requests.post(
             f"{self.control_base}/control/ingest",
+            params={"strict": str(strict).lower()},
             headers={
                 "Authorization": f"Bearer {self.operator_credential}",
                 "x-tessera-batch-id": batch_id,

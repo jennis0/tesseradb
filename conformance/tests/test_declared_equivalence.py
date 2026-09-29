@@ -487,9 +487,15 @@ def _members_table(members: dict[str, list[int]]) -> pa.Table:
     return pa.table({"key": pa.array(keys, pa.string()), "fx": pa.array(named, pa.uint64())})
 
 
-def _halves(ids: list[int]) -> tuple[list[str], list[str]]:
+#: Every member these cases publish names an item, so any refused member refuses the request.
+STRICT = {"strict": "true"}
+
+
+def _halves(ids: list[int]) -> tuple[dict, dict]:
+    """The two halves of a membership, each a member table naming items by `fx`."""
     addressed = [str(i) for i in ids]
-    return addressed[: len(addressed) // 2], addressed[len(addressed) // 2 :]
+    half = len(addressed) // 2
+    return {"fx": addressed[:half]}, {"fx": addressed[half:]}
 
 
 class Layers(Case):
@@ -544,24 +550,24 @@ class Layers(Case):
                 "key": key,
                 "members": _halves(TOPIC_MEMBERS[key])[0],
                 "parent": [parent] if parent else [],
-                "content": [{"values": [f"Topic {key}"], "generated_from": []}],
+                "content": [{"values": [f"Topic {key}"], "generated_from": {}}],
             }
             for key, parent in TOPIC_PARENTS.items()
         ]
         d.control(
             "PUT", "/control/layers/topics/artifacts",
-            json={"field": "fx", "artifacts": artifacts}, expect=(201,),
+            json={"artifacts": artifacts}, params=STRICT, expect=(201,),
         )
         strict_first = [{"key": k, "members": _halves(ids)[0]} for k, ids in STRICT_MEMBERS.items()]
         d.control(
             "PUT", "/control/layers/strict/artifacts",
-            json={"field": "fx", "artifacts": strict_first}, expect=(201,),
+            json={"artifacts": strict_first}, params=STRICT, expect=(201,),
         )
         for layer, members in (("topics", TOPIC_MEMBERS), ("strict", STRICT_MEMBERS)):
             rest = [{"key": k, "members": _halves(ids)[1]} for k, ids in members.items()]
             d.control(
                 "PATCH", f"/control/layers/{layer}/artifacts",
-                json={"field": "fx", "artifacts": rest}, expect=(200,),
+                json={"artifacts": rest}, params=STRICT, expect=(200,),
             )
         d.publish()
         return d

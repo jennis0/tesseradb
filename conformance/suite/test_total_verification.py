@@ -154,8 +154,8 @@ def run(tmp_path_factory) -> SimpleNamespace:
         battery_expected = expected_items(SEED, battery_fx)
 
         def change(op: str, fx: int) -> None:
-            item = {"field": "id", "value": str(battery_expected[fx].e), "op": op}
-            resp = server.changes([item])
+            item = {"op": op, "match": {"id": str(battery_expected[fx].e)}}
+            resp = server.changes([item], strict=True)
             assert resp.status_code == 200, f"{op} refused: {resp.text}"
 
         change("suppress", battery_fx[0])
