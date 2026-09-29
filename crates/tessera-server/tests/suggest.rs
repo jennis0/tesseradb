@@ -566,6 +566,8 @@ async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
             total += expected;
         }
         assert!(total > 0, "the filter passes some item for {terms:?}");
+        let passing = (0..N).filter(|&e| sees(e) && passes(e)).count() as u64;
+        assert_eq!(body["total"], passing, "{terms:?}: total under a region leaf: {body}");
     }
 }
 
