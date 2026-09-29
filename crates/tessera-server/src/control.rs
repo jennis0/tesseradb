@@ -603,7 +603,7 @@ struct ChangeItem {
     /// The item, by its `tessera_id` and the values of unique fields, keyed by column: one row of
     /// an address table ([`crate::address::Table`]).
     #[serde(rename = "match")]
-    matching: serde_json::Map<String, serde_json::Value>,
+    matching: std::collections::BTreeMap<String, crate::address::Cell>,
 }
 
 /// What a change request did: how many changes it applied, and the items the identity rule
@@ -625,7 +625,7 @@ fn run_changes(
     // item's 422 is answered ahead of another item's 404.
     let mut ops: Vec<ChangeOp> = Vec::with_capacity(items.len());
     let mut tables: Vec<Table> = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
+    for (index, item) in items.into_iter().enumerate() {
         ops.push(match item.op.as_str() {
             // Kept so the refusal names the edit flow instead of answering "unknown op".
             "predicate" => {
@@ -644,17 +644,16 @@ fn run_changes(
         });
         tables.push(Table::one_row(
             &format!("item {index}'s `match`"),
-            &item.matching,
+            item.matching,
         )?);
     }
-    let tables: Vec<&Table> = tables.iter().collect();
 
     // An item an edit moved while the request waited, and whose old entity a fold then retired,
     // is found by resolving the request's names again.
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let named = crate::address::name_items(state, &tables)?;
+        let named = crate::address::name_items(state, tables.clone())?;
         let mut changes: Vec<(EntityId, ChangeOp)> = Vec::with_capacity(ops.len());
         let mut refused = Vec::new();
         for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
@@ -1662,12 +1661,12 @@ struct MemberList {
 /// whole.
 fn resolve_member_lists(
     state: &AppState,
-    lists: &[MemberList],
+    lists: &mut [MemberList],
     strict: bool,
     refused: &mut Vec<serde_json::Value>,
 ) -> Result<Vec<Vec<EntityId>>, ApiError> {
-    let tables: Vec<&Table> = lists.iter().map(|l| &l.table).collect();
-    let named = crate::address::name_items(state, &tables)?;
+    let tables: Vec<Table> = lists.iter_mut().map(|l| std::mem::take(&mut l.table)).collect();
+    let named = crate::address::name_items(state, tables)?;
     let mut out = Vec::with_capacity(lists.len());
     for (list, named) in lists.iter().zip(named) {
         let mut entities = Vec::with_capacity(named.len());
@@ -1692,8 +1691,11 @@ fn resolve_member_lists(
 }
 
 /// A member table in its JSON form, `what` naming it in a refusal; absent is no table.
-fn member_table(what: &str, value: Option<&serde_json::Value>) -> Result<Option<Table>, ApiError> {
-    value.map(|value| Table::from_json(what, value)).transpose()
+fn member_table(
+    what: &str,
+    value: Option<crate::address::WireTable>,
+) -> Result<Option<Table>, ApiError> {
+    value.map(|value| Table::from_wire(what, value)).transpose()
 }
 
 #[derive(serde::Deserialize)]
@@ -1725,11 +1727,11 @@ struct IncomingArtifactBody {
     /// field names. Absent only when `excluding` is given; an empty table is a membership that
     /// holds nobody.
     #[serde(default)]
-    members: Option<serde_json::Value>,
+    members: Option<crate::address::WireTable>,
     /// The membership spelled by exclusion, a table as `members` is and never beside it, at most
     /// `max_excluded_per_request` rows. The executor stores the complement against the view.
     #[serde(default)]
-    excluding: Option<serde_json::Value>,
+    excluding: Option<crate::address::WireTable>,
     /// Ranked contents, most specific first; the engine decides whether the layer takes them.
     #[serde(default)]
     content: Vec<IncomingContentBody>,
@@ -2095,7 +2097,7 @@ struct IncomingContentBody {
     /// it: a table as `members` is. Absent or empty asserts nothing about the corpus, and is
     /// refused on a layer whose content is corpus-derived.
     #[serde(default)]
-    generated_from: Option<serde_json::Value>,
+    generated_from: Option<crate::address::WireTable>,
 }
 
 /// `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level, all or none; a held
@@ -2168,7 +2170,7 @@ async fn publish_artifacts(
             ("excluding", artifact.excluding.take()),
         ] {
             let what = format!("artifact {index}'s `{list}`");
-            if let Some(table) = member_table(&what, value.as_ref())? {
+            if let Some(table) = member_table(&what, value)? {
                 lists.push(MemberList {
                     artifact: index,
                     list: list.to_string(),
@@ -2180,7 +2182,7 @@ async fn publish_artifacts(
         for (rank, content) in artifact.content.iter_mut().enumerate() {
             let list = format!("content.{rank}.generated_from");
             let what = format!("artifact {index}'s `{list}`");
-            let table = member_table(&what, content.generated_from.take().as_ref())?;
+            let table = member_table(&what, content.generated_from.take())?;
             lists.push(MemberList {
                 artifact: index,
                 list,
@@ -2267,7 +2269,7 @@ async fn publish_artifacts(
             )?;
 
             let mut refused = Vec::new();
-            let resolved = resolve_member_lists(state, &lists, strict, &mut refused)?;
+            let resolved = resolve_member_lists(state, &mut lists, strict, &mut refused)?;
 
             // Walked back in the order the lists were gathered.
             let mut resolved = lists
@@ -2393,11 +2395,11 @@ struct GrowingArtifactBody {
     rank: Option<u16>,
     /// Members joining, a table as a publication's are. Absent or empty adds nothing.
     #[serde(default)]
-    members: Option<serde_json::Value>,
+    members: Option<crate::address::WireTable>,
     /// Members leaving, a table as `members` is, applied after the joins. Only a generating set may
     /// shrink, so this needs a `rank`; a page that empties a set withdraws its content.
     #[serde(default)]
-    leaving: Option<serde_json::Value>,
+    leaving: Option<crate::address::WireTable>,
     /// Parent keys: filled where the artifact holds none, accepted if identical, 409 otherwise.
     #[serde(default)]
     parent: Vec<String>,
@@ -2458,7 +2460,7 @@ async fn grow_memberships(
             default_space,
             mut artifacts,
         },
-        lists,
+        mut lists,
     ) = match body_encoding(&headers)? {
         BodyEncoding::Json => {
             let mut body: GrowBody = artifact_json(&body, "growth")?;
@@ -2472,7 +2474,7 @@ async fn grow_memberships(
                     lists.push(MemberList {
                         artifact: index,
                         list: list.to_string(),
-                        table: member_table(&what, value.as_ref())?.unwrap_or_default(),
+                        table: member_table(&what, value)?.unwrap_or_default(),
                         whole: false,
                     });
                 }
@@ -2523,7 +2525,7 @@ async fn grow_memberships(
             // entity named in both resolves to one entity.
             let mut refused = Vec::new();
             let mut entities =
-                resolve_member_lists(state, &lists, strict, &mut refused)?.into_iter();
+                resolve_member_lists(state, &mut lists, strict, &mut refused)?.into_iter();
 
             let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
                 .into_iter()

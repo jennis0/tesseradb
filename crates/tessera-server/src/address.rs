@@ -5,6 +5,8 @@
 //! listed in the answer with its reason while the rest apply, or, in a strict request, refusing
 //! the request whole.
 
+use std::collections::BTreeMap;
+
 use tessera_engine::AddressTable;
 use tessera_lifecycle::resolve::{Reason, Verdict};
 use tessera_types::{EntityId, TesseraId};
@@ -25,23 +27,11 @@ impl Table {
         self.rows
     }
 
-    /// A table in its JSON form: an object of equal-length arrays keyed by `tessera_id` and
-    /// unique field names. `what` names the table in a refusal.
-    pub(crate) fn from_json(what: &str, value: &serde_json::Value) -> Result<Table, ApiError> {
-        let serde_json::Value::Object(columns) = value else {
-            return Err(ApiError::Contract(format!(
-                "{what} is not a table; send an object of equal-length arrays keyed by \
-                 `tessera_id` and unique field names, such as {{\"tessera_id\": [\"12\", \"40\"]}}"
-            )));
-        };
+    /// A table as a body carries it: columns of equal length keyed by `tessera_id` and unique
+    /// field names. `what` names the table in a refusal.
+    pub(crate) fn from_wire(what: &str, wire: WireTable) -> Result<Table, ApiError> {
         let mut table = Table::default();
-        for (at, (name, cells)) in columns.iter().enumerate() {
-            let serde_json::Value::Array(cells) = cells else {
-                return Err(ApiError::Contract(format!(
-                    "{what}: column '{name}' is not an array; each column is an array with one \
-                     cell per row"
-                )));
-            };
+        for (at, (name, cells)) in wire.0.into_iter().enumerate() {
             if at == 0 {
                 table.rows = cells.len();
             } else if cells.len() != table.rows {
@@ -53,23 +43,20 @@ impl Table {
                 )));
             }
             let cells = cells
-                .iter()
+                .into_iter()
                 .enumerate()
-                .map(|(row, cell)| cell_text(what, name, row, cell))
+                .map(|(row, cell)| cell_text(what, &name, row, cell))
                 .collect::<Result<_, _>>()?;
-            table.columns.push((name.clone(), cells));
+            table.columns.push((name, cells));
         }
         Ok(table)
     }
 
-    /// One row, from an object of cells keyed by column: a change's `match`.
-    pub(crate) fn one_row(
-        what: &str,
-        cells: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Table, ApiError> {
+    /// One row, from cells keyed by column: a change's `match`.
+    pub(crate) fn one_row(what: &str, cells: BTreeMap<String, Cell>) -> Result<Table, ApiError> {
         let columns = cells
-            .iter()
-            .map(|(name, cell)| Ok((name.clone(), vec![cell_text(what, name, 0, cell)?])))
+            .into_iter()
+            .map(|(name, cell)| Ok((name.clone(), vec![cell_text(what, &name, 0, cell)?])))
             .collect::<Result<_, ApiError>>()?;
         Ok(Table { rows: 1, columns })
     }
@@ -81,28 +68,61 @@ impl Table {
     }
 }
 
-/// A cell as its column's text: a string as itself, an integer in decimal digits, `null` as none.
-fn cell_text(
-    what: &str,
-    column: &str,
-    row: usize,
-    cell: &serde_json::Value,
-) -> Result<Option<String>, ApiError> {
-    match cell {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(text) => Ok(Some(text.clone())),
-        // A JSON number loses `u64` precision past 2^53 in JavaScript.
-        serde_json::Value::Number(n) if column != "tessera_id" && (n.is_i64() || n.is_u64()) => {
-            Ok(Some(n.to_string()))
+/// A member table in its JSON form, an object of arrays, decoded cell by cell as it is read.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct WireTable(BTreeMap<String, Vec<Cell>>);
+
+/// One cell of an address: `null`, a string, or an integer, kept as its decimal digits.
+#[derive(Debug, Clone)]
+pub(crate) enum Cell {
+    Null,
+    Text(String),
+    Integer(String),
+}
+
+impl<'de> serde::Deserialize<'de> for Cell {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Cell, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Cell;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string, an integer or null")
+            }
+            fn visit_unit<E>(self) -> Result<Cell, E> {
+                Ok(Cell::Null)
+            }
+            fn visit_none<E>(self) -> Result<Cell, E> {
+                Ok(Cell::Null)
+            }
+            fn visit_str<E>(self, text: &str) -> Result<Cell, E> {
+                Ok(Cell::Text(text.to_string()))
+            }
+            fn visit_string<E>(self, text: String) -> Result<Cell, E> {
+                Ok(Cell::Text(text))
+            }
+            fn visit_u64<E>(self, n: u64) -> Result<Cell, E> {
+                Ok(Cell::Integer(n.to_string()))
+            }
+            fn visit_i64<E>(self, n: i64) -> Result<Cell, E> {
+                Ok(Cell::Integer(n.to_string()))
+            }
         }
-        _ if column == "tessera_id" => Err(ApiError::Contract(format!(
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// A cell as its column's text: a string as itself, an integer in decimal digits, `null` as none.
+fn cell_text(what: &str, column: &str, row: usize, cell: Cell) -> Result<Option<String>, ApiError> {
+    match cell {
+        Cell::Null => Ok(None),
+        Cell::Text(text) => Ok(Some(text)),
+        // A JSON number loses `u64` precision past 2^53 in JavaScript.
+        Cell::Integer(_) if column == "tessera_id" => Err(ApiError::Contract(format!(
             "{what}: row {row} of column 'tessera_id' is not a string; send a tessera_id as a \
              base-10 string, such as \"12345\""
         ))),
-        _ => Err(ApiError::Contract(format!(
-            "{what}: row {row} of column '{column}' is neither a string, an integer nor null; \
-             send a keyword as a string and an integer as a number or in decimal digits"
-        ))),
+        Cell::Integer(digits) => Ok(Some(digits)),
     }
 }
 
@@ -114,16 +134,20 @@ pub(crate) enum Named {
 }
 
 /// Resolve every row of `tables` in one call: one answer per row, table by table.
-pub(crate) fn name_items(state: &AppState, tables: &[&Table]) -> Result<Vec<Vec<Named>>, ApiError> {
+pub(crate) fn name_items(
+    state: &AppState,
+    mut tables: Vec<Table>,
+) -> Result<Vec<Vec<Named>>, ApiError> {
     let rows: usize = tables.iter().map(|t| t.rows).sum();
+    let widths: Vec<usize> = tables.iter().map(|t| t.rows).collect();
     if rows == 0 {
         return Ok(tables.iter().map(|_| Vec::new()).collect());
     }
-    let mut names: Vec<&str> = Vec::new();
-    for table in tables {
+    let mut names: Vec<String> = Vec::new();
+    for table in &tables {
         for (name, _) in &table.columns {
-            if !names.contains(&name.as_str()) {
-                names.push(name);
+            if !names.contains(name) {
+                names.push(name.clone());
             }
         }
     }
@@ -132,13 +156,13 @@ pub(crate) fn name_items(state: &AppState, tables: &[&Table]) -> Result<Vec<Vec<
         ..AddressTable::default()
     };
     for name in names {
-        let cells: Vec<Option<String>> = tables
-            .iter()
-            .flat_map(|table| match table.columns.iter().find(|(n, _)| n == name) {
-                Some((_, cells)) => cells.clone(),
-                None => vec![None; table.rows],
-            })
-            .collect();
+        let mut cells: Vec<Option<String>> = Vec::with_capacity(rows);
+        for table in &mut tables {
+            match table.columns.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, column)) => cells.append(column),
+                None => cells.resize(cells.len() + table.rows, None),
+            }
+        }
         if name == "tessera_id" {
             let ids = cells
                 .into_iter()
@@ -146,7 +170,7 @@ pub(crate) fn name_items(state: &AppState, tables: &[&Table]) -> Result<Vec<Vec<
                 .collect::<Result<_, _>>()?;
             merged.tessera_id = Some(ids);
         } else {
-            merged.unique.push((name.to_string(), cells));
+            merged.unique.push((name, cells));
         }
     }
     let verdicts = state.engine.name_items(&merged).map_err(map_engine_error)?;
@@ -155,9 +179,9 @@ pub(crate) fn name_items(state: &AppState, tables: &[&Table]) -> Result<Vec<Vec<
         Verdict::Refused(refusal) => Named::Refused(refusal.kind()),
         Verdict::Creates => unreachable!("a call that addresses items creates none"),
     });
-    Ok(tables
-        .iter()
-        .map(|table| verdicts.by_ref().take(table.rows).collect())
+    Ok(widths
+        .into_iter()
+        .map(|rows| verdicts.by_ref().take(rows).collect())
         .collect())
 }
 
