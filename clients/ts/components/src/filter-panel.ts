@@ -216,6 +216,9 @@ export class TesseraFilterPanel extends TesseraElement {
       [part~='add-option']:focus-visible {
         outline-offset: -2px;
       }
+      [part~='add-option'][aria-disabled='true'] {
+        cursor: default;
+      }
       .none {
         display: block;
         padding: 6px 8px;

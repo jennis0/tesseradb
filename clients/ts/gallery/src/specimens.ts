@@ -405,6 +405,15 @@ export const SECTIONS: Section[] = [
         }
       },
       {
+        state: 'Add filter open, clauses applied: the listed fields checked, the pinned one fixed',
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {pinned: 'field', 'controls-only': ''}),
+        ready: async (el) => {
+          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+          shadow(el, '[part="add"]')!.click();
+          await until(() => !!shadow(el, '[part="add-list"]'), 'the Add filter list');
+        }
+      },
+      {
         state: 'clauses applied: filter, highlight and member chips',
         build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})})
       },
