@@ -107,6 +107,72 @@ export function widenDomainOver(
 }
 
 /**
+ * A uniform sample of one numeric column's values among the marks drawn, for sizing points by
+ * rank. The store's `legend` projection holds one per column sized by, in `samples`. A value's rank
+ * is where it falls among `values`; the marks are themselves a sample of the viewer's visible set,
+ * so a rank is an estimate and is never shown as a statistic.
+ *
+ * @category Projections
+ */
+export type ValueSample = {
+  /** Up to {@link SAMPLE_SIZE} finite values, drawn uniformly from the marks seen, in ascending order. */
+  values: readonly number[];
+  /** How many marks with a finite value the sample was drawn from. */
+  seen: number;
+};
+
+/** The most values a {@link ValueSample} holds. @internal */
+export const SAMPLE_SIZE = 1024;
+
+/**
+ * A reservoir of values drawn uniformly from every mark offered to it, each band once. It publishes
+ * a sorted {@link ValueSample} when the marks seen have doubled since the last one, so sizes are
+ * rewritten a few times as a view fills and then hold still while the viewer pans.
+ *
+ * @internal
+ */
+export class ValueReservoir {
+  private held: number[] = [];
+  private seen = 0;
+  private published = 0;
+  private offered = new WeakSet<object>();
+  /** A fixed-seed generator, so one sequence of bands always gives one sample. */
+  private state = 0x2545f491;
+
+  /** Offer a column's values; a column offered before is skipped. */
+  offer(column: ScalarColumn): void {
+    if (this.offered.has(column)) return;
+    this.offered.add(column);
+    const values = numericValues(column);
+    if (!values) return;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i]!;
+      if (!Number.isFinite(v)) continue;
+      this.seen += 1;
+      if (this.held.length < SAMPLE_SIZE) this.held.push(v);
+      else {
+        const j = Math.floor(this.random() * this.seen);
+        if (j < SAMPLE_SIZE) this.held[j] = v;
+      }
+    }
+  }
+
+  /** The sample to publish, or null where the marks seen have not doubled since the last one. */
+  take(): ValueSample | null {
+    if (this.seen === 0 || this.seen < this.published * 2) return null;
+    this.published = this.seen;
+    return {values: [...this.held].sort((a, b) => a - b), seen: this.seen};
+  }
+
+  private random(): number {
+    this.state ^= this.state << 13;
+    this.state ^= this.state >>> 17;
+    this.state ^= this.state << 5;
+    return (this.state >>> 0) / 4294967296;
+  }
+}
+
+/**
  * Counts each code among the marks on screen. The served marks are a sample of the visible set,
  * which is enough to choose which values get a colour; the result is never shown as a count.
  *

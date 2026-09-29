@@ -1,5 +1,5 @@
 import type {Composition} from './compose.js';
-import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
+import {ValueReservoir, countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks, type ValueSample} from './encoding.js';
 import type {Masked} from './counts.js';
 import {refusalOf, type Refusal} from './presented.js';
 import type {CategoryValue, DeclaredScalar} from './types.js';
@@ -13,9 +13,10 @@ import type {CategoryValue, DeclaredScalar} from './types.js';
 export const CLUSTER_PREFIX = 'cluster:';
 
 /**
- * The colour column's legend, accumulated from the marks drawn, which are drawn from this viewer's
- * visible set. A category column gets ranks and names, a numeric column a domain, and colouring by
- * `cluster:<layer>` accumulates nothing. {@link Store.clear} empties it and keeps `colourBy`.
+ * The legend of the colour and size columns, accumulated from the marks drawn, which are drawn from
+ * this viewer's visible set. A category column gets ranks and names, a numeric column a domain, a
+ * column sized by a sample of its values too, and colouring by `cluster:<layer>` accumulates
+ * nothing. {@link Store.clear} empties it and keeps `colourBy` and `sizeBy`.
  *
  * @category Projections
  */
@@ -28,12 +29,16 @@ export type LegendProjection = {
   ranks: Record<string, Ranks>;
   /** The numeric range per column, widened as marks arrive and never narrowed. */
   domains: Record<string, Domain>;
+  /** A sample of the values drawn per column sized by, for sizing by rank. */
+  samples: Record<string, ValueSample>;
   /** The codes drawn, per category column, with their names as `/v1/categories` resolves them. */
   categories: Record<string, CategoryValue[]>;
   /** The refusal per category column whose names could not be fetched. A refused column is not asked again. */
   categoryErrors: Record<string, Refusal>;
   /** What the points are coloured by, as `setColourBy` last set it: a column, `cluster:<layer>`, or `null` for uniform. */
   colourBy: string | null;
+  /** The number column the points are sized by, as `setSizeBy` last set it, or `null` for one size. */
+  sizeBy: string | null;
   /**
    * Exact counts per category value, per column, by category key, over the viewer's current set,
    * for the count beside each legend entry. Not built yet: no route serves per-value counts, so the
@@ -42,13 +47,18 @@ export type LegendProjection = {
   counts?: Record<string, Record<string, Masked>>;
 };
 
+/** The legend with nothing accumulated and nothing chosen. */
+export const EMPTY_LEGEND: LegendProjection = {ranks: {}, domains: {}, samples: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null};
+
 /**
- * The colour column's legend, accumulated from the marks drawn: ranks and names for a category,
- * a domain for a number. A cluster colour accumulates nothing here, because the vis side resolves
- * it from the session artifact table.
+ * The legend of the colour and size columns, accumulated from the marks drawn: ranks and names for
+ * a category, a domain for a number, and a sample of the size column's values. A cluster colour
+ * accumulates nothing here, because the vis side resolves it from the session artifact table.
  */
 export class Legend {
-  private state: LegendProjection = {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null};
+  private state: LegendProjection = EMPTY_LEGEND;
+  /** The reservoir behind each column's sample, emptied with the samples by {@link clear}. */
+  private reservoirs = new Map<string, ValueReservoir>();
   /** Moved by {@link clear}, so names asked for before it are not taken. */
   private epoch = 0;
   private disposed = false;
@@ -67,46 +77,80 @@ export class Legend {
     this.set({...this.state, colourBy: column});
   }
 
-  /** Extend the legend of the colour column over one frame. */
+  get sizeBy(): string | null {
+    return this.state.sizeBy;
+  }
+
+  setSizeBy(column: string | null): void {
+    this.set({...this.state, sizeBy: column});
+  }
+
+  /** Extend the legend of the colour and size columns over one frame. */
   accumulate(frame: Composition, columns: readonly DeclaredScalar[]): void {
     const colourBy = this.state.colourBy;
-    if (!colourBy || colourBy.startsWith(CLUSTER_PREFIX)) return;
-    const column = columns.find((c) => c.name === colourBy);
-    if (!column) return;
-    if (column.category) {
-      const counts = new Map<number, number>();
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) for (const [code, n] of countCodesCached(values)) counts.set(code, (counts.get(code) ?? 0) + n);
-      }
-      // The stand-in pieces seed the ranks while this depth's own bands stream in.
-      if (counts.size === 0) for (const piece of frame.standIn) countCodesInPiece(counts, piece, colourBy);
-      if (counts.size === 0) return;
-      const ranks = extendRanks(this.state.ranks[colourBy] ?? {}, counts);
-      if (ranks !== this.state.ranks[colourBy]) {
-        this.set({...this.state, ranks: {...this.state.ranks, [colourBy]: ranks}});
-        void this.name(colourBy, counts);
-      }
-    } else {
-      let domain: Domain | null = this.state.domains[colourBy] ?? null;
-      for (const band of frame.exact) {
-        const values = band.scalars[colourBy];
-        if (values) domain = widenDomain(domain, values);
-      }
-      for (const piece of frame.standIn) {
-        const values = piece.band.scalars[colourBy];
-        if (values) domain = widenDomainOver(domain, values, piece.indices, piece.limit);
-      }
-      if (domain && domain !== this.state.domains[colourBy]) {
-        this.set({...this.state, domains: {...this.state.domains, [colourBy]: domain}});
-      }
+    const colour = colourBy && !colourBy.startsWith(CLUSTER_PREFIX) ? columns.find((c) => c.name === colourBy) : undefined;
+    if (colour?.category) this.accumulateCodes(frame, colour.name);
+    else if (colour) this.widen(frame, colour.name);
+    const size = columns.find((c) => c.name === this.state.sizeBy && !c.category);
+    if (size) {
+      if (size !== colour) this.widen(frame, size.name);
+      this.sample(frame, size.name);
     }
   }
 
-  /** Forget everything accumulated, keeping the colour column. */
+  /** Rank the codes of a category column drawn in the frame, and ask for the names of new ones. */
+  private accumulateCodes(frame: Composition, colourBy: string): void {
+    const counts = new Map<number, number>();
+    for (const band of frame.exact) {
+      const values = band.scalars[colourBy];
+      if (values) for (const [code, n] of countCodesCached(values)) counts.set(code, (counts.get(code) ?? 0) + n);
+    }
+    // The stand-in pieces seed the ranks while this depth's own bands stream in.
+    if (counts.size === 0) for (const piece of frame.standIn) countCodesInPiece(counts, piece, colourBy);
+    if (counts.size === 0) return;
+    const ranks = extendRanks(this.state.ranks[colourBy] ?? {}, counts);
+    if (ranks !== this.state.ranks[colourBy]) {
+      this.set({...this.state, ranks: {...this.state.ranks, [colourBy]: ranks}});
+      void this.name(colourBy, counts);
+    }
+  }
+
+  /** Widen a number column's domain over the frame's exact bands and stand-ins. */
+  private widen(frame: Composition, name: string): void {
+    let domain: Domain | null = this.state.domains[name] ?? null;
+    for (const band of frame.exact) {
+      const values = band.scalars[name];
+      if (values) domain = widenDomain(domain, values);
+    }
+    for (const piece of frame.standIn) {
+      const values = piece.band.scalars[name];
+      if (values) domain = widenDomainOver(domain, values, piece.indices, piece.limit);
+    }
+    if (domain && domain !== this.state.domains[name]) {
+      this.set({...this.state, domains: {...this.state.domains, [name]: domain}});
+    }
+  }
+
+  /** Offer the frame's exact bands to the column's sample, and publish it when it has grown enough. */
+  private sample(frame: Composition, name: string): void {
+    let reservoir = this.reservoirs.get(name);
+    if (!reservoir) {
+      reservoir = new ValueReservoir();
+      this.reservoirs.set(name, reservoir);
+    }
+    for (const band of frame.exact) {
+      const values = band.scalars[name];
+      if (values) reservoir.offer(values);
+    }
+    const taken = reservoir.take();
+    if (taken) this.set({...this.state, samples: {...this.state.samples, [name]: taken}});
+  }
+
+  /** Forget everything accumulated, keeping the colour and size columns. */
   clear(): void {
     this.epoch += 1;
-    this.set({ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: this.state.colourBy});
+    this.reservoirs.clear();
+    this.set({...EMPTY_LEGEND, colourBy: this.state.colourBy, sizeBy: this.state.sizeBy});
   }
 
   dispose(): void {

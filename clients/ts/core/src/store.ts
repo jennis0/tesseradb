@@ -13,7 +13,7 @@ import {composeFilters, emptyDraft, withoutClause, type ClauseVerb, type FilterD
 import {HeldRecords, HeldShapes} from './held.js';
 import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
-import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
+import {CLUSTER_PREFIX, EMPTY_LEGEND, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
 import {attachedTextOf} from './names.js';
 import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
@@ -183,7 +183,7 @@ export type Projections = {
   region: RegionProjection | null;
   /** The filter controls, the expressions composed from them, the `member_of` clauses and the typeahead. */
   filters: FiltersProjection;
-  /** The colour column's legend. */
+  /** The legend of the colour and size columns. */
   legend: LegendProjection;
   /** How much the store's tile cache holds. */
   replica: ReplicaProjection;
@@ -580,6 +580,13 @@ export interface Store {
    */
   setColourBy(column: string | null): void;
   /**
+   * Size points by a declared number column, or `null` for one size. Publishes `legend`, whose
+   * `domains` and `samples` then accumulate the column from the marks drawn. A `render` column
+   * arrives with every point, so choosing one sends no request. A column that is a category or is
+   * not rendered sizes nothing.
+   */
+  setSizeBy(column: string | null): void;
+  /**
    * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
    * use does nothing.
    */
@@ -830,7 +837,7 @@ export function createStore(options: StoreOptions): Store {
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
-    legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
+    legend: EMPTY_LEGEND,
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
   };
 
@@ -1127,8 +1134,8 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * After `meta` is read again, drop the host's inputs that name what it no longer offers: filter
-   * controls on columns it does not list, layers it does not list, and a colouring by a column or
-   * layer it does not list.
+   * controls on columns it does not list, layers it does not list, a colouring by a column or
+   * layer it does not list, and a sizing by a column it does not list.
    */
   function dropUnoffered(m: Meta): void {
     const columns = new Set(m.filterOperands.map((f) => f.column));
@@ -1153,6 +1160,8 @@ export function createStore(options: StoreOptions): Store {
         ? colourLayers(m.layers).some((l) => CLUSTER_PREFIX + l.name === colourBy)
         : m.declaredScalars.some((c) => c.name === colourBy));
     if (!offered) legend.setColourBy(null);
+    const sizeBy = legend.sizeBy;
+    if (sizeBy !== null && !m.declaredScalars.some((c) => c.name === sizeBy)) legend.setSizeBy(null);
   }
 
   function onStatus(status: PresentedStatus, refusal: Refusal | null): void {
@@ -1632,6 +1641,11 @@ export function createStore(options: StoreOptions): Store {
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
+  function setSizeBy(column: string | null): void {
+    legend.setSizeBy(column);
+    if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
+  }
+
   function setBudget(next: number): void {
     if (!Number.isFinite(next) || next <= 0) return;
     budget = next;
@@ -1822,6 +1836,7 @@ export function createStore(options: StoreOptions): Store {
     forgetSuggestions: (column) => suggestions.forget(column),
     setLayers,
     setColourBy,
+    setSizeBy,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
     setCurrentView,
