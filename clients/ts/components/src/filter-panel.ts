@@ -8,6 +8,7 @@ import {radioKeys} from './display.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {exportparts} from './parts.js';
+import {FloatingList} from './float.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './filter.js';
@@ -224,23 +225,22 @@ export class TesseraFilterPanel extends TesseraElement {
         color: var(--_tessera-ink-3);
       }
       .adder {
-        position: relative;
         padding: 10px var(--_tessera-panel-inline, 16px) 12px;
       }
       [part='add'] {
         height: auto;
         padding: 5px 10px;
       }
-      /* The list opens over what sits below it. */
+      /* The list opens over what sits below it, in the top layer. */
       [part='add-list'] {
-        position: absolute;
-        z-index: 6;
-        top: calc(100% - 8px);
-        left: var(--_tessera-panel-inline, 16px);
-        right: var(--_tessera-panel-inline, 16px);
-        max-height: 320px;
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
         overflow-y: auto;
         background: var(--_tessera-surface);
+        color: var(--_tessera-ink);
+        font-size: 13px;
         padding: 4px;
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius-control);
@@ -271,6 +271,10 @@ export class TesseraFilterPanel extends TesseraElement {
       }
       [part~='add-option'][aria-disabled='true'] {
         cursor: default;
+      }
+      .adder .anchor {
+        height: 0;
+        margin-bottom: 0;
       }
       [part~='add-option'] .kind {
         font-size: 12px;
@@ -313,6 +317,16 @@ export class TesseraFilterPanel extends TesseraElement {
 
   /** The control to open, scroll to and focus once the controls are drawn. */
   private editing: string | null = null;
+  private readonly floating = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="add-list"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.adder .anchor');
+    return list && anchor ? {list, anchor} : null;
+  });
+
+  override disconnectedCallback(): void {
+    this.floating.stop();
+    super.disconnectedCallback();
+  }
 
   /**
    * Set `mode` to `verb`, open `column`'s control, and scroll to and focus it once drawn. A host
@@ -339,6 +353,7 @@ export class TesseraFilterPanel extends TesseraElement {
 
   protected override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
+    this.floating.update();
     if (!this.editing || this.chipsOnly) return;
     const control = Array.from(this.renderRoot.querySelectorAll<HTMLElement & {updateComplete: Promise<unknown>}>('[part~="field"]'))
       .find((f) => (f.dataset.column ?? layerField(f.dataset.layer ?? '')) === this.editing)
@@ -527,9 +542,9 @@ export class TesseraFilterPanel extends TesseraElement {
                 this.adding = !this.adding;
                 this.addSearch = '';
                 this.addActive = 0;
-              }}>${icon('plus', 14, 1.4)}Add filter</button>
+              }}>${icon('plus', 14, 1.4)}Add filter</button><div class="anchor"></div>
             ${this.adding
-              ? html`<div part="add-list" id="add-list" @keydown=${(e: KeyboardEvent) => {
+              ? html`<div part="add-list" id="add-list" popover="manual" @keydown=${(e: KeyboardEvent) => {
                   if (e.key !== 'Escape') return;
                   e.stopPropagation();
                   this.adding = false;

@@ -5,6 +5,7 @@ import {artifactName, withMember, withoutMember, type AggregateSpec, type Browse
 import {refusalOf} from '@tesseradb/client/internal';
 import {HeldAggregate, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
+import {FloatingList} from './float.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
@@ -33,7 +34,7 @@ type Offer = {row: BrowseRow; path: string[] | null; beyond: boolean};
  * with several: under the store's filters without this layer's own filter clauses in the filter
  * position, so a cluster its clauses exclude is still counted, and under the whole filter in the
  * highlight position, where a cluster counted 0 cannot be chosen. A row shows no count until the
- * answer lands. The list opens over what sits below the box.
+ * answer lands. The list opens over what sits below the box, in the top layer.
  *
  * Choosing a row puts its clause on, with the row's name as the clause's label, and pressing a
  * chosen row takes it off. A chip names its cluster by its label, "Outside" before it where the
@@ -84,13 +85,12 @@ export class TesseraClusterFilter extends TesseraElement {
       .combo {
         position: relative;
       }
+      /* The list opens over what sits below the box, in the top layer. */
       [part='values'] {
-        position: absolute;
-        z-index: 5;
-        top: calc(100% + 4px);
-        left: 0;
-        right: 0;
-        max-height: 300px;
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
@@ -186,6 +186,11 @@ export class TesseraClusterFilter extends TesseraElement {
   @state() accessor refusal: Refusal | null = null;
 
   private readonly counts = new HeldAggregate('clusters');
+  private readonly floating = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="values"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.combo');
+    return list && anchor ? {list, anchor} : null;
+  });
   /** Every artifact's row as the field has met it, for names and parents. */
   private readonly rows = new Map<bigint, BrowseRow>();
   /** Each artifact's served parents as a children-form page gave them. */
@@ -210,6 +215,7 @@ export class TesseraClusterFilter extends TesseraElement {
     if (this.searchTimer) clearTimeout(this.searchTimer);
     this.searchTimer = null;
     this.counts.set(null, null);
+    this.floating.stop();
     super.disconnectedCallback();
   }
 
@@ -370,6 +376,7 @@ export class TesseraClusterFilter extends TesseraElement {
 
   protected override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
+    this.floating.update();
     const layer = this.declared();
     const offers = this.listed() ?? [];
     this.counts.set(this.resolvedStore, layer && offers.length > 0 ? countSpec(layer, offers, this.verb, this.resolvedStore?.get('meta')?.selection) : null);
@@ -430,7 +437,7 @@ export class TesseraClusterFilter extends TesseraElement {
             this.listOpen = false;
           }
         }} /></div>
-      ${open ? html`<div part="values" id="values" role="listbox" aria-label=${`${title} clusters`}>${repeat(offers, (o) => o.row.tesseraId, option)}</div>` : nothing}
+      ${open ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${title} clusters`}>${repeat(offers, (o) => o.row.tesseraId, option)}</div>` : nothing}
     </div>`;
     const typed = this.search.trim() !== '';
     const note = this.refusal

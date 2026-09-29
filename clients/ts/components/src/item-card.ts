@@ -21,9 +21,10 @@ import {chrome, tokens} from './tokens.js';
  * slot, `field-<name>`, so a host can render one as a link. The item is the store's selection
  * (`Store.pick`), or the `item` property.
  *
- * `compact` shows less: the headline, the field `subtitle-field` names under it, the first three
- * other fields, then "Show all N fields" beside Open. Show all lists every field, the views and the
- * group-scoped values, and the card scrolls inside itself past 300 px. A host's buttons in the
+ * `compact` shows less: the headline, cut at three lines, the field `subtitle-field` names under
+ * it, cut at two, the first three other fields, then "Show all N fields" beside Open. Show all
+ * lists every field, the views and the group-scoped values, which scroll inside the card past
+ * 300 px. A host's buttons in the
  * `actions` slot sit beside the close button.
  *
  * @summary The selected item's fields, with Open and Copy id.
@@ -94,6 +95,20 @@ export class TesseraItemCard extends TesseraElement {
       }
       :host([compact]) .card-title {
         font-size: 14px;
+      }
+      /* The compact card keeps its headline to three lines and its subtitle to two; Open shows them whole. */
+      :host([compact]) .card-title,
+      :host([compact]) [part='subtitle'] {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
+      :host([compact]) [part='subtitle'] {
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
       }
       :host([compact]) .body {
         max-height: 300px;

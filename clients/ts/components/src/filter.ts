@@ -3,6 +3,7 @@ import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@tesseradb/client';
 import {HeldAggregate, listedGroups, type GroupCount} from './aggregate.js';
+import {FloatingList} from './float.js';
 import {TesseraElement, columnCaption, emit, keyTitle, parseDateText, shortDateText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -149,14 +150,12 @@ export class TesseraFilter extends TesseraElement {
       .combo {
         position: relative;
       }
-      /* The suggestions open over what sits below the box. */
+      /* The suggestions open over what sits below the box, in the top layer. */
       [part='values'] {
-        position: absolute;
-        z-index: 5;
-        top: calc(100% + 4px);
-        left: 0;
-        right: 0;
-        max-height: 280px;
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
@@ -327,6 +326,11 @@ export class TesseraFilter extends TesseraElement {
   private sent: ColumnDraft | null = null;
   /** The commonest values under a category's box. */
   private readonly top = new HeldAggregate('filter');
+  private readonly floating = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="values"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.combo');
+    return list && anchor ? {list, anchor} : null;
+  });
   private typing: ReturnType<typeof setTimeout> | null = null;
   /** The change `typing` is waiting to send, so a change of position can send it first. */
   private pending: (() => void) | null = null;
@@ -394,6 +398,7 @@ export class TesseraFilter extends TesseraElement {
   override disconnectedCallback(): void {
     this.ask('');
     this.top.set(null, null);
+    this.floating.stop();
     super.disconnectedCallback();
   }
 
@@ -441,6 +446,7 @@ export class TesseraFilter extends TesseraElement {
   protected override updated(): void {
     if (this.draft && isPopulated(this.draft)) this.setAttribute('data-on', '');
     else this.removeAttribute('data-on');
+    this.floating.update();
     const category = this.isConnected && this.resolvedOperand?.family === 'category';
     this.top.set(
       this.resolvedStore,
@@ -625,7 +631,7 @@ export class TesseraFilter extends TesseraElement {
     };
     const list =
       rows.length > 0
-        ? html`<div part="values" id="values" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
         : nothing;
     const top = this.topValues();
     const topKeys = new Set(top?.values.map((v) => v.key) ?? []);

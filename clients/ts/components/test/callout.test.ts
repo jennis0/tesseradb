@@ -42,6 +42,17 @@ describe('placing a card beside its point', () => {
     expect(overlaps(leftCard)).toBe(false);
   });
 
+  it('slides along its side, still level with the point, to clear a card in the way', () => {
+    const map = {width: 900, height: 560};
+    const leftCard = {left: 12, top: 12, width: 300, height: 336};
+    const rightCard = {left: 616, top: 12, width: 272, height: 78};
+    const at = placeCallout([333, 150], CARD, map, [leftCard, rightCard])!;
+    expect(at.side).toBe('right');
+    expect(at.top).toBe(rightCard.top + rightCard.height + 8);
+    expect(at.top <= 150 && 150 <= at.top + CARD.height).toBe(true);
+    expect(at.leader.y2).toBe(150);
+  });
+
   it('hides while its point is off the map', () => {
     expect(placeCallout([-1, 300], CARD, MAP)).toBeNull();
     expect(placeCallout([300, 901], CARD, MAP)).toBeNull();

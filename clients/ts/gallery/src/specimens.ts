@@ -1,9 +1,9 @@
-import type {Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
+import type {AggregateSpec, Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
 import {NO_MASKED} from '@tesseradb/client';
 import type {TesseraMap} from '@tesseradb/components';
 import type {Colouring, Sizing} from '@tesseradb/deck';
 import {setColouring, setSizing} from '../../components/src/colouring.js';
-import {fakeStore, meta as baseMeta, settle, status, type FakeStore} from '../../components/test/fake-store.js';
+import {aggregateEntry, fakeStore, meta as baseMeta, settle, status, type AggregateRow, type FakeStore} from '../../components/test/fake-store.js';
 import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestionPage, topicArtifacts, withDraft} from './corpus.js';
 
 /**
@@ -36,9 +36,52 @@ function make<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<Reco
   return el;
 }
 
-/** A fake store holding the corpus's meta and a shown status, and whatever `over` names. */
-function store(over: Partial<Projections> = {}): FakeStore {
-  return fakeStore({meta: META, status: status({}), filters: filtersOf(emptyDraft()), ...over});
+/**
+ * A fake store holding the corpus's meta and a shown status, and whatever `over` names. It answers
+ * every aggregate registered with it from the corpus's made-up counts, as the server would, unless
+ * `answered` is false.
+ */
+function store(over: Partial<Projections> = {}, answered = true): FakeStore {
+  const s = fakeStore({meta: META, status: status({}), filters: filtersOf(emptyDraft()), ...over});
+  if (!answered) return s;
+  s.setAggregate = (id: string, spec: AggregateSpec | null) => {
+    s.calls.push({name: 'setAggregate', args: [id, spec]});
+    // Answered after the element's update, as a response lands.
+    queueMicrotask(() => {
+      const held = new Map(s.get('aggregates'));
+      if (spec === null) held.delete(id);
+      else held.set(id, aggregateOf(spec));
+      s.set('aggregates', held);
+    });
+  };
+  return s;
+}
+
+/** The corpus's figures: 16,431,000 papers, the fields shared out by rank, each artifact its masked count. */
+const CORPUS_TOTAL = 16_431_000;
+const FIELD_SHARES = [0.29, 0.22, 0.14, 0.09, 0.06, 0.05, 0.045, 0.035, 0.03, 0.02, 0.015];
+const ARTIFACT_COUNTS = new Map<string, number>([
+  ...[...Array(10).keys()].map((i) => [TOPIC(i).tesseraId.toString(), Number(TOPIC(i).maskedCount)] as [string, number]),
+  ...[0, 1, 2].map((i) => [AREA(i).tesseraId.toString(), Number(AREA(i).maskedCount)] as [string, number]),
+  ...[...VENUES.roots, ...VENUES.conferences].map((r) => [r.tesseraId.toString(), Number(r.maskedCount)] as [string, number])
+]);
+const fieldCount = (key: string) => Math.round(CORPUS_TOTAL * (FIELD_SHARES[MANY_FIELDS.findIndex((f) => f.key === key)] ?? 0.004));
+
+/** An answer to `spec` from the corpus's figures. */
+function aggregateOf(spec: AggregateSpec) {
+  return aggregateEntry(
+    spec.groupings.map((g) => {
+      const by = g.by;
+      let rows: AggregateRow[] = [];
+      if (by && 'field' in by) {
+        const keys = 'values' in by ? by.values : [...MANY_FIELDS].map((f) => f.key).sort((a, b) => fieldCount(b) - fieldCount(a)).slice(0, by.top);
+        rows = keys.map((key) => ({key, title: MANY_FIELDS.find((f) => f.key === key)?.title ?? null, count: fieldCount(key)}));
+        return {rows, groups: 'values' in by ? null : MANY_FIELDS.length, total: CORPUS_TOTAL};
+      }
+      if (by && 'artifacts' in by) rows = by.artifacts.map((id) => ({key: id, count: ARTIFACT_COUNTS.get(id.toString()) ?? 12_400}));
+      return {rows, total: CORPUS_TOTAL};
+    })
+  );
 }
 
 const SHOWN_VIEW = mapState().view;
@@ -282,13 +325,7 @@ export const SECTIONS: Section[] = [
         build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}))})})
       },
       {state: 'category, one value highlighted', build: () => make('tessera-legend', {store: legendStore('field', {filters: filtersOf(withDraft({}, {field: {family: 'category', keys: ['cs.CV']}}))})})},
-      {
-        state: 'category, with exact counts where a store holds them',
-        build: () =>
-          make('tessera-legend', {
-            store: store({legend: legendOf('field', {counts: {field: Object.fromEntries(FIELDS.map((v, i) => [v.key, {value: Math.round(4_812_300 / (i + 1.2)), exact: true}]))}})})
-          })
-      },
+      {state: 'category, before the counts are answered', build: () => make('tessera-legend', {store: store({legend: legendOf('field')}, false)})},
       {state: 'category, a chosen colour and the Okabe-Ito palette', build: () => make('tessera-legend', {store: legendStore('field', {}, {palette: 'okabe-ito', values: {field: {'cs.CV': '#6b3fa0'}}})})},
       {state: 'category, limit 4', build: () => make('tessera-legend', {store: legendStore('field')}, {limit: '4'})},
       {state: 'category, names loading', build: () => make('tessera-legend', {store: store({legend: legendOf('field', {categories: {}})})})},
@@ -531,8 +568,8 @@ export const SECTIONS: Section[] = [
         return make('tessera-artifact-list', {store: store({artifacts: {...a, served: [], lineage: {...a.lineage, roots: [], childrenOf: new Map()}}})});
       }},
       {
-        state: 'a tree, one opened',
-        build: () => make('tessera-artifact-list', {store: store({artifacts: mapState().artifacts, selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(1).tesseraId, detail: detail(TOPIC(1))}, artifactRefusal: null}})})
+        state: 'the deepest level served, one clause on a row',
+        build: () => make('tessera-artifact-list', {store: store({artifacts: mapState().artifacts, filters: filtersOf(emptyDraft(), {members: [{layer: 'topics', artifact: TOPIC(1).tesseraId, outside: false, verb: 'highlight'}]})})})
       },
       {state: 'more rows than it shows (rows=6)', build: () => make('tessera-artifact-list', {store: store({artifacts: mapState().artifacts})}, {rows: '6'})},
       {state: 'stale', build: () => make('tessera-artifact-list', {store: store({status: status({stale: true}), artifacts: mapState().artifacts})})}
@@ -670,32 +707,105 @@ function explorerSpecimens(): Specimen[] {
   const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
   // The host declares the dataset's title and which filters start listed; the explorer guesses neither.
   const named = {'dataset-title': 'arXiv abstracts', 'pinned-filters': 'field published_at abstract'};
-  const panelOf = (el: HTMLElement) => el.shadowRoot?.querySelector('[part="filters-popover"] tessera-filter-panel') ?? null;
-  const openFilters = async (el: HTMLElement) => {
-    await ready(el);
-    shadow(el, '[part="filters-toggle"]')?.click();
-    await until(() => !!panelOf(el)?.shadowRoot?.querySelector('[part="mode"]'), 'the filters panel');
+  const panelOf = (el: HTMLElement) => el.shadowRoot?.querySelector('[part="panel"] tessera-filter-panel, [part="sidebar"] tessera-filter-panel') ?? null;
+  const redraw = async (el: HTMLElement) => {
+    (el as HTMLElement & {requestUpdate(): void}).requestUpdate();
     await settle(el.parentElement!);
+    await frames(2);
+    // The callout measures itself and the cards it keeps clear of, then draws once more.
+    await settle(el.parentElement!);
+    await frames(2);
+  };
+  /** Pick `what` at `world`, as a click on the map does, once the map has drawn. */
+  const pickAt = (world: [number, number], what: 'item' | 'artifact' = 'item', id: bigint = paper().id) => async (el: HTMLElement) => {
+    await ready(el);
+    const map = (el as HTMLElementTagNameMap['tessera-explorer']).map!;
+    map.pickedAt = {kind: what, id, world};
+    // The ring a click draws round the picked point, which a click would set.
+    if (what === 'item') {
+      const clicked = map as unknown as {selectedWorldXY: [number, number] | null; paint(): void};
+      clicked.selectedWorldXY = world;
+      clicked.paint();
+    }
+    await redraw(el);
+  };
+  // Where the corpus's paper sits in the UMAP view, in world units.
+  const PAPER: [number, number] = [0.29 * 512, 0.27 * 512];
+  const topicsBrowse = (s: FakeStore) => {
+    const {areas, topics} = topicArtifacts();
+    s.setBrowse('roots', page(areas.map((a) => browseRow(a, null, 3))));
+    s.setBrowse('q:model', page(topics.filter((t) => /model/i.test(t.content[0] ?? '')).map((t) => browseRow(t))));
+    for (const t of topics) s.setBrowse(`p:${t.tesseraId}`, {artifacts: [], parents: areas.filter((a) => t.parentIds.includes(a.tesseraId)).map((a) => browseRow(a)), next: null});
+    return s;
+  };
+  const showField = (key: string, verb: 'filter' | 'highlight' = 'filter') => async (el: HTMLElement) => {
+    await ready(el);
+    await until(() => !!panelOf(el)?.shadowRoot?.querySelector('[part="mode"]'), 'the filter panel');
+    (panelOf(el) as HTMLElementTagNameMap['tessera-filter-panel']).show(key, verb);
+    await settle(el.parentElement!);
+    await frames(2);
   };
   return [
-    {state: 'docked, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked', ...named}, 900), ready},
-    {state: 'overlay, an item selected, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 900), ready},
-    {state: 'overlay, no dataset title, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay'}, 900), ready},
+    {state: 'docked, an item open beside its point, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'docked', ...named}, 900), ready: pickAt(PAPER)},
+    {state: 'overlay, an item open beside its point, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named, 'subtitle-field': 'authors'}, 900), ready: pickAt(PAPER)},
+    {state: 'overlay, no dataset title, nothing picked, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay'}, 900), ready},
     {
-      state: 'overlay, the filters open in Filter mode, 1440 × 900',
+      state: 'overlay, the item card showing all its fields, 1440 × 900',
       pinned: 1440,
-      build: (ctx) =>
-        explorer(
-          full(ctx, {
-            filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, published_at: {family: 'numeric', gte: Date.UTC(2019, 0, 1) * 1000, lte: Date.UTC(2025, 0, 1) * 1000 - 1}}, {abstract: {family: 'text', query: '"diffusion model"', phrase: false}}))
-          }),
-          {layout: 'overlay', ...named},
-          900
-        ),
-      ready: openFilters
+      build: (ctx) => explorer(full(ctx, {selection: {item: paper(true), itemRefusal: null, artifact: null, artifactRefusal: null}}), {layout: 'overlay', ...named, 'subtitle-field': 'authors'}, 900),
+      ready: async (el) => {
+        await pickAt(PAPER)(el);
+        const card = el.shadowRoot?.querySelector('[part~="callout"] tessera-item-card');
+        card?.shadowRoot?.querySelector<HTMLElement>('[part="show-all"]')?.click();
+        await redraw(el);
+      }
     },
     {
-      state: 'overlay, the filters open in Highlight mode, typing a value, 1440 × 900',
+      state: 'overlay, an item near the right card, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named, 'subtitle-field': 'authors'}, 900),
+      ready: pickAt([449, 171])
+    },
+    {
+      state: 'overlay, a cluster open beside it, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(full(ctx, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(0).tesseraId, detail: detail(TOPIC(0))}, artifactRefusal: null}}), {layout: 'overlay', ...named}, 900),
+      ready: pickAt([150, 140], 'artifact', TOPIC(0).tesseraId)
+    },
+    {
+      state: 'overlay, a cluster field typing a name, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(topicsBrowse(full(ctx)), {layout: 'overlay', ...named}, 900),
+      ready: async (el) => {
+        await showField('cluster:topics')(el);
+        const field = () => panelOf(el)?.shadowRoot?.querySelector('tessera-cluster-filter') ?? null;
+        await until(() => !!field()?.shadowRoot?.querySelector('[part="entry"]'), 'the cluster field');
+        const input = field()!.shadowRoot!.querySelector('input[part="entry"]') as HTMLInputElement;
+        input.focus();
+        input.value = 'model';
+        input.dispatchEvent(new Event('input'));
+        await until(() => (field()?.shadowRoot?.querySelectorAll('[part="path"]').length ?? 0) > 0, 'the matches and their paths');
+        await until(() => (field()?.shadowRoot?.querySelectorAll('[part="value-count"]').length ?? 0) > 0, 'the counts');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'overlay, a cluster field before typing: the top-level clusters by count, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(topicsBrowse(full(ctx)), {layout: 'overlay', ...named}, 900),
+      ready: async (el) => {
+        await showField('cluster:topics')(el);
+        const field = () => panelOf(el)?.shadowRoot?.querySelector('tessera-cluster-filter') ?? null;
+        await until(() => !!field()?.shadowRoot?.querySelector('[part="entry"]'), 'the cluster field');
+        const input = field()!.shadowRoot!.querySelector('input[part="entry"]') as HTMLInputElement;
+        input.focus();
+        input.dispatchEvent(new Event('focus'));
+        await until(() => (field()?.shadowRoot?.querySelectorAll('[part="value-count"]').length ?? 0) > 0, 'the top-level clusters');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'overlay, Highlight mode, typing a value, 1440 × 900',
       pinned: 1440,
       build: (ctx) =>
         explorer(
@@ -708,28 +818,25 @@ function explorerSpecimens(): Specimen[] {
           900
         ),
       ready: async (el) => {
-        await openFilters(el);
-        (panelOf(el) as HTMLElementTagNameMap['tessera-filter-panel']).show('field', 'highlight');
-        await settle(el.parentElement!);
+        await showField('field', 'highlight')(el);
         const control = panelOf(el)!.shadowRoot!.querySelector('tessera-filter[column="field"]') as HTMLElement;
         await typeInto('c')(control);
         await settle(el.parentElement!);
       }
     },
     {
-      state: 'overlay, a box selected, 1440 × 900',
+      state: 'overlay, a box selected: Colour and In view folded, 1440 × 900',
       pinned: 1440,
-      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 900),
+      build: (ctx) => explorer(full(ctx, {region: region()}), {layout: 'overlay', ...named}, 900),
       ready
     },
-    {state: 'compact container, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready},
+    {state: 'compact container, an item open, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named, 'subtitle-field': 'authors'}, 560), ready: pickAt(PAPER)},
     {
-      state: 'compact container, a box selected and an item open, 900 × 560',
+      state: 'compact container, a box selected, 900 × 560',
       pinned: 900,
-      build: (ctx) => explorer(full(ctx, {...item, region: region()}), {layout: 'overlay', ...named}, 560),
+      build: (ctx) => explorer(full(ctx, {region: region()}), {layout: 'overlay', ...named}, 560),
       ready
     },
-    {state: 'compact container, the filters open, 900 × 560', pinned: 900, build: (ctx) => explorer(full(ctx, item), {layout: 'overlay', ...named}, 560), ready: openFilters},
     {state: 'points over a smooth density, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth'}, 900), ready},
     {state: 'density only, smooth, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'smooth', 'no-points': ''}, 900), ready: readyFor(false)},
     {state: 'density only, hexagons, 1440 × 900', pinned: 1440, build: (ctx) => explorer(full(ctx), {layout: 'overlay', density: 'hex', 'no-points': ''}, 900), ready: readyFor(false)},
@@ -818,22 +925,26 @@ function explorerSpecimens(): Specimen[] {
       }
     },
     {
-      state: 'overlay, a topic opened, the filters, the sections and the layers open',
+      state: 'overlay, a topic opened where the map holds no position for it, and the layers open',
       wide: true,
       build: (ctx) => explorer(full(ctx, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(1).tesseraId, detail: detail(TOPIC(1))}, artifactRefusal: null}}), {layout: 'overlay'}),
       ready: async (el) => {
         await ready(el);
-        shadow(el, '[part="filters-toggle"]')?.click();
-        for (const section of el.shadowRoot?.querySelectorAll('details') ?? []) section.open = true;
         shadow(el, '[part="layers-toggle"]')?.click();
         await until(() => !!shadow(el, '[part="layers-popover"]'), 'the layers popover');
         await settle(el.parentElement!);
       }
     },
     {
-      state: 'narrow container, the filters sheet open',
-      pinned: 420,
-      build: (ctx) => explorer(full(ctx), {layout: 'docked'}),
+      state: 'narrow container, 390 × 844',
+      pinned: 390,
+      build: (ctx) => explorer(full(ctx, item), {layout: 'docked', ...named}, 844),
+      ready
+    },
+    {
+      state: 'narrow container, the filters sheet open, 390 × 844',
+      pinned: 390,
+      build: (ctx) => explorer(topicsBrowse(full(ctx)), {layout: 'docked', ...named}, 844),
       ready: async (el) => {
         await ready(el);
         await until(() => !!shadow(el, '[role="tab"][data-sheet="filters"]'), 'the filters tab');
