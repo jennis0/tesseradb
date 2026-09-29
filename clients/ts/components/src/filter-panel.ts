@@ -35,7 +35,8 @@ const MODES: [ClauseVerb, string][] = [
  * current position or the user opened or changed it, and otherwise a row reading "Any" that opens
  * it. Add filter lists every filterable column, with a search box, and the listed ones are checked.
  * Choosing an unchecked column lists and opens it. Choosing a checked one takes it off the panel and
- * empties its clause in both positions; a column in `pinned` stays, since the host lists it.
+ * empties its clause in both positions; a column in `pinned` stays, since the host lists it. Enter
+ * in the search box adds the first match not yet listed and never takes one off.
  *
  * Pressing a column's chip sets `mode` to the chip's position and opens, scrolls to and focuses
  * the column's control; under `chips-only`, where there are no controls, it fires
@@ -95,6 +96,8 @@ export class TesseraFilterPanel extends TesseraElement {
   @state() accessor adding = false;
   /** @internal */
   @state() accessor addSearch = '';
+  /** The Add filter option in the tab order, the one the arrow keys reached last. @internal */
+  @state() accessor addActive = 0;
 
   static override styles = [
     tokens,
@@ -375,7 +378,7 @@ export class TesseraFilterPanel extends TesseraElement {
       this.renderRoot.querySelector<HTMLElement>('[part="add-search"]')?.focus();
       return;
     }
-    items.forEach((item, j) => (item.tabIndex = j === next ? 0 : -1));
+    this.addActive = next;
     items[next]?.focus();
   }
 
@@ -439,6 +442,7 @@ export class TesseraFilterPanel extends TesseraElement {
     };
     const q = this.addSearch.trim().toLowerCase();
     const offered = operands.filter((o) => q === '' || o.column.toLowerCase().includes(q) || columnCaption(o.column).toLowerCase().includes(q));
+    const tabbed = this.addActive < offered.length ? this.addActive : 0;
     const choose = (column: string) => {
       if (!listed.some((o) => o.column === column)) this.add(column);
       else if (!pinned.has(column)) this.takeOff(column);
@@ -448,6 +452,7 @@ export class TesseraFilterPanel extends TesseraElement {
               @click=${() => {
                 this.adding = !this.adding;
                 this.addSearch = '';
+                this.addActive = 0;
               }}>${icon('plus', 14, 1.4)}Add filter</button>
             ${this.adding
               ? html`<div part="add-list" id="add-list" @keydown=${(e: KeyboardEvent) => {
@@ -457,14 +462,23 @@ export class TesseraFilterPanel extends TesseraElement {
                   this.renderRoot.querySelector<HTMLElement>('[part="add"]')?.focus();
                 }}>
                   <div class="input">${icon('search', 14)}<input part="add-search" type="search" autocomplete="off" placeholder="Find a field" aria-label="Find a field to filter" .value=${this.addSearch}
-                    @input=${(e: Event) => (this.addSearch = (e.target as HTMLInputElement).value)}
-                    @keydown=${(e: KeyboardEvent) => (e.key === 'Enter' && offered[0] ? choose(offered[0].column) : this.addKeys(e, null))} /></div>
+                    @input=${(e: Event) => {
+                      this.addSearch = (e.target as HTMLInputElement).value;
+                      this.addActive = 0;
+                    }}
+                    @keydown=${(e: KeyboardEvent) => {
+                      // Enter adds the first match not yet listed. Taking a field off is always a press on its row.
+                      if (e.key !== 'Enter') return this.addKeys(e, null);
+                      e.preventDefault();
+                      const unlisted = offered.find((o) => !listed.includes(o));
+                      if (unlisted) this.add(unlisted.column);
+                    }} /></div>
                   ${offered.length > 0
                     ? html`<div role="menu" aria-label="Fields">${offered.map((o, i) => {
                         const added = listed.includes(o);
                         const kept = added && pinned.has(o.column);
                         return html`<button part="add-option" type="button" role="menuitemcheckbox" data-column=${o.column} aria-checked=${added ? 'true' : 'false'}
-                          aria-disabled=${kept ? 'true' : nothing} title=${kept ? 'Always shown here' : added ? 'Remove from the panel' : nothing} tabindex=${i === 0 ? '0' : '-1'}
+                          aria-disabled=${kept ? 'true' : nothing} title=${kept ? 'Always shown here' : added ? 'Remove from the panel' : nothing} tabindex=${i === tabbed ? '0' : '-1'}
                           @click=${() => choose(o.column)} @keydown=${(e: KeyboardEvent) => this.addKeys(e, i)}>${columnCaption(o.column)}</button>`;
                       })}</div>`
                     : html`<span class="none">No field by that name</span>`}

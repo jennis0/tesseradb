@@ -461,6 +461,51 @@ describe('<tessera-filter-panel>', () => {
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(writes);
   });
 
+  it('adds the first unlisted match on Enter in the Add filter search, and never takes a field off', async () => {
+    const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {}};
+    const {host, store, fields} = await mountPanel(draft);
+    const enter = async (text: string) => {
+      (deep(host, '[part="add"]') as HTMLButtonElement).click();
+      await settle(host);
+      const search = deep(host, '[part="add-search"]') as HTMLInputElement;
+      search.value = text;
+      search.dispatchEvent(new Event('input'));
+      await settle(host);
+      search.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, composed: true}));
+      await settle(host);
+    };
+    // `archive` is listed and matches first; Enter passes over it to `title`.
+    await enter('i');
+    expect(fields()).toEqual([
+      ['archive', true],
+      ['title', true]
+    ]);
+    // Only listed fields match: Enter does nothing, and the clause stays.
+    await enter('archive');
+    expect(fields()).toEqual([
+      ['archive', true],
+      ['title', true]
+    ]);
+    expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(0);
+  });
+
+  it('puts the first match in the tab order again after the search changes', async () => {
+    const {host, panel} = await mountPanel(none());
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const search = deep(host, '[part="add-search"]') as HTMLInputElement;
+    const press = (key: string) => panel.shadowRoot!.activeElement!.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, composed: true}));
+    press('ArrowDown');
+    press('End');
+    await settle(host);
+    const tabbable = () => deepAll(host, '[part~="add-option"]').filter((o) => o.getAttribute('tabindex') === '0').map((o) => o.getAttribute('data-column'));
+    expect(tabbable()).toEqual(['submitted_at']);
+    search.value = 't';
+    search.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(tabbable()).toEqual(['title']);
+  });
+
   it('keeps a pinned field listed when it is chosen in Add filter', async () => {
     const {host, store, fields} = await mountPanel(none(), 'pinned="title"');
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
