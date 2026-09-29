@@ -870,3 +870,35 @@ require_member_visibility = "any"
     let no_item = refused(&report, "layer 'groups' members", "names_no_item").expect("reported");
     assert_eq!(no_item.rows, 1);
 }
+
+/// **A member a layer lists is outside `--limit` as a members file's row is**: reported as outside
+/// it, not refused, where a listed id below the limit that no row holds is refused.
+#[test]
+fn a_listed_member_outside_the_limit_is_reported_as_a_members_row_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(&dir.join("points.parquet"), &[Some(1), Some(2), Some(30)], Vec::new());
+    let declaration = ONE_VIEW.to_string()
+        + r#"
+[[layer]]
+name                      = "picked"
+views                     = ["s0"]
+membership                = "enumerated"
+value_set                 = "closed"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+artifacts                 = [{ key = "p", members = { a = [1, 30, 7] } }]
+"#;
+    let limited = |out: &str| BuildArgs {
+        limit: Some(10),
+        ..args(dir, &declaration, &dir.join(out))
+    };
+    let report = build(&limited("streamed")).expect("the streaming build runs");
+    let reference = build_in_memory(&limited("linear")).expect("the linear build runs");
+    assert_eq!(report.refused, reference.refused);
+    let object = "layer 'picked' memberships";
+    assert_eq!(refused(&report, object, "outside_limit").map(|e| e.rows), Some(1));
+    assert_eq!(refused(&report, object, "names_no_item").map(|e| e.rows), Some(1));
+}

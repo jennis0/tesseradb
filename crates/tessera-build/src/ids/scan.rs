@@ -71,39 +71,17 @@ impl<'a> FileRead<'a> {
         self.select.is_none() && self.limit.is_none()
     }
 
-    /// The row groups that can hold a row of the read: those a `--limit` cannot rule out from the
-    /// column's own statistics. In a file whose rows do not create items, a group holding a null
-    /// there is kept, its null rows being read.
+    /// The row groups that can hold a row of the read: in a file whose rows create items, those a
+    /// `--limit` cannot rule out from the column's own statistics. Every group of any other file
+    /// is read, so each row the limit leaves out is reported.
     pub(crate) fn kept_groups(&self) -> Option<Vec<usize>> {
-        let (column, below) = self.limit?;
+        let (column, below) = self.limit.filter(|_| self.creates)?;
         let index = self.groups.schema().column_with_name(column)?.0;
-        let meta = self.groups.metadata();
-        let kept = crate::input::prunable_row_groups(meta, index, Some(below));
-        Some(match self.creates {
-            true => kept,
-            false => (0..self.groups.count())
-                .filter(|group| {
-                    kept.binary_search(group).is_ok()
-                        || meta
-                            .row_group(*group)
-                            .column(index)
-                            .statistics()
-                            .and_then(|s| s.null_count_opt())
-                            .is_none_or(|nulls| nulls > 0)
-                })
-                .collect(),
-        })
-    }
-
-    /// How many rows of the groups [`Self::kept_groups`] leaves out: every one of them names an
-    /// item the limit left out, or would create one.
-    pub(crate) fn pruned_rows(&self) -> u64 {
-        match self.kept_groups() {
-            None => 0,
-            Some(kept) => kept.iter().fold(self.groups.rows(), |left, &group| {
-                left - self.groups.group_rows(group)
-            }),
-        }
+        Some(crate::input::prunable_row_groups(
+            self.groups.metadata(),
+            index,
+            Some(below),
+        ))
     }
 
     fn roots(&self) -> Result<Vec<usize>> {

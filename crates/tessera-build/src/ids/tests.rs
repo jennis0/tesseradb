@@ -459,45 +459,107 @@ require_member_visibility = "any"
   source = "members"
 "#;
 
+/// `columns` as a Parquet file of row groups of `rows_per_group` rows.
+fn write_grouped(path: &Path, columns: Vec<(&str, ArrayRef)>, rows_per_group: usize) {
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+        .collect();
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let batch =
+        RecordBatch::try_new(schema.clone(), columns.into_iter().map(|(_, a)| a).collect())
+            .unwrap();
+    let properties = parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_row_count(Some(rows_per_group))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(File::create(path).unwrap(), schema, Some(properties)).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// One points file and one members file keyed by `a`: the points' values from `points`, and each
+/// members row the value at its own position with probability `aligned` in 20, else a moved,
+/// repeated, null or unheld one.
+fn aligned_corpus(dir: &Path, seed: u64, points: &[Option<u64>], aligned: u64, groups: (usize, usize)) {
+    let mut draws = Draws(seed);
+    let rows = points.len();
+    let mut columns = vec![("a", Arc::new(UInt64Array::from(points.to_vec())) as ArrayRef)];
+    columns.extend(positions(rows));
+    write_grouped(&dir.join("world.parquet"), columns, groups.0);
+    let members: Vec<Option<u64>> = (0..rows + 40)
+        .map(|row| match draws.next(20) {
+            roll if roll < aligned => points.get(row).copied().flatten().or(Some(9)),
+            roll if roll == aligned => None,
+            roll if roll == aligned + 1 => Some(draws.next(1 << 40) * 7 + 5),
+            _ => points[draws.next(rows as u64) as usize],
+        })
+        .collect();
+    let keys: Vec<String> = (0..members.len()).map(|_| format!("k{}", draws.next(4))).collect();
+    write_grouped(
+        &dir.join("members.parquet"),
+        vec![
+            ("key", Arc::new(StringArray::from(keys))),
+            ("a", Arc::new(UInt64Array::from(members))),
+        ],
+        groups.1,
+    );
+    std::fs::write(dir.join("corpus.toml"), ALIGNED).unwrap();
+}
+
+fn same_as_the_rule(dir: &Path, trial: u64, what: &str) {
+    let args = args(dir, None);
+    let scratch = dir.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let streamed = super::stream::number_with(&args, &scratch, trial).expect("the sort-merge numbers");
+    let linear = super::linear::number(&args).expect("the rule numbers");
+    assert_eq!(numbers_of(&args, &streamed), numbers_of(&args, &linear), "{what}");
+    assert_eq!(streamed.refused, linear.refused, "{what}: refused");
+}
+
 /// **A members file in the points' own order is compared with them row by row**, and numbers
 /// what the rule does: rows at their own position, rows moved, repeated, null, naming no item and
-/// past the points' last row alike.
+/// past the points' last row alike, across row groups of different sizes in the two files.
 #[test]
 fn a_members_file_in_the_points_order_numbers_as_the_rule_does() {
-    for seed in 1..=6u64 {
+    let rows = 5_000usize;
+    // Distinct values in the points, so every points row creates an item with its value.
+    let points: Vec<Option<u64>> = (0..rows as u64).map(|i| Some(i * 7 + 3)).collect();
+    for seed in 1..=4u64 {
+        for groups in [(97, 131), (1 << 20, 64), (500, 500)] {
+            let tmp = tempfile::tempdir().unwrap();
+            aligned_corpus(tmp.path(), seed, &points, 16, groups);
+            same_as_the_rule(tmp.path(), 1 << 20, &format!("seed {seed}, groups {groups:?}"));
+        }
+    }
+}
+
+/// **The comparison stops where fewer than half the first rows match, whichever row reaches the
+/// trial's end**, and a file that stops being compared numbers as the rule does all the same.
+#[test]
+fn a_members_file_mostly_out_of_order_stops_being_compared() {
+    let rows = 3_000usize;
+    let points: Vec<Option<u64>> = (0..rows as u64).map(|i| Some(i * 7 + 3)).collect();
+    for seed in 1..=3u64 {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let mut draws = Draws(seed);
-        let rows = 5_000usize;
-        // Distinct values in the points, so every points row creates an item with its value.
-        let ids: Vec<u64> = (0..rows as u64).map(|i| i * 7 + 3).collect();
-        let mut columns = vec![("a", Arc::new(UInt64Array::from(ids.clone())) as ArrayRef)];
-        columns.extend(positions(rows));
-        write(&dir.join("world.parquet"), columns);
-        let members: Vec<Option<u64>> = (0..rows + 40)
-            .map(|row| match draws.next(20) {
-                0 => None,
-                1 => Some(ids[draws.next(rows as u64) as usize]),
-                2 => Some(draws.next(1 << 40) * 7 + 5),
-                _ => ids.get(row).copied().or(Some(9)),
-            })
-            .collect();
-        let keys: Vec<String> = (0..members.len()).map(|_| format!("k{}", draws.next(4))).collect();
-        write(
-            &dir.join("members.parquet"),
-            vec![
-                ("key", Arc::new(StringArray::from(keys))),
-                ("a", Arc::new(UInt64Array::from(members))),
-            ],
-        );
-        std::fs::write(dir.join("corpus.toml"), ALIGNED).unwrap();
-        let args = args(dir, None);
-        let scratch = dir.join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        let streamed = super::stream::number(&args, &scratch).expect("the sort-merge numbers");
-        let linear = super::linear::number(&args).expect("the rule numbers");
-        assert_eq!(numbers_of(&args, &streamed), numbers_of(&args, &linear), "seed {seed}");
-        assert_eq!(streamed.refused, linear.refused, "seed {seed}: refused");
-        assert!(!streamed.refused.is_empty(), "seed {seed} plants refusals");
+        aligned_corpus(tmp.path(), seed, &points, 7, (256, 300));
+        for trial in [1, 2, 3, 40, 41, 64, 1 << 20] {
+            same_as_the_rule(tmp.path(), trial, &format!("seed {seed}, trial {trial}"));
+        }
+    }
+}
+
+/// **Points that refuse a row are not compared with**: their rows are not items `base + row`, so
+/// the members file goes through the sort, and numbers as the rule does.
+#[test]
+fn points_refusing_a_row_are_not_compared_with() {
+    let rows = 2_000usize;
+    let mut points: Vec<Option<u64>> = (0..rows as u64).map(|i| Some(i * 7 + 3)).collect();
+    points[700] = points[10];
+    points[900] = None;
+    for seed in 1..=3u64 {
+        let tmp = tempfile::tempdir().unwrap();
+        aligned_corpus(tmp.path(), seed, &points, 16, (128, 200));
+        same_as_the_rule(tmp.path(), 1 << 20, &format!("seed {seed}"));
     }
 }

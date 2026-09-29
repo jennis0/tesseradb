@@ -80,7 +80,6 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                         limit.as_ref(),
                         read.batch == Batch::Creates,
                     );
-                    outside.count("outside_limit", file.pruned_rows());
                     if read.batch != Batch::Creates {
                         resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
                             BuildError::Invalid(super::no_identifier(&read.object, path))
@@ -113,8 +112,19 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                     (identities, None)
                 }
                 ReadInput::Lists(lists) => (
-                    (0..lists.len())
+                    {
+                        let scanned = Limit::lists(limit.as_ref(), lists);
+                        for (member, &out) in scanned.outside.iter().flatten().enumerate() {
+                            if out {
+                                outside.refuse("outside_limit", member as u64);
+                            }
+                        }
+                        let selected = scanned.selected;
+                        (0..lists.len())
                         .map(|member| {
+                            if selected.as_ref().is_some_and(|s| !s[member]) {
+                                return None;
+                            }
                             Some(RowIdentity {
                                 tessera_id: None,
                                 unique: lists
@@ -127,7 +137,8 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                                     .collect(),
                             })
                         })
-                        .collect(),
+                        .collect()
+                    },
                     Some(lists.texts.clone()),
                 ),
             };

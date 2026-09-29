@@ -402,6 +402,40 @@ impl Limit {
         }
     }
 
+    /// A layer's listed members as one scan: every member, and where the lists carry the limit's
+    /// attribute, those whose value is at or above it left out as outside the limit.
+    pub(crate) fn lists(limit: Option<&Limit>, lists: &crate::layers::MemberLists) -> scan::Scanned {
+        let len = lists.len();
+        let outside: Option<Vec<bool>> = limit.and_then(|limit| {
+            let at = lists.carried.iter().position(|f| f.position == limit.position)?;
+            let signed = tessera_store::unique::KeyKind::of(lists.carried[at].ty)
+                == Some(tessera_store::unique::KeyKind::Signed);
+            Some(
+                lists.keys[at]
+                    .iter()
+                    .map(|key| match key {
+                        Some(tessera_store::unique::UniqueKey::Int(key)) => {
+                            let value = match signed {
+                                true => tessera_store::key_index::signed_value(*key) as u64,
+                                false => *key,
+                            };
+                            value >= limit.below
+                        }
+                        _ => false,
+                    })
+                    .collect(),
+            )
+        });
+        scan::Scanned {
+            first: 0,
+            len,
+            selected: outside.as_ref().map(|o| o.iter().map(|&out| !out).collect()),
+            keys: lists.keys.clone(),
+            outside,
+            tessera: None,
+        }
+    }
+
     /// The column a file keeps the limit's attribute in, where it carries it.
     pub fn column<'a>(&self, carried: &'a [CarriedField]) -> Option<&'a str> {
         carried

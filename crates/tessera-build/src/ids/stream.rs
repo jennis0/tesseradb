@@ -59,6 +59,16 @@ const SORT_MAX: u64 = 4 << 30;
 
 /// Number every file of the build.
 pub(crate) fn number(args: &crate::BuildArgs, tmp: &Path) -> Result<Numbering> {
+    number_with(args, tmp, ZIP_TRIAL)
+}
+
+/// [`number`], a names file compared row by row with its creating file for `zip_trial` rows before
+/// one in which fewer than half matched stops being compared.
+pub(super) fn number_with(
+    args: &crate::BuildArgs,
+    tmp: &Path,
+    zip_trial: u64,
+) -> Result<Numbering> {
     let budget = args
         .memory_budget
         .unwrap_or_else(crate::pipeline::detect_memory_budget);
@@ -67,6 +77,7 @@ pub(crate) fn number(args: &crate::BuildArgs, tmp: &Path) -> Result<Numbering> {
         tmp: tmp.to_path_buf(),
         sort_bytes: (budget / SORT_SHARE).clamp(SORT_MIN, SORT_MAX) as usize,
         held: BTreeMap::new(),
+        zip_trial,
         next: 0,
         sequence: 0,
     };
@@ -117,6 +128,8 @@ struct HeldRun {
 struct ZipSource {
     path: PathBuf,
     field: CarriedField,
+    /// Its rows when it was numbered.
+    rows: u64,
 }
 
 /// One field's keys of a file, row after row, decoded on a thread of their own.
@@ -136,6 +149,15 @@ impl KeyStream {
             .spawn(move || {
                 let read = || -> Result<()> {
                     let groups = FileGroups::open(&source.path)?;
+                    if groups.rows() != source.rows {
+                        return Err(BuildError::Invalid(format!(
+                            "{} changed while the build read it: it held {} rows and holds {}. \
+                             Build again from files that do not change",
+                            source.path.display(),
+                            source.rows,
+                            groups.rows()
+                        )));
+                    }
                     let (index, _) = groups
                         .schema()
                         .column_with_name(&source.field.column)
@@ -201,6 +223,8 @@ struct Pass {
     tmp: PathBuf,
     sort_bytes: usize,
     held: BTreeMap<u16, Vec<HeldRun>>,
+    /// [`ZIP_TRIAL`], lowered by tests.
+    zip_trial: u64,
     next: u64,
     sequence: u64,
 }
@@ -278,7 +302,7 @@ impl Pass {
                 let name = self.name("numbers");
                 Rows::Mapped(MappedArray::zeroed(&self.tmp, &name, total as usize)?)
             }
-            Input::Lists(_) => Rows::Held(vec![0; total as usize]),
+            Input::Lists(..) => Rows::Held(vec![0; total as usize]),
         })
     }
 
@@ -347,7 +371,7 @@ impl Pass {
                 ))
             }
             ReadInput::Lists(lists) => {
-                let (rows, tally) = self.number_rows(read, Input::Lists(lists))?;
+                let (rows, tally) = self.number_rows(read, Input::Lists(lists, limit))?;
                 let refused = tally.finish(&read.source, &read.object, |row| {
                     lists.texts[row as usize].clone()
                 });
@@ -364,7 +388,7 @@ impl Pass {
                 file.takes_every_row(),
                 file.tessera,
             ),
-            Input::Lists(lists) => (lists.carried.as_slice(), lists.len() as u64, true, false),
+            Input::Lists(lists, _) => (lists.carried.as_slice(), lists.len() as u64, true, false),
         };
         let base = self.next;
         let creates = read.batch == Batch::Creates;
@@ -372,14 +396,6 @@ impl Pass {
         let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
         let one_row_per_item = read.batch != Batch::Names;
         let mut tally = Tally::default();
-        // Checked before a row is numbered, so no number is written past what a bundle holds.
-        if creates && base + total > ITEMS_MAX {
-            return Err(BuildError::Invalid(format!(
-                "this build's files could create {} items, over the {ITEMS_MAX} one bundle holds. \
-                 Build fewer rows, with --limit or smaller files",
-                base + total
-            )));
-        }
 
         // A file of new items with nothing to name them by: each row is the next item.
         if creates && carried.is_empty() && !tessera && takes_every_row {
@@ -411,9 +427,6 @@ impl Pass {
                 })
             })
             .collect::<Result<_>>()?;
-        if let Input::File(file) = &input {
-            tally.count("outside_limit", file.pruned_rows());
-        }
         // A names file carrying the one field a single creating file set, compared with that file
         // row by row: a row whose value is the one at its position there names that row's item.
         let zip = match (&input, read.batch) {
@@ -456,15 +469,18 @@ impl Pass {
                 if let (Some((stream, zip_base)), Some(numbers)) = (zip.as_mut(), numbers.as_deref_mut()) {
                     if let Some(key) = scanned.keys[0][offset] {
                         compared += 1;
-                        if stream.key_at(row)? == Some(Some(key)) {
+                        let hit = stream.key_at(row)? == Some(Some(key));
+                        if hit {
                             numbers[row as usize] = *zip_base + row as u32 + 1;
                             matched += 1;
+                        }
+                        if compared == self.zip_trial && matched * 2 < compared {
+                            zip = None;
+                        }
+                        if hit {
                             continue;
                         }
                     }
-                }
-                if compared == ZIP_TRIAL && matched * 2 < compared {
-                    zip = None;
                 }
                 for (sort, keys) in sorts.iter_mut().zip(&scanned.keys) {
                     if let Some(key) = keys[offset] {
@@ -477,14 +493,7 @@ impl Pass {
         match &input {
             Input::File(file) if ordered => file.scan_ordered(&mut on_batch)?,
             Input::File(file) => file.scan(&mut on_batch)?,
-            Input::Lists(lists) => on_batch(Scanned {
-                first: 0,
-                len: lists.len(),
-                selected: None,
-                keys: lists.keys.clone(),
-                outside: None,
-                tessera: None,
-            })?,
+            Input::Lists(lists, limit) => on_batch(Limit::lists(*limit, lists))?,
         }
 
         // ---- 2. merge each field against what earlier files hold ------------------------------
@@ -520,8 +529,9 @@ impl Pass {
                         Input::File(file) => Some(ZipSource {
                             path: file.path.to_path_buf(),
                             field: field.clone(),
+                            rows: total,
                         }),
-                        Input::Lists(_) => None,
+                        Input::Lists(..) => None,
                     };
                     self.held.entry(field.position).or_default().push(HeldRun {
                         receipt: unset,
@@ -614,7 +624,7 @@ impl Pass {
                 }
             }
             for (row, number) in numbers.iter_mut().enumerate() {
-                numbering.decide(number, row as u64, &mut tally);
+                numbering.decide(number, row as u64, &mut tally)?;
             }
             numbering.created.seal();
         }
@@ -626,20 +636,17 @@ impl Pass {
             let numbers = rows.slice();
             for (field, outcome) in carried.iter().zip(merged) {
                 let Some(unset) = outcome.unset else { continue };
-                let path = self.scratch("held");
                 let kind = KeyKind::of(field.ty).expect("a unique field has a key kind");
-                let (run, retired) = match kind {
-                    KeyKind::Keyword => {
-                        set_values::<u128>(&unset, &path, numbers, &created, base as u32)?
-                    }
-                    _ => set_values::<u64>(&unset, &path, numbers, &created, base as u32)?,
+                let (runs, retired) = match kind {
+                    KeyKind::Keyword => self.set_values::<u128>(&unset, numbers, &created, base)?,
+                    _ => self.set_values::<u64>(&unset, numbers, &created, base)?,
                 };
                 let _ = std::fs::remove_file(&unset.path);
                 let held_before = self.held.get(&field.position).is_some_and(|runs| !runs.is_empty());
                 if held_before && !retired.is_empty() {
                     self.retire(field.position, kind, &retired)?;
                 }
-                self.held.entry(field.position).or_default().push(run);
+                self.held.entry(field.position).or_default().extend(runs);
             }
         }
         let (named, mixed) = numbering.anchor;
@@ -656,6 +663,7 @@ impl Pass {
 
     /// A file whose row `r` is item `base + r`, every row of it.
     fn offset(&mut self, base: u64, total: u64) -> Result<ReadRows> {
+        check_cap(base + total)?;
         self.next = base + total;
         use rayon::prelude::*;
         let mixed = (base..base + total)
@@ -670,8 +678,82 @@ impl Pass {
         })
     }
 
+    /// Turn a file's unset `(key, row)` into runs of `(key, item)` for the rows the rule accepted,
+    /// and name the items whose value of this field changed.
+    ///
+    /// A created row's item is its rank among the file's created rows. Every other row's item is
+    /// its number, which is looked up a partition by row at a time, so the file's numbers are read
+    /// in order; what that finds is sorted back into key order. So a file of edits costs two
+    /// sequential passes over its values and no random reads.
+    fn set_values<K: Key>(
+        &mut self,
+        unset: &RunReceipt,
+        numbers: &[u32],
+        created: &Created,
+        base: u64,
+    ) -> Result<(Vec<HeldRun>, croaring::Bitmap)> {
+        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let created_path = self.scratch("held");
+        let mut created_run = RunWriter::<K>::create(&created_path)?;
+        let by_row_path = self.scratch("named-by-row");
+        std::fs::create_dir_all(&by_row_path).map_err(|e| BuildError::io(&by_row_path, e))?;
+        let total = numbers.len() as u64;
+        let boundaries = boundaries_uniform(total);
+        let mut by_row = Partition::create(&by_row_path, "row", boundaries, 4 + K::WIDTH, total)?;
+        let mut reader = RunReader::<K>::open(unset)?;
+        let mut record = [0u8; 20];
+        while let Some((key, row)) = reader.next_entry()? {
+            let row64 = u64::from(row);
+            if created.contains(row64) {
+                created_run.push(key, (base + created.rank(row64)) as u32)?;
+                continue;
+            }
+            record[..4].copy_from_slice(&row.to_le_bytes());
+            key.write(&mut record[4..4 + K::WIDTH]);
+            by_row.push(&record[..4 + K::WIDTH])?;
+        }
+        let buckets = by_row.buckets();
+        let by_row = by_row.finish()?;
+        let mut named = KeySpill::<K>::create(&self.tmp, self.sort_bytes).map_err(store)?;
+        let mut retired = croaring::Bitmap::new();
+        for k in 0..buckets {
+            let bytes = by_row.load(k)?;
+            for entry in bytes.chunks_exact(4 + K::WIDTH) {
+                let row = u32::from_le_bytes(entry[..4].try_into().expect("four bytes"));
+                // A row naming an item and giving it a value it did not hold: its old one goes.
+                let Some(item) = numbers[row as usize].checked_sub(1) else {
+                    continue;
+                };
+                retired.add(item);
+                named.push(K::read(&entry[4..]), item).map_err(store)?;
+            }
+        }
+        drop(by_row);
+        let _ = std::fs::remove_dir(&by_row_path);
+        let named_path = self.scratch("held");
+        let mut named_run = RunWriter::<K>::create(&named_path)?;
+        named
+            .drain(|key, item| {
+                named_run
+                    .push(key, item)
+                    .map_err(|e| tessera_store::StoreError::MalformedBundle {
+                        detail: e.to_string(),
+                    })
+            })
+            .map_err(store)?;
+        let runs = [created_run.finish()?, named_run.finish()?]
+            .into_iter()
+            .map(|receipt| HeldRun {
+                receipt,
+                base: None,
+                source: None,
+            })
+            .collect();
+        Ok((runs, retired))
+    }
+
     /// Drop the holdings of `items` from every run of one field: their values changed.
-    fn retire(&mut self, position: u16, kind: KeyKind, items: &[u32]) -> Result<()> {
+    fn retire(&mut self, position: u16, kind: KeyKind, items: &croaring::Bitmap) -> Result<()> {
         let runs = std::mem::take(self.held.entry(position).or_default());
         let mut kept = Vec::with_capacity(runs.len());
         for run in runs {
@@ -690,7 +772,7 @@ impl Pass {
 /// Where a file's rows come from.
 enum Input<'a> {
     File(&'a FileRead<'a>),
-    Lists(&'a crate::layers::MemberLists),
+    Lists(&'a crate::layers::MemberLists, Option<&'a Limit>),
 }
 
 /// What the rule lets a file's rows do, for the merge of one field.
@@ -866,9 +948,10 @@ impl FileNumbers {
     }
 
     /// Decide a row the rule left pending, and count a row naming an item.
-    fn decide(&mut self, stored: &mut u32, row: u64, tally: &mut Tally) {
+    fn decide(&mut self, stored: &mut u32, row: u64, tally: &mut Tally) -> Result<()> {
         if *stored == PENDING {
             if self.creates {
+                check_cap(self.base + self.created.count + 1)?;
                 *stored = (self.base + self.created.count) as u32 + 1;
                 self.created.mark(row);
             } else {
@@ -880,7 +963,20 @@ impl FileNumbers {
             self.anchor.0 += 1;
             self.anchor.1 = self.anchor.1.wrapping_add(mix64(u64::from(number)));
         }
+        Ok(())
     }
+}
+
+/// Refuse a build creating more than `items` items where a bundle holds fewer, before the number
+/// past the last is written.
+fn check_cap(items: u64) -> Result<()> {
+    if items > ITEMS_MAX {
+        return Err(BuildError::Invalid(format!(
+            "this build's files create more than the {ITEMS_MAX} items one bundle holds. Build \
+             fewer rows, with --limit or smaller files"
+        )));
+    }
+    Ok(())
 }
 
 /// Which rows of a file created items, and how many before each: a created row's number is the
@@ -974,7 +1070,7 @@ fn walk(
             }
             if let Some(numbering) = numbering.as_deref_mut() {
                 for row in u64::from(lo)..hi {
-                    numbering.decide(&mut numbers[row as usize], row, tally);
+                    numbering.decide(&mut numbers[row as usize], row, tally)?;
                 }
             }
             continue;
@@ -994,7 +1090,7 @@ fn walk(
                 decide_row(stored, row, &hits[start..at], tally, named_items)?;
             }
             if let Some(numbering) = numbering.as_deref_mut() {
-                numbering.decide(stored, row, tally);
+                numbering.decide(stored, row, tally)?;
             }
         }
     }
@@ -1053,52 +1149,13 @@ fn decide_row(
     Ok(())
 }
 
-/// Turn a file's unset `(key, row)` into a run of `(key, item)` for the rows the rule accepted,
-/// and name the items whose value of this field changed.
-fn set_values<K: Key>(
-    unset: &RunReceipt,
-    path: &Path,
-    numbers: &[u32],
-    created: &Created,
-    base: u32,
-) -> Result<(HeldRun, Vec<u32>)> {
-    let mut reader = RunReader::<K>::open(unset)?;
-    let mut writer = RunWriter::<K>::create(path)?;
-    let mut retired: Vec<u32> = Vec::new();
-    while let Some((key, row)) = reader.next_entry()? {
-        let row = u64::from(row);
-        let item = match created.contains(row) {
-            true => base + created.rank(row) as u32,
-            false => match numbers[row as usize].checked_sub(1) {
-                // A row naming an item and giving it a value it did not hold: its old one goes.
-                Some(item) => {
-                    retired.push(item);
-                    item
-                }
-                None => continue,
-            },
-        };
-        writer.push(key, item)?;
-    }
-    retired.sort_unstable();
-    retired.dedup();
-    Ok((
-        HeldRun {
-            receipt: writer.finish()?,
-            base: None,
-            source: None,
-        },
-        retired,
-    ))
-}
-
 /// A copy of one held run without the entries of `items`.
-fn filter_run<K: Key>(run: &HeldRun, path: &Path, items: &[u32]) -> Result<HeldRun> {
+fn filter_run<K: Key>(run: &HeldRun, path: &Path, items: &croaring::Bitmap) -> Result<HeldRun> {
     let mut reader = RunReader::<K>::open(&run.receipt)?;
     let mut writer = RunWriter::<K>::create(path)?;
     while let Some((key, value)) = reader.next_entry()? {
         let item = run.base.map_or(value, |base| base + value);
-        if items.binary_search(&item).is_ok() {
+        if items.contains(item) {
             continue;
         }
         writer.push(key, value)?;
