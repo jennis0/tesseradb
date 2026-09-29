@@ -44,6 +44,10 @@ FRAME_RECORDS_HEAD = 6
 FRAME_RECORDS = 7
 FRAME_PAGE_END = 8
 
+#: The frame kind of a `POST /v1/aggregate` table head, which comes before a table's first page in
+#: each response. The body has no head of its own; its other frames are the items read's.
+FRAME_TABLE_HEAD = 9
+
 
 def _read_exactly(stream, size: int) -> Optional[bytearray]:
     """`size` bytes of `stream`, or `None` where the stream ends or its connection fails first.
@@ -633,6 +637,18 @@ class Selection:
             options["filters"] = expression
         return read(self._view, fields, **options)
 
+    def aggregate(self, groupings: Sequence[dict], reference: Optional[dict] = None) -> list:
+        """How the items in this selection are distributed, as one pyarrow table per grouping.
+
+        The selection's filters and box are sent as the request's `filters`, so each table counts
+        the items `count()` counts. `groupings` and `reference` are as `Viewer.aggregate` takes
+        them.
+
+            papers = db.view("papers").filter({"year": {"range": {"gte": 2020}}})
+            [size, venues] = papers.aggregate([{}, {"by": {"field": "venue", "top": 10}}])
+        """
+        return self._reader().aggregate(self._view, groupings, self._expression(), reference)
+
     def map(
         self,
         colour_by: Optional[str] = None,
@@ -951,6 +967,112 @@ class Viewer:
         request.update({key: value for key, value in given.items() if value is not None})
         read = Batches(self, route, request)
         return read if batches else read.read_all()
+
+    def aggregate(
+        self,
+        view: str,
+        groupings: Sequence[dict],
+        filters: Optional[dict] = None,
+        reference: Optional[dict] = None,
+    ) -> list:
+        """How the items this reader may see in `view` are distributed: one pyarrow table of
+        exact counts per grouping, in the order of `groupings`.
+
+        - `view`: the view the counts are taken in. An item with no position in it is not
+          counted.
+        - `groupings`: one dictionary per table. `{}` is the size of the set. `"by"` groups the
+          items by a category field, `{"field": name, "top": n}` or `{"field": name, "values":
+          [key, ...]}`, or by the artifacts of one level of a layer, `{"layer": name, "level": k,
+          "top": n}` or `{"layer": name, "level": k, "artifacts": [tessera_id, ...]}`. `"cells"`
+          divides the set, or each group, into the view's cells at a depth from 0 to 32,
+          `{"depth": d}`, optionally only those meeting a box, `{"depth": d, "area": [x0, y0, x1,
+          y1]}`.
+        - `filters`: the set counted, as `Selection.filter` takes an expression. Without it, every
+          item this reader may see in the view.
+        - `reference`: a second set to compare with, drawn from what this reader may see. `{}` is
+          everything this reader may see in the view. Each table then also has `reference_count`
+          and `lift`.
+
+        A table's columns are, where they apply: `group` (`listed`, `rest` or `none`), `key` (a
+        category's key or an artifact's `tessera_id`), `title`, `cell` (the cell's Morton
+        prefix), `count`, `reference_count` and `lift`. Its schema metadata `tessera.head` is the
+        table's figures as JSON: `grouping`, `total` (the items in the set), `reference_total`
+        with a reference, and `groups` (the groups in the set before the cut to `top` or the
+        names given) with `"by"`. `tessera.recomposed` is `"true"` where a page counted a
+        different state of the database from the page before it, and `tessera.region` is the
+        server's region verdict where a filter had a `region` leaf.
+
+        The server answers a page at a time, and each response ends with a cursor for the next.
+        This requests responses until none is left and joins each table's pages. A refusal, and a
+        response cut short, raise `Refusal`. `.to_pandas()` on a table gives a DataFrame.
+
+            [size, venues] = v.aggregate("papers", [{}, {"by": {"field": "venue", "top": 10}}])
+            venues.to_pandas()
+            v.aggregate("papers", [{"cells": {"depth": 6}}], filters={"year": {"eq": 2023}}, reference={})
+        """
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+
+        request: dict = {"view": view, "groupings": list(groupings)}
+        if filters is not None:
+            request["filters"] = filters
+        if reference is not None:
+            request["reference"] = reference
+        what = "POST /v1/aggregate"
+        heads: dict = {}
+        pages: dict = {}
+        recomposed = False
+        region = None
+        cursor = None
+        while True:
+            body = request if cursor is None else {**request, "cursor": cursor}
+            table, pending, trailer, carried = None, None, None, [0, 0]
+            with self._open("POST", "/v1/aggregate", body) as response:
+                region = region or response.headers.get("x-tessera-region")
+                for kind, payload in _frames(response):
+                    if kind == FRAME_TABLE_HEAD:
+                        head = json.loads(payload)
+                        table = head["grouping"]
+                        # The first head's figures, whose page chose the groups listed.
+                        heads.setdefault(table, head)
+                        pages.setdefault(table, [])
+                    elif kind == FRAME_RECORDS:
+                        if table is None:
+                            raise Refusal(f"{what}: a page arrived before any table head")
+                        pending = ipc.open_stream(payload).read_next_batch()
+                    elif kind == FRAME_PAGE_END:
+                        if pending is None:
+                            raise Refusal(f"{what}: a page end has no page before it")
+                        pages[table].append(pending)
+                        carried = [carried[0] + 1, carried[1] + pending.num_rows]
+                        pending = None
+                    elif kind == FRAME_TRAILER:
+                        trailer = json.loads(payload)
+                    else:
+                        raise Refusal(f"{what}: a frame has the unknown kind {kind}")
+            if trailer is None:
+                raise Refusal(f"{what}: the response ended before its trailer, so it is incomplete")
+            if [trailer["pages"], trailer["rows"]] != carried:
+                raise Refusal(
+                    f"{what}: the trailer counts {trailer['pages']} pages and {trailer['rows']} "
+                    f"rows, but the body carried {carried[0]} and {carried[1]}"
+                )
+            recomposed = recomposed or trailer.get("recomposed") is True
+            cursor = trailer["next"]
+            if cursor is None:
+                break
+        tables = []
+        for grouping in sorted(pages):
+            figures = {key: value for key, value in heads[grouping].items() if key != "resumed"}
+            metadata = {
+                "tessera.head": json.dumps(figures),
+                "tessera.recomposed": "true" if recomposed else "false",
+            }
+            if region is not None:
+                metadata["tessera.region"] = region
+            joined = pa.Table.from_batches(pages[grouping]).unify_dictionaries()
+            tables.append(joined.replace_schema_metadata(metadata))
+        return tables
 
     def categories(
         self,

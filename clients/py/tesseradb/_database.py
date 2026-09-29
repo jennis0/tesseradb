@@ -1533,6 +1533,22 @@ class Database:
         self._refuse_before_the_first_commit("artifacts")
         return self.viewer().artifacts(view, layer, fields, **options)
 
+    def aggregate(
+        self,
+        view: str,
+        groupings: Sequence[dict],
+        filters: dict | None = None,
+        reference: dict | None = None,
+    ) -> list:
+        """How the items in `view` are distributed, as one pyarrow table of counts per grouping.
+
+        This is `Viewer.aggregate` as this database's own reader, which sees every item.
+
+            [size, venues] = db.aggregate("papers", [{}, {"by": {"field": "venue", "top": 10}}])
+        """
+        self._refuse_before_the_first_commit("aggregate")
+        return self.viewer().aggregate(view, groupings, filters, reference)
+
     def view(self, name: str) -> Selection:
         """The whole of one view, as this database's own reader sees it: every item.
 
