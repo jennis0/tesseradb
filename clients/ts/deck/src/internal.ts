@@ -7,4 +7,5 @@ export {MarkSlab} from './slab.js';
 export {artifactOfMark} from './pick.js';
 export {UNMAPPED, colourOfFraction, colourOfRank, css, encodingSignature, fractionOf, hexOf, lighter, paletteValues, rampAt, rgbOfHex, valueAtFraction} from './colour.js';
 export {DENSITY_COLOUR_TITLES, densityStops} from './density.js';
+export {radiusAt, sizeEncodingOf, sizeFraction, sizesPoints, valueAtSize, writeSizes, type SizeEncoding} from './size.js';
 export {hoverAt, type ContourShape} from './contours.js';

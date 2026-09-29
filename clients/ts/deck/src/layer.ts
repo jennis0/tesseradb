@@ -28,7 +28,8 @@ import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidat
 import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
-import {deckOpacity, markStyle} from './marks-style.js';
+import {ANTIALIAS_ABOVE_PX, deckOpacity, markStyle} from './marks-style.js';
+import {DEFAULT_SIZING, buildSizeAttribute, sizeEncodingOf, sizeSignature, type SizeEncoding, type Sizing} from './size.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
@@ -58,9 +59,10 @@ export type TesseraLayerProps = CompositeLayerProps & {
    */
   meta?: Meta | null;
   /**
-   * The colouring, in place of the store's `legend`. Its `colourBy` names a column, or
-   * `cluster:<layer>` to colour each mark by the artifact it belongs to. Defaults to `null`, which
-   * draws every mark in one colour.
+   * The colouring and sizing, in place of the store's `legend`. Its `colourBy` names a column, or
+   * `cluster:<layer>` to colour each mark by the artifact it belongs to, and its `sizeBy` a number
+   * column to size each mark by. Defaults to `null`, which draws every mark in one colour and one
+   * size.
    */
   legend?: LegendProjection | null;
   /**
@@ -122,9 +124,15 @@ export type TesseraLayerProps = CompositeLayerProps & {
   /**
    * A fixed mark radius in pixels. Defaults to `null`, which sizes marks by how many are drawn and
    * by the zoom: 1.7 px at a hundred marks or fewer down to 1.1 px at a million, plus 0.05 px per
-   * zoom level up to zoom 10.
+   * zoom level up to zoom 10. Under the legend's `sizeBy`, `sizing` sizes the marks in its place.
    */
   radius?: number | null;
+  /**
+   * The smallest and largest radius and the scale a number column sizes marks on, under the
+   * legend's `sizeBy`. A mark with no value draws at the smallest radius as a ring. Defaults to
+   * {@link DEFAULT_SIZING}.
+   */
+  sizing?: Sizing;
   /**
    * A fixed mark alpha from 0 to 1, as a fraction of the colour's own alpha. Defaults to `null`,
    * which sets it by how many marks are drawn: 0.78 at a hundred or fewer down to 0.34 at a
@@ -317,7 +325,8 @@ function gpuAttributes(gpu: GpuSlab): AttributeMap {
       instanceFillColors: {buffer: gpu.colours, size: 4, type: 'unorm8', stride: 4, offset: 0},
       instancePickingColors: {buffer: gpu.picking, size: 4, type: 'uint8', stride: 4, offset: 0},
       instanceOrdinals: {buffer: gpu.ordinals, size: 1, type: 'float32', stride: 4, offset: 0},
-      instanceHighlights: {buffer: gpu.highlights, size: 1, type: 'float32', stride: 4, offset: 0}
+      instanceHighlights: {buffer: gpu.highlights, size: 1, type: 'float32', stride: 4, offset: 0},
+      instanceSizes: {buffer: gpu.sizes, size: 1, type: 'float32', stride: 4, offset: 0}
     };
     gpuDescriptors.set(gpu, held);
   }
@@ -328,6 +337,8 @@ function gpuAttributes(gpu: GpuSlab): AttributeMap {
 const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>();
 /** The stand-in colours, once per (buffers, encoding). */
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
+/** The stand-in size fractions, once per (buffers, size encoding). */
+const heldStandInSizes = new WeakMap<object, {key: string; sizes: Float32Array}>();
 /** `marks` objects whose slab-residency check has run. */
 const checkedMarks = new WeakSet<object>();
 /** What a wash is built for: one `tiles` object, at one depth, reading one count, in one set of colours. */
@@ -779,6 +790,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     densityColours: null,
     densityStrength: 1,
     colouring: DEFAULT_COLOURING,
+    sizing: DEFAULT_SIZING,
     pickable: true,
     onDrawn: null,
     onTimings: null
@@ -969,8 +981,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const membershipLayer = clusterLayer ?? r.artifacts?.layers[0] ?? '';
     const useLut = clusterLayer !== null && lut.gpu !== null;
     const highlighting = this.props.highlighting ?? false;
+    const sizing = this.props.sizing ?? DEFAULT_SIZING;
+    const size = sizeEncodingOf(r.meta, r.legend, sizing.scale);
+    const sized = size.kind !== 'none';
     const slabStarted = performance.now();
-    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer);
+    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer, size);
     timings.slabMs = performance.now() - slabStarted;
 
     if (!checkedMarks.has(r.marks)) {
@@ -986,8 +1001,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
 
     layers.push(...this.densityLayers(r, timings));
 
-    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer);
+    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer, sized ? size.column : null);
     const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null, this.props.pointOpacity ?? null);
+    // Under sizing the layer's radius is the largest, and each mark's own is a fraction of it.
+    const radius = sized ? sizing.max : style.radius;
+    const antialiasing = sized ? sizing.min >= ANTIALIAS_ABOVE_PX : style.antialiasing;
+    const sizeRange = sized ? {min: sizing.min, max: sizing.max} : null;
     const opacity = deckOpacity(style.alpha);
     const dullColour = DULL_COLOUR[this.props.scheme ?? 'dark'];
     timings.markRadius = style.radius;
@@ -1004,6 +1023,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     // Stand-ins draw like any other mark, at the same alpha and through the same texture: each is
     // a served point with its served ordinal. No count is shown for a non-exact tile.
     const colours = this.standInColours(standIn, encoding, encodingKey);
+    const sizes = this.standInSizes(standIn, size);
     if (colours.length !== standIn.count * 4) {
       throw new Error(
         `colour buffer covers ${colours.length / 4} of ${standIn.count} stand-in marks. Colour is presentation and must never decide what is drawn.`
@@ -1026,7 +1046,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
                       getPosition: binary(held.draw.positions, 2),
                       getFillColor: binary(held.draw.colours, 4, true),
                       getOrdinal: binary(held.draw.ordinals, 1),
-                      getHighlight: binary(held.draw.highlights, 1)
+                      getHighlight: binary(held.draw.highlights, 1),
+                      getSize: binary(held.draw.sizes, 1)
                     }
               },
               tesseraIds: held.draw.ids,
@@ -1036,10 +1057,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
               highlightPass: pass,
               dullColour,
               lutTexture: lut.gpu,
+              sizing: sizeRange,
               radiusUnits: 'pixels' as const,
-              getRadius: style.radius,
+              getRadius: radius,
               radiusMinPixels: 1,
-              antialiasing: style.antialiasing,
+              antialiasing,
               opacity,
               // Each mark is drawn by one of the dull and lit passes, which pick; the glow does not.
               pickable: this.props.pickable && held.active && pass !== 'glow',
@@ -1059,7 +1081,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
                 getPosition: binary(standIn.positions, 2),
                 getFillColor: binary(colours, 4, true),
                 getOrdinal: binary(standIn.ordinals, 1),
-                getHighlight: binary(standIn.highlights, 1)
+                getHighlight: binary(standIn.highlights, 1),
+                getSize: binary(sizes, 1)
               }
             },
             tesseraIds: standIn.ids,
@@ -1069,10 +1092,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
             highlightPass: pass,
             dullColour,
             lutTexture: lut.gpu,
+            sizing: sizeRange,
             radiusUnits: 'pixels' as const,
-            getRadius: style.radius,
+            getRadius: radius,
             radiusMinPixels: 1,
-            antialiasing: style.antialiasing,
+            antialiasing,
             opacity,
             pickable: this.props.pickable && pass !== 'glow',
             parameters: {depthCompare: 'always' as const}
@@ -1132,11 +1156,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     return layers;
   }
 
-  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string): StandInBuffers {
-    const key = `${colourBy ?? ''}|${layer}`;
+  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string, sizeBy: string | null): StandInBuffers {
+    const key = `${colourBy ?? ''}|${layer}|${sizeBy ?? ''}`;
     const held = heldStandIn.get(marks.standIn);
     if (held && held.key === key) return held.buffers;
-    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : [], layer);
+    const buffers = materialiseStandIn(marks.standIn, new Set([colourBy, sizeBy].filter((c): c is string => c !== null)), layer);
     heldStandIn.set(marks.standIn, {key, buffers});
     return buffers;
   }
@@ -1147,6 +1171,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const colours = buildColourAttribute(standIn.count, standIn.scalars, encoding);
     heldStandInColours.set(standIn, {key, colours});
     return colours;
+  }
+
+  private standInSizes(standIn: StandInBuffers, size: SizeEncoding): Float32Array {
+    const key = sizeSignature(size);
+    const held = heldStandInSizes.get(standIn);
+    if (held && held.key === key) return held.sizes;
+    const sizes = buildSizeAttribute(standIn.count, standIn.scalars, size);
+    heldStandInSizes.set(standIn, {key, sizes});
+    return sizes;
   }
 
   /**
