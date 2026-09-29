@@ -55,10 +55,12 @@ def _layer() -> dict:
 
 
 def grow(server, **body) -> requests.Response:
-    """`PATCH /control/layers/{name}/artifacts` — one growth into one level. The harness carries
-    no helper for the verb, so the request is spelled here."""
+    """`PATCH /control/layers/{name}/artifacts` — one growth into one level, refused whole at a
+    member the identity rule refuses. The harness carries no helper for the verb, so the request
+    is spelled here."""
     return requests.patch(
         f"{server.control_base}/control/layers/{LAYER}/artifacts",
+        params={"strict": "true"},
         headers={"Authorization": f"Bearer {server.operator_credential}"},
         json=body,
         timeout=60,
@@ -104,12 +106,14 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
 
     resp = server.register_layer(_layer())
     assert resp.status_code == 201, resp.text
-    resp = server.publish_artifacts(LAYER, artifacts=[{"key": "whole", "members": slices[0]}])
+    resp = server.publish_artifacts(
+        LAYER, artifacts=[{"key": "whole", "members": {"tessera_id": slices[0]}}], strict=True
+    )
     assert resp.status_code == 201, resp.text
     tessera_id = resp.json()["artifacts"][0]["tessera_id"]
 
     for joining in slices[1:]:
-        resp = grow(server, artifacts=[{"key": "whole", "members": joining}])
+        resp = grow(server, artifacts=[{"key": "whole", "members": {"tessera_id": joining}}])
         assert resp.status_code == 200, resp.text
         (row,) = resp.json()["artifacts"]
         assert (row["key"], row["tessera_id"], row["joined"]) == ("whole", tessera_id, len(joining)), row
@@ -119,7 +123,7 @@ def test_a_membership_grown_in_slices_serves_the_union_inside_each_principals_ma
         assert served_count(server, terms) == expected, terms
 
     # Re-sending a slice names the artifact and adds nothing.
-    resp = grow(server, artifacts=[{"key": "whole", "members": slices[1]}])
+    resp = grow(server, artifacts=[{"key": "whole", "members": {"tessera_id": slices[1]}}])
     assert resp.status_code == 200, resp.text
     assert resp.json()["artifacts"][0]["joined"] == 0
     assert served_count(server, ["1", "2"]) == len(points)
@@ -136,8 +140,8 @@ def test_an_unknown_key_refuses_the_batch_with_nothing_applied(growth_server):
     resp = grow(
         server,
         artifacts=[
-            {"key": "whole", "members": ids[:5]},
-            {"key": "never-published", "members": ids[5:10]},
+            {"key": "whole", "members": {"tessera_id": ids[:5]}},
+            {"key": "never-published", "members": {"tessera_id": ids[5:10]}},
         ],
     )
     assert resp.status_code == 422, resp.text

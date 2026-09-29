@@ -189,7 +189,7 @@ fn built_gid(source: u64) -> u64 {
 /// any row changes one.
 fn built_entities(engine: &Engine) -> BTreeMap<u64, u64> {
     let gids: Vec<String> = (0..BUILT).map(|s| built_gid(s).to_string()).collect();
-    let found = engine.resolve_unique_values("gid", &gids).unwrap();
+    let found = unique_holders(engine, "gid", &gids).unwrap();
     (0..BUILT)
         .zip(found)
         .map(|(source, entity)| (source, entity.expect("a built item holds its gid").raw()))
@@ -1109,6 +1109,8 @@ impl Run {
                 view: view.map(str::to_string),
                 rows,
                 artifacts: Default::default(),
+                strict: true,
+                tessera_id_column: false,
             })
     }
 
@@ -1149,7 +1151,7 @@ impl Run {
                     );
                 }
                 self.check_receipt(&expect, &receipt, &batch_id);
-                let ids: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
+                let ids: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
                 self.model.apply(view, &rows, &expect, &ids);
                 self.renumber(&expect, &ids);
                 self.sent.push(Sent {
@@ -1220,7 +1222,7 @@ impl Run {
             if let Expect::Unchanged(named) | Expect::Added(named) | Expect::Edited(named) = expect
             {
                 assert_eq!(
-                    tid.raw(),
+                    tid.expect("an accepted row has a tessera_id").raw(),
                     *named,
                     "{batch_id} answers the named item's tessera_id"
                 );
@@ -1249,7 +1251,7 @@ impl Run {
         let expected = self.model.decide(view.as_deref(), &model_rows);
         match answered {
             Ok(receipt) if receipt.replayed => {
-                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
+                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
                 assert_eq!(
                     got, ids,
                     "a replay of {batch_id} answers its first tessera_ids"
@@ -1264,7 +1266,7 @@ impl Run {
                     )
                 });
                 self.check_receipt(&expect, &receipt, &batch_id);
-                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.raw()).collect();
+                let got: Vec<u64> = receipt.tessera_ids.iter().map(|t| t.expect("an accepted row has a tessera_id").raw()).collect();
                 self.model
                     .apply(view.as_deref(), &model_rows, &expect, &got);
                 self.renumber(&expect, &got);
@@ -2180,13 +2182,15 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
                 view: Some(view.to_string()),
                 rows,
                 artifacts: Default::default(),
+                strict: false,
+                tessera_id_column: false,
             })
             .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
     };
     // `older` is given an entity between two items of the other view, so that view's segment spans
     // it with no row.
     send(&engine, "before", VIEWS[1], vec![row((20.0, 20.0))]);
-    let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).tessera_ids[0];
+    let older = send(&engine, "older", VIEWS[0], vec![row((10.0, 10.0))]).tessera_ids[0].expect("an accepted row has a tessera_id");
     send(&engine, "after", VIEWS[1], vec![row((25.0, 25.0))]);
     publish_buffered(&engine);
     let entity = |engine: &Engine| engine.resolve_tessera_ids(&[older]).unwrap()[0];
@@ -2224,7 +2228,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
     };
     let added = send(&engine, "add-older", VIEWS[1], vec![joining]);
     assert_eq!((added.added, added.edited), (1, 0));
-    assert_eq!(added.tessera_ids, vec![older], "the item keeps its tessera_id");
+    assert_eq!(added.tessera_ids, vec![Some(older)], "the item keeps its tessera_id");
     assert_eq!(entity(&engine), first, "and its entity");
     assert_eq!(
         placed(&engine),

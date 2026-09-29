@@ -84,9 +84,12 @@ mod ingest_rows {
                 view,
                 rows,
                 artifacts,
+                strict: true,
+                tessera_id_column: false,
             })?;
             let entities = self
-                .resolve_tessera_ids(&receipt.tessera_ids).unwrap()
+                .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .unwrap()
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
                 .collect();
@@ -556,7 +559,7 @@ pub fn item_of_id(
     engine: &Engine,
     source: u64,
 ) -> Result<Option<EntityId>, tessera_engine::EngineError> {
-    Ok(engine.resolve_unique_values("id", &[source.to_string()])?[0])
+    Ok(unique_holders(engine, "id", &[source.to_string()])?[0])
 }
 
 /// The `id` a test gives the item it calls `key`: a stable hash with the top bit set, so it names
@@ -576,7 +579,7 @@ pub fn keyed(key: &str) -> Vec<tessera_lifecycle::wal::WalScalar> {
 
 /// The live item holding the `id` of `key`, if any.
 pub fn item_of_key(engine: &Engine, key: &str) -> Option<EntityId> {
-    engine.resolve_unique_values("id", &[key_id(key).to_string()]).unwrap()[0]
+    unique_holders(engine, "id", &[key_id(key).to_string()]).unwrap()[0]
 }
 
 /// An engine with its write executor running.
@@ -728,4 +731,33 @@ pub fn subset_credential() -> Vec<u8> {
 
 pub fn zero_credential() -> Vec<u8> {
     br#"{"terms": []}"#.to_vec()
+}
+
+/// The item each of `values` names in the unique field `field`, `None` for a value naming none,
+/// asked of [`tessera_engine::Engine::name_items`].
+pub fn unique_holders(
+    engine: &tessera_engine::Engine,
+    field: &str,
+    values: &[String],
+) -> Result<Vec<Option<tessera_types::EntityId>>, tessera_engine::EngineError> {
+    let table = tessera_engine::AddressTable {
+        rows: values.len(),
+        tessera_id: None,
+        columns: vec![(
+            field.to_string(),
+            values
+                .iter()
+                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .collect(),
+        )],
+    };
+    Ok(engine
+        .name_items(&table)?
+        .verdicts
+        .into_iter()
+        .map(|verdict| match verdict {
+            tessera_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            _ => None,
+        })
+        .collect())
 }

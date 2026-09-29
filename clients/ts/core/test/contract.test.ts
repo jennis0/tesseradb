@@ -129,8 +129,8 @@ const CONTROL_CALLS: Record<string, (c: Control) => Promise<unknown>> = {
   dropView: (c) => c.dropView('quarter', 'q1'),
   declareLayer: (c) => c.declareLayer({}),
   dropLayer: (c) => c.dropLayer('clusters'),
-  publish: (c) => c.publish('clusters', {}),
-  grow: (c) => c.grow('clusters', {})
+  publish: (c) => c.publish('clusters', {artifacts: []}),
+  grow: (c) => c.grow('clusters', {artifacts: []})
 };
 
 const methodOf = (operation: string) => REACHED_AS[operation] ?? operation;

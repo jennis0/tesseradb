@@ -246,8 +246,10 @@ class Publication:
         access_column: str | None = None,
     ):
         self.table = in_parent_order(roster_table(roster))
-        #: The unique field every member, as a decimal value, is named by.
+        #: The unique field every member, as a decimal value, is named by: the one column of every
+        #: member table sent.
         self.field = field
+        self._table_head = b"{" + json.dumps(field).encode() + b":"
         #: The struct field a roster's own `members` list holds the unique field's value in.
         self.member_field = member_field
         #: The roster column naming the view each artifact belongs to, on a group-scoped layer.
@@ -480,9 +482,9 @@ class Publication:
     def _grow_body(self, level: int, i: int, members: np.ndarray) -> bytes:
         """One growth of roster row `i`, naming its view on a group-scoped layer."""
         return (
-            b'{"level":' + str(level).encode() + b',"field":' + json.dumps(self.field).encode()
+            b'{"level":' + str(level).encode()
             + b',"artifacts":[{"key":' + json.dumps(self.rows[i]["key"]).encode() + self._view(i)
-            + b',"members":' + json_list(members) + b"}]}"
+            + b',"members":' + self._table(members) + b"}]}"
         )
 
     def _grow_slices(self, level: int, i: int, members: np.ndarray):
@@ -532,10 +534,11 @@ class Publication:
             ).encode()
         tail += b"}"
         # Sized before anything large is built, so a declined artifact's list is never assembled.
-        fixed = len(head) + len(tail) + len(self._body(0, [b""]))
+        wrap = len(self._table_head) + 1
+        fixed = len(head) + wrap + len(tail) + len(self._body(0, [b""]))
         if content_heads:
             fixed += len(b',"content":[') + 1 + sum(
-                len(h) + json_list_bytes(g) + 2 for h, g in content_heads
+                len(h) + wrap + json_list_bytes(g) + 2 for h, g in content_heads
             )
         budget = self.max_bytes - fixed
         if budget < json_list_bytes(EMPTY_ENTITIES):
@@ -549,20 +552,20 @@ class Publication:
         remainder = None
         if fit < len(members):
             members, remainder = members[:fit], members[fit:]
-        parts = [head, json_list(members)]
+        parts = [head, self._table(members)]
         if content_heads:
             parts.append(b',"content":[')
-            parts.append(b",".join(h + json_list(g) + b"}" for h, g in content_heads))
+            parts.append(b",".join(h + self._table(g) + b"}" for h, g in content_heads))
             parts.append(b"]")
         parts.append(tail)
         return b"".join(parts), len(members), len(parents), remainder
 
+    def _table(self, entities: np.ndarray) -> bytes:
+        """A member table of one column, the unique field, holding `entities`."""
+        return self._table_head + json_list(entities) + b"}"
+
     def _body(self, level: int, blocks: list[bytes]) -> bytes:
-        return (
-            b'{"level":' + str(level).encode() + b',"field":' + json.dumps(self.field).encode()
-            + b',"artifacts":[' + b",".join(blocks)
-            + b"]}"
-        )
+        return b'{"level":' + str(level).encode() + b',"artifacts":[' + b",".join(blocks) + b"]}"
 
     def cleanup(self) -> None:
         """Remove the layer's transient buckets. Called whether or not the publication finished."""

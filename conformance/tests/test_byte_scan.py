@@ -1183,14 +1183,14 @@ def test_no_entity_id_or_identity_key_crosses_the_wire_or_appears_in_logs(
         planted_artifacts.append(
             {
                 "key": f"group-{g}",
-                "members": [str(identity_mod.forward(identity_key, shard, e)) for e in group],
+                "members": {
+                    "tessera_id": [str(identity_mod.forward(identity_key, shard, e)) for e in group]
+                },
                 "content": [{"values": [f"group {g}"]}],
                 "parent": [] if g == 0 else ["group-0"],
             }
         )
-    resp = server.publish_artifacts(
-        ARTIFACTS_LAYER, artifacts=planted_artifacts
-    )
+    resp = server.publish_artifacts(ARTIFACTS_LAYER, artifacts=planted_artifacts, strict=True)
     assert resp.status_code == 201, resp.text
     # A publication's memberships are served from the tick that publishes them, which a flush
     # request runs.

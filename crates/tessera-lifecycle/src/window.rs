@@ -157,6 +157,8 @@ pub enum Slot {
     Joined { entity: EntityId, tessera_id: u64 },
     /// The row moves its item to a new entity as the entry's edit at this position.
     Edited { edit: u32, tessera_id: u64 },
+    /// The identity rule refused the row, which writes nothing.
+    Refused(crate::resolve::Reason),
 }
 
 /// What an entry's rows touch that a later entry's rows must not touch in the same window: the
@@ -783,24 +785,28 @@ impl<W> CommitWindow<W> {
                             } else {
                                 RowOutcome::Created
                             },
-                            tessera_id: tessera_id.unwrap_or_else(|| tessera_id_of(row.entity_id)),
+                            tessera_id: Some(
+                                tessera_id.unwrap_or_else(|| tessera_id_of(row.entity_id)),
+                            ),
                             over_bound: entry.over_bound.contains(&(i as u32)),
                         }
                     }
-                    Slot::Unchanged { tessera_id, .. } => RowReceipt {
-                        outcome: RowOutcome::Unchanged,
-                        tessera_id,
-                        over_bound: false,
-                    },
-                    Slot::Joined { tessera_id, .. } => RowReceipt {
-                        outcome: RowOutcome::Unchanged,
-                        tessera_id,
-                        over_bound: false,
-                    },
+                    Slot::Unchanged { tessera_id, .. } | Slot::Joined { tessera_id, .. } => {
+                        RowReceipt {
+                            outcome: RowOutcome::Unchanged,
+                            tessera_id: Some(tessera_id),
+                            over_bound: false,
+                        }
+                    }
                     Slot::Edited { tessera_id, .. } => RowReceipt {
                         outcome: RowOutcome::Edited,
-                        tessera_id,
+                        tessera_id: Some(tessera_id),
                         over_bound: entry.over_bound.contains(&(i as u32)),
+                    },
+                    Slot::Refused(reason) => RowReceipt {
+                        outcome: RowOutcome::Refused(reason),
+                        tessera_id: None,
+                        over_bound: false,
                     },
                 })
                 .collect();

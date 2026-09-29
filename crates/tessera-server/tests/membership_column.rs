@@ -355,7 +355,7 @@ async fn publish_artifacts(
         .client
         .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -371,7 +371,7 @@ async fn suppress(server: &TestServer, tessera_id: &str, op: &str) {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "tessera_id": tessera_id, "op": op }]))
+        .json(&json!([{ "op": op, "match": { "tessera_id": tessera_id } }]))
         .send()
         .await
         .unwrap();
@@ -1411,7 +1411,7 @@ async fn a_layer_reading_labels_refuses_to_mint() {
         .client
         .put(server.control_url("/control/layers/teams%2Fx/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "artifacts": [{ "key": "unlabelled", "members": [], "access": null }] }))
+        .json(&json!({ "artifacts": [{ "key": "unlabelled", "members": {}, "access": null }] }))
         .send()
         .await
         .unwrap();
@@ -1568,7 +1568,7 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 201);
 
-    let members: Vec<String> = members(0..4u64);
+    let members = members(0..4u64);
     let resp = server
         .client
         // A layer name is path-shaped, so its slash is percent-encoded into the one path segment
@@ -1576,7 +1576,6 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_records_it() {
         .put(server.control_url("/control/layers/tree%2Fx/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
             "artifacts": [
                 { "key": "root", "members": members.clone() },
                 { "key": "leaf", "members": members },

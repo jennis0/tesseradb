@@ -266,13 +266,14 @@ def _ingest_batch(rows: list[tuple[int, list[str]]]) -> bytes:
     return sink.getvalue()
 
 
-def _member(source_id: int) -> str:
-    return str(source_id)
+def _members(source_ids: list[int]) -> dict:
+    """A member table naming items by their source id, the fixture's unique field."""
+    return {JOIN_FIELD: [str(e) for e in source_ids]}
 
 
 def _change(server, source_id: int, op: str):
     """One `/control/changes` item addressing an item by its source id, the fixture's unique field."""
-    return server.changes([{"field": JOIN_FIELD, "value": str(source_id), "op": op}])
+    return server.changes([{"op": op, "match": {JOIN_FIELD: str(source_id)}}], strict=True)
 
 
 #: Source ids for the two items this case ingests. Above the fixture's own range, so neither can
@@ -317,20 +318,21 @@ def test_a_generating_set_holding_an_ingested_member_is_served_on_the_same_rule(
         # Published while its members are still buffered: the set names two entities with no rows.
         resp = server.publish_artifacts(
             lf.LAYER.replace("/", "%2F"),
-            field=JOIN_FIELD,
             artifacts=[
                 {
                     "key": "l-ingested",
-                    "members": [_member(e) for e in lf.NARROW_SET],
+                    "members": _members(lf.NARROW_SET),
                     "content": [
                         {
                             "values": ["drawn from what arrived since the build"],
-                            "generated_from": [_member(e) for e in lf.NARROW_SET]
-                            + [_member(INGESTED_SHARED), _member(INGESTED_EDGE)],
+                            "generated_from": _members(
+                                [*lf.NARROW_SET, INGESTED_SHARED, INGESTED_EDGE]
+                            ),
                         }
                     ],
                 }
             ],
+            strict=True,
         )
         assert resp.status_code == 201, resp.text
 

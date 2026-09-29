@@ -176,7 +176,7 @@ async fn item_fields(served: &Served, id: u64) -> Value {
 /// **A row without coordinates edits the item it names, restates, and names nothing it cannot
 /// place.** A `200` counts what the batch did; a restatement changes nothing and is counted
 /// unchanged; a different value edits the item again; a row naming no item and carrying no
-/// position is a `422` naming the row.
+/// position is refused and listed by its row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rows_without_coordinates_edit_restate_and_create_nothing() {
     let served = serve().await;
@@ -241,15 +241,14 @@ async fn rows_without_coordinates_edit_restate_and_create_nothing() {
         json!([{"id": SUBJECT + 1, "tag": "gamma"}]),
     )
     .await;
-    assert_eq!(status, 422, "{answer}");
-    assert_eq!(answer["error"], "contract", "{answer}");
-    assert!(
-        answer["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("row 0"),
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["refused"],
+        json!([{ "row": 0, "reason": "names_no_item" }]),
         "the refusal names the row and not the id: {answer}"
     );
+    assert_eq!(answer["tessera_ids"], json!([null]), "{answer}");
+    assert_eq!(answer["created"], 0, "{answer}");
 }
 
 /// The keys a viewer route that lists a column's values answers, on one page.
@@ -511,8 +510,9 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }
 
-/// A row may name its item by both forms where they agree, and a row naming it by neither and
-/// carrying no position is refused with no effect.
+/// A row may name its item by both forms where they agree. A batch whose rows carry no position
+/// and no column to name items by is `422`; a row whose identifying cell is null is refused as
+/// naming no item. Neither has any effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_naming_its_item_by_both_forms_or_neither() {
     let served = serve().await;
@@ -538,7 +538,19 @@ async fn a_row_naming_its_item_by_both_forms_or_neither() {
     )
     .await;
     assert_eq!(status, 422, "{answer}");
-    assert_eq!(answer["error"], "contract", "{answer}");
+    let (status, answer) = values(
+        &served,
+        "values-null",
+        Some("s0"),
+        json!([{"id": null, "tag": "beta"}]),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        answer["refused"],
+        json!([{ "row": 0, "reason": "names_no_item" }]),
+        "{answer}"
+    );
     tick(&served.server).await;
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }

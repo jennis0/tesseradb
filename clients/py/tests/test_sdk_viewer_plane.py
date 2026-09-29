@@ -150,7 +150,7 @@ def test_status_is_read_from_the_database(db):
 
 def test_compact_is_accepted(db):
     """A deletion leaves the overlay at the fold, and this is how one is asked for."""
-    assert db.remove(["p0"], field="paper").ok
+    assert db.remove({"paper": ["p0"]}).ok
     assert db.compact() == {}
 
 

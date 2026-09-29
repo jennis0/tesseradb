@@ -37,6 +37,7 @@ DEFINITIONAL = (
     "filters",
     "record_blob",
     "text",
+    "naming",
 )
 DRIVERS = ("harness", "journal")
 FIXTURE_BUILDERS = (

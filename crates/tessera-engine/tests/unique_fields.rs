@@ -522,10 +522,28 @@ fn a_generation_from_before_a_coalesce_and_a_fold_still_answers_from_its_runs() 
     fold(&engine);
 
     let values = ["10.held/a".to_string(), "10.held/b".to_string()];
+    let table = tessera_engine::AddressTable {
+        rows: values.len(),
+        tessera_id: None,
+        columns: vec![(
+            "doi".to_string(),
+            values
+                .iter()
+                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .collect(),
+        )],
+    };
     let found = engine
-        .resolve_unique_values_under_for_test(&held, "doi", &values)
-        .expect("the held generation reads its runs");
-    assert_eq!(found, vec![Some(a[0]), Some(b[0])]);
+        .name_items_under_for_test(&held, &table)
+        .expect("the held generation reads its runs")
+        .verdicts;
+    assert_eq!(
+        found,
+        vec![
+            tessera_lifecycle::resolve::Verdict::Names(a[0]),
+            tessera_lifecycle::resolve::Verdict::Names(b[0])
+        ]
+    );
 
     let superseded = fx.root.join(&held.prefix);
     drop(held);
@@ -850,7 +868,7 @@ fn a_join_keeps_its_value_when_the_view_holding_its_own_row_is_dropped_before_it
         "the log rotated past the batches, so nothing but the stored value answers"
     );
     assert_eq!(
-        engine.resolve_unique_values("doi", &[doi.to_string()]).unwrap(),
+        unique_holders(&engine, "doi", &[doi.to_string()]).unwrap(),
         vec![Some(item)],
         "the value names its item"
     );
@@ -1281,6 +1299,8 @@ fn fill(
             view: None,
             rows,
             artifacts: Default::default(),
+            strict: true,
+            tessera_id_column: false,
         })
         .map(|_| ())
 }

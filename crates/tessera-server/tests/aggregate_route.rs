@@ -136,7 +136,7 @@ async fn fixture_with_gates(
             LAYER.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -730,7 +730,7 @@ async fn a_suppression_applies_from_the_next_response() {
         .client
         .post(f.server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "field": "id", "value": member(victim), "op": "suppress" }]))
+        .json(&json!([{ "op": "suppress", "match": { "id": member(victim) } }]))
         .send()
         .await
         .unwrap();
@@ -943,7 +943,7 @@ async fn a_trailer_says_when_a_table_was_counted_over_a_changed_corpus() {
         .client
         .post(f.server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "field": "id", "value": member(N - 1), "op": "suppress" }]))
+        .json(&json!([{ "op": "suppress", "match": { "id": member(N - 1) } }]))
         .send()
         .await
         .unwrap();

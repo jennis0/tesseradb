@@ -6,7 +6,6 @@ mod json;
 mod membership;
 
 use tessera_engine::{DeclaredScalar, ScalarType, ScopedScalar};
-use tessera_types::TesseraId;
 
 pub(crate) use self::arrow::{labels_col, parse_ingest_batch, Frame, ParsedBatch};
 
@@ -34,13 +33,6 @@ impl Fixed<'_> {
             Fixed::TesseraId => "tessera_id",
         }
     }
-}
-
-/// How one item names its entity: the two address forms, already shape-validated.
-pub(crate) enum Address {
-    Tessera(TesseraId),
-    /// A unique field and one value of it, as the value's text.
-    Unique { field: String, value: String },
 }
 
 /// The two encodings a record-bearing route takes; both decode to one row form.

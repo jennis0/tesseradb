@@ -5,10 +5,11 @@
 //! 1. **Scan.** Each unique field the file carries goes into an external sort as `(key, row)`
 //!    ([`KeySpill`]). A row carrying a `tessera_id` is refused here.
 //! 2. **Merge.** Each field's sorted rows are merged against the run of `(key, item)` the earlier
-//!    files built for that field. A row whose key is held names that item. The later rows of a
-//!    run of equal keys are the rows [`collisions`] finds: where the file carries one field they
-//!    are refused here, one item or one value twice; where it carries several they are decided
-//!    once every field has been merged. Every decision is routed by row to a partition.
+//!    files built for that field. A row whose key is held names that item. Where the file carries
+//!    one field, the later rows of a run of equal keys are refused here, one item or one value
+//!    twice; where it carries several, one pass in row order decides them once every field has
+//!    been merged, so that a refused row claims neither its item nor its values. Every decision
+//!    is routed by row to a partition.
 //! 3. **Walk.** The partition is replayed in row order into the file's numbers, deciding each row
 //!    by [`name_row`] over the items its fields named, and numbering the rows that create items in
 //!    row order.
@@ -27,16 +28,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::run::{RunReader, RunReceipt, RunWriter};
 use rayon::prelude::*;
 use tessera_lifecycle::resolve::{self, Batch, Named, Refusal};
 use tessera_store::key_index::{Key, KeySpill};
-use super::run::{RunReader, RunReceipt, RunWriter};
 use tessera_store::unique::{KeyKind, UniqueKey};
 use tessera_types::EntityId;
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::{FileRead, Scanned};
-use super::{check_cap, CarriedField, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows};
+use super::{
+    check_cap, CarriedField, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows,
+};
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 use crate::spill::{self, boundaries_uniform, mix64, MappedArray, Partition};
@@ -186,7 +189,9 @@ impl KeyStream {
             .spawn(move || {
                 let read = || -> Result<()> {
                     let groups = FileGroups::open(&source.path)?;
-                    source.stamp.check(&source.path, source.rows, groups.rows())?;
+                    source
+                        .stamp
+                        .check(&source.path, source.rows, groups.rows())?;
                     let (index, _) = groups
                         .schema()
                         .column_with_name(&source.field.column)
@@ -197,7 +202,8 @@ impl KeyStream {
                     let projection = groups.projection(&[index]);
                     let all: Vec<usize> = (0..groups.count()).collect();
                     groups.each_batch(&source.path, &all, &projection, |_, batch| {
-                        let keys = super::scan::keys_of(&source.path, batch.column(0), &source.field)?;
+                        let keys =
+                            super::scan::keys_of(&source.path, batch.column(0), &source.field)?;
                         Ok(match sender.send(Ok(keys)) {
                             Ok(()) => std::ops::ControlFlow::Continue(()),
                             Err(_) => std::ops::ControlFlow::Break(()),
@@ -366,7 +372,10 @@ impl Pass {
                         detail,
                     })?;
                 let creates = read.batch == Batch::Creates;
-                let limit = self.limited.as_ref().and_then(|l| l.read(&carried, creates));
+                let limit = self
+                    .limited
+                    .as_ref()
+                    .and_then(|l| l.read(&carried, creates));
                 let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit);
                 if !creates {
                     resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
@@ -385,7 +394,10 @@ impl Pass {
                 let (rows, tally) = self.number_rows(read, Input::File(&file))?;
                 let values = file.values_at(&tally.sampled())?;
                 let refused = tally.finish(&read.source, &read.object, |row| {
-                    values.get(&row).cloned().unwrap_or_else(|| format!("row {row}"))
+                    values
+                        .get(&row)
+                        .cloned()
+                        .unwrap_or_else(|| format!("row {row}"))
                 });
                 Ok((
                     ReadRows {
@@ -472,11 +484,13 @@ impl Pass {
         let zip = match (&input, read.batch) {
             (Input::File(_), Batch::Names) if single && !tessera => {
                 match self.held.get(&carried[0].position).map(Vec::as_slice) {
-                    Some([HeldRun {
-                        base: Some(zip_base),
-                        source: Some(source),
-                        ..
-                    }]) => Some((KeyStream::open(source)?, *zip_base)),
+                    Some(
+                        [HeldRun {
+                            base: Some(zip_base),
+                            source: Some(source),
+                            ..
+                        }],
+                    ) => Some((KeyStream::open(source)?, *zip_base)),
                     _ => None,
                 }
             }
@@ -511,7 +525,9 @@ impl Pass {
                     decided += 1;
                     continue;
                 }
-                if let (Some((stream, zip_base)), Some(numbers)) = (zip.as_mut(), numbers.as_deref_mut()) {
+                if let (Some((stream, zip_base)), Some(numbers)) =
+                    (zip.as_mut(), numbers.as_deref_mut())
+                {
                     if let Some(key) = scanned.keys[0][offset] {
                         compared += 1;
                         let hit = stream.key_at(row)? == Some(Some(key));
@@ -558,7 +574,10 @@ impl Pass {
                 one_row_per_item,
             };
             let unset_path = self.scratch("unset");
-            let runs = self.held.get(&field.position).map_or(&[][..], Vec::as_slice);
+            let runs = self
+                .held
+                .get(&field.position)
+                .map_or(&[][..], Vec::as_slice);
             let merge = Merge {
                 index,
                 context,
@@ -628,56 +647,94 @@ impl Pass {
         drop(updates);
 
         // ---- 4. with several fields: one item twice, one value twice, then the numbers --------
+        // Decided in one pass in row order, so that a row refused for any reason claims neither its
+        // item nor its values. Each row naming an item is linked to the row before it naming that
+        // item, and carries whether any row of that chain up to it was kept.
         if deferred {
             let numbers = rows.slice();
+            let mut chains: Option<(MappedArray<u32>, MappedArray<u64>)> = None;
             if let Some(named) = named_items {
-                let mut later = KeySpill::<u32>::create(&self.tmp, share).map_err(store)?;
-                // A run of one item is held as its first row and the row after it.
-                let mut run: Vec<(u32, usize)> = Vec::with_capacity(2);
+                let name = self.name("before");
+                let mut before = MappedArray::<u32>::zeroed(&self.tmp, &name, total as usize)?;
+                let links = before.as_mut_slice();
+                let mut last: Option<(u32, u32)> = None;
                 named
                     .drain(|item, row| {
-                        if run.first().is_some_and(|&(held, _)| held != item) {
-                            run.clear();
+                        if let Some((_, earlier)) = last.filter(|&(held, _)| held == item) {
+                            links[row as usize] = earlier + 1;
                         }
-                        run.push((item, row as usize));
-                        for (_, refused) in resolve::collisions(run.iter().copied()) {
-                            later.push(refused as u32, 0)?;
-                        }
-                        run.truncate(1);
+                        last = Some((item, row));
                         Ok(())
                     })
                     .map_err(store)?;
-                later
-                    .drain(|row, _| {
-                        numbers[row as usize] = 0;
-                        tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
-                        Ok(())
-                    })
-                    .map_err(store)?;
+                let words = total.div_ceil(64) as usize;
+                let name = self.name("kept");
+                let kept = MappedArray::<u64>::zeroed(&self.tmp, &name, words)?;
+                chains = Some((before, kept));
             }
             let total_candidates: u64 = merged.iter().map(|m| m.candidates).sum();
+            let name = self.name("claimed");
+            let mut claimed = match total_candidates {
+                0 => None,
+                n => Some(MappedArray::<u64>::zeroed(
+                    &self.tmp,
+                    &name,
+                    n.div_ceil(64) as usize,
+                )?),
+            };
+            let mut step = |row: u32, bits: &[u64], tally: &mut Tally| {
+                let stored = &mut numbers[row as usize];
+                let names_item = !matches!(*stored, 0 | PENDING | LEFT_OUT);
+                if let Some((before, kept)) = chains.as_mut().filter(|_| names_item) {
+                    let earlier = before.as_mut_slice()[row as usize];
+                    let kept = kept.as_mut_slice();
+                    let is_kept = |row: u32| kept[(row / 64) as usize] & (1 << (row % 64)) != 0;
+                    let claimed_before = earlier.checked_sub(1).is_some_and(is_kept);
+                    let keep = match claimed_before {
+                        true => {
+                            *stored = 0;
+                            tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
+                            true
+                        }
+                        false => {
+                            if let Some(claimed) = claimed.as_mut() {
+                                claim(stored, row, bits, claimed.as_mut_slice(), creates, tally);
+                            }
+                            *stored != 0
+                        }
+                    };
+                    if keep {
+                        kept[(row / 64) as usize] |= 1 << (row % 64);
+                    }
+                    return;
+                }
+                if let Some(claimed) = claimed.as_mut() {
+                    claim(stored, row, bits, claimed.as_mut_slice(), creates, tally);
+                }
+            };
+            // Each candidate value's bit: its field's first, plus its number in the field.
+            let firsts: Vec<u64> = merged
+                .iter()
+                .scan(0u64, |sum, m| {
+                    let first = *sum;
+                    *sum += m.candidates;
+                    Some(first)
+                })
+                .collect();
+            let mut next = 0u32;
             if let Some(candidates) = candidates.filter(|_| total_candidates > 0) {
-                // Each candidate value's bit: its field's first, plus its number in the field.
-                let firsts: Vec<u64> = merged
-                    .iter()
-                    .scan(0u64, |sum, m| {
-                        let first = *sum;
-                        *sum += m.candidates;
-                        Some(first)
-                    })
-                    .collect();
-                let name = self.name("claimed");
-                let words = total_candidates.div_ceil(64) as usize;
-                let mut claimed = MappedArray::<u64>::zeroed(&self.tmp, &name, words)?;
-                let claimed = claimed.as_mut_slice();
                 let mut at: Option<u32> = None;
                 let mut bits: Vec<u64> = Vec::new();
                 candidates
                     .drain(|key, number| {
                         let row = (key >> 16) as u32;
                         if let Some(done) = at.filter(|&done| done != row) {
-                            let stored = &mut numbers[done as usize];
-                            claim(stored, done, &bits, claimed, creates, &mut tally);
+                            while next < done {
+                                step(next, &[], &mut tally);
+                                next += 1;
+                            }
+                            step(done, &bits, &mut tally);
+                            next = done + 1;
                             bits.clear();
                         }
                         at = Some(row);
@@ -686,9 +743,21 @@ impl Pass {
                     })
                     .map_err(store)?;
                 if let Some(done) = at {
-                    claim(&mut numbers[done as usize], done, &bits, claimed, creates, &mut tally);
+                    while next < done {
+                        step(next, &[], &mut tally);
+                        next += 1;
+                    }
+                    step(done, &bits, &mut tally);
+                    next = done + 1;
                 }
             }
+            while u64::from(next) < total {
+                step(next, &[], &mut tally);
+                next += 1;
+            }
+            drop(chains);
+            drop(claimed);
+            let numbers = rows.slice();
             for (row, number) in numbers.iter_mut().enumerate() {
                 numbering.decide(number, row as u64, &mut tally)?;
             }
@@ -722,7 +791,10 @@ impl Pass {
                         limited.raise();
                     }
                 }
-                let held_before = self.held.get(&field.position).is_some_and(|runs| !runs.is_empty());
+                let held_before = self
+                    .held
+                    .get(&field.position)
+                    .is_some_and(|runs| !runs.is_empty());
                 if held_before && !retired.is_empty() {
                     self.retire(field.position, kind, &retired)?;
                 }
@@ -1029,7 +1101,9 @@ fn merge_field<K: Key>(
                                 number
                             }
                         };
-                        candidates.push(candidate_key(row, index), number).map_err(store)?;
+                        candidates
+                            .push(candidate_key(row, index), number)
+                            .map_err(store)?;
                     }
                 }
             }
@@ -1128,7 +1202,6 @@ impl FileNumbers {
     }
 }
 
-
 /// Which rows of a file created items, and how many before each: a created row's number is the
 /// file's base plus the rows created before it.
 #[derive(Default)]
@@ -1217,7 +1290,13 @@ fn walk(
             }
             for hit in &hits {
                 let row = u64::from(hit.0);
-                decide_row(&mut numbers[row as usize], row, std::slice::from_ref(hit), tally, named_items)?;
+                decide_row(
+                    &mut numbers[row as usize],
+                    row,
+                    std::slice::from_ref(hit),
+                    tally,
+                    named_items,
+                )?;
             }
             if let Some(numbering) = numbering.as_deref_mut() {
                 for row in u64::from(lo)..hi {

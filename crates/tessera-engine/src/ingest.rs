@@ -5,6 +5,9 @@
 //! every row through [`tessera_lifecycle::resolve`], then reads what each named item stores, in
 //! ascending entity order, and decides the row:
 //!
+//! - a row the rule refuses writes nothing, and the receipt names it with its reason; a strict
+//!   batch is refused whole at its first refused row instead. A row naming no item and carrying no
+//!   position is refused as naming no item, since it cannot create one;
 //! - a row naming no item creates one, in the batch's view, at the row's position;
 //! - a row naming an item and changing nothing stored writes nothing and is counted unchanged;
 //! - a row naming an item that has no row in the batch's view, carrying a position there and
@@ -24,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_lifecycle::resolve::{self, Identifier, Key, Refusal, RowIdentity};
+use tessera_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
 use tessera_lifecycle::{
     BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
     UnallocatedRow, WalScalar,
@@ -49,13 +52,20 @@ pub struct IngestRequest {
     pub rows: Vec<IngestRow>,
     /// The artifacts the batch's rows name in a column named for a layer.
     pub artifacts: BatchArtifacts,
+    /// Refuse the whole batch at its first refused row, instead of applying the other rows.
+    pub strict: bool,
+    /// The batch carries a `tessera_id` column, whether or not any row gives one.
+    pub tessera_id_column: bool,
 }
 
 /// What an accepted batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReceipt {
-    /// One per row, in request order: the item the row created or named.
-    pub tessera_ids: Vec<TesseraId>,
+    /// One per row, in request order: the item the row created or named, or none for a refused
+    /// row.
+    pub tessera_ids: Vec<Option<TesseraId>>,
+    /// The rows the identity rule refused, by position in the request, with the reason.
+    pub refused: Vec<(usize, Reason)>,
     pub created: u64,
     /// Rows that changed an item they named.
     pub edited: u64,
@@ -89,7 +99,15 @@ impl IngestReceipt {
         IngestReceipt {
             tessera_ids: receipt
                 .iter()
-                .map(|r| TesseraId::new(r.tessera_id))
+                .map(|r| r.tessera_id.map(TesseraId::new))
+                .collect(),
+            refused: receipt
+                .iter()
+                .enumerate()
+                .filter_map(|(at, r)| match r.outcome {
+                    RowOutcome::Refused(reason) => Some((at, reason)),
+                    _ => None,
+                })
                 .collect(),
             created: count(RowOutcome::Created),
             edited: count(RowOutcome::Edited),
@@ -232,12 +250,62 @@ impl Engine {
             generation,
             declared,
         };
-        let verdicts = resolve::resolve(&identities, &holdings, resolve::Batch::Creates)?;
-        if let Some(refusal) = resolve::first_refusal(&verdicts) {
+        // A row carrying no position cannot create an item, so a batch without one creates nothing
+        // and refuses a row naming no item, as a build refuses an attribute file's. Where some rows
+        // carry positions, a row without one that would create is refused, and the batch is
+        // decided again without its values, so that a refused row sets none a later row sets.
+        let creates = view.is_some() && request.rows.iter().any(|row| row.position.is_some());
+        let batch = match creates {
+            true => resolve::Batch::Creates,
+            false => resolve::Batch::Edits,
+        };
+        // A batch that only addresses items needs a column to address them by, as a build's
+        // attribute file does.
+        if !creates && !request.rows.is_empty() {
+            let tessera = request.tessera_id_column
+                || request.rows.iter().any(|row| row.tessera_id.is_some());
+            let unique = declared.iter().enumerate().any(|(at, d)| {
+                d.unique
+                    && request
+                        .rows
+                        .iter()
+                        .any(|row| at < row.scalars.len() && !row.omitted.contains(&at))
+            });
+            resolve::require_identifier(tessera, usize::from(unique)).map_err(|e| {
+                AcceptError::Contract(format!(
+                    "this batch creates no item, since no row carries a position, so its rows \
+                     address items, and {e}"
+                ))
+            })?;
+        }
+        let mut verdicts = resolve::resolve(&identities, &holdings, batch)?;
+        let unplaced: Vec<usize> = (0..request.rows.len())
+            .filter(|at| {
+                request.rows[*at].position.is_none() && verdicts[*at] == resolve::Verdict::Creates
+            })
+            .collect();
+        if !unplaced.is_empty() {
+            let mut without = identities.clone();
+            for at in &unplaced {
+                without[*at].unique.clear();
+            }
+            verdicts = resolve::resolve(&without, &holdings, batch)?;
+            for at in unplaced {
+                verdicts[at] = resolve::Verdict::Refused(Refusal::NamesNoItem { row: at });
+            }
+        }
+        if let Some(refusal) = resolve::first_refusal(&verdicts).filter(|_| request.strict) {
             return Err(AcceptError::Conflict(
                 self.refusal_text(generation, declared, request, refusal),
             ));
         }
+        let refused: Vec<Option<Reason>> = verdicts
+            .iter()
+            .map(|verdict| match verdict {
+                resolve::Verdict::Refused(refusal) => Some(refusal.kind()),
+                _ => None,
+            })
+            .collect();
         let named: Vec<Option<EntityId>> = verdicts
             .into_iter()
             .map(|verdict| match verdict {
@@ -326,14 +394,14 @@ impl Engine {
         };
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
+            if let Some(reason) = refused[at] {
+                slots.push(Slot::Refused(reason));
+                continue;
+            }
             match item {
                 None => {
                     let (Some(view), Some((x, y))) = (view, row.position) else {
-                        return Err(AcceptError::Contract(format!(
-                            "row {at} names no item and carries no position, so it creates \
-                             nothing; send its coordinates in the batch's view, or name the item \
-                             it is about"
-                        )));
+                        unreachable!("a row naming no item without a position is refused above")
                     };
                     let descriptors = self.label_of(at, row.labels.as_deref(), view)?;
                     keys.extend(identities[at].unique.iter().copied());
@@ -725,7 +793,10 @@ impl Engine {
                 .terms_of_labels(labels)
                 .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?;
             // A novel descriptor is on no stored label.
-            let supplied = self.write.live().lookup_terms(&generation.dict, &descriptors);
+            let supplied = self
+                .write
+                .live()
+                .lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
                 Some(item) => Some(item.terms.clone()),
                 None => joined::flushed_terms_of(generation, entity),
@@ -1039,7 +1110,8 @@ impl Engine {
                 )
             }
             Refusal::NamesNoItem { row } => format!(
-                "row {row} names no item; send a value that names one, or send the row as a new item"
+                "row {row} names no item and carries no position, so it creates nothing; send a \
+                 value that names an item, or the row's coordinates in the batch's view"
             ),
             Refusal::OneItemTwice { rows, item } => format!(
                 "rows {} and {} both name item {}; send one row per item",
@@ -1146,20 +1218,15 @@ struct Held<'a> {
 impl resolve::Holdings for Held<'_> {
     type Error = AcceptError;
 
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, AcceptError> {
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, AcceptError> {
         let d = &self.declared[usize::from(field)];
         let kind = KeyKind::of(d.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        let found = crate::unique::holders(self.generation, &d.name, &keys)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
-        let mut out = vec![Vec::new(); keys.len()];
-        for (at, entity) in found {
-            out[at].push(entity);
-        }
-        Ok(out)
+        crate::unique::holders(self.generation, &d.name, &keys)
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, AcceptError> {

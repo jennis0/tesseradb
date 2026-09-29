@@ -136,6 +136,23 @@ def test_the_first_commit_reports_each_row_the_build_left_out(tmp_path, corpus):
         db.close()
 
 
+def test_a_strict_first_commit_refuses_the_build_at_a_row_it_would_leave_out(tmp_path, corpus):
+    """The same member naming no item, with `strict=True`: the build is refused and nothing is
+    served."""
+    db = create(tmp_path / "db")
+    try:
+        small(db)
+        db.declare_layer("clusters", kind="flat")
+        db.insert(
+            "clusters", members=pa.table({"key": ["a", "a"], "id": ["p0", "nobody"]}), key="key"
+        )
+        with pytest.raises(Refusal):
+            db.commit(strict=True)
+        assert not db.built
+    finally:
+        db.close()
+
+
 def test_the_first_commit_reports_what_it_built_and_prints_nothing(tmp_path, corpus, capsys):
     db = create(tmp_path / "db")
     try:
@@ -165,12 +182,27 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     assert report.ok and report.clamped == 1
     assert "clamped" in str(report)
 
-    # A members table naming its members by no unique attribute is a finding, and the check and
-    # the commit both carry it.
+    # A members table naming its members by no unique attribute names items by nothing, which is
+    # a finding, as the build refuses such a file.
     db = served(small)
     capsys.readouterr()
     db.declare_layer("clusters", kind="flat")
     db.insert("clusters", members=pa.table({"key": ["a"], "paper": ["p0"]}), key="key")
+    assert db.check().findings
+    with pytest.raises(Refusal):
+        db.commit()
+
+    # A member written as a plain value names no column, which is a finding, and the check and the
+    # commit both carry it.
+    db = served(small)
+    capsys.readouterr()
+    db.declare_layer("clusters", kind="flat")
+    db.insert(
+        "clusters",
+        artifacts=pa.table({"key": ["a"], "members": pa.array([["p0"]])}),
+        key="key",
+        members="members",
+    )
     plan = db.check()
     assert plan.findings and all(str(finding) in str(plan) for finding in plan.findings)
     assert str(len(plan.plan)) in str(plan)
@@ -179,9 +211,9 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     refused = raised.value.report
     assert all(str(finding) in str(refused) for finding in refused.findings)
 
-    # No item is named `nobody`, and a row without coordinates creates none, so it is refused, and
-    # the two new rows land. The refused commit left its rows pending, so this is a second
-    # database.
+    # No item is named `nobody`, and a row without coordinates creates none, so a strict commit
+    # refuses its page, and the two new rows land. The refused commit left its rows pending, so
+    # this is a second database.
     db = served(small)
     capsys.readouterr()
     db.insert(
@@ -190,7 +222,7 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
         value="score",
     )
     db.insert("map", unscored(["q0", "q1"], x=[1.5, 2.5]), x="x", y="y", access="labels")
-    report = db.commit()
+    report = db.commit(strict=True)
     summary = str(report)
     assert report.rows_accepted == {"map": 2} and "2 rows to map" in summary
     assert report.refusals and all(
@@ -201,10 +233,11 @@ def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served
     assert capsys.readouterr().out == ""
 
 
-def test_a_change_reports_how_many_ids_it_was_given(served, corpus, capsys):
+def test_a_change_reports_how_many_rows_it_was_given_and_applied(served, corpus, capsys):
     db = served(small)
     capsys.readouterr()
-    for report in (db.suppress(["p1", "p2", "p3"], field="id"),
-                   db.unsuppress(["p1", "p2", "p3"], field="id")):
-        assert report.ok and report.requested == 3 and "3 ids" in str(report)
+    for report in (db.suppress({"id": ["p1", "p2", "p3"]}),
+                   db.unsuppress({"id": ["p1", "p2", "p3"]})):
+        assert report.ok and report.requested == 3 and report.accepted == 3
+        assert "3 rows" in str(report)
     assert capsys.readouterr().out == ""

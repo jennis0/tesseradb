@@ -93,7 +93,7 @@ pub use config::{
     default_compute_threads, EngineConfig, DEFAULT_MAX_MERGED_SEGMENT_BYTES, MIN_K_MIN,
     MIN_SELECTION_WIDTH,
 };
-pub use control::{GrownMembership, PublishedArtifacts};
+pub use control::{AddressTable, AddressValue, GrownMembership, NamedItems, PublishedArtifacts};
 pub use engine::Engine;
 pub use ingest::{IngestReceipt, IngestRequest};
 pub use error::EngineError;

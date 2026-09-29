@@ -22,15 +22,11 @@ use tessera_engine::{MetaView, ScopedScalar};
 use tessera_lifecycle::ChangeOp;
 
 use tessera_types::view::ViewMetadataValue;
-use tessera_types::{EntityId, TesseraId};
+use tessera_types::EntityId;
 
-use crate::decode::{
-    labels_col, parse_ingest_batch, Address, BodyEncoding, DecodeError, ParsedBatch,
-};
-use crate::error::{
-    map_accept_error, map_change_batch_error, map_engine_error, map_join_error, map_store_error,
-    ApiError,
-};
+use crate::address::{Named, Table};
+use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
+use crate::error::{map_accept_error, map_change_batch_error, map_join_error, ApiError};
 use crate::health::is_ready;
 use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
 
@@ -179,7 +175,10 @@ async fn require_operator_credential(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
+    state.check_bearer(
+        crate::state::bearer_token(request.headers()),
+        &state.operator_credential,
+    )?;
     Ok(next.run(request).await)
 }
 
@@ -342,9 +341,13 @@ struct IngestResp {
     clipped: u64,
     /// Rows whose coordinates fell outside the view's extent and were stored on its edge.
     clamped: u64,
-    /// One `tessera_id` per row, in request order: the item the row created or named. Decimal
-    /// strings, since a JSON number loses `u64` precision past 2^53 in JavaScript.
-    tessera_ids: Vec<String>,
+    /// One `tessera_id` per row, in request order: the item the row created or named, and null
+    /// for a refused row. Decimal strings, since a JSON number loses `u64` precision past 2^53 in
+    /// JavaScript.
+    tessera_ids: Vec<Option<String>>,
+    /// The rows the identity rule refused, each `{row, reason}` by position in the batch. The
+    /// batch applied every other row. Empty in a strict batch, which is refused whole instead.
+    refused: Vec<serde_json::Value>,
     /// Artifacts this batch's membership columns created, for keys no artifact held on an open
     /// layer. Reported because a minted artifact cannot be undone.
     minted: u64,
@@ -373,6 +376,7 @@ fn run_ingest(
     body: &[u8],
     batch_id: String,
     view: Option<&str>,
+    strict: bool,
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
@@ -387,10 +391,12 @@ fn run_ingest(
         None => None,
     };
     let extent = view.map(crate::filter_dto::view_extent);
-    let frame = view.zip(extent.as_ref()).map(|(view, extent)| crate::decode::Frame {
-        projection: view.projection,
-        extent,
-    });
+    let frame = view
+        .zip(extent.as_ref())
+        .map(|(view, extent)| crate::decode::Frame {
+            projection: view.projection,
+            extent,
+        });
     let view_id = view.map(|view| view.id.clone());
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
@@ -410,6 +416,7 @@ fn run_ingest(
         artifacts,
         clipped,
         clamped,
+        tessera_id_column,
     } = parse_ingest_batch(
         encoding,
         body,
@@ -497,6 +504,8 @@ fn run_ingest(
             view: view_id,
             rows: rows_in,
             artifacts,
+            strict,
+            tessera_id_column,
         })
         .map_err(|e| {
             tracing::debug!(detail = %e, "an ingest batch was refused");
@@ -523,7 +532,12 @@ fn run_ingest(
         tessera_ids: receipt
             .tessera_ids
             .iter()
-            .map(|id| id.raw().to_string())
+            .map(|id| id.map(|id| id.raw().to_string()))
+            .collect(),
+        refused: receipt
+            .refused
+            .iter()
+            .map(|&(row, reason)| crate::address::refused_json(row, reason))
             .collect(),
         minted: receipt.minted,
         joined: receipt.joined,
@@ -539,7 +553,7 @@ fn run_ingest(
 /// cap), 429 (queue). Connections are not bounded in-process; the deployment bounds them.
 async fn ingest(
     State(state): State<Arc<AppState>>,
-    ApiQuery(wait): ApiQuery<WaitQuery>,
+    ApiQuery(query): ApiQuery<RowsQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<Json<IngestResp>, ApiError> {
@@ -570,15 +584,16 @@ async fn ingest(
 
     // The permit moves into the closure: if the client disconnects, the closure still holds its
     // thread, and the permit must be held as long.
+    let strict = query.strict;
     let mut resp = state
         .blocking(move |state| {
             let _permit = permit;
-            run_ingest(state, encoding, &body, batch_id, view.as_deref())
+            run_ingest(state, encoding, &body, batch_id, view.as_deref(), strict)
         })
         .await?;
 
     // Read after the rows are buffered, so the number names a cycle that carries them.
-    let ack = publication_ack(&state, &wait).await?;
+    let ack = publication_ack(&state, &query.wait()).await?;
     resp.publication = ack.publication;
     resp.visible = ack.visible;
     Ok(Json(resp))
@@ -588,35 +603,35 @@ async fn ingest(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChangeItem {
-    /// A decimal string, since a JSON number loses `u64` precision past 2^53 in JavaScript.
-    #[serde(default)]
-    tessera_id: Option<String>,
-    /// A unique field, with `value`: the other way to name an item.
-    #[serde(default)]
-    field: Option<String>,
-    /// One value of `field`, as its text: a keyword itself, an integer or a timestamp in decimal
-    /// digits.
-    #[serde(default)]
-    value: Option<String>,
     op: String,
+    /// The item, by its `tessera_id` and the values of unique fields, keyed by column: one row of
+    /// an address table ([`crate::address::Table`]).
+    #[serde(rename = "match")]
+    matching: std::collections::BTreeMap<String, crate::address::Cell>,
 }
 
-/// A change item whose shape is valid and whose address is not yet resolved; every item's
-/// address is resolved in one batched call.
-struct DecodedChange {
-    address: Address,
-    op: ChangeOp,
+/// What a change request did: how many changes it applied, the items the identity rule refused,
+/// by position in the request, and the columns it ignored.
+struct ChangesDone {
+    accepted: usize,
+    refused: Vec<serde_json::Value>,
+    ignored: Vec<String>,
 }
 
 /// The blocking body of `/control/changes`, run on the deny lane. Every item is validated and
 /// resolved before any is enqueued, so an invalid request applies nothing; a WAL failure during
 /// the apply cannot be rolled back.
-fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError> {
+fn run_changes(
+    state: &AppState,
+    items: Vec<ChangeItem>,
+    strict: bool,
+) -> Result<ChangesDone, ApiError> {
     // Shape is checked over the whole request before any address is resolved, so a malformed
     // item's 422 is answered ahead of another item's 404.
-    let mut decoded: Vec<DecodedChange> = Vec::with_capacity(items.len());
-    for item in &items {
-        let op = match item.op.as_str() {
+    let mut ops: Vec<ChangeOp> = Vec::with_capacity(items.len());
+    let mut tables: Vec<Table> = Vec::with_capacity(items.len());
+    for item in items {
+        ops.push(match item.op.as_str() {
             // Kept so the refusal names the edit flow instead of answering "unknown op".
             "predicate" => {
                 return Err(ApiError::Contract(
@@ -631,124 +646,50 @@ fn run_changes(state: &AppState, items: Vec<ChangeItem>) -> Result<(), ApiError>
             other => {
                 return Err(ApiError::Contract(format!("unknown change op '{other}'")));
             }
-        };
-
-        let address = match (&item.tessera_id, &item.field, &item.value) {
-            (Some(tessera_id), None, None) => {
-                let id: u64 = tessera_id.parse().map_err(|_| {
-                    ApiError::Contract(
-                        "tessera_id must be a base-10 string, such as \"12345\", not a JSON \
-                         number"
-                            .to_string(),
-                    )
-                })?;
-                Address::Tessera(TesseraId::new(id))
-            }
-            (None, Some(field), Some(value)) => Address::Unique {
-                field: field.clone(),
-                value: value.clone(),
-            },
-            _ => {
-                return Err(ApiError::Contract(
-                    "a change names its item by a tessera_id, or by a unique field and a value \
-                     of it; send `tessera_id`, or `field` and `value`"
-                        .to_string(),
-                ))
-            }
-        };
-
-        decoded.push(DecodedChange { address, op });
+        });
+        tables.push(Table::one_row(item.matching));
     }
+    let merged = crate::address::Merged::of(tables)?;
 
     // An item an edit moved while the request waited, and whose old entity a fold then retired,
     // is found by resolving the request's names again.
-    let ops: Vec<ChangeOp> = decoded.iter().map(|d| d.op).collect();
     let mut attempts = 0;
     loop {
         attempts += 1;
-        let changes = resolve_changes(state, &decoded)?;
+        let (named, ignored) = merged.name(state)?;
+        let mut changes: Vec<(EntityId, ChangeOp)> = Vec::with_capacity(ops.len());
+        let mut refused = Vec::new();
+        for (index, (named, op)) in named.iter().zip(&ops).enumerate() {
+            match named[0] {
+                Named::Item(entity) => changes.push((entity, *op)),
+                Named::Refused(reason) if strict => {
+                    return Err(crate::address::strict_refusal("the request", index, reason))
+                }
+                Named::Refused(reason) => refused.push(crate::address::refused_json(index, reason)),
+            }
+        }
+        let done = ChangesDone {
+            accepted: changes.len(),
+            refused,
+            ignored,
+        };
+        if changes.is_empty() {
+            return Ok(done);
+        }
+        let applied: Vec<ChangeOp> = changes.iter().map(|(_, op)| *op).collect();
         match state.engine.accept_changes(changes) {
             Err(tessera_engine::AcceptError::Exec(tessera_lifecycle::ExecError::Stale))
                 if attempts < 3 =>
             {
                 continue
             }
-            answered => return answered.map_err(|e| map_change_batch_error(&ops, e)),
+            answered => {
+                return answered
+                    .map(|()| done)
+                    .map_err(|e| map_change_batch_error(&applied, e))
+            }
         }
     }
-}
-
-/// Every change's entity, in order. Resolved before anything is enqueued: an unissued
-/// `tessera_id` is answered ahead of a value naming nothing, wherever each sits in the request.
-fn resolve_changes(
-    state: &AppState,
-    decoded: &[DecodedChange],
-) -> Result<Vec<(EntityId, ChangeOp)>, ApiError> {
-    let resolved = resolve_addresses(state, decoded.iter().map(|d| &d.address))?;
-    for tessera_first in [true, false] {
-        let unknown = decoded.iter().zip(&resolved).position(|(d, entity)| {
-            matches!(d.address, Address::Tessera(_)) == tessera_first && entity.is_none()
-        });
-        if let Some(index) = unknown {
-            let what = match tessera_first {
-                true => "tessera_id",
-                false => "value",
-            };
-            return Err(ApiError::Unknown(format!(
-                "the {what} of item {index} names nothing this deployment holds"
-            )));
-        }
-    }
-    Ok(decoded
-        .iter()
-        .zip(resolved)
-        .map(|(d, entity)| (entity.expect("every address resolved above"), d.op))
-        .collect())
-}
-
-/// Resolves each address to its entity, in order, `None` where it names nothing: one batched call
-/// for the `tessera_id`s and one for each unique field's values.
-fn resolve_addresses<'a>(
-    state: &AppState,
-    addresses: impl IntoIterator<Item = &'a Address>,
-) -> Result<Vec<Option<EntityId>>, ApiError> {
-    let addresses: Vec<&Address> = addresses.into_iter().collect();
-    let mut resolved: Vec<Option<EntityId>> = vec![None; addresses.len()];
-    let tessera: Vec<(usize, TesseraId)> = addresses
-        .iter()
-        .enumerate()
-        .filter_map(|(at, address)| match address {
-            Address::Tessera(id) => Some((at, *id)),
-            Address::Unique { .. } => None,
-        })
-        .collect();
-    let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
-    let found = state
-        .engine
-        .resolve_tessera_ids(&ids)
-        .map_err(map_store_error)?;
-    for ((at, _), entity) in tessera.iter().zip(found) {
-        resolved[*at] = entity;
-    }
-    let mut by_field: std::collections::BTreeMap<&str, (Vec<usize>, Vec<String>)> =
-        std::collections::BTreeMap::new();
-    for (at, address) in addresses.iter().enumerate() {
-        if let Address::Unique { field, value } = address {
-            let (positions, values) = by_field.entry(field.as_str()).or_default();
-            positions.push(at);
-            values.push(value.clone());
-        }
-    }
-    for (field, (positions, values)) in by_field {
-        let found = state
-            .engine
-            .resolve_unique_values(field, &values)
-            .map_err(map_engine_error)?;
-        for (at, entity) in positions.into_iter().zip(found) {
-            resolved[at] = entity;
-        }
-    }
-    Ok(resolved)
 }
 
 /// `POST /control/changes`: deletions, suppressions and unsuppressions. Never answers 429, and has
@@ -757,7 +698,7 @@ fn resolve_addresses<'a>(
 /// fails, because an accepted deny left unapplied would fail open. The 200 follows the fsync.
 async fn changes(
     State(state): State<Arc<AppState>>,
-    ApiQuery(wait): ApiQuery<WaitQuery>,
+    ApiQuery(query): ApiQuery<RowsQuery>,
     body: Result<ApiJson<Vec<ChangeItem>>, ApiJsonRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let ApiJson(items) = body.map_err(|rejection| match rejection {
@@ -782,13 +723,19 @@ async fn changes(
     // No readiness gate: a node with a poisoned WAL still applies denies to the overlay, and
     // gating on readiness would refuse them unapplied.
     let engine = Arc::clone(&state);
-    spawn_on_deny_lane(move || run_changes(&engine, items))
+    let strict = query.strict;
+    let done = spawn_on_deny_lane(move || run_changes(&engine, items, strict))
         .await
         .map_err(map_join_error)??;
 
     // The deny is in force and durable when this is sent, without waiting for a publication cycle.
     // `publication` is carried only for uniformity; `wait=visible` here waits for the next cycle.
-    acknowledge(&state, &wait, StatusCode::OK, serde_json::json!({})).await
+    let body = serde_json::json!({
+        "accepted": done.accepted,
+        "refused": done.refused,
+        "ignored_columns": done.ignored,
+    });
+    acknowledge(&state, &query.wait(), StatusCode::OK, body).await
 }
 
 /// How often a `wait=visible` wait re-reads the publication counter; this is the delay between a
@@ -812,6 +759,26 @@ impl WaitQuery {
             Some(other) => Err(ApiError::Contract(format!(
                 "wait takes 'visible' and nothing else; got '{other}'"
             ))),
+        }
+    }
+}
+
+/// The query parameters of a write route whose rows name items: `wait`, as [`WaitQuery`] takes
+/// it, and `strict`, which refuses the whole request at its first refused row instead of applying
+/// the other rows.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowsQuery {
+    #[serde(default)]
+    wait: Option<String>,
+    #[serde(default)]
+    strict: bool,
+}
+
+impl RowsQuery {
+    fn wait(&self) -> WaitQuery {
+        WaitQuery {
+            wait: self.wait.clone(),
         }
     }
 }
@@ -872,8 +839,9 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// Holds until the counter reaches `publication` or `serve.visible_wait_max_secs` passes; a
 /// ceiling too large to add to the clock waits without one.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline = std::time::Instant::now()
-        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(
+        state.limits.visible_wait_max_secs,
+    ));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -977,7 +945,11 @@ async fn register_layer(
                  key of it; name {} or a view of {}, or drop the scope",
                 outside.view,
                 outside.sharing.join(" or "),
-                if outside.sharing.len() == 1 { "it" } else { "them" }
+                if outside.sharing.len() == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
             ))
         })?;
     }
@@ -1446,18 +1418,6 @@ fn access_descriptors(
         .map_err(ApiError::Contract)
 }
 
-/// Turns a flat member offset back into `(artifact index, member index)` for a refusal to name.
-fn position_in_batch(widths: &[usize], flat: usize) -> (usize, usize) {
-    let mut remaining = flat;
-    for (artifact, width) in widths.iter().enumerate() {
-        if remaining < *width {
-            return (artifact, remaining);
-        }
-        remaining -= width;
-    }
-    (widths.len(), 0)
-}
-
 /// A JSON body on an artifact route, decoded as `T`; a field `T` does not take is refused.
 fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Result<T, ApiError> {
     serde_json::from_slice(body).map_err(|e| {
@@ -1468,11 +1428,12 @@ fn artifact_json<T: serde::de::DeserializeOwned>(body: &[u8], noun: &str) -> Res
 }
 
 /// `PATCH /control/layers/{name}/artifacts`'s Arrow form: one row per artifact, `key: utf8` and
-/// `members: list<utf8>` or `large_list<utf8>`, with `view` and `access` optional, and
-/// `field` and `level` in the schema metadata. Decoded into the JSON form's body, so
-/// the handler has one path.
-fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
-    use arrow::array::{LargeListArray, ListArray, StringArray};
+/// `members: list<struct<…>>` or `large_list<struct<…>>`, each struct a member named by its
+/// `tessera_id` and unique field columns, with `view` and `access` optional and `level` in the
+/// schema metadata. Decoded into the JSON form's body and member tables, so the handler has one
+/// path.
+fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiError> {
+    use arrow::array::{LargeListArray, ListArray, StringArray, StructArray};
     use arrow::datatypes::DataType;
 
     let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(body), None)
@@ -1491,14 +1452,13 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         }
     }
     for name in metadata.keys() {
-        if !matches!(name.as_str(), "field" | "level") {
+        if name != "level" {
             return Err(ApiError::Contract(format!(
                 "growth body: schema metadata `{name}` is not one this route takes; the envelope \
-                 is `field` and `level`"
+                 is `level`"
             )));
         }
     }
-    let field = metadata.get("field").cloned();
     let level = match metadata.get("level") {
         None => 0,
         Some(text) => text.parse::<u32>().map_err(|_| {
@@ -1507,7 +1467,10 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
             ))
         })?,
     };
+    let list_type = "list<struct> or large_list<struct>, one member per element, each struct \
+                     naming its member by `tessera_id` and unique field columns";
     let mut artifacts = Vec::new();
+    let mut lists = Vec::new();
     for batch in reader {
         let batch = batch
             .map_err(|e| ApiError::Contract(format!("growth body: arrow decode error: {e}")))?;
@@ -1523,94 +1486,117 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
         // The view each artifact belongs to, on a group-scoped layer. A null cell names none.
         let views = match batch.column_by_name("view") {
             None => None,
-            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                ApiError::Contract(
-                    "growth body: column 'view' is not utf8; it names each artifact's view key"
-                        .to_string(),
-                )
-            })?),
+            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(
+                || {
+                    ApiError::Contract(
+                        "growth body: column 'view' is not utf8; it names each artifact's view key"
+                            .to_string(),
+                    )
+                },
+            )?),
         };
         let access = labels_col("growth body", &batch, "access")
             .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
         let members = batch.column_by_name("members").ok_or_else(|| {
-            ApiError::Contract(
-                "growth body: column 'members' is missing; it is list<utf8> or large_list<utf8>, \
-                 one address per element"
-                    .to_string(),
-            )
-        })?;
-        // A null cell is refused, as JSON's `"members": null` is; nothing joining is an empty list.
-        let null_cell = |row: usize| {
             ApiError::Contract(format!(
-                "growth body: row {row}, column 'members' is null; an artifact with nothing \
-                 joining carries an empty list"
+                "growth body: column 'members' is missing; it is {list_type}"
             ))
-        };
-        let entries = |row: usize| -> Result<Vec<String>, ApiError> {
-            let (values, range) = match members.data_type() {
+        })?;
+        // Each row's range of struct elements, and the elements' columns as text.
+        let (elements, ranges): (&StructArray, Vec<Option<std::ops::Range<usize>>>) =
+            match members.data_type() {
                 DataType::List(_) => {
                     let list = members
                         .as_any()
                         .downcast_ref::<ListArray>()
                         .expect("a List column downcasts to a ListArray");
-                    if list.is_null(row) {
-                        return Err(null_cell(row));
-                    }
                     let offsets = list.value_offsets();
-                    (
-                        list.values().clone(),
-                        offsets[row] as usize..offsets[row + 1] as usize,
-                    )
+                    let ranges = (0..list.len())
+                        .map(|row| {
+                            (!list.is_null(row))
+                                .then(|| offsets[row] as usize..offsets[row + 1] as usize)
+                        })
+                        .collect();
+                    (struct_elements(list.values().as_ref(), list_type)?, ranges)
                 }
                 DataType::LargeList(_) => {
                     let list = members
                         .as_any()
                         .downcast_ref::<LargeListArray>()
                         .expect("a LargeList column downcasts to a LargeListArray");
-                    if list.is_null(row) {
-                        return Err(null_cell(row));
-                    }
                     let offsets = list.value_offsets();
-                    (
-                        list.values().clone(),
-                        offsets[row] as usize..offsets[row + 1] as usize,
-                    )
+                    let ranges = (0..list.len())
+                        .map(|row| {
+                            (!list.is_null(row))
+                                .then(|| offsets[row] as usize..offsets[row + 1] as usize)
+                        })
+                        .collect();
+                    (struct_elements(list.values().as_ref(), list_type)?, ranges)
                 }
                 other => {
                     return Err(ApiError::Contract(format!(
-                        "growth body: column 'members' is {other:?}; it is list<utf8> or \
-                         large_list<utf8>, one address per element"
+                        "growth body: column 'members' is {other:?}; it is {list_type}"
                     )))
                 }
             };
-            let values = values
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    ApiError::Contract(
-                        "growth body: column 'members' is a list whose elements are not utf8"
-                            .to_string(),
-                    )
-                })?;
-            range
-                .map(|index| {
-                    if values.is_null(index) {
-                        return Err(ApiError::Contract(format!(
-                            "growth body: row {row}, column 'members' has a null element; every \
-                             element is one address"
-                        )));
-                    }
-                    Ok(values.value(index).to_string())
-                })
-                .collect()
-        };
-        for row in 0..batch.num_rows() {
+        let mut columns: Vec<(String, MemberColumn)> = Vec::new();
+        for (field, column) in elements.fields().iter().zip(elements.columns()) {
+            if columns.iter().any(|(name, _)| name == field.name()) {
+                return Err(ApiError::Contract(format!(
+                    "growth body: the member struct has two fields named '{}'; name each column \
+                     once",
+                    field.name()
+                )));
+            }
+            columns.push((field.name().clone(), MemberColumn::of(field, column)?));
+        }
+        for (row, range) in ranges.into_iter().enumerate() {
             if keys.is_null(row) {
                 return Err(ApiError::Contract(format!(
                     "growth body: row {row}, column 'key' is null; every row names the artifact \
                      it grows"
                 )));
             }
+            // A null cell is refused, as JSON's `"members": null` is; nothing joining is an empty
+            // list.
+            let Some(range) = range else {
+                return Err(ApiError::Contract(format!(
+                    "growth body: row {row}, column 'members' is null; an artifact with nothing \
+                     joining carries an empty list"
+                )));
+            };
+            if let Some(element) = range.clone().find(|&at| elements.is_null(at)) {
+                return Err(ApiError::Contract(format!(
+                    "growth body: row {row}, column 'members' has a null element at {}; every \
+                     element is one member",
+                    element - range.start
+                )));
+            }
+            let index = artifacts.len();
+            let table = Table::of_columns(
+                range.len(),
+                columns
+                    .iter()
+                    .map(|(name, column)| {
+                        (
+                            name.clone(),
+                            range.clone().map(|at| column.cell(at)).collect(),
+                        )
+                    })
+                    .collect(),
+            );
+            lists.push(MemberList {
+                artifact: index,
+                list: "members".to_string(),
+                table,
+                whole: false,
+            });
+            lists.push(MemberList {
+                artifact: index,
+                list: "leaving".to_string(),
+                table: Table::default(),
+                whole: false,
+            });
             let labels = access
                 .as_ref()
                 .map(|access| access.labels(row).map(str::to_string).collect());
@@ -1622,8 +1608,8 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
                     .filter(|views| !views.is_null(row))
                     .map(|views| views.value(row).to_string()),
                 rank: None,
-                members: entries(row)?,
-                leaving: Vec::new(),
+                members: None,
+                leaving: None,
                 parent: Vec::new(),
                 attached_to: None,
                 content: Vec::new(),
@@ -1636,58 +1622,178 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<GrowBody, ApiError> {
             });
         }
     }
-    Ok(GrowBody {
-        level,
-        field,
-        default_space: None,
-        artifacts,
+    Ok((
+        GrowBody {
+            level,
+            default_space: None,
+            artifacts,
+        },
+        lists,
+    ))
+}
+
+/// One column of an Arrow member struct: text, or an integer of any width.
+enum MemberColumn {
+    Text(arrow::array::StringArray),
+    LargeText(arrow::array::LargeStringArray),
+    Signed(arrow::array::Int64Array),
+    Unsigned(arrow::array::UInt64Array),
+}
+
+impl MemberColumn {
+    fn of(
+        field: &arrow::datatypes::Field,
+        column: &arrow::array::ArrayRef,
+    ) -> Result<Self, ApiError> {
+        use arrow::array::{Int64Array, LargeStringArray, StringArray, UInt64Array};
+        use arrow::datatypes::DataType;
+        let widened = |to: &DataType| {
+            arrow::compute::cast(column, to).expect("an integer widens to its 64-bit type")
+        };
+        Ok(match field.data_type() {
+            DataType::Utf8 => MemberColumn::Text(
+                column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("utf8")
+                    .clone(),
+            ),
+            DataType::LargeUtf8 => MemberColumn::LargeText(
+                column
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .expect("large utf8")
+                    .clone(),
+            ),
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                MemberColumn::Signed(
+                    widened(&DataType::Int64)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .expect("int64")
+                        .clone(),
+                )
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                MemberColumn::Unsigned(
+                    widened(&DataType::UInt64)
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .expect("uint64")
+                        .clone(),
+                )
+            }
+            other => {
+                return Err(ApiError::Contract(format!(
+                    "growth body: member column '{}' is {other}; a member column is utf8 or an \
+                     integer type",
+                    field.name()
+                )))
+            }
+        })
+    }
+
+    fn cell(&self, at: usize) -> Option<tessera_engine::AddressValue> {
+        use arrow::array::Array;
+        use tessera_engine::AddressValue;
+        match self {
+            MemberColumn::Text(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
+            }
+            MemberColumn::LargeText(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
+            }
+            MemberColumn::Signed(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Integer(i128::from(c.value(at))))
+            }
+            MemberColumn::Unsigned(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Integer(i128::from(c.value(at))))
+            }
+        }
+    }
+}
+
+/// A member list's elements, which are structs.
+fn struct_elements<'a>(
+    values: &'a dyn arrow::array::Array,
+    list_type: &str,
+) -> Result<&'a arrow::array::StructArray, ApiError> {
+    values
+        .as_any()
+        .downcast_ref::<arrow::array::StructArray>()
+        .ok_or_else(|| {
+            ApiError::Contract(format!(
+                "growth body: column 'members' is a list whose elements are {:?}; it is \
+                 {list_type}",
+                values.data_type()
+            ))
+        })
+}
+
+/// One member table of an artifact: which list it is, as a refusal names it, and the table.
+struct MemberList {
+    artifact: usize,
+    list: String,
+    table: Table,
+    /// A refused row refuses the whole request, strict or not: a generating set, which a viewer
+    /// must see whole to be served the content, never loses a member.
+    whole: bool,
+}
+
+/// What a request's member tables resolved to: for each list, the entities its accepted rows name,
+/// in row order; the refused rows, as `{artifact, list, row, reason}`; and the columns ignored.
+struct ResolvedLists {
+    entities: Vec<Vec<EntityId>>,
+    refused: Vec<serde_json::Value>,
+    ignored: Vec<String>,
+}
+
+/// Every member table of a request, resolved in one call. A refused row is dropped and listed, or
+/// refuses the request where it is `strict` or the list is whole.
+fn resolve_member_lists(
+    state: &AppState,
+    lists: &mut [MemberList],
+    strict: bool,
+) -> Result<ResolvedLists, ApiError> {
+    let tables: Vec<Table> = lists
+        .iter_mut()
+        .map(|l| std::mem::take(&mut l.table))
+        .collect();
+    let (named, ignored) = crate::address::Merged::of(tables)?.name(state)?;
+    let mut refused = Vec::new();
+    let mut out = Vec::with_capacity(lists.len());
+    for (list, named) in lists.iter().zip(named) {
+        let mut entities = Vec::with_capacity(named.len());
+        for (row, named) in named.into_iter().enumerate() {
+            match named {
+                Named::Item(entity) => entities.push(entity),
+                Named::Refused(reason) if strict || list.whole => {
+                    let what = format!("artifact {}'s `{}`", list.artifact, list.list);
+                    return Err(crate::address::strict_refusal(&what, row, reason));
+                }
+                Named::Refused(reason) => refused.push(serde_json::json!({
+                    "artifact": list.artifact,
+                    "list": list.list,
+                    "row": row,
+                    "reason": reason.as_str(),
+                })),
+            }
+        }
+        out.push(entities);
+    }
+    Ok(ResolvedLists {
+        entities: out,
+        refused,
+        ignored,
     })
 }
 
-/// Resolves every member address of a batch to an entity at the boundary: a `tessera_id`, or a
-/// value of `field` where the batch names one. `flat` holds every address and `widths` each
-/// artifact's share. An unresolvable member refuses the batch, never dropped.
-fn resolve_member_addresses(
-    state: &AppState,
-    field: Option<&str>,
-    flat: &[&String],
-    widths: &[usize],
-    layout: &str,
-) -> Result<Vec<tessera_types::EntityId>, ApiError> {
-    let resolved: Vec<Option<tessera_types::EntityId>> = match field {
-        None => {
-            let ids = flat
-                .iter()
-                .map(|raw| {
-                    raw.parse::<u64>()
-                        .map(TesseraId::new)
-                        .map_err(|_| ApiError::Contract(format!("'{raw}' is not a tessera_id")))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            state
-                .engine
-                .resolve_tessera_ids(&ids)
-                .map_err(map_store_error)?
-        }
-        Some(field) => {
-            let values: Vec<String> = flat.iter().map(|value| (*value).clone()).collect();
-            state
-                .engine
-                .resolve_unique_values(field, &values)
-                .map_err(map_engine_error)?
-        }
-    };
-
-    if let Some(position) = resolved.iter().position(Option::is_none) {
-        // Named by its position in the batch, never by the id the caller sent.
-        let (artifact, member) = position_in_batch(widths, position);
-        return Err(ApiError::Unknown(format!(
-            "id {member} of artifact {artifact} names nothing this deployment holds, counting \
-             {layout}"
-        )));
-    }
-
-    Ok(resolved.into_iter().flatten().collect())
+/// A member table in its JSON form, `what` naming it in a refusal; absent is no table.
+fn member_table(
+    what: &str,
+    value: Option<crate::address::WireTable>,
+) -> Result<Option<Table>, ApiError> {
+    value.map(|value| Table::from_wire(what, value)).transpose()
 }
 
 #[derive(serde::Deserialize)]
@@ -1696,10 +1802,6 @@ struct PublishBody {
     /// Defaults to the layer's only level. A layer that declared none has exactly level 0.
     #[serde(default)]
     level: u32,
-    /// The unique field whose values name the members, one form per request since a per-member
-    /// tag would be most of a large membership's body. Absent, members are `tessera_id`s.
-    #[serde(default)]
-    field: Option<String>,
     /// The space of a row's shape and authored shape content where the row names none: `"view"`
     /// (the default) or `"wgs84"`, projected by the view's own transform. A view with projection
     /// `none` refuses `wgs84`.
@@ -1719,14 +1821,15 @@ struct IncomingArtifactBody {
     /// entity-scoped one. Keys are unique per view, and an edge may not cross views.
     #[serde(default)]
     view: Option<String>,
-    /// Decimal `tessera_id` strings, or values of the batch's `field` where it names one. Absent
-    /// only when `excluding` is given; an empty list is a membership that holds nobody.
+    /// A table of members ([`crate::address::Table`]): columns keyed by `tessera_id` and unique
+    /// field names. Absent only when `excluding` is given; an empty table is a membership that
+    /// holds nobody.
     #[serde(default)]
-    members: Option<Vec<String>>,
-    /// The membership spelled by exclusion, addressed as `members` is and never beside it, at most
-    /// `max_excluded_per_request` long. The executor stores the complement against the view.
+    members: Option<crate::address::WireTable>,
+    /// The membership spelled by exclusion, a table as `members` is and never beside it, at most
+    /// `max_excluded_per_request` rows. The executor stores the complement against the view.
     #[serde(default)]
-    excluding: Option<Vec<String>>,
+    excluding: Option<crate::address::WireTable>,
     /// Ranked contents, most specific first; the engine decides whether the layer takes them.
     #[serde(default)]
     content: Vec<IncomingContentBody>,
@@ -1917,8 +2020,7 @@ fn canonical_row_shape(
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
         if !carried.is_empty() {
             return Err(refuse(
-                "carries a shape, and this layer declares no `shape`; remove the shape"
-                    .to_string(),
+                "carries a shape, and this layer declares no `shape`; remove the shape".to_string(),
             ));
         }
         return Ok(None);
@@ -2089,10 +2191,10 @@ struct IncomingContentBody {
     /// One value per kind the layer declares, in the order of its `content.supplied` list.
     values: Vec<String>,
     /// The entities this content was generated from, all of which a viewer must see to be served
-    /// it; addressed as `members` are. Empty asserts nothing about the corpus, and is refused on a
-    /// layer whose content is corpus-derived.
+    /// it: a table as `members` is. Absent or empty asserts nothing about the corpus, and is
+    /// refused on a layer whose content is corpus-derived.
     #[serde(default)]
-    generated_from: Vec<String>,
+    generated_from: Option<crate::address::WireTable>,
 }
 
 /// `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level, all or none; a held
@@ -2101,7 +2203,7 @@ struct IncomingContentBody {
 async fn publish_artifacts(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    ApiQuery(wait): ApiQuery<WaitQuery>,
+    ApiQuery(query): ApiQuery<RowsQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2120,105 +2222,150 @@ async fn publish_artifacts(
             "a publication takes JSON, not `{ARROW_CONTENT_TYPE}`; send `application/json`"
         )));
     }
-    let PublishBody {
-        level,
-        field,
-        default_space,
-        mut artifacts,
-    } = artifact_json(&body, "publication")?;
+    // The body is decoded, checked and resolved on the blocking pool with the write, since a large
+    // publication's decode and resolution are the request's heaviest work.
+    let strict = query.strict;
+    let (batch, keys, shape_reports, refused, ignored) = state
+        .blocking(move |state| {
+            let PublishBody {
+                level,
+                default_space,
+                mut artifacts,
+            } = artifact_json(&body, "publication")?;
 
-    if artifacts.is_empty() {
-        return Err(ApiError::Contract(
-            "a publication carries at least one artifact".to_string(),
-        ));
-    }
-    // The artifact cap, before any shape is canonicalised or address resolved.
-    if artifacts.len() > state.limits.max_artifacts_per_request {
-        return Err(ApiError::Contract(format!(
-            "the publication carries {} artifacts, over the {}-artifact limit \
-             (ingest.max_artifacts_per_request); send fewer artifacts per request",
-            artifacts.len(),
-            state.limits.max_artifacts_per_request
-        )));
-    }
+            if artifacts.is_empty() {
+                return Err(ApiError::Contract(
+                    "a publication carries at least one artifact".to_string(),
+                ));
+            }
+            // The artifact cap, before any shape is canonicalised or address resolved.
+            if artifacts.len() > state.limits.max_artifacts_per_request {
+                return Err(ApiError::Contract(format!(
+                    "the publication carries {} artifacts, over the {}-artifact limit \
+                     (ingest.max_artifacts_per_request); send fewer artifacts per request",
+                    artifacts.len(),
+                    state.limits.max_artifacts_per_request
+                )));
+            }
 
-    // A row names `members` or `excluding`. Only an attached row may carry neither; it is served
-    // over its target's membership.
-    for (index, artifact) in artifacts.iter().enumerate() {
-        if artifact.members.is_none()
-            && artifact.excluding.is_none()
-            && artifact.attached_to.is_none()
-        {
-            return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication carries neither `members` nor `excluding`, \
-                 and attaches to nothing; give one of them, or `\"members\": []` for an empty \
-                 membership"
-            )));
-        }
-    }
-
-    // `members` and `excluding` never together, and an exclusion list must fit one request, since
-    // its complement cannot be taken until the whole list is in; a longer one is sent as members.
-    for (index, artifact) in artifacts.iter().enumerate() {
-        let Some(excluding) = artifact.excluding.as_ref() else {
-            continue;
-        };
-        if artifact.members.is_some() {
-            return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication carries both `members` and `excluding`; \
-                 give one of them"
-            )));
-        }
-        if excluding.len() > state.limits.max_excluded_per_request {
-            return Err(ApiError::Contract(format!(
-                "artifact {index} of this publication excludes {} entities, over the {}-entity \
-                 limit (ingest.max_excluded_per_request); name its `members` instead",
-                excluding.len(),
-                state.limits.max_excluded_per_request
-            )));
-        }
-    }
-
-    // `view` is required on a group-scoped layer and refused on an entity-scoped one. The executor
-    // checks again; this answers before any work. An unknown layer is refused by the engine.
-    let declaration = state
-        .engine
-        .registered_layer(&name)
-        .map(|registered| registered.declaration);
-    if let Some(declaration) = &declaration {
-        for (index, artifact) in artifacts.iter().enumerate() {
-            match (declaration.scope.group(), artifact.view.as_deref()) {
-                (Some(_), Some(_)) | (None, None) => {}
-                (Some(group), None) => {
+            // A row names `members` or `excluding`. Only an attached row may carry neither; it is served
+            // over its target's membership.
+            for (index, artifact) in artifacts.iter().enumerate() {
+                if artifact.members.is_none()
+                    && artifact.excluding.is_none()
+                    && artifact.attached_to.is_none()
+                {
                     return Err(ApiError::Contract(format!(
-                        "artifact {index} of this publication names no `view`, and layer '{name}' \
-                         is scoped to the group '{group}'; name the key of the view it belongs to"
-                    )))
-                }
-                (None, Some(view)) => {
-                    return Err(ApiError::Contract(format!(
-                        "artifact {index} of this publication names the view '{view}', and layer \
-                         '{name}' is entity-scoped; remove `view`"
-                    )))
+                        "artifact {index} of this publication carries neither `members` nor `excluding`, \
+                         and attaches to nothing; give one of them, or `\"members\": {{}}` for an empty \
+                         membership"
+                    )));
                 }
             }
-        }
-    }
 
-    let accesses: Vec<Option<Vec<Vec<u8>>>> = artifacts
-        .iter_mut()
-        .map(|artifact| {
-            artifact
-                .access
-                .take()
-                .map(|labels| access_descriptors(&state, labels))
-                .transpose()
-        })
-        .collect::<Result<_, _>>()?;
+            // Each artifact's member tables, in the order they are resolved: members, exclusions, then
+            // each content's generating set.
+            let mut lists: Vec<MemberList> = Vec::new();
+            // Each artifact's `members` and `excluding` sizes, where it carries them.
+            let mut sizes: Vec<(Option<usize>, Option<usize>)> = vec![(None, None); artifacts.len()];
+            for (index, artifact) in artifacts.iter_mut().enumerate() {
+                for (list, value) in [
+                    ("members", artifact.members.take()),
+                    ("excluding", artifact.excluding.take()),
+                ] {
+                    let what = format!("artifact {index}'s `{list}`");
+                    if let Some(table) = member_table(&what, value)? {
+                        match list {
+                            "members" => sizes[index].0 = Some(table.len()),
+                            _ => sizes[index].1 = Some(table.len()),
+                        }
+                        lists.push(MemberList {
+                            artifact: index,
+                            list: list.to_string(),
+                            table,
+                            whole: false,
+                        });
+                    }
+                }
+                for (rank, content) in artifact.content.iter_mut().enumerate() {
+                    let list = format!("content.{rank}.generated_from");
+                    let what = format!("artifact {index}'s `{list}`");
+                    let table = member_table(&what, content.generated_from.take())?;
+                    lists.push(MemberList {
+                        artifact: index,
+                        list,
+                        table: table.unwrap_or_default(),
+                        whole: true,
+                    });
+                }
+            }
+            let carries = |index: usize, list: &str| {
+                let (members, excluding) = sizes[index];
+                match list {
+                    "members" => members,
+                    _ => excluding,
+                }
+            };
 
-    // Shapes and addresses read the bundle, so they run on the blocking pool with the write.
-    let (batch, keys, shape_reports) = state
-        .blocking(move |state| {
+            // `members` and `excluding` never together, and an exclusion list must fit one request, since
+            // its complement cannot be taken until the whole list is in; a longer one is sent as members.
+            for index in 0..artifacts.len() {
+                let Some(excluding) = carries(index, "excluding") else {
+                    continue;
+                };
+                if carries(index, "members").is_some() {
+                    return Err(ApiError::Contract(format!(
+                        "artifact {index} of this publication carries both `members` and `excluding`; \
+                         give one of them"
+                    )));
+                }
+                if excluding > state.limits.max_excluded_per_request {
+                    return Err(ApiError::Contract(format!(
+                        "artifact {index} of this publication excludes {} entities, over the {}-entity \
+                         limit (ingest.max_excluded_per_request); name its `members` instead",
+                        excluding,
+                        state.limits.max_excluded_per_request
+                    )));
+                }
+            }
+
+            // `view` is required on a group-scoped layer and refused on an entity-scoped one. The executor
+            // checks again; this answers before any work. An unknown layer is refused by the engine.
+            let declaration = state
+                .engine
+                .registered_layer(&name)
+                .map(|registered| registered.declaration);
+            if let Some(declaration) = &declaration {
+                for (index, artifact) in artifacts.iter().enumerate() {
+                    match (declaration.scope.group(), artifact.view.as_deref()) {
+                        (Some(_), Some(_)) | (None, None) => {}
+                        (Some(group), None) => {
+                            return Err(ApiError::Contract(format!(
+                                "artifact {index} of this publication names no `view`, and layer '{name}' \
+                                 is scoped to the group '{group}'; name the key of the view it belongs to"
+                            )))
+                        }
+                        (None, Some(view)) => {
+                            return Err(ApiError::Contract(format!(
+                                "artifact {index} of this publication names the view '{view}', and layer \
+                                 '{name}' is entity-scoped; remove `view`"
+                            )))
+                        }
+                    }
+                }
+            }
+
+            let accesses: Vec<Option<Vec<Vec<u8>>>> = artifacts
+                .iter_mut()
+                .map(|artifact| {
+                    artifact
+                        .access
+                        .take()
+                        .map(|labels| access_descriptors(state, labels))
+                        .transpose()
+                })
+                .collect::<Result<_, _>>()?;
+
             let (shapes, shape_reports) = canonical_batch_shapes(
                 state,
                 declaration.as_ref(),
@@ -2226,61 +2373,41 @@ async fn publish_artifacts(
                 &mut artifacts,
             )?;
 
-            // Every address in one flat list, resolved in one pass: per artifact its members,
-            // its exclusions, then each content's generating set.
-            let widths: Vec<usize> = artifacts
-                .iter()
-                .map(|a| {
-                    a.members.as_ref().map_or(0, |m| m.len())
-                        + a.excluding.as_ref().map_or(0, |e| e.len())
-                        + a.content
-                            .iter()
-                            .map(|v| v.generated_from.len())
-                            .sum::<usize>()
-                })
-                .collect();
-            let flat: Vec<&String> = artifacts
-                .iter()
-                .flat_map(|a| {
-                    a.members
-                        .iter()
-                        .flatten()
-                        .chain(a.excluding.iter().flatten())
-                        .chain(a.content.iter().flat_map(|v| v.generated_from.iter()))
-                })
-                .collect();
+            let ResolvedLists {
+                entities: resolved,
+                refused,
+                ignored,
+            } = resolve_member_lists(state, &mut lists, strict)?;
 
-            let resolved = resolve_member_addresses(
-                state,
-                field.as_deref(),
-                &flat,
-                &widths,
-                "its members first, then each content's generating set",
-            )?;
-
-            // Walked back in the order it was flattened.
-            let mut entities = resolved.into_iter();
+            // Walked back in the order the lists were gathered.
+            let mut resolved = lists
+                .iter()
+                .map(|l| (l.artifact, l.list.as_str()))
+                .zip(resolved)
+                .peekable();
             let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
                 .into_iter()
                 .zip(shapes)
                 .zip(accesses)
-                .map(|((artifact, shape), access)| {
-                    let members: Vec<tessera_types::EntityId> = entities
-                        .by_ref()
-                        .take(artifact.members.as_ref().map_or(0, |m| m.len()))
-                        .collect();
-                    let excluded: Option<Vec<tessera_types::EntityId>> = artifact
-                        .excluding
-                        .as_ref()
-                        .map(|list| entities.by_ref().take(list.len()).collect());
+                .enumerate()
+                .map(|(index, ((artifact, shape), access))| {
+                    let mut members: Vec<EntityId> = Vec::new();
+                    let mut excluded: Option<Vec<EntityId>> = None;
+                    let mut sets: Vec<Vec<EntityId>> = Vec::new();
+                    while let Some(((_, list), entities)) =
+                        resolved.next_if(|((at, _), _)| *at == index)
+                    {
+                        match list {
+                            "members" => members = entities,
+                            "excluding" => excluded = Some(entities),
+                            _ => sets.push(entities),
+                        }
+                    }
                     let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
                         .content
                         .into_iter()
-                        .map(|v| {
-                            let set: Vec<tessera_types::EntityId> =
-                                entities.by_ref().take(v.generated_from.len()).collect();
-                            tessera_lifecycle::membership::IncomingContent::new(v.values, set)
-                        })
+                        .zip(sets)
+                        .map(|(v, set)| tessera_lifecycle::membership::IncomingContent::new(v.values, set))
                         .collect();
                     let attached_to = artifact.attached_to.map(|a| {
                         tessera_lifecycle::membership::IncomingAttachment {
@@ -2319,7 +2446,7 @@ async fn publish_artifacts(
                 .engine
                 .put_artifacts(name, level, incoming)
                 .map_err(crate::error::map_accept_error)?;
-            Ok((batch, keys, shape_reports))
+            Ok((batch, keys, shape_reports, refused, ignored))
         })
         .await?;
 
@@ -2338,23 +2465,22 @@ async fn publish_artifacts(
         "without_content": batch.without_content,
         "filled": batch.filled,
         "joined": batch.joined,
+        "refused": refused,
+        "ignored_columns": ignored,
     });
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    acknowledge(&state, &wait, declared(batch.created == 0), body).await
+    acknowledge(&state, &query.wait(), declared(batch.created == 0), body).await
 }
 
-/// `PATCH /control/layers/{name}/artifacts`'s body. `field` and `default_space` are as on
-/// [`PublishBody`].
+/// `PATCH /control/layers/{name}/artifacts`'s body. `default_space` is as on [`PublishBody`].
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GrowBody {
     /// Defaults to the layer's only level.
     #[serde(default)]
     level: u32,
-    #[serde(default)]
-    field: Option<String>,
     #[serde(default)]
     default_space: Option<String>,
     artifacts: Vec<GrowingArtifactBody>,
@@ -2376,13 +2502,13 @@ struct GrowingArtifactBody {
     /// rank, and the row carries no part to fill.
     #[serde(default)]
     rank: Option<u16>,
-    /// Members joining, addressed as a publication's are. Empty adds nothing.
+    /// Members joining, a table as a publication's are. Absent or empty adds nothing.
     #[serde(default)]
-    members: Vec<String>,
-    /// Members leaving, applied after the joins. Only a generating set may shrink, so this needs a
-    /// `rank`; a page that empties a set withdraws its content.
+    members: Option<crate::address::WireTable>,
+    /// Members leaving, a table as `members` is, applied after the joins. Only a generating set may
+    /// shrink, so this needs a `rank`; a page that empties a set withdraws its content.
     #[serde(default)]
-    leaving: Vec<String>,
+    leaving: Option<crate::address::WireTable>,
     /// Parent keys: filled where the artifact holds none, accepted if identical, 409 otherwise.
     #[serde(default)]
     parent: Vec<String>,
@@ -2425,7 +2551,7 @@ struct ContentFillBody {
 async fn grow_memberships(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    ApiQuery(wait): ApiQuery<WaitQuery>,
+    ApiQuery(query): ApiQuery<RowsQuery>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -2437,42 +2563,64 @@ async fn grow_memberships(
             " (ingest.publish_max_body_bytes); send fewer members per request",
         )
     })?;
-    let GrowBody {
-        level,
-        field,
-        default_space,
-        mut artifacts,
-    } = match body_encoding(&headers)? {
-        BodyEncoding::Json => artifact_json(&body, "growth")?,
-        BodyEncoding::Arrow => grow_body_from_arrow(&body)?,
-    };
-    let accesses: Vec<Vec<Vec<u8>>> = artifacts
-        .iter_mut()
-        .map(|artifact| access_descriptors(&state, artifact.access.take()))
-        .collect::<Result<_, _>>()?;
-
-    if artifacts.is_empty() {
-        return Err(ApiError::Contract(
-            "a growth names at least one artifact".to_string(),
-        ));
-    }
-
-    // The member cap, over joining and leaving members, before any address is resolved.
-    let members: usize = artifacts
-        .iter()
-        .map(|a| a.members.len() + a.leaving.len())
-        .sum();
-    if members > state.limits.max_members_per_request {
-        return Err(ApiError::Contract(format!(
-            "the growth names {} members, over the {}-member limit \
-             (ingest.max_members_per_request); send fewer members per request",
-            members,
-            state.limits.max_members_per_request
-        )));
-    }
-
-    let (grown, keys, shape_reports) = state
+    let encoding = body_encoding(&headers)?;
+    // The body is decoded, checked and resolved on the blocking pool with the write.
+    let strict = query.strict;
+    let (grown, keys, shape_reports, refused, ignored) = state
         .blocking(move |state| {
+            let (
+                GrowBody {
+                    level,
+                    default_space,
+                    mut artifacts,
+                },
+                mut lists,
+            ) = match encoding {
+                BodyEncoding::Json => {
+                    let mut body: GrowBody = artifact_json(&body, "growth")?;
+                    let mut lists = Vec::with_capacity(body.artifacts.len() * 2);
+                    for (index, artifact) in body.artifacts.iter_mut().enumerate() {
+                        // Members joining a generating set are refused whole, as a publication's
+                        // generating set is; one leaving it that names nothing leaves nothing.
+                        let generating = artifact.rank.is_some();
+                        for (list, value, whole) in [
+                            ("members", artifact.members.take(), generating),
+                            ("leaving", artifact.leaving.take(), false),
+                        ] {
+                            let what = format!("artifact {index}'s `{list}`");
+                            lists.push(MemberList {
+                                artifact: index,
+                                list: list.to_string(),
+                                table: member_table(&what, value)?.unwrap_or_default(),
+                                whole,
+                            });
+                        }
+                    }
+                    (body, lists)
+                }
+                BodyEncoding::Arrow => grow_body_from_arrow(&body)?,
+            };
+            let accesses: Vec<Vec<Vec<u8>>> = artifacts
+                .iter_mut()
+                .map(|artifact| access_descriptors(state, artifact.access.take()))
+                .collect::<Result<_, _>>()?;
+
+            if artifacts.is_empty() {
+                return Err(ApiError::Contract(
+                    "a growth names at least one artifact".to_string(),
+                ));
+            }
+
+            // The member cap, over joining and leaving members, before any address is resolved.
+            let members: usize = lists.iter().map(|l| l.table.len()).sum();
+            if members > state.limits.max_members_per_request {
+                return Err(ApiError::Contract(format!(
+                    "the growth names {} members, over the {}-member limit \
+                     (ingest.max_members_per_request); send fewer members per request",
+                    members, state.limits.max_members_per_request
+                )));
+            }
+
             // Shapes go through the publication's reader, so a filled shape is stored byte for
             // byte as a publication would store it.
             let declaration = state
@@ -2488,32 +2636,20 @@ async fn grow_memberships(
 
             // Joining and leaving members are resolved in one pass, joins first in each row, so an
             // entity named in both resolves to one entity.
-            let widths: Vec<usize> = artifacts
-                .iter()
-                .map(|a| a.members.len() + a.leaving.len())
-                .collect();
-            let flat: Vec<&String> = artifacts
-                .iter()
-                .flat_map(|a| a.members.iter().chain(a.leaving.iter()))
-                .collect();
-            let resolved = resolve_member_addresses(
-                state,
-                field.as_deref(),
-                &flat,
-                &widths,
-                "its members",
-            )?;
+            let ResolvedLists {
+                entities,
+                refused,
+                ignored,
+            } = resolve_member_lists(state, &mut lists, strict)?;
+            let mut entities = entities.into_iter();
 
-            let mut entities = resolved.into_iter();
             let joins: Vec<tessera_lifecycle::IncomingGrowth> = artifacts
                 .into_iter()
                 .zip(shapes)
                 .zip(accesses)
                 .map(|((artifact, shape), access)| {
-                    let members: Vec<tessera_types::EntityId> =
-                        entities.by_ref().take(artifact.members.len()).collect();
-                    let leaving: Vec<tessera_types::EntityId> =
-                        entities.by_ref().take(artifact.leaving.len()).collect();
+                    let members = entities.next().expect("a joining list per artifact");
+                    let leaving = entities.next().expect("a leaving list per artifact");
                     // Every row carries all its fields; the executor refuses combinations it does
                     // not take, rather than this dropping them and answering 200.
                     let mut join = tessera_lifecycle::IncomingGrowth::page_of_entities(
@@ -2549,7 +2685,7 @@ async fn grow_memberships(
                 .engine
                 .grow_memberships(name, level, joins)
                 .map_err(crate::error::map_accept_error)?;
-            Ok((grown, keys, shape_reports))
+            Ok((grown, keys, shape_reports, refused, ignored))
         })
         .await?;
 
@@ -2571,11 +2707,15 @@ async fn grow_memberships(
             row
         })
         .collect();
-    let mut body = serde_json::json!({ "artifacts": artifacts });
+    let mut body = serde_json::json!({
+        "artifacts": artifacts,
+        "refused": refused,
+        "ignored_columns": ignored,
+    });
     if !shape_reports.is_empty() {
         body["shapes"] = serde_json::Value::Array(shape_reports);
     }
-    acknowledge(&state, &wait, StatusCode::OK, body).await
+    acknowledge(&state, &query.wait(), StatusCode::OK, body).await
 }
 /// `POST /control/faults/arm`: arms a pause site with `Stall`, so a test driver can park the
 /// executor, then kill or release it. Only a stall is armable over the wire: a crash is the

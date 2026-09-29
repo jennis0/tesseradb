@@ -370,7 +370,7 @@ def publish(server) -> None:
         assert response.status_code == 201, response.text
 
     def record(key, members, labels, parent=None):
-        out = {"key": key, "members": [str(m) for m in members]}
+        out = {"key": key, "members": {JOIN_FIELD: [str(m) for m in members]}}
         # Stated on every record, `None` for no label of its own: the layers read labels.
         out["access"] = labels if labels and key != FILLED_LATER else None
         if parent:
@@ -379,7 +379,7 @@ def publish(server) -> None:
 
     for layer, rows in ((TEAMS, TEAM_ROWS), (SEALED, SEALED_ROWS), (GATED, GATED_ROWS)):
         response = server.publish_artifacts(
-            layer, field=JOIN_FIELD, artifacts=[record(*row) for row in rows]
+            layer, artifacts=[record(*row) for row in rows], strict=True
         )
         assert response.status_code == 201, response.text
     response = server.publish_artifacts(
@@ -392,12 +392,12 @@ def publish(server) -> None:
     assert response.status_code == 201, response.text
     response = server.publish_artifacts(
         TITLES,
-        field=JOIN_FIELD,
         artifacts=[
-            {"key": key, "members": [str(m) for m in members],
+            {"key": key, "members": {JOIN_FIELD: [str(m) for m in members]},
              "attached_to": {"layer": TEAMS, "key": team}, "content": [{"values": [text]}]}
             for key, team, text, members in TITLE_ROWS
         ],
+        strict=True,
     )
     assert response.status_code == 201, response.text
     labels = next(row[2] for row in TEAM_ROWS if row[0] == FILLED_LATER)

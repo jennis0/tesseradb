@@ -1062,7 +1062,7 @@ class Cycle:
         it takes the deployment to."""
         field = self.naming["name"]
         r, wall = self.send_changes(
-            control, [{"field": field, "value": value, "op": op} for value in values]
+            control, [{"op": op, "match": {field: value}} for value in values]
         )
         target = start_visible - len(values)
         reached, visibility_s = wait_for(

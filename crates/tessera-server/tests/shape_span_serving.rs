@@ -186,7 +186,7 @@ async fn one_wgs84_shape_is_canonicalised_per_view_and_served_per_view() {
         "regions/uk",
         json!({
             "default_space": "wgs84",
-            "artifacts": [{ "key": "uk", "members": [], "bbox": [-8.0, 50.0, 2.0, 58.0] }]
+            "artifacts": [{ "key": "uk", "members": {}, "bbox": [-8.0, 50.0, 2.0, 58.0] }]
         }),
     )
     .await;
@@ -238,7 +238,7 @@ async fn a_shape_outside_one_views_extent_is_published_and_reported_not_refused(
         "regions/nz",
         json!({
             "default_space": "wgs84",
-            "artifacts": [{ "key": "nz", "members": [], "bbox": [166.0, -47.0, 179.0, -34.0] }]
+            "artifacts": [{ "key": "nz", "members": {}, "bbox": [166.0, -47.0, 179.0, -34.0] }]
         }),
     )
     .await;
@@ -299,7 +299,7 @@ async fn a_view_space_shape_over_two_frames_is_refused_at_the_row() {
         &server,
         "regions/vs",
         json!({
-            "artifacts": [{ "key": "uk", "members": [], "bbox": [0.4, 0.2, 0.5, 0.3] }]
+            "artifacts": [{ "key": "uk", "members": {}, "bbox": [0.4, 0.2, 0.5, 0.3] }]
         }),
     )
     .await;

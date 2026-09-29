@@ -6,18 +6,23 @@
 //! and so is a `tessera_id` naming no live or suppressed item, since a new item is never given a
 //! `tessera_id` its caller chose. Within a batch, rows are decided against what was held before
 //! it, so two rows naming one item, or setting one unique value, would each be decided without
-//! seeing the other: the first in row order is kept and the later ones are refused.
+//! seeing the other: the first in row order is kept and the later ones are refused. Rows are
+//! decided in row order against the rows kept before them, so a refused row claims neither its
+//! item nor its values and never refuses a later row. Where two reasons apply to one row, the rule
+//! gives the first of: a `tessera_id` naming nothing, values naming two items, naming no item where
+//! the batch creates none, an item an earlier row names, a value an earlier row sets.
 //!
 //! A deleted item names nothing: its values may be given to a new item.
 //!
 //! The pieces are public so that each path applies them to the batch shape it holds.
-//! [`name_row`] decides one row from what its identifiers name, [`collisions`] finds the later
-//! rows of every run of equal keys, and [`require_identifier`] says whether a batch that addresses
-//! items carries a column to address them by. [`resolve`] composes them over a batch held in
-//! memory. The service answers [`Holdings`] from a generation and refuses a batch at its first
-//! refused row. The linear build answers it from maps over the files read before, one file at a
-//! time. The streaming build applies the same pieces to sorted runs, because a probe per row is
-//! the random access it cannot afford at 10⁹ rows.
+//! [`name_row`] decides one row from what its identifiers name, and [`require_identifier`] says
+//! whether a batch that addresses items carries a column to address them by. [`resolve`] composes
+//! them over a batch held in memory. The service answers [`Holdings`] from a generation; it
+//! applies a batch's accepted rows and lists the refused ones, or refuses the whole batch at its
+//! first refused row where the caller asks for a strict batch. The linear build answers it from
+//! maps over the files read before, one file at a time. The streaming build applies the same
+//! decisions to sorted runs and one pass in row order, because a probe per row is the random
+//! access it cannot afford at 10⁹ rows.
 
 use rustc_hash::FxHashMap;
 use tessera_types::{EntityId, TesseraId};
@@ -38,8 +43,9 @@ pub struct RowIdentity {
 pub trait Holdings {
     type Error;
 
-    /// For each key, every item holding it in the unique field at declared position `field`.
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, Self::Error>;
+    /// Every item holding a key in the unique field at declared position `field`, as
+    /// `(position in keys, item)`.
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, Self::Error>;
 
     /// For each `tessera_id`, the item it names.
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
@@ -129,14 +135,45 @@ impl Refusal {
     pub const ONE_ITEM_TWICE: &'static str = "one_item_twice";
     pub const ONE_VALUE_TWICE: &'static str = "one_value_twice";
 
+    /// Why the row is refused, without the rows and items the refusal names.
+    pub fn kind(&self) -> Reason {
+        match self {
+            Refusal::NamesTwo { .. } => Reason::NamesTwo,
+            Refusal::UnknownTesseraId { .. } => Reason::UnknownTesseraId,
+            Refusal::NamesNoItem { .. } => Reason::NamesNoItem,
+            Refusal::OneItemTwice { .. } => Reason::OneItemTwice,
+            Refusal::OneValueTwice { .. } => Reason::OneValueTwice,
+        }
+    }
+
     /// The reason as a report spells it.
     pub fn reason(&self) -> &'static str {
+        self.kind().as_str()
+    }
+}
+
+/// Why a row is refused, as a receipt records it.
+///
+/// On-disk format: variants are positional under postcard, since an ingest record's receipt
+/// carries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Reason {
+    NamesTwo,
+    UnknownTesseraId,
+    NamesNoItem,
+    OneItemTwice,
+    OneValueTwice,
+}
+
+impl Reason {
+    /// The reason as a receipt and a report spell it.
+    pub fn as_str(self) -> &'static str {
         match self {
-            Refusal::NamesTwo { .. } => Self::NAMES_TWO,
-            Refusal::UnknownTesseraId { .. } => Self::UNKNOWN_TESSERA_ID,
-            Refusal::NamesNoItem { .. } => Self::NAMES_NO_ITEM,
-            Refusal::OneItemTwice { .. } => Self::ONE_ITEM_TWICE,
-            Refusal::OneValueTwice { .. } => Self::ONE_VALUE_TWICE,
+            Reason::NamesTwo => Refusal::NAMES_TWO,
+            Reason::UnknownTesseraId => Refusal::UNKNOWN_TESSERA_ID,
+            Reason::NamesNoItem => Refusal::NAMES_NO_ITEM,
+            Reason::OneItemTwice => Refusal::ONE_ITEM_TWICE,
+            Reason::OneValueTwice => Refusal::ONE_VALUE_TWICE,
         }
     }
 }
@@ -168,21 +205,6 @@ pub fn name_row(named: &[(Identifier, EntityId)]) -> Named {
     Named::One(first)
 }
 
-/// Every later row of a run of equal keys, with the run's first row: `(kept, refused)`. `sorted`
-/// ascends by `(key, row)`.
-pub fn collisions<K: PartialEq>(
-    sorted: impl IntoIterator<Item = (K, usize)>,
-) -> impl Iterator<Item = (usize, usize)> {
-    let mut first: Option<(K, usize)> = None;
-    sorted.into_iter().filter_map(move |(key, row)| match &first {
-        Some((held, kept)) if *held == key => Some((*kept, row)),
-        _ => {
-            first = Some((key, row));
-            None
-        }
-    })
-}
-
 /// Why a batch that addresses items cannot be resolved at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoIdentifier;
@@ -198,7 +220,10 @@ impl std::fmt::Display for NoIdentifier {
 
 /// Whether a batch that addresses existing items carries a column to address them by. A batch
 /// that creates items needs none: each row without an identifier is a new item.
-pub fn require_identifier(tessera_id_column: bool, unique_columns: usize) -> Result<(), NoIdentifier> {
+pub fn require_identifier(
+    tessera_id_column: bool,
+    unique_columns: usize,
+) -> Result<(), NoIdentifier> {
     match tessera_id_column || unique_columns > 0 {
         true => Ok(()),
         false => Err(NoIdentifier),
@@ -211,8 +236,9 @@ pub fn resolve<H: Holdings>(
     holdings: &H,
     batch: Batch,
 ) -> Result<Vec<Verdict>, H::Error> {
-    // Each row's identifiers, with the item each names, gathered one lookup per field.
-    let mut named: Vec<Vec<(Identifier, EntityId)>> = vec![Vec::new(); rows.len()];
+    // Each row's identifiers, with the item each names, gathered one lookup per field into one
+    // list, then ordered by row.
+    let mut found: Vec<(usize, (Identifier, EntityId))> = Vec::new();
     let mut verdicts: Vec<Option<Verdict>> = vec![None; rows.len()];
 
     let tessera: Vec<(usize, TesseraId)> = rows
@@ -223,10 +249,8 @@ pub fn resolve<H: Holdings>(
     let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
     for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)?) {
         match holder {
-            Some(entity) => named[*at].push((Identifier::TesseraId, entity)),
-            None => {
-                verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at }))
-            }
+            Some(entity) => found.push((*at, (Identifier::TesseraId, entity))),
+            None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at })),
         }
     }
 
@@ -241,19 +265,28 @@ pub fn resolve<H: Holdings>(
     for field in fields {
         let settings = &by_field[&field];
         let keys: Vec<Key> = settings.iter().map(|(_, key)| *key).collect();
-        for ((at, _), holders) in settings.iter().zip(holdings.holders(field, &keys)?) {
-            for entity in holders {
-                named[*at].push((Identifier::Unique(field), entity));
-            }
+        for (at, entity) in holdings.holders(field, &keys)? {
+            found.push((settings[at].0, (Identifier::Unique(field), entity)));
         }
     }
+    found.sort_by_key(|(at, _)| *at);
+    let named: Vec<(Identifier, EntityId)> = found.iter().map(|(_, named)| *named).collect();
 
-    for (at, named) in named.into_iter().enumerate() {
-        if verdicts[at].is_some() {
+    let mut next = 0;
+    for (at, verdict) in verdicts.iter_mut().enumerate() {
+        let start = next;
+        while next < found.len() && found[next].0 == at {
+            next += 1;
+        }
+        if verdict.is_some() {
             continue;
         }
-        verdicts[at] = Some(match name_row(&named) {
-            Named::Two => Verdict::Refused(Refusal::NamesTwo { row: at, named }),
+        let named = &named[start..next];
+        *verdict = Some(match name_row(named) {
+            Named::Two => Verdict::Refused(Refusal::NamesTwo {
+                row: at,
+                named: named.to_vec(),
+            }),
             Named::One(entity) => Verdict::Names(entity),
             Named::Nothing if batch.creates() => Verdict::Creates,
             Named::Nothing => Verdict::Refused(Refusal::NamesNoItem { row: at }),
@@ -261,63 +294,43 @@ pub fn resolve<H: Holdings>(
     }
     let mut verdicts: Vec<Verdict> = verdicts.into_iter().map(|v| v.expect("decided")).collect();
 
-    if batch.one_row_per_item() {
-        let mut items: Vec<(EntityId, usize)> = verdicts
-            .iter()
-            .enumerate()
-            .filter_map(|(at, v)| match v {
-                Verdict::Names(entity) => Some((*entity, at)),
-                _ => None,
-            })
-            .collect();
-        items.sort_unstable();
-        let refused: Vec<(usize, usize)> = collisions(items.iter().copied()).collect();
-        for (kept, at) in refused {
-            let Verdict::Names(item) = verdicts[at] else {
-                unreachable!("only rows naming an item collide on one")
-            };
-            verdicts[at] = Verdict::Refused(Refusal::OneItemTwice {
-                rows: [kept, at],
-                item,
-            });
-        }
-    }
-
-    // Two rows setting one value name no one item here, or the rule above would have met them.
-    if batch.sets_values() {
-        let mut claimed: FxHashMap<(u16, Key), usize> = FxHashMap::default();
-        for (at, row) in rows.iter().enumerate() {
-            if matches!(verdicts[at], Verdict::Refused(_)) {
+    // Rows are decided in row order against the rows kept before them, so a refused row claims
+    // neither its item nor its values: of two rows naming one item, or setting one value, the first
+    // kept is kept.
+    let mut items: FxHashMap<EntityId, usize> = FxHashMap::default();
+    let mut claimed: FxHashMap<(u16, Key), usize> = FxHashMap::default();
+    for (at, row) in rows.iter().enumerate() {
+        let item = match verdicts[at] {
+            Verdict::Refused(_) => continue,
+            Verdict::Names(item) => batch.one_row_per_item().then_some(item),
+            Verdict::Creates => None,
+        };
+        if let Some(item) = item {
+            if let Some(&kept) = items.get(&item) {
+                verdicts[at] = Verdict::Refused(Refusal::OneItemTwice {
+                    rows: [kept, at],
+                    item,
+                });
                 continue;
             }
-            verdicts[at] = match one_value_twice(&mut claimed, at, &row.unique) {
-                Some(refusal) => Verdict::Refused(refusal),
-                None => continue,
-            };
+        }
+        if batch.sets_values() {
+            if let Some(&(field, key)) = row.unique.iter().find(|v| claimed.contains_key(v)) {
+                verdicts[at] = Verdict::Refused(Refusal::OneValueTwice {
+                    rows: [claimed[&(field, key)], at],
+                    field: Identifier::Unique(field),
+                });
+                continue;
+            }
+            for value in &row.unique {
+                claimed.insert(*value, at);
+            }
+        }
+        if let Some(item) = item {
+            items.insert(item, at);
         }
     }
     Ok(verdicts)
-}
-
-/// The refusal of row `at` if an earlier kept row set one of its `values`, and otherwise nothing,
-/// the row's values then being claimed. Rows are offered in row order, each kept row's values
-/// claimed before the next is offered, so of the rows setting one value the first kept is the
-/// first offered.
-pub fn one_value_twice(
-    claimed: &mut FxHashMap<(u16, Key), usize>,
-    at: usize,
-    values: &[(u16, Key)],
-) -> Option<Refusal> {
-    if let Some(&(field, key)) = values.iter().find(|v| claimed.contains_key(v)) {
-        return Some(Refusal::OneValueTwice {
-            rows: [claimed[&(field, key)], at],
-            field: Identifier::Unique(field),
-        });
-    }
-    for value in values {
-        claimed.insert(*value, at);
-    }
-    None
 }
 
 /// The refusal a batch refused whole is refused for: the first the rule decides, and the first row
@@ -345,14 +358,21 @@ mod tests {
 
     impl Holdings for Held {
         type Error = ();
-        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, ()> {
+        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, ()> {
             Ok(keys
                 .iter()
-                .map(|key| self.unique.get(&(field, *key)).cloned().unwrap_or_default())
+                .enumerate()
+                .flat_map(|(at, key)| {
+                    let held = self.unique.get(&(field, *key)).cloned().unwrap_or_default();
+                    held.into_iter().map(move |entity| (at, entity))
+                })
                 .collect())
         }
         fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
-            Ok(ids.iter().map(|id| self.tessera.get(&id.raw()).copied()).collect())
+            Ok(ids
+                .iter()
+                .map(|id| self.tessera.get(&id.raw()).copied())
+                .collect())
         }
     }
 
@@ -393,7 +413,12 @@ mod tests {
             tessera_id: Some(TesseraId::new(101)),
             unique: vec![(0, 17), (1, 5)],
         };
-        let rows = [agreeing, by_unique(0, 18), by_unique(0, 99), RowIdentity::default()];
+        let rows = [
+            agreeing,
+            by_unique(0, 18),
+            by_unique(0, 99),
+            RowIdentity::default(),
+        ];
         assert_eq!(
             resolved(&rows, Batch::Creates),
             vec![
@@ -448,6 +473,40 @@ mod tests {
 
     /// Two rows naming one item keep the first and refuse the later, and so do two new items
     /// given one value. Nulls are not values and never collide.
+    /// A refused row claims neither its item nor its values: a row refused for a value an earlier
+    /// row set does not make a later row naming its item the second to name it.
+    #[test]
+    fn a_refused_row_refuses_no_later_row() {
+        let row = |a: Key, b: Key| RowIdentity {
+            unique: vec![(0, a), (1, b)],
+            ..RowIdentity::default()
+        };
+        let rows = [row(17, 77), row(18, 77), by_unique(0, 18)];
+        assert_eq!(
+            resolved(&rows, Batch::Creates),
+            vec![
+                Verdict::Names(e(1)),
+                refused(Refusal::OneValueTwice {
+                    rows: [0, 1],
+                    field: Identifier::Unique(1)
+                }),
+                Verdict::Names(e(2)),
+            ]
+        );
+        let rows = [by_unique(0, 18), row(18, 77), row(99, 77)];
+        assert_eq!(
+            resolved(&rows, Batch::Creates),
+            vec![
+                Verdict::Names(e(2)),
+                refused(Refusal::OneItemTwice {
+                    rows: [0, 1],
+                    item: e(2)
+                }),
+                Verdict::Creates,
+            ]
+        );
+    }
+
     #[test]
     fn the_first_of_two_rows_naming_one_item_or_setting_one_value_is_kept() {
         let by_tessera = RowIdentity {
@@ -466,7 +525,12 @@ mod tests {
         );
         assert_eq!(
             resolved(
-                &[by_unique(0, 50), by_unique(1, 6), by_unique(0, 50), by_unique(0, 50)],
+                &[
+                    by_unique(0, 50),
+                    by_unique(1, 6),
+                    by_unique(0, 50),
+                    by_unique(0, 50)
+                ],
                 Batch::Creates
             ),
             vec![
@@ -483,7 +547,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            resolved(&[RowIdentity::default(), RowIdentity::default()], Batch::Creates),
+            resolved(
+                &[RowIdentity::default(), RowIdentity::default()],
+                Batch::Creates
+            ),
             vec![Verdict::Creates, Verdict::Creates]
         );
     }
@@ -528,8 +595,12 @@ mod tests {
             unique: vec![(0, a), (1, b)],
             ..RowIdentity::default()
         };
-        let verdicts = resolve(&[row(1, 11), row(1, 12), row(3, 12)], &held, Batch::Creates).unwrap();
-        assert!(matches!(verdicts[0], Verdict::Refused(Refusal::NamesTwo { row: 0, .. })));
+        let verdicts =
+            resolve(&[row(1, 11), row(1, 12), row(3, 12)], &held, Batch::Creates).unwrap();
+        assert!(matches!(
+            verdicts[0],
+            Verdict::Refused(Refusal::NamesTwo { row: 0, .. })
+        ));
         assert_eq!(verdicts[1], Verdict::Names(e(0)));
         assert_eq!(
             verdicts[2],
@@ -537,15 +608,6 @@ mod tests {
                 rows: [1, 2],
                 field: Identifier::Unique(1)
             })
-        );
-    }
-
-    #[test]
-    fn collisions_keep_the_first_row_of_each_run() {
-        let sorted = [(1, 0), (1, 4), (1, 9), (2, 3), (3, 1), (3, 2)];
-        assert_eq!(
-            collisions(sorted).collect::<Vec<_>>(),
-            vec![(0, 4), (0, 9), (1, 2)]
         );
     }
 
