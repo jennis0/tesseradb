@@ -1397,7 +1397,8 @@ export class TesseraLegend extends TesseraElement {
    * the legend, level with the swatch. Focus goes into it as it opens.
    */
   protected override updated(changed: PropertyValues<this>): void {
-    this.counts.set(this.resolvedStore, this.readout || !this.selectable ? countSpec(this.resolvedStore) : null);
+    // An update that lands after the element left the page registers nothing.
+    this.counts.set(this.resolvedStore, this.isConnected && (this.readout || !this.selectable) ? countSpec(this.resolvedStore) : null);
     const open = this.menuOpen || this.picking !== null;
     if (changed.has('menuOpen') || changed.has('picking')) {
       if (open) document.addEventListener('pointerdown', this.onOutside, true);

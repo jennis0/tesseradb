@@ -1,12 +1,14 @@
 import {ContextProvider} from '@lit/context';
 import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import type {ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
+import {repeat} from 'lit/directives/repeat.js';
+import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {emptyDraft} from '@tesseradb/client';
+import {artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
+import {HeldAggregate} from './aggregate.js';
 import {TesseraElement, columnCaption, emit} from './base.js';
 import {placeCallout, type Rect} from './callout.js';
 import {sizingOf, watchChoices} from './colouring.js';
@@ -106,15 +108,20 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * choice in its heading and exact counts beside the colours, then Size where the points are sized
  * by a column) and In view (the clusters on screen at the level the map draws, each fitting the map
  * to it when pressed). While a region is selected its card goes first, and Colour and In view fold
- * to one-line headings with a hint of what they hold; pressing one opens it again, and clearing the
- * region unfolds them. The status strip sits in the map's bottom-right.
+ * to one-line headings with a hint of what they hold; pressing one opens it, the chevron beside an
+ * opened one folds it again, and clearing the region unfolds them. The hint names the colouring and
+ * how many values the current set holds, counted by the aggregate route once it answers, or how
+ * many clusters are in view. The status strip sits in the map's bottom-right.
  *
  * Picking a point opens its item card beside the point, joined to it by a short leader: on the side
  * with most room, clear of the left and right cards, following the point as the map pans and zooms,
- * hidden while the point is off the map. The card shows the headline, the `subtitle-field` field,
- * three fields and "Show all N fields". Picking another point replaces it unless Pin was pressed,
- * which keeps it open; Close drops it, and the selection with it. A picked cluster's card behaves
- * the same way. Where the map holds no position for the selection, as after following an item into
+ * hidden while the point is off the map, and clear of the other cards beside points. The card shows
+ * the headline, the `subtitle-field` field, three fields and "Show all N fields". Picking another
+ * point replaces it unless Pin was pressed, which keeps it open; Close or Escape closes it and drops
+ * the selection, and a click on the map that finds nothing does the same for the card that is not
+ * pinned. The card is the next stop in the tab order after the map's own controls, is named by its
+ * item's title, and gives focus back to the map as it closes. A picked cluster's card behaves the
+ * same way. Where the map holds no position for the selection, as after following an item into
  * another view, the card goes first in the right column, as a region's does.
  *
  * The Layers button opens a popover with a Display section (whether the points are drawn, what sizes
@@ -130,7 +137,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * legend naming four values with the rest under "N more"; the tools move to the bottom-left and the
  * strip shortens its figures. In a container 720 px wide or narrower, the status strip runs full
  * width above a tab bar (Filters, Layers, In view, Item), and each tab opens its panel as a sheet;
- * the item card is the Item sheet there.
+ * the item card is the Item sheet there, and the cards over the map are not drawn.
  *
  * Every event its elements fire bubbles out of it, since each is composed.
  *
@@ -495,6 +502,31 @@ export class TesseraExplorer extends TesseraElement {
       [part='fold']:hover {
         background: var(--_tessera-surface-2);
       }
+      /* An opened section keeps a chevron in its heading's gutter that folds it again. */
+      .section {
+        position: relative;
+      }
+      .section + .section,
+      [part='fold'] + .section,
+      .section + [part='fold'] {
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      .section > .refold {
+        position: absolute;
+        z-index: 1;
+        top: 11px;
+        left: 6px;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+      }
+      .section tessera-legend::part(title),
+      .section tessera-artifact-list::part(title) {
+        padding-left: 12px;
+      }
       [part='fold-hint'] {
         min-width: 0;
         overflow: hidden;
@@ -531,6 +563,8 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part~='callout'] {
         position: absolute;
+        left: 0;
+        top: 0;
         width: 300px;
         pointer-events: auto;
         box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
@@ -540,6 +574,11 @@ export class TesseraExplorer extends TesseraElement {
         --_tessera-key-width: 76px;
         --_tessera-field-gap: 4px 10px;
         font-size: 12px;
+      }
+      /* A callout whose point is off the map keeps its box, so its size stays known. */
+      [part~='callout'][hidden] {
+        display: block;
+        visibility: hidden;
       }
       [part~='callout'] tessera-artifact-card {
         max-height: 360px;
@@ -704,7 +743,8 @@ export class TesseraExplorer extends TesseraElement {
   /**
    * Which regions appear, space- or comma-separated, from `toolbar` (the heading and the
    * legend), `legend` (the Layers button and its layer picker), `filters`, `artifacts` (In view),
-   * `selection` and `detail` (the item and artifact cards). Defaults to all six.
+   * `selection` and `detail` (the item and artifact cards). Defaults to all six. Any other name,
+   * such as `hierarchy`, shows nothing.
    */
   @property() accessor panels: string = ALL_PANELS.join(' ');
   /** Passed to the map's `colour-by`. */
@@ -781,6 +821,24 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor layersOpen = false;
   /** Whether the container is narrower than 1000 px and wider than the narrow layout. @internal */
   @state() accessor compact = false;
+  /** Whether the container is 720 px wide or narrower, where the panels are sheets. @internal */
+  @state() accessor narrow = false;
+  /** The cards beside points as last rendered, which {@link placeCallouts} places. */
+  private cards: {key: string; world: [number, number]; pinned: boolean}[] = [];
+  /** The map's size as last measured; read from the map where nothing has measured it. */
+  private mapSize: {width: number; height: number} | null = null;
+  /** Measures the map, the cards over it and the callouts as they change size. */
+  private sizes: ResizeObserver | null = null;
+  private observed = new Set<Element>();
+  /** A frame asked for to place the callouts after the camera moved. */
+  private placing: number | null = null;
+  /** The zoom the level drawn was last worked out at, and the level that gave when none is chosen. */
+  private zoomSeen: number | null = null;
+  private autoSeen: number | null = null;
+  /** The count of values behind the folded Colour heading. */
+  private readonly hintCount = new HeldAggregate('colour-hint');
+  /** The folded In view heading, kept while nothing it counts has changed. */
+  private inViewHeld: {key: string; hint: string} | null = null;
 
   /** Whether the host put anything in the toolbar slot. */
   @state() private accessor toolbarFilled = false;
@@ -831,8 +889,10 @@ export class TesseraExplorer extends TesseraElement {
     this.resize ??= new ResizeObserver((entries) => {
       const width = entries.at(-1)?.contentRect.width ?? 0;
       this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
+      this.narrow = width > 0 && width <= COMPACT_BETWEEN[0];
     });
     this.resize.observe(this);
+    this.sizes ??= new ResizeObserver(() => this.measure());
   }
 
   override disconnectedCallback(): void {
@@ -840,6 +900,12 @@ export class TesseraExplorer extends TesseraElement {
     this.following?.();
     this.resize?.disconnect();
     this.resize = null;
+    this.sizes?.disconnect();
+    this.sizes = null;
+    this.observed.clear();
+    if (this.placing !== null) cancelAnimationFrame(this.placing);
+    this.placing = null;
+    this.hintCount.set(null, null);
     this.closeLayers();
     super.disconnectedCallback();
   }
@@ -885,16 +951,20 @@ export class TesseraExplorer extends TesseraElement {
     const artifacts = s?.get('artifacts');
     const layersOn = artifacts?.layers.length ?? 0;
     const compact = this.compact;
+    // The narrow layout shows its panels as sheets and draws none of the cards over the map.
+    const narrow = this.narrow;
     // Short of room, the docked layout takes the overlay's form.
     const floating = this.layout === 'overlay' || compact;
     // The level drawn: the one chosen through the legend, else, for a levelled layer served
     // whole, the level the view's budget would cut at, else the deepest served.
     const autoLevel = this.autoLevel();
+    this.zoomSeen = this.map?.zoom ?? null;
+    this.autoSeen = autoLevel;
     const level = this.level ?? autoLevel;
     // A click that found nothing shows no card; a broken pick shows its fault.
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick?.kind === 'broken');
     // The detail shows whichever changed last.
-    const showArtifact = this.lastDetail === 'artifact' && Boolean(selection?.artifact || selection?.artifactRefusal);
+    const showArtifact = this.showsArtifact();
     const detail = this.liveCard(showArtifact);
     // The pickers draw nothing for a one-view bundle, so their row is hidden there unless the host
     // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
@@ -936,10 +1006,22 @@ export class TesseraExplorer extends TesseraElement {
           this.unfolded = new Set([...this.unfolded, section]);
           this.requestUpdate();
         }}><span>${title}</span><span part="fold-hint">${hint}</span></button>`;
+    // An opened section, while the sections fold by default, keeps a chevron that folds it again.
+    const opened = (section: 'colour' | 'in-view', title: string, body: unknown) =>
+      foldedByDefault
+        ? html`<div class="section" data-section=${section}><button part="fold" class="refold" type="button" data-section=${section} aria-expanded="true" aria-label=${`Fold ${title}`}
+            @click=${() => {
+              const next = new Set(this.unfolded);
+              next.delete(section);
+              this.unfolded = next;
+              this.requestUpdate();
+            }}>${icon('chev', 12, 1.4)}</button>${body}</div>`
+        : body;
     const sections = [
-      this.has('toolbar') ? (folded('colour') ? fold('colour', 'Colour', this.colourHint()) : colour) : nothing,
-      this.has('artifacts') ? (folded('in-view') ? fold('in-view', 'In view', this.inViewHint(level)) : list) : nothing
+      this.has('toolbar') ? (folded('colour') ? fold('colour', 'Colour', this.colourHint()) : opened('colour', 'Colour', colour)) : nothing,
+      this.has('artifacts') ? (folded('in-view') ? fold('in-view', 'In view', this.inViewHint(level)) : opened('in-view', 'In view', list)) : nothing
     ];
+    this.hintCount.set(s, this.isConnected && !narrow && this.has('toolbar') && folded('colour') ? this.hintSpec() : null);
     const info = this.has('toolbar') || this.has('artifacts') ? html`<div part="info" class="card">${sections}</div>` : nothing;
     const right = html`<div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${detailInColumn ? html`<div part="detail" class="card">${detail}</div>` : nothing}${info}</div>`;
 
@@ -1001,7 +1083,7 @@ export class TesseraExplorer extends TesseraElement {
       @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
       @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
       @tessera-close=${(e: Event) => this.closeDetail(e)}>
-      ${floating ? nothing : docked}
+      ${floating || narrow ? nothing : docked}
       <div class="stage">
         <tessera-map
           exportparts=${FORWARD.map}
@@ -1027,18 +1109,18 @@ export class TesseraExplorer extends TesseraElement {
           .rampScale=${this.rampScale}
           .rampReverse=${this.rampReverse}
           .valueColours=${this.valueColours}
-          @tessera-viewchange=${() => this.requestUpdate()}
+          @tessera-viewchange=${() => this.onCamera()}
           @tessera-pick=${() => this.requestUpdate()}
           @tessera-miss=${() => this.onMiss()}
           @click=${() => this.requestUpdate()}
         >
-          ${layersButton}
-          ${right}
-          <div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>
+          ${narrow ? nothing : layersButton}
+          ${narrow ? nothing : right}
+          ${narrow ? nothing : html`<div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>`}
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
         </tessera-map>
-        ${floating ? panel : nothing}
-        ${this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
+        ${narrow ? nothing : this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
+        ${floating && !narrow ? panel : nothing}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
@@ -1055,13 +1137,38 @@ export class TesseraExplorer extends TesseraElement {
       : html`<tessera-item-card exportparts=${FORWARD['item-card']} compact title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing} .pick=${this.map?.lastPick ?? null}>${pin}</tessera-item-card>`}</slot>`;
   }
 
-  /** The key the selection's card goes by, `item:<id>` or `artifact:<id>`, or `null` for none. */
+  /** Whether the card for the selection is the artifact card: the artifact, or its refusal, changed last. */
+  private showsArtifact(): boolean {
+    const sel = this.resolvedStore?.get('selection');
+    return this.lastDetail === 'artifact' && Boolean(sel?.artifact || sel?.artifactRefusal);
+  }
+
+  /**
+   * The key the selection's card goes by, `item:<id>` or `artifact:<id>`, or `null` where the card
+   * shows a refusal or nothing, which cannot be pinned.
+   */
   private liveKey(): string | null {
     const sel = this.resolvedStore?.get('selection');
-    const showArtifact = this.lastDetail === 'artifact' && Boolean(sel?.artifact);
-    if (showArtifact && sel?.artifact) return `artifact:${sel.artifact.id}`;
-    if (sel?.item) return `item:${sel.item.id}`;
-    return null;
+    if (this.showsArtifact()) return sel?.artifact ? `artifact:${sel.artifact.id}` : null;
+    return sel?.item ? `item:${sel.item.id}` : null;
+  }
+
+  /** What a card is called: its item's title field, else its `tessera_id`; a cluster's name. */
+  private cardName(key: string | null): string {
+    const sel = this.resolvedStore?.get('selection');
+    const pinned = this.pinned.find((p) => p.key === key);
+    const item = pinned?.kind === 'item' ? pinned.item : key?.startsWith('item:') ? sel?.item : null;
+    if (item) {
+      const title = this.titleField ? item.detail.fields[this.titleField] : undefined;
+      return title === undefined || title === null || title === '' ? `Item ${item.id}` : String(title);
+    }
+    const id = pinned?.kind === 'artifact' ? pinned.artifact.id : key?.startsWith('artifact:') ? sel?.artifact?.id : undefined;
+    if (id !== undefined) {
+      const a = this.resolvedStore?.get('artifacts');
+      const row = a?.served.find((x) => x.tesseraId === id) ?? a?.colourServed.find((x) => x.tesseraId === id);
+      return (row && a ? artifactName(row, a.attached) : null) ?? 'Cluster';
+    }
+    return 'Unavailable';
   }
 
   /**
@@ -1094,18 +1201,17 @@ export class TesseraExplorer extends TesseraElement {
 
   /**
    * The cards beside their points: each pinned card, then the selection's where `anchor` places it
-   * and no pinned card shows it already. A card whose point is off the map is not drawn.
+   * and no pinned card shows it already. {@link placeCallouts} places them, and hides a card whose
+   * point is off the map.
    */
   private callouts(anchor: [number, number] | null, detail: TemplateResult): TemplateResult | typeof nothing {
     const m = this.map;
     const view = this.resolvedStore?.get('view').id ?? '';
     if (!m) return nothing;
     const live = this.liveKey();
-    const size = {width: m.clientWidth, height: m.clientHeight};
-    if (size.width === 0 || size.height === 0) return nothing;
     const pinButton = (pressed: boolean, onPress: () => void) =>
       html`<button part="pin" slot="actions" type="button" aria-pressed=${pressed ? 'true' : 'false'} aria-label=${pressed ? 'Unpin' : 'Pin'} title=${pressed ? 'Unpin' : 'Keep open'} @click=${onPress}>${icon('pin', 13, 1.5)}</button>`;
-    const cards: {key: string; world: [number, number]; body: TemplateResult; pinned: boolean}[] = this.pinned
+    const cards: {key: string; world: [number, number]; body: TemplateResult; pinned: boolean; name: string}[] = this.pinned
       .filter((p) => p.view === view)
       .map((p) => {
         const unpin = pinButton(true, () => (this.pinned = this.pinned.filter((q) => q.key !== p.key)));
@@ -1113,67 +1219,148 @@ export class TesseraExplorer extends TesseraElement {
           p.kind === 'item'
             ? html`<tessera-item-card exportparts=${FORWARD['item-card']} compact .item=${p.item} title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing}>${unpin}</tessera-item-card>`
             : html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']} .artifact=${p.artifact}>${unpin}</tessera-artifact-card>`;
-        return {key: p.key, world: p.world, body, pinned: true};
+        return {key: p.key, world: p.world, body, pinned: true, name: this.cardName(p.key)};
       });
     if (anchor && !(live && this.pinned.some((p) => p.key === live && p.view === view))) {
-      const showArtifact = live?.startsWith('artifact:') ?? false;
-      const body = live ? this.liveCard(showArtifact, pinButton(false, () => this.togglePin())) : detail;
-      cards.push({key: 'live', world: anchor, body, pinned: false});
+      const body = live ? this.liveCard(this.showsArtifact(), pinButton(false, () => this.togglePin())) : detail;
+      cards.push({key: 'live', world: anchor, body, pinned: false, name: this.cardName(live)});
     }
-    const placed = cards.flatMap((c) => {
-      const at = placeCallout(m.screenOf(c.world), this.calloutSizes.get(c.key) ?? CALLOUT_SIZE, size, this.keepClear);
-      return at ? [{...c, at, point: m.screenOf(c.world)}] : [];
-    });
-    if (placed.length === 0) return nothing;
+    this.cards = cards.map(({key, world, pinned}) => ({key, world, pinned}));
+    if (cards.length === 0) return nothing;
     return html`<div class="callouts">
       <svg part="leaders" aria-hidden="true">
-        ${placed.map((c) => svg`<line x1=${c.at.leader.x1} y1=${c.at.leader.y1} x2=${c.at.leader.x2} y2=${c.at.leader.y2}></line>${c.pinned ? svg`<circle cx=${c.point[0]} cy=${c.point[1]} r="4"></circle>` : nothing}`)}
+        ${repeat(cards, (c) => c.key, (c) => svg`<g data-callout=${c.key}><line></line>${c.pinned ? svg`<circle r="4"></circle>` : nothing}</g>`)}
       </svg>
-      ${placed.map(
-        (c) => html`<div part="callout" class="card" role="dialog" aria-label=${c.pinned ? 'Pinned card' : 'Selected'} data-callout=${c.key} data-side=${c.at.side} ?data-pinned=${c.pinned}
-          style=${`left:${Math.round(c.at.left)}px;top:${Math.round(c.at.top)}px`}>${c.body}</div>`
+      ${repeat(
+        cards,
+        (c) => c.key,
+        (c) => html`<div part="callout" class="card" role="dialog" aria-label=${c.name} data-callout=${c.key} ?data-pinned=${c.pinned} @keydown=${this.onCalloutKey}>${c.body}</div>`
       )}
     </div>`;
   }
 
   /**
-   * Measure each callout and the cards callouts keep clear of, and draw again where either moved:
-   * a card's size is known only once it is drawn.
+   * Place each callout beside its point under the camera as it stands, clear of the cards over the
+   * map and of the callouts placed before it, and join it to its point. A callout whose point is off
+   * the map is hidden with its leader. Reads no layout: the sizes are those {@link measure} took.
    */
-  private measureCallouts(): void {
+  private placeCallouts(): void {
     const m = this.map;
-    const callouts = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'));
-    // Nothing is measured while no card is beside a point, so a camera move reads no layout.
-    if (!m || callouts.length === 0) return;
-    const origin = m.getBoundingClientRect();
-    let moved = false;
-    for (const el of callouts) {
+    if (!m) return;
+    const size = this.mapSize ?? {width: m.clientWidth, height: m.clientHeight};
+    const placed: Rect[] = [];
+    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
       const key = el.dataset.callout!;
-      const size = {width: el.offsetWidth, height: el.offsetHeight};
-      const held = this.calloutSizes.get(key);
-      if (size.width > 0 && (!held || Math.abs(held.width - size.width) > 1 || Math.abs(held.height - size.height) > 1)) {
-        this.calloutSizes.set(key, size);
-        moved = true;
-      }
+      const card = this.cards.find((c) => c.key === key);
+      const leader = this.renderRoot.querySelector<SVGGElement>(`[part="leaders"] g[data-callout="${key}"]`);
+      if (!card) continue;
+      const point = m.screenOf(card.world);
+      const box = this.calloutSizes.get(key) ?? CALLOUT_SIZE;
+      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed]) : null;
+      el.hidden = at === null;
+      leader?.setAttribute('visibility', at === null ? 'hidden' : 'visible');
+      if (!at) continue;
+      placed.push({left: at.left, top: at.top, width: box.width, height: box.height});
+      el.style.transform = `translate(${Math.round(at.left)}px, ${Math.round(at.top)}px)`;
+      el.dataset.side = at.side;
+      const line = leader?.querySelector('line');
+      line?.setAttribute('x1', String(at.leader.x1));
+      line?.setAttribute('y1', String(at.leader.y1));
+      line?.setAttribute('x2', String(at.leader.x2));
+      line?.setAttribute('y2', String(at.leader.y2));
+      const dot = leader?.querySelector('circle');
+      dot?.setAttribute('cx', String(point[0]));
+      dot?.setAttribute('cy', String(point[1]));
     }
-    const clear: Rect[] = [];
-    const add = (el: Element | null) => {
-      const r = el?.getBoundingClientRect();
-      if (r && r.width > 0 && r.height > 0) clear.push({left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height});
-    };
-    add(this.renderRoot.querySelector('[part="panel"]'));
-    for (const el of Array.from(this.renderRoot.querySelectorAll('.right > *'))) add(el);
-    add(this.renderRoot.querySelector('.in-map-strip'));
-    add(this.renderRoot.querySelector('.layers .group'));
-    const same = clear.length === this.keepClear.length && clear.every((r, i) => ['left', 'top', 'width', 'height'].every((k) => Math.abs(r[k as keyof Rect] - this.keepClear[i]![k as keyof Rect]) <= 1));
-    if (!same) {
-      this.keepClear = clear;
-      moved = true;
-    }
-    if (moved) this.requestUpdate();
   }
 
-  /** What the folded Colour heading says: what the points are coloured by, and how many colours. */
+  /**
+   * Take the map's size, each callout's size and where the cards callouts keep clear of are, then
+   * place the callouts. Run as any of them changes size, not as the camera moves.
+   */
+  private measure(): void {
+    const m = this.map;
+    if (!m) return;
+    this.mapSize = {width: m.clientWidth, height: m.clientHeight};
+    const origin = m.getBoundingClientRect();
+    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
+      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: el.offsetHeight});
+    }
+    this.keepClear = this.keptClear().flatMap((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? [{left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height}] : [];
+    });
+    this.placeCallouts();
+  }
+
+  /** The cards over the map that callouts keep clear of. */
+  private keptClear(): Element[] {
+    const q = (sel: string) => Array.from(this.renderRoot.querySelectorAll(sel));
+    return [...q('[part="panel"]'), ...q('.right > *'), ...q('.in-map-strip'), ...q('.layers .group')];
+  }
+
+  /**
+   * After a render: follow the size of the map, the cards over it and the callouts, forget the size
+   * of a callout that has closed, and place the callouts. Where nothing reports sizes, measure now.
+   */
+  private followLayout(): void {
+    const m = this.map;
+    const callouts = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'));
+    const keys = new Set(callouts.map((el) => el.dataset.callout!));
+    for (const key of [...this.calloutSizes.keys()]) if (!keys.has(key)) this.calloutSizes.delete(key);
+    if (!this.sizes) {
+      if (callouts.length > 0) this.measure();
+      return;
+    }
+    const now = new Set<Element>([...(m ? [m] : []), ...this.keptClear(), ...callouts]);
+    for (const el of this.observed) if (!now.has(el)) this.sizes.unobserve(el);
+    for (const el of now) if (!this.observed.has(el)) this.sizes.observe(el);
+    this.observed = now;
+    this.placeCallouts();
+  }
+
+  /**
+   * The camera moved: place the callouts in the next frame, and draw again only where the zoom
+   * changed the level the layers are drawn at.
+   */
+  private onCamera(): void {
+    if (this.placing !== null || typeof requestAnimationFrame === 'undefined') return;
+    this.placing = requestAnimationFrame(() => {
+      this.placing = null;
+      this.placeCallouts();
+      const zoom = this.map?.zoom ?? null;
+      if (zoom !== this.zoomSeen && this.level === null) {
+        this.zoomSeen = zoom;
+        if (this.autoLevel() !== this.autoSeen) this.requestUpdate();
+      }
+    });
+  }
+
+  /** Escape on a card: the card not pinned closes, dropping the selection; focus goes back to the map. */
+  private onCalloutKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    const key = (e.currentTarget as HTMLElement).dataset.callout;
+    if (key === 'live') this.closeDetail(e);
+    else this.map?.focus();
+  };
+
+  /**
+   * The aggregate behind the folded Colour heading under a category colouring: how many values the
+   * current set holds. `null` under any other colouring.
+   */
+  private hintSpec(): AggregateSpec | null {
+    const s = this.resolvedStore;
+    const colourBy = s?.get('legend').colourBy ?? null;
+    const meta = s?.get('meta');
+    if (!colourBy || !meta?.declaredScalars.some((c) => c.name === colourBy && c.category && c.render)) return null;
+    return {groupings: [{by: {field: colourBy, top: 1}}]};
+  }
+
+  /**
+   * What the folded Colour heading says: what the points are coloured by, then how many values the
+   * current set holds once the aggregate answers, or how many of the layer's clusters are in view.
+   */
   private colourHint(): string {
     const s = this.resolvedStore;
     const meta = s?.get('meta');
@@ -1186,8 +1373,8 @@ export class TesseraExplorer extends TesseraElement {
       const decl = meta.layers.find((l) => l.name === layer);
       return `${decl?.title || layer} · ${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
     }
-    const values = legend.categories[colourBy];
-    return values ? `${columnCaption(colourBy)} · ${values.length.toLocaleString('en-GB')} value${values.length === 1 ? '' : 's'}` : columnCaption(colourBy);
+    const n = this.hintCount.entry()?.result?.tables[0]?.groups ?? null;
+    return n === null ? columnCaption(colourBy) : `${columnCaption(colourBy)} · ${n.toLocaleString('en-GB')} value${n === 1 ? '' : 's'}`;
   }
 
   /** What the folded In view heading says: how many clusters are on screen at the level drawn. */
@@ -1195,10 +1382,15 @@ export class TesseraExplorer extends TesseraElement {
     const s = this.resolvedStore;
     const a = s?.get('artifacts');
     if (!s || !a) return '';
-    const colourLayer = clusterLayerOf(s.get('legend').colourBy);
+    const colourBy = s.get('legend').colourBy;
+    const key = `${a.version}|${level}|${colourBy}`;
+    if (this.inViewHeld?.key === key) return this.inViewHeld.hint;
+    const colourLayer = clusterLayerOf(colourBy);
     const source = colourLayer ? a.colourServed.filter((x) => x.layer === colourLayer) : a.served;
     const n = listedAt(source, level, s.get('meta'), colourLayer === null).length;
-    return `${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
+    const hint = `${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
+    this.inViewHeld = {key, hint};
+    return hint;
   }
 
   /** The display settings as they stand. */
@@ -1458,7 +1650,7 @@ export class TesseraExplorer extends TesseraElement {
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
     this.placeSizeMenu(changed.has('sizeMenuOpen'));
-    this.measureCallouts();
+    this.followLayout();
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
     if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();
@@ -1579,10 +1771,13 @@ export class TesseraExplorer extends TesseraElement {
    * card closes alone unless it shows what is selected.
    */
   private closeDetail(e: Event): void {
+    const refocus = () => void this.updateComplete.then(() => this.map?.focus());
     const s = this.resolvedStore;
     if (!s) return;
     const from = e.composedPath().find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.callout !== undefined);
     const key = from?.dataset.callout;
+    // A card beside a point that closes gives focus back to the map rather than to the page.
+    if (from) refocus();
     const live = this.liveKey();
     if (key && key !== 'live') {
       this.pinned = this.pinned.filter((p) => p.key !== key);

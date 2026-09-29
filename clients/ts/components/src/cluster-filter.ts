@@ -385,7 +385,7 @@ export class TesseraClusterFilter extends TesseraElement {
     // Counted only while the list is open: a closed list shows no counts, so asks for none.
     const layer = this.declared();
     const limits = this.resolvedStore?.get('meta')?.selection;
-    const offers = this.listOpen ? (this.listed() ?? []) : [];
+    const offers = this.listOpen && this.isConnected ? (this.listed() ?? []) : [];
     this.counts.set(
       this.resolvedStore,
       layer && limits && offers.length > 0

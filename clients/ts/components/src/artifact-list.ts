@@ -180,7 +180,7 @@ export class TesseraArtifactList extends TesseraElement {
     const s = this.resolvedStore;
     const meta = s?.get('meta');
     const layer = meta?.layers.find((l) => l.name === this.listedNow[0]?.layer);
-    const own = this.artifacts === null && layer && this.listedNow.every((a) => a.layer === layer.name);
+    const own = this.isConnected && this.artifacts === null && layer && this.listedNow.every((a) => a.layer === layer.name);
     this.counts.set(s, own && meta && this.listedNow.length > 0 ? {groupings: artifactGroupings(layer, this.listedNow, meta.selection)} : null);
   }
 

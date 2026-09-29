@@ -1,9 +1,15 @@
 import {afterEach, describe, expect, it} from 'vitest';
 import type {Meta, RegionProjection} from '@tesseradb/client';
 import '../src/explorer.js';
-import {deep, deepAll, fakeStore, mount, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
 
-const folds = (shadow: ShadowRoot) => [...shadow.querySelectorAll('[part="info"] [part="fold"]')].map((f) => [f.getAttribute('data-section'), f.querySelector('[part="fold-hint"]')!.textContent]);
+/** The folded sections of the right card, with their hints. */
+const folds = (shadow: ShadowRoot) => [...shadow.querySelectorAll('[part="info"] [part="fold"][aria-expanded="false"]')].map((f) => [f.getAttribute('data-section'), f.querySelector('[part="fold-hint"]')!.textContent]);
+/** Where a callout was placed: its offset from the map's top-left corner. */
+const placedAt = (el: HTMLElement): [number, number] => {
+  const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(el.style.transform);
+  return m ? [Number(m[1]), Number(m[2])] : [NaN, NaN];
+};
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -112,6 +118,18 @@ describe('<tessera-explorer title-field>', () => {
 });
 
 describe('<tessera-explorer> narrow layout', () => {
+  it('draws none of the cards over the map, so nothing hidden asks for counts; a sheet asks for its own', async () => {
+    const {host, el, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{code: 1, key: 'cs', title: null}]}});
+    (el as unknown as {narrow: boolean}).narrow = true;
+    await settle(host);
+    expect(shadow.querySelector('[part="panel"], [part="sidebar"], [part="info"], tessera-legend, tessera-filter-panel')).toBeNull();
+    expect([...registered(store).keys()]).toEqual([]);
+    shadow.querySelector<HTMLButtonElement>('[role="tab"][data-sheet="layers"]')!.click();
+    await settle(host);
+    expect([...registered(store).keys()].map((id) => id.split('#')[0])).toEqual(['legend']);
+  });
+
   const tabs = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
   const key = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, composed: true, cancelable: true}));
 
@@ -187,7 +205,8 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(ctx.host);
     return {...ctx, map};
   }
-  const callouts = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLElement>('[part~="callout"]')];
+  /** The callouts shown: those whose point is on the map. */
+  const callouts = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLElement>('[part~="callout"]')].filter((c) => !c.hidden);
 
   it('opens beside the point, compact, and not in the right column', async () => {
     const {shadow, map} = await picked([256, 256]);
@@ -196,21 +215,29 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(card!.querySelector('tessera-item-card')!.hasAttribute('compact')).toBe(true);
     expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
     const [px, py] = map.screenOf([256, 256]);
-    const left = parseFloat(card!.style.left);
-    const top = parseFloat(card!.style.top);
+    const [left, top] = placedAt(card!);
     // Beside the point, on one side of it, and joined to it by a leader that starts at the point.
     expect(left > px || left + 300 < px || top > py).toBe(true);
     const line = shadow.querySelector('[part="leaders"] line')!;
     expect([Number(line.getAttribute('x1')), Number(line.getAttribute('y1'))]).toEqual([px, py]);
   });
 
-  it('follows its point as the camera moves, and hides while the point is off the map', async () => {
+  it('follows its point as the camera moves, without drawing the explorer again, and hides while the point is off the map', async () => {
     const {host, shadow, map} = await picked([256, 256]);
-    const before = callouts(shadow)[0]!.style.left;
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void};
+    const before = placedAt(callouts(shadow)[0]!);
+    let renders = 0;
+    const render = (el as unknown as {render: () => unknown}).render.bind(el);
+    (el as unknown as {render: () => unknown}).render = () => {
+      renders += 1;
+      return render();
+    };
+    // A pan: the zoom holds, so the level drawn does not change.
     map.lookAt(0.3, 0.5);
-    (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
+    await new Promise((r) => requestAnimationFrame(r));
     await settle(host);
-    expect(callouts(shadow)[0]!.style.left).not.toBe(before);
+    expect(placedAt(callouts(shadow)[0]!)).not.toEqual(before);
+    expect(renders).toBe(0);
     map.pickedAt = {kind: 'item', id: 5n, world: [-100_000, 0]};
     (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
     await settle(host);
@@ -282,6 +309,34 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(host);
     expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5']);
     expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
+  });
+
+  it('places two cards clear of each other', async () => {
+    const {shadow} = await pinnedAndLive();
+    const [a, b] = callouts(shadow).map((c) => placedAt(c));
+    // The default size, 300 × 220, where nothing has measured a card.
+    const apart = a![0] + 300 <= b![0] || b![0] + 300 <= a![0] || a![1] + 220 <= b![1] || b![1] + 220 <= a![1];
+    expect(apart).toBe(true);
+  });
+
+  it('is named by its item’s title, closes on Escape with the selection, and gives focus back to the map', async () => {
+    const ctx = await explorer('<tessera-explorer layout="overlay" title-field="author"></tessera-explorer>');
+    const map = ctx.shadow.querySelector('tessera-map') as Map;
+    Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
+    Object.defineProperty(map, 'clientHeight', {configurable: true, value: 600});
+    map.pickedAt = {kind: 'item', id: 5n, world: [256, 256]};
+    ctx.store.set('selection', item(5n));
+    await settle(ctx.host);
+    const [card] = callouts(ctx.shadow);
+    expect(card!.getAttribute('aria-label')).toBe('A5');
+    // The card follows the map in the tab order, before the left card.
+    const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
+    expect(order).toEqual(['tessera-map', 'callout', 'panel']);
+    card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
+    card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(ctx.host);
+    expect(ctx.store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+    expect(ctx.shadow.activeElement).toBe(map);
   });
 
   it('drops every card when it is given another store', async () => {
@@ -360,15 +415,29 @@ describe('<tessera-explorer> layouts', () => {
     await settle(host);
     const corner = shadow.querySelector('.right')!;
     expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card', 'info']);
+    // The number of values is the aggregate's, and is left out until it answers.
     expect(folds(shadow)).toEqual([
-      ['colour', 'Archive · 2 values'],
+      ['colour', 'Archive'],
       ['in-view', '0 clusters']
     ]);
+    expect([...registered(store).entries()].filter(([id]) => id.startsWith('colour-hint')).map(([, spec]) => spec)).toEqual([{groupings: [{by: {field: 'archive', top: 1}}]}]);
+    answerAggregate(store, 'colour-hint', aggregateEntry([{rows: [{key: 'cs', count: 3}], groups: 7}]));
+    await settle(host);
+    expect(folds(shadow)[0]).toEqual(['colour', 'Archive · 7 values']);
     expect(shadow.querySelector('[part="info"] tessera-legend')).toBeNull();
     shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
     await settle(host);
     expect(shadow.querySelector('[part="info"] tessera-legend')).not.toBeNull();
     expect(folds(shadow).map(([s]) => s)).toEqual(['in-view']);
+    // The opened section folds again from its chevron, and its count is no longer asked for.
+    expect(registered(store).size).toBeGreaterThan(0);
+    expect([...registered(store).keys()].some((id) => id.startsWith('colour-hint'))).toBe(false);
+    const refold = shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"][aria-expanded="true"]')!;
+    refold.click();
+    await settle(host);
+    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+    shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
+    await settle(host);
     store.set('region', null);
     await settle(host);
     expect(folds(shadow)).toEqual([]);
