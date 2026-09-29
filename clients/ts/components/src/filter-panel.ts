@@ -61,7 +61,7 @@ const MODES: [ClauseVerb, string][] = [
  * heading and the chips without the controls, and nothing while no clause is applied;
  * `controls-only` leaves the heading out.
  *
- * @summary The applied clauses as chips, and the filter controls.
+ * @summary The filter controls, and the applied clauses as chips.
  * @tagname tessera-filter-panel
  * @category Elements
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A
