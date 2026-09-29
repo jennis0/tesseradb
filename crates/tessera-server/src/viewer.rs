@@ -504,8 +504,7 @@ async fn suggest(
     suggest_page(state, session, column, body).await
 }
 
-/// `POST /v1/categories/{column}/suggest`: the same page, with counts taken under a filter. A
-/// request counting under `filters` runs behind the compute gate, as `/v1/viewport` does.
+/// `POST /v1/categories/{column}/suggest`: the same page, with counts taken under a filter.
 async fn suggest_filtered(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
