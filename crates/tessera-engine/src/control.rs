@@ -161,10 +161,7 @@ pub(crate) fn name_items_in(
                     }
                 }
             }
-            let holdings = Addressed {
-                engine,
-                generation,
-            };
+            let holdings = Addressed { engine, generation };
             resolve::resolve(&rows, &holdings, Batch::Names).map_err(store)?
         }
     };
@@ -204,7 +201,11 @@ struct Addressed<'a> {
 impl resolve::Holdings for Addressed<'_> {
     type Error = StoreError;
 
-    fn holders(&self, field: u16, keys: &[resolve::Key]) -> Result<Vec<(usize, EntityId)>, StoreError> {
+    fn holders(
+        &self,
+        field: u16,
+        keys: &[resolve::Key],
+    ) -> Result<Vec<(usize, EntityId)>, StoreError> {
         let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
         let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
@@ -459,7 +460,8 @@ impl Engine {
         mut declaration: tessera_lifecycle::wal::ViewGroupDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
-        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.point_default =
+            self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_view_group(declaration)
     }
 
@@ -470,7 +472,8 @@ impl Engine {
         mut declaration: tessera_lifecycle::wal::PlainViewDeclaration,
     ) -> std::result::Result<bool, crate::write::AcceptError> {
         declaration.visibility = self.check_visibility(declaration.visibility.as_deref())?;
-        declaration.point_default = self.check_point_default(declaration.point_default.as_deref())?;
+        declaration.point_default =
+            self.check_point_default(declaration.point_default.as_deref())?;
         self.write.create_plain_view(declaration)
     }
 
@@ -484,7 +487,9 @@ impl Engine {
             .map(|default| tessera_plugin::check_point_default(self.plugin.as_ref(), default))
             .transpose()
             .map_err(|detail| {
-                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused {
+                    detail,
+                })
             })
     }
 

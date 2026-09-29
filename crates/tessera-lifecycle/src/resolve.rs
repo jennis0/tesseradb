@@ -220,7 +220,10 @@ impl std::fmt::Display for NoIdentifier {
 
 /// Whether a batch that addresses existing items carries a column to address them by. A batch
 /// that creates items needs none: each row without an identifier is a new item.
-pub fn require_identifier(tessera_id_column: bool, unique_columns: usize) -> Result<(), NoIdentifier> {
+pub fn require_identifier(
+    tessera_id_column: bool,
+    unique_columns: usize,
+) -> Result<(), NoIdentifier> {
     match tessera_id_column || unique_columns > 0 {
         true => Ok(()),
         false => Err(NoIdentifier),
@@ -247,9 +250,7 @@ pub fn resolve<H: Holdings>(
     for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)?) {
         match holder {
             Some(entity) => found.push((*at, (Identifier::TesseraId, entity))),
-            None => {
-                verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at }))
-            }
+            None => verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at })),
         }
     }
 
@@ -368,7 +369,10 @@ mod tests {
                 .collect())
         }
         fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {
-            Ok(ids.iter().map(|id| self.tessera.get(&id.raw()).copied()).collect())
+            Ok(ids
+                .iter()
+                .map(|id| self.tessera.get(&id.raw()).copied())
+                .collect())
         }
     }
 
@@ -409,7 +413,12 @@ mod tests {
             tessera_id: Some(TesseraId::new(101)),
             unique: vec![(0, 17), (1, 5)],
         };
-        let rows = [agreeing, by_unique(0, 18), by_unique(0, 99), RowIdentity::default()];
+        let rows = [
+            agreeing,
+            by_unique(0, 18),
+            by_unique(0, 99),
+            RowIdentity::default(),
+        ];
         assert_eq!(
             resolved(&rows, Batch::Creates),
             vec![
@@ -516,7 +525,12 @@ mod tests {
         );
         assert_eq!(
             resolved(
-                &[by_unique(0, 50), by_unique(1, 6), by_unique(0, 50), by_unique(0, 50)],
+                &[
+                    by_unique(0, 50),
+                    by_unique(1, 6),
+                    by_unique(0, 50),
+                    by_unique(0, 50)
+                ],
                 Batch::Creates
             ),
             vec![
@@ -533,7 +547,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            resolved(&[RowIdentity::default(), RowIdentity::default()], Batch::Creates),
+            resolved(
+                &[RowIdentity::default(), RowIdentity::default()],
+                Batch::Creates
+            ),
             vec![Verdict::Creates, Verdict::Creates]
         );
     }
@@ -578,8 +595,12 @@ mod tests {
             unique: vec![(0, a), (1, b)],
             ..RowIdentity::default()
         };
-        let verdicts = resolve(&[row(1, 11), row(1, 12), row(3, 12)], &held, Batch::Creates).unwrap();
-        assert!(matches!(verdicts[0], Verdict::Refused(Refusal::NamesTwo { row: 0, .. })));
+        let verdicts =
+            resolve(&[row(1, 11), row(1, 12), row(3, 12)], &held, Batch::Creates).unwrap();
+        assert!(matches!(
+            verdicts[0],
+            Verdict::Refused(Refusal::NamesTwo { row: 0, .. })
+        ));
         assert_eq!(verdicts[1], Verdict::Names(e(0)));
         assert_eq!(
             verdicts[2],

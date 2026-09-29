@@ -43,7 +43,9 @@ impl Table {
                     table.rows
                 )));
             }
-            table.columns.push((name, cells.into_iter().map(|c| c.0).collect()));
+            table
+                .columns
+                .push((name, cells.into_iter().map(|c| c.0).collect()));
         }
         Ok(table)
     }
@@ -60,7 +62,10 @@ impl Table {
     }
 
     /// A table from columns already read, each of `rows` cells: an Arrow member list.
-    pub(crate) fn of_columns(rows: usize, columns: Vec<(String, Vec<Option<AddressValue>>)>) -> Table {
+    pub(crate) fn of_columns(
+        rows: usize,
+        columns: Vec<(String, Vec<Option<AddressValue>>)>,
+    ) -> Table {
         debug_assert!(columns.iter().all(|(_, cells)| cells.len() == rows));
         Table { rows, columns }
     }
@@ -159,7 +164,10 @@ impl Merged {
     }
 
     /// Resolve every row: one answer per row, table by table, and the columns ignored.
-    pub(crate) fn name(&self, state: &AppState) -> Result<(Vec<Vec<Named>>, Vec<String>), ApiError> {
+    pub(crate) fn name(
+        &self,
+        state: &AppState,
+    ) -> Result<(Vec<Vec<Named>>, Vec<String>), ApiError> {
         let named = state
             .engine
             .name_items(&self.table)

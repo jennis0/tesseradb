@@ -2,8 +2,8 @@ use arrow::array::{Array, UInt32Array};
 use arrow::record_batch::RecordBatch;
 use tessera_engine::coordinates;
 use tessera_engine::member_key;
-use tessera_engine::shapes::Bounds;
 use tessera_engine::scalar_column::{self, ScalarColumn};
+use tessera_engine::shapes::Bounds;
 use tessera_engine::utf8::{Utf8Column, Utf8Values};
 use tessera_engine::vocabulary::{code_value, Resolved};
 use tessera_engine::{absent_scalar, DeclaredScalar, Projection, ScopedScalar, Vocabularies};
@@ -14,9 +14,7 @@ use tessera_types::TesseraId;
 use super::json::JsonColumns;
 use super::membership::{membership_column, MembershipColumn, MembershipTally};
 use super::DecodeError;
-use super::{
-    scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed,
-};
+use super::{scoped_as_declared, scoped_wire_type, BodyEncoding, Fixed};
 
 #[derive(Debug)]
 pub(crate) struct RawIngestItem {
@@ -270,7 +268,14 @@ fn cell(
                 .vocabulary
                 .as_deref()
                 .expect("a column of keys is a category's");
-            category_code(body_name, col.column(), row, declared, vocabulary, vocabularies)
+            category_code(
+                body_name,
+                col.column(),
+                row,
+                declared,
+                vocabulary,
+                vocabularies,
+            )
         }
         Cells::Scalars(column) => column.value(row).map_err(|e| {
             DecodeError(format!(
@@ -304,11 +309,7 @@ pub(crate) fn parse_ingest_batch(
         Some(frame) => coordinates::axis_names(frame.projection),
         None => ("", ""),
     };
-    let mut fixed = vec![
-        Fixed::TesseraId,
-        Fixed::Access,
-        Fixed::NodeId,
-    ];
+    let mut fixed = vec![Fixed::TesseraId, Fixed::Access, Fixed::NodeId];
     if frame.is_some() {
         fixed.extend([Fixed::Coordinate(x_name), Fixed::Coordinate(y_name)]);
     }
@@ -357,7 +358,8 @@ pub(crate) fn parse_ingest_batch(
                 (None, None)
             }
             Some(frame) => {
-                if let Some((wrong, right)) = coordinates::misnamed_axis(frame.projection, has_column)
+                if let Some((wrong, right)) =
+                    coordinates::misnamed_axis(frame.projection, has_column)
                 {
                     return Err(DecodeError(format!(
                         "ingest body: {}, so its coordinate columns are '{x_name}' and \
@@ -390,8 +392,9 @@ pub(crate) fn parse_ingest_batch(
         let access_column = batch.column_by_name("access");
         let access = labels_col(body_name, &batch, "access")?;
 
-        let memberships =
-            check_columns(body_name, &batch, &fixed, declared, scoped, layer_of, view_in)?;
+        let memberships = check_columns(
+            body_name, &batch, &fixed, declared, scoped, layer_of, view_in,
+        )?;
         // A column the batch leaves out holds its absence, which is what a null cell reads as.
         let cells_of =
             |d: &DeclaredScalar| batch.column_by_name(&d.name).map(|col| Cells::new(col, d));
@@ -405,11 +408,11 @@ pub(crate) fn parse_ingest_batch(
         for i in 0..batch.num_rows() {
             let position = match (x.as_ref().map(|x| x[i]), y.as_ref().map(|y| y[i])) {
                 (Some(Some(x)), Some(Some(y))) => {
-                    let frame = frame.as_ref().expect("coordinates are read against a frame");
-                    let placed =
-                        coordinates::place(frame.projection, Some(frame.extent), x, y).map_err(
-                            |e| DecodeError(format!("ingest body: row {} {e}", offset + i)),
-                        )?;
+                    let frame = frame
+                        .as_ref()
+                        .expect("coordinates are read against a frame");
+                    let placed = coordinates::place(frame.projection, Some(frame.extent), x, y)
+                        .map_err(|e| DecodeError(format!("ingest body: row {} {e}", offset + i)))?;
                     clipped += u64::from(placed.clipped);
                     clamped += u64::from(placed.clamped());
                     Some((placed.x, placed.y))

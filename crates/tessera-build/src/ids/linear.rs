@@ -141,10 +141,17 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
         let (rows, mut tally) = decide(&read, &rows, &mut held, &mut next, limited.as_mut())?;
         tally.merge(outside);
         let refused = match (&read.input, texts) {
-            (_, Some(texts)) => {
-                tally.finish(&read.source, &read.object, |row| texts[row as usize].clone())
-            }
-            (ReadInput::File { path, fields, select }, None) => {
+            (_, Some(texts)) => tally.finish(&read.source, &read.object, |row| {
+                texts[row as usize].clone()
+            }),
+            (
+                ReadInput::File {
+                    path,
+                    fields,
+                    select,
+                },
+                None,
+            ) => {
                 let groups = FileGroups::open(path)?;
                 let carried = super::carried_unique(groups.schema(), fields, &args.schema)
                     .map_err(|detail| BuildError::Schema {
@@ -154,7 +161,10 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                 let file = FileRead::new(path, &groups, &carried, select.as_ref(), None);
                 let values = file.values_at(&tally.sampled())?;
                 tally.finish(&read.source, &read.object, |row| {
-                    values.get(&row).cloned().unwrap_or_else(|| format!("row {row}"))
+                    values
+                        .get(&row)
+                        .cloned()
+                        .unwrap_or_else(|| format!("row {row}"))
                 })
             }
             (ReadInput::Lists(_), None) => unreachable!("a list read carries its texts"),

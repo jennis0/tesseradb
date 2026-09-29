@@ -46,13 +46,26 @@ fn fixture(dir: &Path) -> std::path::PathBuf {
         &ids,
         scatter,
         vec![
-            column("gid", false, UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e)))),
-            column("code", false, StringArray::from_iter_values(ids.iter().map(|e| format!("c{e}")))),
+            column(
+                "gid",
+                false,
+                UInt64Array::from_iter_values(ids.iter().map(|e| gid_of(*e))),
+            ),
+            column(
+                "code",
+                false,
+                StringArray::from_iter_values(ids.iter().map(|e| format!("c{e}"))),
+            ),
         ],
     );
     write_pairs_n(&pairs, N);
     let out = dir.join("bundle");
-    build_declared(&out, &points, &pairs, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"));
+    build_declared(
+        &out,
+        &points,
+        &pairs,
+        &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"),
+    );
     out
 }
 
@@ -176,7 +189,10 @@ async fn refused_rows_are_listed_and_the_rest_apply() {
             { "row": 5, "reason": "unknown_tessera_id" },
         ])
     );
-    assert_eq!((body["unchanged"].clone(), body["created"].clone()), (json!(1), json!(1)));
+    assert_eq!(
+        (body["unchanged"].clone(), body["created"].clone()),
+        (json!(1), json!(1))
+    );
     let ids = body["tessera_ids"].as_array().unwrap();
     assert_eq!(ids[1], json!(three));
     assert!(ids[3].is_string(), "{body}");
@@ -185,8 +201,12 @@ async fn refused_rows_are_listed_and_the_rest_apply() {
     }
 
     // The kept row created the item holding gid 9, which a later row now names.
-    let (status, body) =
-        ingest(&served, "after", json!([{ "x": 1.0, "y": 1.0, "access": ["0"], "gid": 9 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "after",
+        json!([{ "x": 1.0, "y": 1.0, "access": ["0"], "gid": 9 }]),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["unchanged"], 1, "{body}");
     assert_eq!(body["tessera_ids"][0], ids[3]);
@@ -216,17 +236,26 @@ async fn a_strict_batch_with_a_refused_row_is_a_conflict_and_writes_nothing() {
                 { "x": 2.0, "y": 2.0, "access": ["0"], "gid": 9 },
             ]),
         ),
-        ("unknown", json!([{ "tessera_id": "12345", "x": 1.0, "y": 1.0, "access": ["0"] }])),
+        (
+            "unknown",
+            json!([{ "tessera_id": "12345", "x": 1.0, "y": 1.0, "access": ["0"] }]),
+        ),
     ];
     for (batch, rows) in refused {
         let (status, body) = ingest_strict(&served, batch, rows).await;
         assert_eq!(status, 409, "{batch}: {body}");
     }
-    let (_, body) =
-        ingest_strict(&served, "two-items-again", json!([{ "tessera_id": three, "gid": gid_of(4) }]))
-            .await;
+    let (_, body) = ingest_strict(
+        &served,
+        "two-items-again",
+        json!([{ "tessera_id": three, "gid": gid_of(4) }]),
+    )
+    .await;
     let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains(&three) && detail.contains(&four), "{detail}");
+    assert!(
+        detail.contains(&three) && detail.contains(&four),
+        "{detail}"
+    );
 
     // Nothing was written: gid 9 names no item.
     let (status, body) = ingest_strict(
@@ -236,7 +265,10 @@ async fn a_strict_batch_with_a_refused_row_is_a_conflict_and_writes_nothing() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!((body["unchanged"].clone(), body["created"].clone()), (json!(1), json!(1)));
+    assert_eq!(
+        (body["unchanged"].clone(), body["created"].clone()),
+        (json!(1), json!(1))
+    );
     assert_eq!(body["refused"], json!([]));
 }
 
@@ -254,7 +286,10 @@ async fn a_new_item_needs_both_coordinates() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(
+        body["refused"],
+        json!([{ "row": 0, "reason": "names_no_item" }])
+    );
     assert_eq!(body["unchanged"], 1, "{body}");
     // A refused row sets no value, so a later row giving the value a position creates the item.
     let (status, body) = ingest(
@@ -267,13 +302,24 @@ async fn a_new_item_needs_both_coordinates() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(
+        body["refused"],
+        json!([{ "row": 0, "reason": "names_no_item" }])
+    );
     assert_eq!(body["created"], 1, "{body}");
-    let (status, body) =
-        ingest_strict(&served, "no-position-strict", json!([{ "access": ["0"], "gid": 12 }])).await;
+    let (status, body) = ingest_strict(
+        &served,
+        "no-position-strict",
+        json!([{ "access": ["0"], "gid": 12 }]),
+    )
+    .await;
     assert_eq!(status, 409, "{body}");
-    let (status, body) =
-        ingest(&served, "one-coordinate", json!([{ "x": 5.0, "access": ["0"], "gid": 11 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "one-coordinate",
+        json!([{ "x": 5.0, "access": ["0"], "gid": 11 }]),
+    )
+    .await;
     assert_eq!(status, 422, "{body}");
 }
 
@@ -290,7 +336,10 @@ async fn a_resent_batch_answers_its_first_tessera_ids_across_a_restart() {
     ]);
     let (status, first) = ingest(&served, "kept", rows.clone()).await;
     assert_eq!(status, 200, "{first}");
-    assert_eq!(first["refused"], json!([{ "row": 2, "reason": "one_value_twice" }]));
+    assert_eq!(
+        first["refused"],
+        json!([{ "row": 2, "reason": "one_value_twice" }])
+    );
     let (_, replayed) = ingest(&served, "kept", rows.clone()).await;
     assert_eq!(replayed["replayed"], true, "{replayed}");
     assert_eq!(replayed["tessera_ids"], first["tessera_ids"]);
@@ -305,8 +354,7 @@ async fn a_resent_batch_answers_its_first_tessera_ids_across_a_restart() {
     assert_eq!(replayed["refused"], first["refused"]);
 
     // The restart replayed the kept row alone: gid 12 names the one item it created, at (5, 5).
-    let (status, body) =
-        ingest(&served, "again", json!([{ "x": 5.0, "y": 5.0, "gid": 12 }])).await;
+    let (status, body) = ingest(&served, "again", json!([{ "x": 5.0, "y": 5.0, "gid": 12 }])).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["unchanged"], 1, "{body}");
     assert_eq!(body["tessera_ids"][0], first["tessera_ids"][1]);
@@ -317,8 +365,12 @@ async fn a_resent_batch_answers_its_first_tessera_ids_across_a_restart() {
 #[tokio::test]
 async fn a_folded_away_items_tessera_id_names_nothing() {
     let served = Served::build(fixture).await;
-    let (status, body) =
-        ingest(&served, "made", json!([{ "x": 5.0, "y": 5.0, "access": ["0"], "gid": 21 }])).await;
+    let (status, body) = ingest(
+        &served,
+        "made",
+        json!([{ "x": 5.0, "y": 5.0, "access": ["0"], "gid": 21 }]),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let made = body["tessera_ids"][0].as_str().unwrap().to_string();
     tick(&served.server).await;
@@ -357,6 +409,9 @@ async fn a_batch_that_only_addresses_items_needs_a_column_to_name_them_by() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(
+        body["refused"],
+        json!([{ "row": 0, "reason": "names_no_item" }])
+    );
     assert_eq!(body["unchanged"], 1, "{body}");
 }

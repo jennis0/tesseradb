@@ -89,7 +89,10 @@ impl Rows {
         let n = if empty { 0 } else { self.len() };
         let mut columns: Vec<(&str, ArrayRef)> = Vec::new();
         if let Some(key) = &self.key {
-            columns.push(("key", Arc::new(StringArray::from_iter_values(key[..n].iter()))));
+            columns.push((
+                "key",
+                Arc::new(StringArray::from_iter_values(key[..n].iter())),
+            ));
         }
         if !self.a.is_empty() {
             columns.push(("a", Arc::new(UInt64Array::from(self.a[..n].to_vec()))));
@@ -101,14 +104,23 @@ impl Rows {
             columns.push(("b", Arc::new(StringArray::from(b[..n].to_vec()))));
         }
         if let Some(xy) = &self.xy {
-            columns.push(("x", Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.0)))));
-            columns.push(("y", Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.1)))));
+            columns.push((
+                "x",
+                Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.0))),
+            ));
+            columns.push((
+                "y",
+                Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.1))),
+            ));
         }
         if let Some(score) = &self.score {
             columns.push(("score", Arc::new(Int64Array::from(score[..n].to_vec()))));
         }
         if let Some(tessera_id) = &self.tessera_id {
-            columns.push(("tessera_id", Arc::new(StringArray::from(tessera_id[..n].to_vec()))));
+            columns.push((
+                "tessera_id",
+                Arc::new(StringArray::from(tessera_id[..n].to_vec())),
+            ));
         }
         if let Some(term) = &self.term {
             columns.push(("term_id", Arc::new(UInt32Array::from(term[..n].to_vec()))));
@@ -118,8 +130,9 @@ impl Rows {
             .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
             .collect();
         let schema = Arc::new(ArrowSchema::new(fields));
-        let batch = RecordBatch::try_new(schema.clone(), columns.into_iter().map(|c| c.1).collect())
-            .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), columns.into_iter().map(|c| c.1).collect())
+                .unwrap();
         let mut writer =
             ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
@@ -284,8 +297,11 @@ impl Corpus {
         near.rid = Some((2000..2020).collect());
         let mut notes = rows(&mut d, 25, 50, false);
         notes.score = Some((0..25).map(|i| 100 + i).collect());
-        notes.tessera_id =
-            Some((0..25).map(|i| (i % 6 == 5).then(|| format!("9999999999{i}"))).collect());
+        notes.tessera_id = Some(
+            (0..25)
+                .map(|i| (i % 6 == 5).then(|| format!("9999999999{i}")))
+                .collect(),
+        );
         // A refused row refuses no later row: the first row gives an item held in the world a new
         // `b`, the second gives another held item that value and is refused, and the third names
         // that other item alone and is kept.
@@ -456,7 +472,11 @@ fn args(dir: &Path, declaration: &str, out: &Path) -> BuildArgs {
 /// The rows the build refused from the block `object` reads, by reason.
 fn reported(report: &BuildReport, object: &str) -> BTreeMap<String, u64> {
     let mut out = BTreeMap::new();
-    for entry in report.refused.iter().filter(|e| e.object == object && e.is_refusal()) {
+    for entry in report
+        .refused
+        .iter()
+        .filter(|e| e.object == object && e.is_refusal())
+    {
         *out.entry(entry.reason.clone()).or_default() += entry.rows;
     }
     out
@@ -466,7 +486,10 @@ fn reported(report: &BuildReport, object: &str) -> BTreeMap<String, u64> {
 /// rows it stands for.
 fn listed(answer: &Value, row_of: impl Fn(&Value) -> Vec<usize>) -> BTreeMap<String, Vec<usize>> {
     let mut out: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for entry in answer["refused"].as_array().expect("the answer lists refused rows") {
+    for entry in answer["refused"]
+        .as_array()
+        .expect("the answer lists refused rows")
+    {
         let reason = entry["reason"].as_str().unwrap().to_string();
         out.entry(reason).or_default().extend(row_of(entry));
     }
@@ -487,10 +510,16 @@ fn assert_refused_alike(
     what: &str,
 ) {
     let reported = reported(report, object);
-    let counts: BTreeMap<String, u64> =
-        listed.iter().map(|(reason, rows)| (reason.clone(), rows.len() as u64)).collect();
+    let counts: BTreeMap<String, u64> = listed
+        .iter()
+        .map(|(reason, rows)| (reason.clone(), rows.len() as u64))
+        .collect();
     assert_eq!(counts, reported, "{what}: refused rows by reason");
-    for entry in report.refused.iter().filter(|e| e.object == object && e.is_refusal()) {
+    for entry in report
+        .refused
+        .iter()
+        .filter(|e| e.object == object && e.is_refusal())
+    {
         let mut sample: Vec<String> = Vec::new();
         for row in listed[&entry.reason].iter().take(10) {
             let text = rows.value_text(*row);
@@ -498,7 +527,11 @@ fn assert_refused_alike(
                 sample.push(text);
             }
         }
-        assert_eq!(entry.values, sample, "{what}: the first {} rows", entry.reason);
+        assert_eq!(
+            entry.values, sample,
+            "{what}: the first {} rows",
+            entry.reason
+        );
     }
 }
 
@@ -535,7 +568,10 @@ async fn send(
     let status = resp.status().as_u16();
     let answer: Value = resp.json().await.unwrap_or(Value::Null);
     if !refuses {
-        assert!(status < 300, "{batch}: the build refused no row of it: {status} {answer}");
+        assert!(
+            status < 300,
+            "{batch}: the build refused no row of it: {status} {answer}"
+        );
         return answer;
     }
     assert!(
@@ -699,9 +735,16 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         let refuses = !reported(&report, object).is_empty();
         let batch = format!("{seed}-{source}");
         let body = rows.ingest_body();
-        let answer =
-            send(&ingested, reqwest::Method::POST, "/control/ingest", view, &body, refuses, &batch)
-                .await;
+        let answer = send(
+            &ingested,
+            reqwest::Method::POST,
+            "/control/ingest",
+            view,
+            &body,
+            refuses,
+            &batch,
+        )
+        .await;
         let what = format!("seed {seed}: {source}");
         assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
         tick(&ingested).await;
@@ -712,11 +755,25 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     let (body, rows_of) = corpus.relation.relation_body();
     let refuses = !reported(&report, object).is_empty();
     let batch = format!("{seed}-access");
-    let answer =
-        send(&ingested, reqwest::Method::POST, "/control/ingest", None, &body, refuses, &batch).await;
+    let answer = send(
+        &ingested,
+        reqwest::Method::POST,
+        "/control/ingest",
+        None,
+        &body,
+        refuses,
+        &batch,
+    )
+    .await;
     let of_item = |entry: &Value| rows_of[entry["row"].as_u64().unwrap() as usize].clone();
     let what = format!("seed {seed}: the access relation");
-    assert_refused_alike(&report, object, &listed(&answer, of_item), &corpus.relation, &what);
+    assert_refused_alike(
+        &report,
+        object,
+        &listed(&answer, of_item),
+        &corpus.relation,
+        &what,
+    );
     tick(&ingested).await;
 
     let object = format!("layer '{LAYER}' members");
@@ -737,10 +794,19 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
             entry["artifact"].as_u64().unwrap() as usize,
             entry["row"].as_u64().unwrap() as usize,
         );
-        vec![positions.iter().position(|p| *p == at).expect("a member row")]
+        vec![positions
+            .iter()
+            .position(|p| *p == at)
+            .expect("a member row")]
     };
     let what = format!("seed {seed}: the members");
-    assert_refused_alike(&report, &object, &listed(&answer, of_member), &corpus.members, &what);
+    assert_refused_alike(
+        &report,
+        &object,
+        &listed(&answer, of_member),
+        &corpus.members,
+        &what,
+    );
     tick(&ingested).await;
 
     // Compared as a restart replays it.
@@ -756,14 +822,27 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     for view in ["world", "near"] {
         let items = left[&format!("0+7 {view} items")].as_array().unwrap().len();
         let everyone = left[&format!("0 {view} items")].as_array().unwrap().len();
-        assert!(everyone > 0, "seed {seed}: {view} holds items everyone sees");
-        assert!(items > everyone, "seed {seed}: {view} holds items only the narrower term shows");
-        let artifacts = left[&format!("0+7 {view} artifacts")].as_object().unwrap().len();
+        assert!(
+            everyone > 0,
+            "seed {seed}: {view} holds items everyone sees"
+        );
+        assert!(
+            items > everyone,
+            "seed {seed}: {view} holds items only the narrower term shows"
+        );
+        let artifacts = left[&format!("0+7 {view} artifacts")]
+            .as_object()
+            .unwrap()
+            .len();
         assert!(artifacts > 0, "seed {seed}: {view} serves artifacts");
     }
     built.shutdown().await;
     ingested.shutdown().await;
-    report.refused.iter().map(|entry| entry.reason.clone()).collect()
+    report
+        .refused
+        .iter()
+        .map(|entry| entry.reason.clone())
+        .collect()
 }
 
 #[tokio::test]
@@ -780,6 +859,9 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
         "one_value_twice",
         "unknown_tessera_id",
     ] {
-        assert!(reasons.contains(reason), "the corpora plant {reason}: {reasons:?}");
+        assert!(
+            reasons.contains(reason),
+            "the corpora plant {reason}: {reasons:?}"
+        );
     }
 }

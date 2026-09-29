@@ -233,7 +233,10 @@ async fn a_generating_set_grown_by_a_member_naming_nothing_or_two_refuses_the_re
     let three = tessera_id_of(&server, 3);
     for (members, status) in [
         (json!({ "id": [2, 999_999] }), 404),
-        (json!({ "id": [2, 4], "tessera_id": [null, three.to_string()] }), 409),
+        (
+            json!({ "id": [2, 4], "tessera_id": [null, three.to_string()] }),
+            409,
+        ),
     ] {
         let resp = patch(json!({ "artifacts": [{ "key": "a", "rank": 0, "members": members }] }))
             .await
@@ -261,10 +264,22 @@ async fn a_malformed_table_is_refused_whole() {
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
     for (what, artifacts) in [
-        ("columns of different lengths", json!([{ "key": "a", "members": { "id": [0, 1], "tessera_id": [null] } }])),
-        ("no column that names items", json!([{ "key": "a", "members": { "name": ["x"] } }])),
-        ("a list in place of a table", json!([{ "key": "a", "members": ["0"] }])),
-        ("a tessera_id that is a number", json!([{ "key": "a", "members": { "tessera_id": [12] } }])),
+        (
+            "columns of different lengths",
+            json!([{ "key": "a", "members": { "id": [0, 1], "tessera_id": [null] } }]),
+        ),
+        (
+            "no column that names items",
+            json!([{ "key": "a", "members": { "name": ["x"] } }]),
+        ),
+        (
+            "a list in place of a table",
+            json!([{ "key": "a", "members": ["0"] }]),
+        ),
+        (
+            "a tessera_id that is a number",
+            json!([{ "key": "a", "members": { "tessera_id": [12] } }]),
+        ),
     ] {
         let (status, body) = put(&server, false, artifacts).await;
         assert_eq!(status, 422, "{what}: {body}");
@@ -288,7 +303,12 @@ async fn an_arrow_growth_names_members_as_a_list_of_structs() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
-    let (status, body) = put(&server, false, json!([{ "key": "a", "members": { "id": [0] } }])).await;
+    let (status, body) = put(
+        &server,
+        false,
+        json!([{ "key": "a", "members": { "id": [0] } }]),
+    )
+    .await;
     assert_eq!(status, 201, "{body}");
 
     let one = tessera_id_of(&server, 1);
@@ -340,15 +360,24 @@ async fn an_arrow_member_column_of_another_type_or_named_twice_is_refused() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
-    let (status, body) = put(&server, false, json!([{ "key": "a", "members": { "id": [0] } }])).await;
+    let (status, body) = put(
+        &server,
+        false,
+        json!([{ "key": "a", "members": { "id": [0] } }]),
+    )
+    .await;
     assert_eq!(status, 201, "{body}");
 
     let body_of = |fields: Vec<Field>, columns: Vec<ArrayRef>| {
         let fields = Fields::from(fields);
         let elements = StructArray::new(fields.clone(), columns, None);
         let item = Arc::new(Field::new("item", DataType::Struct(fields), false));
-        let members =
-            ListArray::new(item.clone(), OffsetBuffer::from_lengths([1]), Arc::new(elements), None);
+        let members = ListArray::new(
+            item.clone(),
+            OffsetBuffer::from_lengths([1]),
+            Arc::new(elements),
+            None,
+        );
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("members", DataType::List(item), false),

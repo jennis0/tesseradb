@@ -118,7 +118,10 @@ async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["accepted"], 1);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["accepted"],
+        1
+    );
 }
 
 /// One request names items by a unique value, by a `tessera_id`, and by both agreeing.
@@ -142,7 +145,10 @@ async fn a_change_names_its_item_by_any_identifier_it_holds() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["accepted"], 3);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["accepted"],
+        3
+    );
     assert_eq!(visible(&server, &token).await, before - 3);
 }
 
@@ -172,7 +178,11 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
     let two = serde_json::json!([request[0], request[3]]);
     let resp = post_strict(&server, &two).await;
     assert_eq!(resp.status(), 409, "values naming two items");
-    assert_eq!(visible(&server, &token).await, before, "a strict refusal applies nothing");
+    assert_eq!(
+        visible(&server, &token).await,
+        before,
+        "a strict refusal applies nothing"
+    );
 
     let resp = post_changes(&server, &request).await;
     assert_eq!(resp.status(), 200);
@@ -189,7 +199,11 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
             { "row": 5, "reason": "names_no_item" },
         ])
     );
-    assert_eq!(visible(&server, &token).await, before - 1, "only the first applied");
+    assert_eq!(
+        visible(&server, &token).await,
+        before - 1,
+        "only the first applied"
+    );
 }
 
 /// A malformed request applies nothing, whatever `strict` says.

@@ -26,10 +26,7 @@ use tessera_types::EntityId;
 
 use crate::address::{Named, Table};
 use crate::decode::{labels_col, parse_ingest_batch, BodyEncoding, DecodeError, ParsedBatch};
-use crate::error::{
-    map_accept_error, map_change_batch_error, map_join_error,
-    ApiError,
-};
+use crate::error::{map_accept_error, map_change_batch_error, map_join_error, ApiError};
 use crate::health::is_ready;
 use crate::state::{ApiJson, ApiJsonRejection, ApiQuery, AppState};
 
@@ -178,7 +175,10 @@ async fn require_operator_credential(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    state.check_bearer(crate::state::bearer_token(request.headers()), &state.operator_credential)?;
+    state.check_bearer(
+        crate::state::bearer_token(request.headers()),
+        &state.operator_credential,
+    )?;
     Ok(next.run(request).await)
 }
 
@@ -391,10 +391,12 @@ fn run_ingest(
         None => None,
     };
     let extent = view.map(crate::filter_dto::view_extent);
-    let frame = view.zip(extent.as_ref()).map(|(view, extent)| crate::decode::Frame {
-        projection: view.projection,
-        extent,
-    });
+    let frame = view
+        .zip(extent.as_ref())
+        .map(|(view, extent)| crate::decode::Frame {
+            projection: view.projection,
+            extent,
+        });
     let view_id = view.map(|view| view.id.clone());
 
     // The group-scoped families this batch may carry: those whose group owns this view's key,
@@ -837,8 +839,9 @@ async fn publication_ack(state: &AppState, wait: &WaitQuery) -> Result<Publicati
 /// Holds until the counter reaches `publication` or `serve.visible_wait_max_secs` passes; a
 /// ceiling too large to add to the clock waits without one.
 async fn await_publication(state: &AppState, publication: u64) -> PublicationAck {
-    let deadline = std::time::Instant::now()
-        .checked_add(std::time::Duration::from_secs(state.limits.visible_wait_max_secs));
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(
+        state.limits.visible_wait_max_secs,
+    ));
     loop {
         if state.engine.publication() >= publication {
             return PublicationAck {
@@ -942,7 +945,11 @@ async fn register_layer(
                  key of it; name {} or a view of {}, or drop the scope",
                 outside.view,
                 outside.sharing.join(" or "),
-                if outside.sharing.len() == 1 { "it" } else { "them" }
+                if outside.sharing.len() == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
             ))
         })?;
     }
@@ -1479,12 +1486,14 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
         // The view each artifact belongs to, on a group-scoped layer. A null cell names none.
         let views = match batch.column_by_name("view") {
             None => None,
-            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                ApiError::Contract(
-                    "growth body: column 'view' is not utf8; it names each artifact's view key"
-                        .to_string(),
-                )
-            })?),
+            Some(column) => Some(column.as_any().downcast_ref::<StringArray>().ok_or_else(
+                || {
+                    ApiError::Contract(
+                        "growth body: column 'view' is not utf8; it names each artifact's view key"
+                            .to_string(),
+                    )
+                },
+            )?),
         };
         let access = labels_col("growth body", &batch, "access")
             .map_err(|DecodeError(detail)| ApiError::Contract(detail))?;
@@ -1568,7 +1577,12 @@ fn grow_body_from_arrow(body: &[u8]) -> Result<(GrowBody, Vec<MemberList>), ApiE
                 range.len(),
                 columns
                     .iter()
-                    .map(|(name, column)| (name.clone(), range.clone().map(|at| column.cell(at)).collect()))
+                    .map(|(name, column)| {
+                        (
+                            name.clone(),
+                            range.clone().map(|at| column.cell(at)).collect(),
+                        )
+                    })
                     .collect(),
             );
             lists.push(MemberList {
@@ -1627,7 +1641,10 @@ enum MemberColumn {
 }
 
 impl MemberColumn {
-    fn of(field: &arrow::datatypes::Field, column: &arrow::array::ArrayRef) -> Result<Self, ApiError> {
+    fn of(
+        field: &arrow::datatypes::Field,
+        column: &arrow::array::ArrayRef,
+    ) -> Result<Self, ApiError> {
         use arrow::array::{Int64Array, LargeStringArray, StringArray, UInt64Array};
         use arrow::datatypes::DataType;
         let widened = |to: &DataType| {
@@ -1635,10 +1652,18 @@ impl MemberColumn {
         };
         Ok(match field.data_type() {
             DataType::Utf8 => MemberColumn::Text(
-                column.as_any().downcast_ref::<StringArray>().expect("utf8").clone(),
+                column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("utf8")
+                    .clone(),
             ),
             DataType::LargeUtf8 => MemberColumn::LargeText(
-                column.as_any().downcast_ref::<LargeStringArray>().expect("large utf8").clone(),
+                column
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .expect("large utf8")
+                    .clone(),
             ),
             DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
                 MemberColumn::Signed(
@@ -1672,7 +1697,9 @@ impl MemberColumn {
         use arrow::array::Array;
         use tessera_engine::AddressValue;
         match self {
-            MemberColumn::Text(c) => (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string())),
+            MemberColumn::Text(c) => {
+                (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
+            }
             MemberColumn::LargeText(c) => {
                 (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
             }
@@ -1728,7 +1755,10 @@ fn resolve_member_lists(
     lists: &mut [MemberList],
     strict: bool,
 ) -> Result<ResolvedLists, ApiError> {
-    let tables: Vec<Table> = lists.iter_mut().map(|l| std::mem::take(&mut l.table)).collect();
+    let tables: Vec<Table> = lists
+        .iter_mut()
+        .map(|l| std::mem::take(&mut l.table))
+        .collect();
     let (named, ignored) = crate::address::Merged::of(tables)?.name(state)?;
     let mut refused = Vec::new();
     let mut out = Vec::with_capacity(lists.len());
@@ -1990,8 +2020,7 @@ fn canonical_row_shape(
     let Some(kind) = declaration.shape.map(|s| s.kind) else {
         if !carried.is_empty() {
             return Err(refuse(
-                "carries a shape, and this layer declares no `shape`; remove the shape"
-                    .to_string(),
+                "carries a shape, and this layer declares no `shape`; remove the shape".to_string(),
             ));
         }
         return Ok(None);
@@ -2588,8 +2617,7 @@ async fn grow_memberships(
                 return Err(ApiError::Contract(format!(
                     "the growth names {} members, over the {}-member limit \
                      (ingest.max_members_per_request); send fewer members per request",
-                    members,
-                    state.limits.max_members_per_request
+                    members, state.limits.max_members_per_request
                 )));
             }
 

@@ -793,7 +793,10 @@ impl Engine {
                 .terms_of_labels(labels)
                 .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?;
             // A novel descriptor is on no stored label.
-            let supplied = self.write.live().lookup_terms(&generation.dict, &descriptors);
+            let supplied = self
+                .write
+                .live()
+                .lookup_terms(&generation.dict, &descriptors);
             let held: Option<Vec<TermId>> = match buffered {
                 Some(item) => Some(item.terms.clone()),
                 None => joined::flushed_terms_of(generation, entity),

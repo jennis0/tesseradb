@@ -28,16 +28,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::run::{RunReader, RunReceipt, RunWriter};
 use rayon::prelude::*;
 use tessera_lifecycle::resolve::{self, Batch, Named, Refusal};
 use tessera_store::key_index::{Key, KeySpill};
-use super::run::{RunReader, RunReceipt, RunWriter};
 use tessera_store::unique::{KeyKind, UniqueKey};
 use tessera_types::EntityId;
 
 use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::{FileRead, Scanned};
-use super::{check_cap, CarriedField, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows};
+use super::{
+    check_cap, CarriedField, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows,
+};
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 use crate::spill::{self, boundaries_uniform, mix64, MappedArray, Partition};
@@ -187,7 +189,9 @@ impl KeyStream {
             .spawn(move || {
                 let read = || -> Result<()> {
                     let groups = FileGroups::open(&source.path)?;
-                    source.stamp.check(&source.path, source.rows, groups.rows())?;
+                    source
+                        .stamp
+                        .check(&source.path, source.rows, groups.rows())?;
                     let (index, _) = groups
                         .schema()
                         .column_with_name(&source.field.column)
@@ -198,7 +202,8 @@ impl KeyStream {
                     let projection = groups.projection(&[index]);
                     let all: Vec<usize> = (0..groups.count()).collect();
                     groups.each_batch(&source.path, &all, &projection, |_, batch| {
-                        let keys = super::scan::keys_of(&source.path, batch.column(0), &source.field)?;
+                        let keys =
+                            super::scan::keys_of(&source.path, batch.column(0), &source.field)?;
                         Ok(match sender.send(Ok(keys)) {
                             Ok(()) => std::ops::ControlFlow::Continue(()),
                             Err(_) => std::ops::ControlFlow::Break(()),
@@ -367,7 +372,10 @@ impl Pass {
                         detail,
                     })?;
                 let creates = read.batch == Batch::Creates;
-                let limit = self.limited.as_ref().and_then(|l| l.read(&carried, creates));
+                let limit = self
+                    .limited
+                    .as_ref()
+                    .and_then(|l| l.read(&carried, creates));
                 let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit);
                 if !creates {
                     resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
@@ -386,7 +394,10 @@ impl Pass {
                 let (rows, tally) = self.number_rows(read, Input::File(&file))?;
                 let values = file.values_at(&tally.sampled())?;
                 let refused = tally.finish(&read.source, &read.object, |row| {
-                    values.get(&row).cloned().unwrap_or_else(|| format!("row {row}"))
+                    values
+                        .get(&row)
+                        .cloned()
+                        .unwrap_or_else(|| format!("row {row}"))
                 });
                 Ok((
                     ReadRows {
@@ -473,11 +484,13 @@ impl Pass {
         let zip = match (&input, read.batch) {
             (Input::File(_), Batch::Names) if single && !tessera => {
                 match self.held.get(&carried[0].position).map(Vec::as_slice) {
-                    Some([HeldRun {
-                        base: Some(zip_base),
-                        source: Some(source),
-                        ..
-                    }]) => Some((KeyStream::open(source)?, *zip_base)),
+                    Some(
+                        [HeldRun {
+                            base: Some(zip_base),
+                            source: Some(source),
+                            ..
+                        }],
+                    ) => Some((KeyStream::open(source)?, *zip_base)),
                     _ => None,
                 }
             }
@@ -512,7 +525,9 @@ impl Pass {
                     decided += 1;
                     continue;
                 }
-                if let (Some((stream, zip_base)), Some(numbers)) = (zip.as_mut(), numbers.as_deref_mut()) {
+                if let (Some((stream, zip_base)), Some(numbers)) =
+                    (zip.as_mut(), numbers.as_deref_mut())
+                {
                     if let Some(key) = scanned.keys[0][offset] {
                         compared += 1;
                         let hit = stream.key_at(row)? == Some(Some(key));
@@ -559,7 +574,10 @@ impl Pass {
                 one_row_per_item,
             };
             let unset_path = self.scratch("unset");
-            let runs = self.held.get(&field.position).map_or(&[][..], Vec::as_slice);
+            let runs = self
+                .held
+                .get(&field.position)
+                .map_or(&[][..], Vec::as_slice);
             let merge = Merge {
                 index,
                 context,
@@ -658,7 +676,11 @@ impl Pass {
             let name = self.name("claimed");
             let mut claimed = match total_candidates {
                 0 => None,
-                n => Some(MappedArray::<u64>::zeroed(&self.tmp, &name, n.div_ceil(64) as usize)?),
+                n => Some(MappedArray::<u64>::zeroed(
+                    &self.tmp,
+                    &name,
+                    n.div_ceil(64) as usize,
+                )?),
             };
             let mut step = |row: u32, bits: &[u64], tally: &mut Tally| {
                 let stored = &mut numbers[row as usize];
@@ -770,7 +792,10 @@ impl Pass {
                         limited.raise();
                     }
                 }
-                let held_before = self.held.get(&field.position).is_some_and(|runs| !runs.is_empty());
+                let held_before = self
+                    .held
+                    .get(&field.position)
+                    .is_some_and(|runs| !runs.is_empty());
                 if held_before && !retired.is_empty() {
                     self.retire(field.position, kind, &retired)?;
                 }
@@ -1077,7 +1102,9 @@ fn merge_field<K: Key>(
                                 number
                             }
                         };
-                        candidates.push(candidate_key(row, index), number).map_err(store)?;
+                        candidates
+                            .push(candidate_key(row, index), number)
+                            .map_err(store)?;
                     }
                 }
             }
@@ -1176,7 +1203,6 @@ impl FileNumbers {
     }
 }
 
-
 /// Which rows of a file created items, and how many before each: a created row's number is the
 /// file's base plus the rows created before it.
 #[derive(Default)]
@@ -1265,7 +1291,13 @@ fn walk(
             }
             for hit in &hits {
                 let row = u64::from(hit.0);
-                decide_row(&mut numbers[row as usize], row, std::slice::from_ref(hit), tally, named_items)?;
+                decide_row(
+                    &mut numbers[row as usize],
+                    row,
+                    std::slice::from_ref(hit),
+                    tally,
+                    named_items,
+                )?;
             }
             if let Some(numbering) = numbering.as_deref_mut() {
                 for row in u64::from(lo)..hi {
