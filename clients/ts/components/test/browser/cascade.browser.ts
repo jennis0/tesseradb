@@ -125,18 +125,32 @@ describe('the explorer by the width of its container', () => {
   });
 });
 
-describe('the explorer’s sections', () => {
-  it('show one heading when open: the summary, not the panel’s own title as well', async () => {
-    const p = await page('<div style="width: 1300px; height: 700px"><tessera-explorer layout="docked"></tessera-explorer></div>');
+describe('a list that opens over what sits below it', () => {
+  it('shows whole past the bottom of a card that scrolls inside itself', async () => {
+    const p = await page('<div id="card" style="width: 340px; height: 160px; overflow-y: auto"><tessera-filter-panel></tessera-filter-panel></div>');
     const seen = await p.evaluate(async () => {
-      const root = document.querySelector('tessera-explorer')!.shadowRoot!;
-      const section = root.querySelector('details')!;
-      section.open = true;
+      const columns = ['archive', 'title', 'submitted_at', 'author', 'venue', 'year'];
+      const projections: Record<string, unknown> = {
+        meta: {declaredScalars: [], layers: [], views: [], filterOperands: columns.map((column) => ({column, family: 'keyword', operands: ['eq']})), selection: {}},
+        status: {status: 'shown', sessionWarm: true, refusal: null, stale: false, expired: false, retrying: false},
+        view: {id: 's0'},
+        filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
+        aggregates: new Map()
+      };
+      const store = {get: (name: string) => projections[name], subscribe: () => () => {}};
+      const panel = document.querySelector('tessera-filter-panel') as HTMLElement & {store: unknown; updateComplete: Promise<unknown>};
+      panel.store = store;
+      await panel.updateComplete;
+      panel.shadowRoot!.querySelector<HTMLElement>('[part="add"]')!.click();
+      await panel.updateComplete;
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      const inner = [...section.querySelectorAll('tessera-artifact-list, tessera-hierarchy')].map((e) => e.shadowRoot!.querySelector('[part="title"]'));
-      return {summary: section.querySelector('summary')!.checkVisibility(), titles: inner.filter((t) => t?.checkVisibility()).length, panels: inner.length};
+      const list = panel.shadowRoot!.querySelector<HTMLElement>('[part="add-list"]')!;
+      const last = [...list.querySelectorAll<HTMLElement>('[part~="add-option"]')].at(-1)!.getBoundingClientRect();
+      const card = document.getElementById('card')!.getBoundingClientRect();
+      const hit = panel.shadowRoot!.elementFromPoint(last.left + 10, last.top + last.height / 2);
+      return {open: list.matches(':popover-open'), below: last.bottom > card.bottom, onTop: hit?.closest('[part~="add-option"]') != null};
     });
-    expect(seen).toEqual({summary: true, titles: 0, panels: 1});
+    expect(seen).toEqual({open: true, below: true, onTop: true});
   });
 });
 

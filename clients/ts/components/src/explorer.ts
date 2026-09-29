@@ -1135,7 +1135,7 @@ export class TesseraExplorer extends TesseraElement {
     if (!m) return;
     const origin = m.getBoundingClientRect();
     let moved = false;
-    for (const el of this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]')) {
+    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
       const key = el.dataset.callout!;
       const size = {width: el.offsetWidth, height: el.offsetHeight};
       const held = this.calloutSizes.get(key);
@@ -1150,7 +1150,7 @@ export class TesseraExplorer extends TesseraElement {
       if (r && r.width > 0 && r.height > 0) clear.push({left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height});
     };
     add(this.renderRoot.querySelector('[part="panel"]'));
-    for (const el of this.renderRoot.querySelectorAll('.right > *')) add(el);
+    for (const el of Array.from(this.renderRoot.querySelectorAll('.right > *'))) add(el);
     add(this.renderRoot.querySelector('.in-map-strip'));
     add(this.renderRoot.querySelector('.layers .group'));
     const same = clear.length === this.keepClear.length && clear.every((r, i) => ['left', 'top', 'width', 'height'].every((k) => Math.abs(r[k as keyof Rect] - this.keepClear[i]![k as keyof Rect]) <= 1));
