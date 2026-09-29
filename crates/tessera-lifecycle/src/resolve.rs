@@ -302,7 +302,7 @@ pub fn resolve<H: Holdings>(
     for (at, row) in rows.iter().enumerate() {
         let item = match verdicts[at] {
             Verdict::Refused(_) => continue,
-            Verdict::Names(item) => Some(item).filter(|_| batch.one_row_per_item()),
+            Verdict::Names(item) => batch.one_row_per_item().then_some(item),
             Verdict::Creates => None,
         };
         if let Some(item) = item {

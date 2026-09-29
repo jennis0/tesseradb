@@ -755,7 +755,6 @@ impl Pass {
                 step(next, &[], &mut tally);
                 next += 1;
             }
-            drop(step);
             drop(chains);
             drop(claimed);
             let numbers = rows.slice();
