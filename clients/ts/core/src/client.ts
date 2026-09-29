@@ -1041,6 +1041,7 @@ type RawBrowseRow = {
   matched_count?: number | string | null;
   rung: number;
   parent_ids?: string[];
+  child_count: number;
 };
 
 type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next?: string | null};
@@ -1056,7 +1057,8 @@ function browseRow(r: RawBrowseRow): BrowseRow {
     matchedCount: r.matched_count === undefined || r.matched_count === null ? null : BigInt(r.matched_count),
     rung: r.rung,
     // A null cell is the empty list.
-    parentIds: (r.parent_ids ?? []).map((v) => BigInt(v))
+    parentIds: (r.parent_ids ?? []).map((v) => BigInt(v)),
+    childCount: r.child_count
   };
 }
 

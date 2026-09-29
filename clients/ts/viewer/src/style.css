@@ -14,7 +14,6 @@ body {
   position: absolute;
   inset: 0 0 0 300px;
   --tessera-explorer-height: 100%;
-  --tessera-sidebar-width: 300px;
 }
 
 /* The instruments: what you change and what came back, in one column beside the explorer. */

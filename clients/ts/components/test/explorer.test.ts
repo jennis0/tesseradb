@@ -45,7 +45,7 @@ describe('<tessera-explorer> parts', () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
     const store = fakeStore({meta: {...META, layers: [mesh]}, status: status({})});
-    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: []}], parents: [], next: 'more'});
+    store.setBrowse('roots', {artifacts: [{tesseraId: 1n, key: 'k-1', name: 'Neoplasms', maskedCount: 9n, matchedCount: null, rung: 0, parentIds: [], childCount: 0}], parents: [], next: 'more'});
     el.store = store;
     await settle(host);
     const shadow = el.shadowRoot!;

@@ -480,21 +480,21 @@ const TOPICS = topicArtifacts();
 export const TOPIC = (i: number): Artifact => TOPICS.topics[i]!;
 export const AREA = (i: number): Artifact => TOPICS.areas[i]!;
 
-/** A hierarchy row as `POST /v1/artifacts/browse` answers it. */
-export function browseRow(a: Artifact, matched: bigint | null = null): BrowseRow {
-  return {tesseraId: a.tesseraId, key: a.key, name: a.content[0] ?? null, maskedCount: a.maskedCount, matchedCount: matched, rung: a.rung, parentIds: a.parentIds};
+/** A hierarchy row as `POST /v1/artifacts/browse` answers it, with `children` served under it. */
+export function browseRow(a: Artifact, matched: bigint | null = null, children = 0): BrowseRow {
+  return {tesseraId: a.tesseraId, key: a.key, name: a.content[0] ?? null, maskedCount: a.maskedCount, matchedCount: matched, rung: a.rung, parentIds: a.parentIds, childCount: children};
 }
 
 /** The venues filter layer's rows: two kinds of venue, and venues under them. */
 export const VENUES = {
   roots: [
-    {tesseraId: VENUE_IDS[0]!, key: 'conf', name: 'Conferences', maskedCount: 11_204_330n, matchedCount: null, rung: 0, parentIds: []},
-    {tesseraId: VENUE_IDS[1]!, key: 'jour', name: 'Journals', maskedCount: 6_981_002n, matchedCount: null, rung: 0, parentIds: []}
+    {tesseraId: VENUE_IDS[0]!, key: 'conf', name: 'Conferences', maskedCount: 11_204_330n, matchedCount: null, rung: 0, parentIds: [], childCount: 3},
+    {tesseraId: VENUE_IDS[1]!, key: 'jour', name: 'Journals', maskedCount: 6_981_002n, matchedCount: null, rung: 0, parentIds: [], childCount: 1}
   ] satisfies BrowseRow[],
   conferences: [
-    {tesseraId: VENUE_IDS[2]!, key: 'neurips', name: 'NeurIPS', maskedCount: 1_402_118n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!]},
-    {tesseraId: VENUE_IDS[3]!, key: 'cvpr', name: 'CVPR', maskedCount: 988_201n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!]},
-    {tesseraId: VENUE_IDS[4]!, key: 'acl', name: 'Annual Meeting of the Association for Computational Linguistics', maskedCount: 402_770n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!, VENUE_IDS[1]!]}
+    {tesseraId: VENUE_IDS[2]!, key: 'neurips', name: 'NeurIPS', maskedCount: 1_402_118n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!], childCount: 0},
+    {tesseraId: VENUE_IDS[3]!, key: 'cvpr', name: 'CVPR', maskedCount: 988_201n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!], childCount: 0},
+    {tesseraId: VENUE_IDS[4]!, key: 'acl', name: 'Annual Meeting of the Association for Computational Linguistics', maskedCount: 402_770n, matchedCount: null, rung: 1, parentIds: [VENUE_IDS[0]!, VENUE_IDS[1]!], childCount: 0}
   ] satisfies BrowseRow[]
 };
 

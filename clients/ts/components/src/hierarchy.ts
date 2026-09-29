@@ -26,8 +26,9 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
 /**
  * A layer's hierarchy, browsed through `POST /v1/artifacts/browse` independently of the viewport:
  * it opens on the roots at any zoom and does not move with the map. A select chooses among the
- * bundle's hierarchical layers where there are several. Each row is a name, a masked count and an
- * expander; expanding fetches the children, a page at a time under More. On a layer where a child
+ * bundle's hierarchical layers where there are several. Each row is a name, a masked count and,
+ * where the server counts children under it, an expander; expanding fetches the children, a page
+ * at a time under More. On a layer where a child
  * may have several parents, a row appears under each parent it is served under and names the
  * others. A parent the viewer may not see is absent, so its child reads as a root. The search box
  * lists matching names.
@@ -57,7 +58,8 @@ const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
  * @csspart tree - The tree of rows.
  * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
  *   `filter`, `highlight`, or both separated by a space.
- * @csspart expander - A row's expand button.
+ * @csspart expander - A row's expand button, with `data-leaf` and hidden where the row has no
+ *   children, so every row's name starts at the same place.
  * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
  *   when pressed.
  * @csspart counts - A row's counts.
@@ -495,7 +497,7 @@ export class TesseraHierarchy extends TesseraElement {
     const drawn = !isFilterLayer(layer);
     return html`<li>
       <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
-        <button part="expander" type="button" data-leaf=${layer.hierarchy.kind === 'flat' ? '' : nothing}
+        <button part="expander" type="button" data-leaf=${node.row.childCount === 0 ? '' : nothing}
           aria-expanded=${open ? 'true' : 'false'}
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
