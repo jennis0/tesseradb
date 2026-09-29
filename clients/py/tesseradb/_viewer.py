@@ -1006,10 +1006,16 @@ class Viewer:
                 "categories: codes= lists the values of codes you hold and prefix= searches the "
                 "values by text. Give one of them"
             )
+        if filters is not None and codes is not None:
+            raise Refusal(
+                "categories: codes= resolves codes and carries no counts for filters= to narrow; "
+                "give prefix= with filters= in place of codes="
+            )
         if filters is not None and prefix is None:
             raise Refusal(
-                "categories: filters= narrows the counts, which only a listing by prefix= "
-                "carries. Give prefix= as well; an empty one lists every value"
+                "categories: filters= narrows the counts of a listing by prefix=; give prefix= as "
+                "well, where an empty one lists values from the start up to the server's "
+                "max_suggestions"
             )
         path = f"/v1/categories/{urllib.parse.quote(column, safe='')}"
         query: dict = {} if view is None else {"view": view}

@@ -273,6 +273,8 @@ def test_categories_under_a_filter_count_the_rows_it_passes(db, points):
     assert 0 in counts.values() and any(counts.values())
     with pytest.raises(Refusal):
         db.categories("archive", view="s0", filters=expression)
+    with pytest.raises(Refusal):
+        db.categories("archive", view="s0", codes=[1], filters=expression)
 
 
 def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bundle):
