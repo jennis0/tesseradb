@@ -156,7 +156,13 @@ deny](#accepting-a-deny)). It is the rule a build applies to its files, written 
 
 Across the batch, a row naming an item an earlier row names, and a row setting a unique value an
 earlier row sets, are refused, since each row is decided against what was held before the batch:
-of the two, the first is kept. A refused row claims no value, so it never refuses a later row. A
+of the two, the first is kept. Rows are decided in row order against the rows kept before them:
+a refused row claims neither its item nor its values, so it never refuses a later row. Where two
+reasons apply to one row, the first of these is given: a `tessera_id` naming nothing, values
+naming two items, naming no item where the row cannot create one, an item an earlier kept row
+names, a value an earlier kept row sets. A batch in which no row carries a position creates
+nothing, so it needs a `tessera_id` or a unique column to address items by, or is refused with
+`422`, as a build refuses an attribute file with none. A
 `tessera_id` naming no live or suppressed item is refused, because a new item is given its
 `tessera_id` when it is created and a caller cannot choose one.
 
@@ -333,7 +339,9 @@ the new label, which edits it ([edits](#edits)).
 A change names its item in `match`: by its `tessera_id`, inverted under the bundle's identity key,
 and by the values of unique fields, each looked up in the field's index. Every identifier must name
 the same item. A membership's members, excluded items and generating sets are tables of the same
-columns, one row per member, resolved the same way.
+columns, one row per member, resolved the same way. A column that is neither `tessera_id` nor a
+unique field names nothing: it is ignored, as a build ignores it, and the answer names it in
+`ignored_columns`.
 
 Every change and member of a request is validated and resolved, in one call, before anything is
 accepted. A request with a malformed item, or one that names no item by any column, is refused
@@ -341,8 +349,8 @@ with `422` and nothing is queued. A change or member naming no item, or two, is 
 in the answer's `refused` by position and reason, and the others are applied; with `strict=true`
 the request is refused instead, `404` where the row names no item and `409` where it names two.
 Many changes, or members, may name one item. A generating set is refused whole at any member it
-cannot resolve, strict or not, because a viewer must see every member of the set to be served the
-content, and a set missing a member would be served to viewers who cannot. A suppression of an
+cannot resolve, strict or not, and so is a growth's page joining one, because a viewer must see
+every member of the set to be served the content, and a set missing a member would be served to viewers who cannot. A suppression of an
 item already suppressed is accepted and has no further effect. A deleted item names nothing, so a
 deletion sent again is listed as refused, and a retried request is safe to resend without
 `strict`.

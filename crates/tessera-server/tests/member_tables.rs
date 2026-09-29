@@ -181,6 +181,25 @@ async fn a_generating_set_member_naming_nothing_refuses_the_request() {
     count(&server, 0).await;
 }
 
+/// A column that is neither `tessera_id` nor a unique field names nothing: it is ignored, as a
+/// build ignores it, and the answer names it.
+#[tokio::test]
+async fn a_column_that_names_nothing_is_ignored_and_named() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, flat_layer(LAYER)).await;
+    let (status, body) = put(
+        &server,
+        false,
+        json!([{ "key": "a", "members": { "id": [0, 1], "name": ["x", "y"] } }]),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["ignored_columns"], json!(["name"]));
+    assert_eq!(body["refused"], json!([]));
+    assert_eq!(count(&server, 1).await, vec![2]);
+}
+
 /// Members joining a generating set through a growth are refused whole in the same way, strict or
 /// not; a member leaving it that names nothing is listed and the rest apply.
 #[tokio::test]
@@ -243,7 +262,7 @@ async fn a_malformed_table_is_refused_whole() {
     register(&server, flat_layer(LAYER)).await;
     for (what, artifacts) in [
         ("columns of different lengths", json!([{ "key": "a", "members": { "id": [0, 1], "tessera_id": [null] } }])),
-        ("a column that is not a unique field", json!([{ "key": "a", "members": { "name": ["x"] } }])),
+        ("no column that names items", json!([{ "key": "a", "members": { "name": ["x"] } }])),
         ("a list in place of a table", json!([{ "key": "a", "members": ["0"] }])),
         ("a tessera_id that is a number", json!([{ "key": "a", "members": { "tessera_id": [12] } }])),
     ] {
@@ -312,4 +331,54 @@ async fn an_arrow_growth_names_members_as_a_list_of_structs() {
         json!([{ "artifact": 0, "list": "members", "row": 2, "reason": "names_no_item" }])
     );
     assert_eq!(count(&server, 1).await, vec![3]);
+}
+
+/// An Arrow member struct's columns are text or integers: another type, and a column named twice,
+/// are refused by name.
+#[tokio::test]
+async fn an_arrow_member_column_of_another_type_or_named_twice_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register(&server, flat_layer(LAYER)).await;
+    let (status, body) = put(&server, false, json!([{ "key": "a", "members": { "id": [0] } }])).await;
+    assert_eq!(status, 201, "{body}");
+
+    let body_of = |fields: Vec<Field>, columns: Vec<ArrayRef>| {
+        let fields = Fields::from(fields);
+        let elements = StructArray::new(fields.clone(), columns, None);
+        let item = Arc::new(Field::new("item", DataType::Struct(fields), false));
+        let members =
+            ListArray::new(item.clone(), OffsetBuffer::from_lengths([1]), Arc::new(elements), None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("members", DataType::List(item), false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec!["a"])), Arc::new(members)],
+        )
+        .unwrap();
+        let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.into_inner().unwrap()
+    };
+    let float = body_of(
+        vec![Field::new("id", DataType::Float64, true)],
+        vec![Arc::new(arrow::array::Float64Array::from(vec![1.0])) as ArrayRef],
+    );
+    let (status, body) = patch_arrow(&server, float).await;
+    assert_eq!(status, 422, "{body}");
+    let twice = body_of(
+        vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("id", DataType::UInt64, true),
+        ],
+        vec![
+            Arc::new(UInt64Array::from(vec![1])) as ArrayRef,
+            Arc::new(UInt64Array::from(vec![2])) as ArrayRef,
+        ],
+    );
+    let (status, body) = patch_arrow(&server, twice).await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(count(&server, 1).await, vec![1]);
 }

@@ -787,8 +787,15 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
     assert db.leave("topics", "l0", {"id": ["p0", "p1", "p2"]}, rank=0).ok
     assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
+    # A `None` names no item, as it does for `remove`: the row is refused and nothing leaves.
+    report = db.leave("topics", "l0", [None], rank=0)
+    assert report.accepted == 0 and report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
+
     # The page that empties the set withdraws the content, and it does not come back on its own.
-    assert db.leave("topics", "l0", {"id": ["p3", "p4"]}, rank=0).ok
+    # A column naming no item is not sent, and the report names it.
+    report = db.leave("topics", "l0", {"id": ["p3", "p4"], "note": ["a", "b"]}, rank=0)
+    assert report.ok and report.accepted == 2 and report.ignored_columns == ["note"], report
     assert not [row for row in artifact_rows_of(db) if row[0] == "topics" and row[2]]
 
 

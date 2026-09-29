@@ -178,8 +178,7 @@ fn served_positions_in(engine: &Engine, k: usize, bbox: [f64; 4]) -> BTreeMap<u6
 
 /// The position the item holding `id` was placed at, or a panic naming the id.
 fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, id: u64) -> u64 {
-    let entity = engine
-        .resolve_unique_values("id", &[id.to_string()])
+    let entity = unique_holders(engine, "id", &[id.to_string()])
         .expect("`id` is a declared unique attribute")[0]
         .unwrap_or_else(|| panic!("no item holds id {id}"));
     let tessera_id = engine

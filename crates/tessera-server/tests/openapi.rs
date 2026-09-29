@@ -2043,7 +2043,8 @@ async fn ingest_matches_the_description() {
     assert_eq!(created["created"], 1);
 
     // The row again, naming the item by its `tessera_id` alone, changes nothing; a row naming no
-    // item and carrying no position creates nothing and is refused.
+    // item and carrying no position creates nothing and is refused; a batch of such rows with no
+    // column to name items by is `422`.
     let named = json!([{ "tessera_id": created["tessera_ids"][0] }]);
     assert_valid(&doc, "IngestRecords", &named);
     let resp = ingest("openapi-named")
@@ -2054,7 +2055,14 @@ async fn ingest_matches_the_description() {
         .unwrap();
     let unchanged = assert_answer(&doc, &post, resp, 200).await;
     assert_eq!(unchanged["unchanged"], 1);
-    let unplaced = json!([{ "access": ["0"] }]).to_string();
+    let resp = ingest("openapi-unaddressed")
+        .header("content-type", "application/json")
+        .body(json!([{ "access": ["0"] }]).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_refusal_to(&doc, Some(&post), resp, 422, "contract").await;
+    let unplaced = json!([{ "id": null, "access": ["0"] }]).to_string();
     let resp = ingest("openapi-unplaced")
         .header("content-type", "application/json")
         .body(unplaced.clone())

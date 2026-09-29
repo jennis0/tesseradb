@@ -284,9 +284,12 @@ encodings: the build reads a `geometry` column as WKB and the publication route 
 `remove(items, strict=False)`, `suppress(items, strict=False)` and `unsuppress(items,
 strict=False)` take a list of `tessera_id`s, or a table (a pandas or polars data frame, a pyarrow
 table, or a dict of columns) whose columns are `tessera_id` and unique attributes, each row naming
-one item. A column that is neither is refused by the server and nothing is applied. A row naming no
-item, or two, is refused and listed in the report's `refused` by its position, and the other rows
-are applied; with `strict=True` the whole request is refused instead, and a call that applied
+one item. A unique attribute is read from the column an insert reads it from. A column that is
+neither is not sent, and the report names it in `ignored_columns`; a table with no other column is
+refused before anything is sent, as is a bare string, a list of dicts, or a dict whose columns
+differ in length. A row naming no item, or two, is refused and listed in the report's `refused` by
+its position, and the other rows are applied; a `None` in a list, or a row whose cells are all
+null, names no item; with `strict=True` the whole request is refused instead, and a call that applied
 nothing raises `Refusal`. A removed item names nothing after, so its value inserted again creates a
 new item. `leave(layer, key, items, rank, strict=False)` shrinks a content's generating set, which
 is the one set that may shrink, and names its items the same way.

@@ -43,8 +43,9 @@ pub struct RowIdentity {
 pub trait Holdings {
     type Error;
 
-    /// For each key, every item holding it in the unique field at declared position `field`.
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, Self::Error>;
+    /// Every item holding a key in the unique field at declared position `field`, as
+    /// `(position in keys, item)`.
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, Self::Error>;
 
     /// For each `tessera_id`, the item it names.
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, Self::Error>;
@@ -232,8 +233,9 @@ pub fn resolve<H: Holdings>(
     holdings: &H,
     batch: Batch,
 ) -> Result<Vec<Verdict>, H::Error> {
-    // Each row's identifiers, with the item each names, gathered one lookup per field.
-    let mut named: Vec<Vec<(Identifier, EntityId)>> = vec![Vec::new(); rows.len()];
+    // Each row's identifiers, with the item each names, gathered one lookup per field into one
+    // list, then ordered by row.
+    let mut found: Vec<(usize, (Identifier, EntityId))> = Vec::new();
     let mut verdicts: Vec<Option<Verdict>> = vec![None; rows.len()];
 
     let tessera: Vec<(usize, TesseraId)> = rows
@@ -244,7 +246,7 @@ pub fn resolve<H: Holdings>(
     let ids: Vec<TesseraId> = tessera.iter().map(|(_, id)| *id).collect();
     for ((at, _), holder) in tessera.iter().zip(holdings.tessera_holders(&ids)?) {
         match holder {
-            Some(entity) => named[*at].push((Identifier::TesseraId, entity)),
+            Some(entity) => found.push((*at, (Identifier::TesseraId, entity))),
             None => {
                 verdicts[*at] = Some(Verdict::Refused(Refusal::UnknownTesseraId { row: *at }))
             }
@@ -262,19 +264,28 @@ pub fn resolve<H: Holdings>(
     for field in fields {
         let settings = &by_field[&field];
         let keys: Vec<Key> = settings.iter().map(|(_, key)| *key).collect();
-        for ((at, _), holders) in settings.iter().zip(holdings.holders(field, &keys)?) {
-            for entity in holders {
-                named[*at].push((Identifier::Unique(field), entity));
-            }
+        for (at, entity) in holdings.holders(field, &keys)? {
+            found.push((settings[at].0, (Identifier::Unique(field), entity)));
         }
     }
+    found.sort_by_key(|(at, _)| *at);
+    let named: Vec<(Identifier, EntityId)> = found.iter().map(|(_, named)| *named).collect();
 
-    for (at, named) in named.into_iter().enumerate() {
-        if verdicts[at].is_some() {
+    let mut next = 0;
+    for (at, verdict) in verdicts.iter_mut().enumerate() {
+        let start = next;
+        while next < found.len() && found[next].0 == at {
+            next += 1;
+        }
+        if verdict.is_some() {
             continue;
         }
-        verdicts[at] = Some(match name_row(&named) {
-            Named::Two => Verdict::Refused(Refusal::NamesTwo { row: at, named }),
+        let named = &named[start..next];
+        *verdict = Some(match name_row(named) {
+            Named::Two => Verdict::Refused(Refusal::NamesTwo {
+                row: at,
+                named: named.to_vec(),
+            }),
             Named::One(entity) => Verdict::Names(entity),
             Named::Nothing if batch.creates() => Verdict::Creates,
             Named::Nothing => Verdict::Refused(Refusal::NamesNoItem { row: at }),
@@ -346,10 +357,14 @@ mod tests {
 
     impl Holdings for Held {
         type Error = ();
-        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, ()> {
+        fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, ()> {
             Ok(keys
                 .iter()
-                .map(|key| self.unique.get(&(field, *key)).cloned().unwrap_or_default())
+                .enumerate()
+                .flat_map(|(at, key)| {
+                    let held = self.unique.get(&(field, *key)).cloned().unwrap_or_default();
+                    held.into_iter().map(move |entity| (at, entity))
+                })
                 .collect())
         }
         fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, ()> {

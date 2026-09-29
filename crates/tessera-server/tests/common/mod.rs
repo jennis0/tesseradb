@@ -1135,9 +1135,7 @@ pub fn member(source_id: u64) -> String {
 /// reads off an ingest answer or a viewport, read here from the engine.
 pub fn tessera_id_of(server: &TestServer, source_id: u64) -> u64 {
     let engine = &server.state.engine;
-    let entity = engine
-        .resolve_unique_values("id", &[source_id.to_string()])
-        .unwrap()[0]
+    let entity = unique_holders(engine, "id", &[source_id.to_string()]).unwrap()[0]
         .unwrap_or_else(|| panic!("no live item holds id {source_id}"));
     engine.tessera_id_of(entity).unwrap().raw()
 }
@@ -2185,4 +2183,33 @@ pub fn aggregate_rows(batch: &RecordBatch) -> Vec<AggregateRow> {
             }),
         })
         .collect()
+}
+
+/// The item each of `values` names in the unique field `field`, `None` for a value naming none,
+/// asked of [`tessera_engine::Engine::name_items`].
+pub fn unique_holders(
+    engine: &tessera_engine::Engine,
+    field: &str,
+    values: &[String],
+) -> Result<Vec<Option<tessera_types::EntityId>>, tessera_engine::EngineError> {
+    let table = tessera_engine::AddressTable {
+        rows: values.len(),
+        tessera_id: None,
+        columns: vec![(
+            field.to_string(),
+            values
+                .iter()
+                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .collect(),
+        )],
+    };
+    Ok(engine
+        .name_items(&table)?
+        .verdicts
+        .into_iter()
+        .map(|verdict| match verdict {
+            tessera_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            _ => None,
+        })
+        .collect())
 }

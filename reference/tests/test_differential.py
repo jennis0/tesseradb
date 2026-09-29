@@ -384,6 +384,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     resp = requests.post(
         f"{server.control_base}/control/changes",
+        params={"strict": "true"},
         headers={"Authorization": f"Bearer {server.operator_credential}"},
         json=payload,
         timeout=10,

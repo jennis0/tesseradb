@@ -44,6 +44,7 @@ fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<T
             rows,
             artifacts: Default::default(),
             strict: false,
+            tessera_id_column: false,
         })
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
         .tessera_ids
@@ -851,6 +852,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
                 rows: vec![rescore(x, 777)],
                 artifacts: Default::default(),
                 strict: false,
+                tessera_id_column: false,
             })
         })
     };

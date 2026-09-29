@@ -2,8 +2,14 @@
 //! declaration built empty with each file then sent to the running service in declaration order,
 //! answer alike: the same items in each view at the same positions with the same values, seen by
 //! the same principals, in the same artifacts; and the rows the build reports refused are the rows
-//! the service lists as refused, reason by reason. Under `strict=true` the service refuses each
-//! file that carries a refused row, whole.
+//! the service lists as refused, reason by reason and row by row, the report's sample of each
+//! reason's first rows included. Under `strict=true` the service refuses each file that carries a
+//! refused row, whole. The service is restarted before it is compared, so what it answers is what
+//! its write-ahead log replays.
+//!
+//! The corpus has two views' points, an attribute file whose rows can carry a `tessera_id`, an
+//! access relation, which the service is sent as a batch naming each item once with its labels,
+//! and a members file, which it is sent as one publication.
 //!
 //! Items are compared by the values they hold, since the two paths number them independently.
 //! Corpora are drawn from a seed over one or two unique fields with small value ranges, so values
@@ -15,7 +21,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
+use arrow::array::{
+    Array, ArrayRef, Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
@@ -27,7 +35,11 @@ use tessera_build::{build, BuildArgs, BuildReport};
 use tessera_spatial::Bounds;
 
 const LAYER: &str = "groups";
-const PRINCIPALS: [&[&str]; 2] = [&["public"], &["public", "x"]];
+/// The access terms the relation gives items: every item one everyone is given, and some a
+/// narrower one. Each is the label of its digits at the service.
+const EVERYONE: u32 = 0;
+const TERM: u32 = 7;
+const PRINCIPALS: [&[&str]; 2] = [&["0"], &["0", "7"]];
 
 /// A seeded draw: small ranges, so values repeat and collide.
 struct Draws(u64);
@@ -58,14 +70,18 @@ struct Rows {
     a: Vec<Option<u64>>,
     b: Option<Vec<Option<String>>>,
     xy: Option<Vec<(f64, f64)>>,
-    access: Option<Vec<String>>,
     score: Option<Vec<i64>>,
+    tessera_id: Option<Vec<Option<String>>>,
+    /// `rid`, a unique field only the points carry, one value per row, which no file edits: the
+    /// access relation names items by it.
+    rid: Option<Vec<u64>>,
     key: Option<Vec<String>>,
+    term: Option<Vec<u32>>,
 }
 
 impl Rows {
     fn len(&self) -> usize {
-        self.a.len()
+        self.a.len().max(self.rid.as_ref().map_or(0, Vec::len))
     }
 
     /// The file, or with `empty` the file's schema and no rows.
@@ -75,7 +91,12 @@ impl Rows {
         if let Some(key) = &self.key {
             columns.push(("key", Arc::new(StringArray::from_iter_values(key[..n].iter()))));
         }
-        columns.push(("a", Arc::new(UInt64Array::from(self.a[..n].to_vec()))));
+        if !self.a.is_empty() {
+            columns.push(("a", Arc::new(UInt64Array::from(self.a[..n].to_vec()))));
+        }
+        if let Some(rid) = &self.rid {
+            columns.push(("rid", Arc::new(UInt64Array::from(rid[..n].to_vec()))));
+        }
         if let Some(b) = &self.b {
             columns.push(("b", Arc::new(StringArray::from(b[..n].to_vec()))));
         }
@@ -83,11 +104,14 @@ impl Rows {
             columns.push(("x", Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.0)))));
             columns.push(("y", Arc::new(Float64Array::from_iter_values(xy[..n].iter().map(|p| p.1)))));
         }
-        if let Some(access) = &self.access {
-            columns.push(("access", Arc::new(StringArray::from_iter_values(access[..n].iter()))));
-        }
         if let Some(score) = &self.score {
             columns.push(("score", Arc::new(Int64Array::from(score[..n].to_vec()))));
+        }
+        if let Some(tessera_id) = &self.tessera_id {
+            columns.push(("tessera_id", Arc::new(StringArray::from(tessera_id[..n].to_vec()))));
+        }
+        if let Some(term) = &self.term {
+            columns.push(("term_id", Arc::new(UInt32Array::from(term[..n].to_vec()))));
         }
         let fields: Vec<Field> = columns
             .iter()
@@ -111,6 +135,9 @@ impl Rows {
                 if let Some(a) = self.a[i] {
                     row.insert("a".into(), json!(a));
                 }
+                if let Some(rid) = &self.rid {
+                    row.insert("rid".into(), json!(rid[i]));
+                }
                 if let Some(Some(b)) = self.b.as_ref().map(|b| &b[i]) {
                     row.insert("b".into(), json!(b));
                 }
@@ -118,11 +145,11 @@ impl Rows {
                     row.insert("x".into(), json!(xy[i].0));
                     row.insert("y".into(), json!(xy[i].1));
                 }
-                if let Some(access) = &self.access {
-                    row.insert("access".into(), json!([access[i]]));
-                }
                 if let Some(score) = &self.score {
                     row.insert("score".into(), json!(score[i]));
+                }
+                if let Some(Some(id)) = self.tessera_id.as_ref().map(|t| &t[i]) {
+                    row.insert("tessera_id".into(), json!(id));
                 }
                 Value::Object(row)
             })
@@ -154,6 +181,59 @@ impl Rows {
         json!({ "artifacts": artifacts })
     }
 
+    /// The access relation as one batch naming each item once, in the order its identifier first
+    /// appears, with every label the relation gives it; and each batch row's file rows.
+    fn relation_body(&self) -> (Value, Vec<Vec<usize>>) {
+        let term = self.term.as_ref().expect("a relation carries terms");
+        let rid = self.rid.as_ref().expect("a relation names items by rid");
+        let mut order: Vec<u64> = Vec::new();
+        let mut rows_of: Vec<Vec<usize>> = Vec::new();
+        for (i, a) in rid.iter().copied().enumerate() {
+            match order.iter().position(|held| *held == a) {
+                Some(at) => rows_of[at].push(i),
+                None => {
+                    order.push(a);
+                    rows_of.push(vec![i]);
+                }
+            }
+        }
+        let body = order
+            .iter()
+            .zip(&rows_of)
+            .map(|(a, rows)| {
+                let mut labels: Vec<String> = rows.iter().map(|i| term[*i].to_string()).collect();
+                labels.dedup();
+                json!({ "rid": a, "access": labels })
+            })
+            .collect();
+        (Value::Array(body), rows_of)
+    }
+
+    /// A row as the build's report names it: each identifying value it carries, `field = value`,
+    /// or its position where it carries none.
+    fn value_text(&self, row: usize) -> String {
+        let mut parts = Vec::new();
+        if let Some(Some(a)) = self.a.get(row) {
+            parts.push(format!("a = {a}"));
+        }
+        if let Some(Some(b)) = self.b.as_ref().map(|b| &b[row]) {
+            parts.push(format!("b = {b}"));
+        }
+        if let Some(rid) = &self.rid {
+            parts.push(format!("rid = {}", rid[row]));
+        }
+        if let Some(score) = &self.score {
+            parts.push(format!("score = {}", score[row]));
+        }
+        if let Some(Some(id)) = self.tessera_id.as_ref().map(|t| &t[row]) {
+            parts.push(format!("tessera_id = {id}"));
+        }
+        match parts.is_empty() {
+            true => format!("row {row}"),
+            false => parts.join(", "),
+        }
+    }
+
     /// Each member row's position in [`Self::publish_body`]: `(artifact, row)`.
     fn member_positions(&self) -> Vec<(usize, usize)> {
         let keys = self.key.as_ref().unwrap();
@@ -181,6 +261,7 @@ struct Corpus {
     world: Rows,
     near: Rows,
     notes: Rows,
+    relation: Rows,
     members: Rows,
 }
 
@@ -197,24 +278,44 @@ impl Corpus {
                 ..Rows::default()
             }
         };
-        // An item's label is one set in every view, and a build refuses a corpus whose views
-        // disagree, so only items no other file can name carry `x`: every fifth world row, which
-        // holds no unique value.
         let mut world = rows(&mut d, 40, 40, true);
-        for i in (0..40).step_by(5) {
-            world.a[i] = None;
-            if let Some(b) = world.b.as_mut() {
-                b[i] = None;
-            }
-        }
-        world.access = Some(
-            (0..40)
-                .map(|i| if i % 5 == 0 { "x" } else { "public" }.to_string())
-                .collect(),
-        );
-        let near = rows(&mut d, 20, 50, true);
+        world.rid = Some((1000..1040).collect());
+        let mut near = rows(&mut d, 20, 50, true);
+        near.rid = Some((2000..2020).collect());
         let mut notes = rows(&mut d, 25, 50, false);
         notes.score = Some((0..25).map(|i| 100 + i).collect());
+        notes.tessera_id =
+            Some((0..25).map(|i| (i % 6 == 5).then(|| format!("9999999999{i}"))).collect());
+        // A refused row refuses no later row: the first row gives an item held in the world a new
+        // `b`, the second gives another held item that value and is refused, and the third names
+        // that other item alone and is kept.
+        if let (Some(b), true) = (notes.b.as_mut(), two_fields) {
+            let mut held = world.a.iter().flatten().copied().collect::<Vec<_>>();
+            held.dedup();
+            held.sort_unstable();
+            held.dedup();
+            let (x, y) = (held[0], held[1]);
+            notes.a[0..3].copy_from_slice(&[Some(x), Some(y), Some(y)]);
+            b[0..3].clone_from_slice(&[Some("bz".to_string()), Some("bz".to_string()), None]);
+            notes.tessera_id.as_mut().unwrap()[0..3].fill(None);
+        }
+        // Every point row's `rid` gets a term: every fifth the narrower one alone, the rest the
+        // one everyone holds. A build gives an item the relation names nothing no label at all,
+        // where the service gives it the view's default, so every item is named. More rows give
+        // some the narrower term too, and a few name nothing.
+        let mut rid: Vec<u64> = (1000..1040).chain(2000..2020).collect();
+        let mut term: Vec<u32> = (0..rid.len())
+            .map(|i| if i % 5 == 0 { TERM } else { EVERYONE })
+            .collect();
+        for _ in 0..12 {
+            rid.push([1000, 2000, 3000][d.next(3) as usize] + d.next(40));
+            term.push(TERM);
+        }
+        let relation = Rows {
+            rid: Some(rid),
+            term: Some(term),
+            ..Rows::default()
+        };
         let mut members = rows(&mut d, 40, 50, false);
         members.key = Some((0..40).map(|_| format!("k{}", d.next(4))).collect());
         Corpus {
@@ -222,6 +323,7 @@ impl Corpus {
             world,
             near,
             notes,
+            relation,
             members,
         }
     }
@@ -232,6 +334,7 @@ impl Corpus {
         self.world.write(&dir.join("world.parquet"), empty);
         self.near.write(&dir.join("near.parquet"), empty);
         self.notes.write(&dir.join("notes.parquet"), empty);
+        self.relation.write(&dir.join("access.parquet"), empty);
         self.members.write(&dir.join("members.parquet"), empty);
         let b = if self.two_fields {
             "\n[[attribute]]\nname   = \"b\"\ntype   = \"keyword\"\nunique = true\n"
@@ -244,6 +347,7 @@ impl Corpus {
 world   = "world.parquet"
 near    = "near.parquet"
 notes   = "notes.parquet"
+access  = "access.parquet"
 members = "members.parquet"
 
 [defaults]
@@ -253,19 +357,24 @@ allocation_view = "world"
 [[view]]
 name             = "world"
 extent           = {{ min = 0.0, max = 100.0 }}
-point_visibility = {{ field = "access", default = "public" }}
+point_visibility = {{ source = "access", default = "public" }}
 
 [[view]]
 name             = "near"
 source           = "near"
 extent           = {{ min = 0.0, max = 100.0 }}
-point_visibility = {{ default = "public" }}
+point_visibility = {{ source = "access", default = "public" }}
 
 [[attribute]]
 name   = "a"
 type   = "u64"
 unique = true
 {b}
+[[attribute]]
+name   = "rid"
+type   = "u64"
+unique = true
+
 [[attribute]]
 name   = "score"
 type   = "i64"
@@ -353,13 +462,44 @@ fn reported(report: &BuildReport, object: &str) -> BTreeMap<String, u64> {
     out
 }
 
-/// The refused rows an answer lists, by reason.
-fn listed(answer: &Value) -> BTreeMap<String, u64> {
-    let mut out = BTreeMap::new();
+/// The file rows an answer refused, by reason: `row_of` turns an answer's entry into the file
+/// rows it stands for.
+fn listed(answer: &Value, row_of: impl Fn(&Value) -> Vec<usize>) -> BTreeMap<String, Vec<usize>> {
+    let mut out: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for entry in answer["refused"].as_array().expect("the answer lists refused rows") {
-        *out.entry(entry["reason"].as_str().unwrap().to_string()).or_default() += 1;
+        let reason = entry["reason"].as_str().unwrap().to_string();
+        out.entry(reason).or_default().extend(row_of(entry));
+    }
+    for rows in out.values_mut() {
+        rows.sort_unstable();
     }
     out
+}
+
+/// Hold the rows the service refused of one file to the build's report on it: the same count for
+/// each reason, and the report's sample, the values of the first ten rows each once, as those rows
+/// of the file read.
+fn assert_refused_alike(
+    report: &BuildReport,
+    object: &str,
+    listed: &BTreeMap<String, Vec<usize>>,
+    rows: &Rows,
+    what: &str,
+) {
+    let reported = reported(report, object);
+    let counts: BTreeMap<String, u64> =
+        listed.iter().map(|(reason, rows)| (reason.clone(), rows.len() as u64)).collect();
+    assert_eq!(counts, reported, "{what}: refused rows by reason");
+    for entry in report.refused.iter().filter(|e| e.object == object && e.is_refusal()) {
+        let mut sample: Vec<String> = Vec::new();
+        for row in listed[&entry.reason].iter().take(10) {
+            let text = rows.value_text(*row);
+            if !sample.contains(&text) {
+                sample.push(text);
+            }
+        }
+        assert_eq!(entry.values, sample, "{what}: the first {} rows", entry.reason);
+    }
 }
 
 /// Send one file's rows to `path`, first strict, which must be refused exactly where the build
@@ -550,47 +690,62 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     build(&args(&empty, &declaration, &empty_root)).expect("the empty build runs");
     let ingested = spawn_server(&empty_root, &empty.join("cache"), &empty.join("wal.log")).await;
 
+    let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
     for (source, object, rows, view) in [
         ("world", "view 'world'", &corpus.world, Some("world")),
         ("near", "view 'near'", &corpus.near, Some("near")),
         ("notes", "attribute source 'notes'", &corpus.notes, None),
     ] {
-        let expected = reported(&report, object);
-        let answer = send(
-            &ingested,
-            reqwest::Method::POST,
-            "/control/ingest",
-            view,
-            &rows.ingest_body(),
-            !expected.is_empty(),
-            &format!("{seed}-{source}"),
-        )
-        .await;
-        assert_eq!(listed(&answer), expected, "seed {seed}: {source}'s refused rows");
+        let refuses = !reported(&report, object).is_empty();
+        let batch = format!("{seed}-{source}");
+        let body = rows.ingest_body();
+        let answer =
+            send(&ingested, reqwest::Method::POST, "/control/ingest", view, &body, refuses, &batch)
+                .await;
+        let what = format!("seed {seed}: {source}");
+        assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
         tick(&ingested).await;
     }
-    let expected = reported(&report, &format!("layer '{LAYER}' members"));
+
+    // The access relation, one row per item naming it with its labels.
+    let object = "point_visibility";
+    let (body, rows_of) = corpus.relation.relation_body();
+    let refuses = !reported(&report, object).is_empty();
+    let batch = format!("{seed}-access");
+    let answer =
+        send(&ingested, reqwest::Method::POST, "/control/ingest", None, &body, refuses, &batch).await;
+    let of_item = |entry: &Value| rows_of[entry["row"].as_u64().unwrap() as usize].clone();
+    let what = format!("seed {seed}: the access relation");
+    assert_refused_alike(&report, object, &listed(&answer, of_item), &corpus.relation, &what);
+    tick(&ingested).await;
+
+    let object = format!("layer '{LAYER}' members");
+    let refuses = !reported(&report, &object).is_empty();
     let answer = send(
         &ingested,
         reqwest::Method::PUT,
         &format!("/control/layers/{LAYER}/artifacts"),
         None,
         &corpus.members.publish_body(),
-        !expected.is_empty(),
+        refuses,
         &format!("{seed}-members"),
     )
     .await;
-    assert_eq!(listed(&answer), expected, "seed {seed}: the members' refused rows");
     let positions = corpus.members.member_positions();
-    for entry in answer["refused"].as_array().unwrap() {
+    let of_member = |entry: &Value| {
         let at = (
             entry["artifact"].as_u64().unwrap() as usize,
             entry["row"].as_u64().unwrap() as usize,
         );
-        assert!(positions.contains(&at), "seed {seed}: {entry}");
-    }
+        vec![positions.iter().position(|p| *p == at).expect("a member row")]
+    };
+    let what = format!("seed {seed}: the members");
+    assert_refused_alike(&report, &object, &listed(&answer, of_member), &corpus.members, &what);
     tick(&ingested).await;
 
+    // Compared as a restart replays it.
+    ingested.shutdown().await;
+    let ingested = spawn_server(&empty_root, &empty.join("cache-2"), &empty.join("wal.log")).await;
     let built = spawn_server(&built_root, &full.join("cache"), &full.join("wal.log")).await;
     let left = state(&built, corpus.two_fields).await;
     let right = state(&ingested, corpus.two_fields).await;
@@ -599,9 +754,11 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     }
     assert_eq!(left.len(), right.len());
     for view in ["world", "near"] {
-        let items = left[&format!("public+x {view} items")].as_array().unwrap().len();
-        assert!(items > 0, "seed {seed}: {view} holds items");
-        let artifacts = left[&format!("public+x {view} artifacts")].as_object().unwrap().len();
+        let items = left[&format!("0+7 {view} items")].as_array().unwrap().len();
+        let everyone = left[&format!("0 {view} items")].as_array().unwrap().len();
+        assert!(everyone > 0, "seed {seed}: {view} holds items everyone sees");
+        assert!(items > everyone, "seed {seed}: {view} holds items only the narrower term shows");
+        let artifacts = left[&format!("0+7 {view} artifacts")].as_object().unwrap().len();
         assert!(artifacts > 0, "seed {seed}: {view} serves artifacts");
     }
     built.shutdown().await;
@@ -616,7 +773,13 @@ async fn a_build_answers_as_its_files_ingested_into_an_empty_database() {
         eprintln!("seed {seed}");
         reasons.extend(build_equals_ingest(seed).await);
     }
-    for reason in ["names_two_items", "names_no_item", "one_item_twice", "one_value_twice"] {
+    for reason in [
+        "names_two_items",
+        "names_no_item",
+        "one_item_twice",
+        "one_value_twice",
+        "unknown_tessera_id",
+    ] {
         assert!(reasons.contains(reason), "the corpora plant {reason}: {reasons:?}");
     }
 }

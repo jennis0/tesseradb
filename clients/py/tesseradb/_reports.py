@@ -226,6 +226,10 @@ class PagedReport(Summarised):
       "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent.
       `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`
       and `unknown_tessera_id`. `refused_by_reason` counts them.
+    - `ignored_columns`: by layer, the fields of its member structs, and the columns of the
+      memberships its declaration writes, that name no item, being neither `tessera_id` nor a
+      unique attribute's column: those the plan did not send, and any the server says it
+      ignored. `check()` names those the plan leaves out.
     - `tessera_ids`: the id given to each row sent, `None` for a refused row.
     - `artifact_ids`: the id given to each added annotation, by layer and then by
       `(level, view, key)`.
@@ -254,6 +258,7 @@ class PagedReport(Summarised):
     clamped: int = 0
     refusals: list = field(default_factory=list)
     refused: list = field(default_factory=list)
+    ignored_columns: dict = field(default_factory=dict)
     tessera_ids: list = field(default_factory=list)
     replayed: list = field(default_factory=list)
     publication: int | None = None
@@ -284,7 +289,7 @@ class PagedReport(Summarised):
                 f"check: {'ok' if self.ok else 'FAILED'}, "
                 f"{_count(len(self.plan), 'request')} planned, nothing sent"
             ]
-            return out + [str(finding) for finding in self.findings]
+            return out + self._ignored() + [str(finding) for finding in self.findings]
         added = [f"{_count(n, 'row')} to {view}" for view, n in self.rows_accepted.items()]
         for n, what in (
             (self.artifacts_minted, "annotation"),
@@ -328,12 +333,20 @@ class PagedReport(Summarised):
                 f"  {_count(len(members), 'member')} refused and left out: "
                 f"{_reasons_in_words(_by_reason(members))}"
             )
+        out += self._ignored()
         out += [str(finding) for finding in self.findings]
         out += [
             f"refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"
             for refusal in self.refusals
         ]
         return out
+
+    def _ignored(self) -> list[str]:
+        return [
+            f"  layer '{layer}': {_count(len(names), 'member column')} naming no item, ignored: "
+            f"{', '.join(names)}"
+            for layer, names in self.ignored_columns.items()
+        ]
 
 
 @dataclass(repr=False)
@@ -346,6 +359,8 @@ class ChangeReport(Summarised):
     - `refused`: each row the identity rule refused, `{"row", "reason"}`, `row` being its
       position in what was given, and `reason` one of `names_no_item`, `names_two_items` and
       `unknown_tessera_id`. The other rows were applied. `refused_by_reason` counts them.
+    - `ignored_columns`: the columns given that name no item, being neither `tessera_id` nor a
+      unique attribute's column: those not sent, and any the server says it ignored.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`
       when there were none. Each is in the summary.
     """
@@ -354,6 +369,7 @@ class ChangeReport(Summarised):
     requested: int = 0
     accepted: int = 0
     refused: list = field(default_factory=list)
+    ignored_columns: list = field(default_factory=list)
     refusals: list = field(default_factory=list)
 
     @property
@@ -367,8 +383,8 @@ class ChangeReport(Summarised):
         return _by_reason(self.refused)
 
     def summary(self) -> list[str]:
-        """The lines `print()` shows: the rows given and applied, the rows refused by reason, then
-        every refused request."""
+        """The lines `print()` shows: the rows given and applied, the rows refused by reason, the
+        columns ignored, then every refused request."""
         out = [
             f"{self.op}: {_count(self.requested, 'row')}, {self.accepted:,} applied, "
             f"{'ok' if self.ok else 'FAILED'}"
@@ -377,6 +393,11 @@ class ChangeReport(Summarised):
             out.append(
                 f"  {_count(len(self.refused), 'row')} refused: "
                 f"{_reasons_in_words(self.refused_by_reason)}"
+            )
+        if self.ignored_columns:
+            out.append(
+                f"  {_count(len(self.ignored_columns), 'column')} naming no item, ignored: "
+                f"{', '.join(self.ignored_columns)}"
             )
         out += [f"refused {refusal['status']}: {refusal['detail']}" for refusal in self.refusals]
         return out

@@ -26,129 +26,172 @@ impl Engine {
             .resolve_terms(&self.generation.load().dict, descriptors)
     }
 
-    /// The item each of `values` names in the unique column `field`, `None` for a value naming
-    /// none, deleted items left out. A value is written as [`AddressTable`] says.
-    pub fn resolve_unique_values(
-        &self,
-        field: &str,
-        values: &[String],
-    ) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
-        resolve_unique_values_in(&self.generation.load(), field, values)
-    }
-
     /// Which item each row of a call that addresses items names, under the identity rule
     /// ([`tessera_lifecycle::resolve`]): a row names the item its `tessera_id` and unique values
-    /// name, and a row naming none, or naming two, is refused. Many rows may name one item.
+    /// name, and a row naming none, or naming two, is refused. Many rows may name one item. A
+    /// column that is neither `tessera_id` nor a unique field names nothing and is ignored, as a
+    /// build ignores it; the answer names it.
     ///
-    /// Refused with [`crate::EngineError::AddressMalformed`] where the table has no column to name
-    /// items by, a column names a field that is not unique, or a value is not one of its field's.
+    /// Refused with [`crate::EngineError::AddressMalformed`] where a table with rows is left with
+    /// no column to name items by, or a value is not one of its field's.
     pub fn name_items(
         &self,
         table: &AddressTable,
-    ) -> std::result::Result<Vec<Verdict>, crate::EngineError> {
-        resolve::require_identifier(table.tessera_id.is_some(), table.unique.len()).map_err(|e| {
-            crate::EngineError::AddressMalformed(format!("This request cannot address items: {e}"))
-        })?;
-        let generation = self.generation.load_full();
-        let mut rows = vec![RowIdentity::default(); table.rows];
-        if let Some(ids) = &table.tessera_id {
-            for (row, id) in rows.iter_mut().zip(ids) {
-                row.tessera_id = *id;
-            }
-        }
-        for (field, values) in &table.unique {
-            let (position, declared) = unique_field(&generation, field)?;
-            for (row, value) in rows.iter_mut().zip(values) {
-                let Some(value) = value else { continue };
-                if let Some(key) = key_of_text(declared, value)? {
-                    row.unique.push((position, key.widen()));
-                }
-            }
-        }
-        let holdings = Addressed {
-            engine: self,
-            generation: &generation,
-        };
-        resolve::resolve(&rows, &holdings, Batch::Names).map_err(crate::EngineError::Store)
+    ) -> std::result::Result<NamedItems, crate::EngineError> {
+        name_items_in(self, &self.generation.load_full(), table)
     }
 }
 
 /// The rows of a call that addresses items, as the caller wrote them: an optional `tessera_id`
-/// column and a column for each unique field it names items by, `None` where a cell is null. A
-/// unique value is written as its column's text: a keyword as itself, and an integer or a
-/// timestamp in decimal digits. An integer the column cannot hold names nothing.
+/// column and the other columns by name, `None` where a cell is null. An integer the field cannot
+/// hold names nothing.
 #[derive(Debug, Clone, Default)]
 pub struct AddressTable {
     pub rows: usize,
     pub tessera_id: Option<Vec<Option<TesseraId>>>,
-    /// `(field, cells)`, one cell per row.
-    pub unique: Vec<(String, Vec<Option<String>>)>,
+    /// `(column, cells)`, one cell per row.
+    pub columns: Vec<(String, Vec<Option<AddressValue>>)>,
 }
 
-/// The declared position and declaration of the unique field `field`.
-fn unique_field<'g>(
-    generation: &'g Generation,
-    field: &str,
-) -> std::result::Result<(u16, &'g DeclaredScalar), crate::EngineError> {
-    generation
-        .bundle
-        .manifest
-        .declared_scalars
-        .iter()
-        .enumerate()
-        .find(|(_, d)| d.name == field)
-        .filter(|_| generation.unique.get(field).is_some())
-        .map(|(at, d)| (at as u16, d))
-        .ok_or_else(|| {
-            crate::EngineError::AddressMalformed(format!(
-                "'{field}' is not a unique field. Address an item by its tessera_id, or by a \
-                 field declared unique"
-            ))
-        })
+/// One cell of an address as the caller wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddressValue {
+    /// A keyword, or an integer or a timestamp written in decimal digits.
+    Text(String),
+    Integer(i128),
 }
 
-/// A unique value written as its column's text, as the column's index keys it.
-fn key_of_text(
-    declared: &DeclaredScalar,
-    value: &str,
-) -> std::result::Result<Option<UniqueKey>, crate::EngineError> {
-    if declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword {
-        return Ok(Some(UniqueKey::keyword(value)));
+/// What [`Engine::name_items`] decided: one verdict per row, and the columns it ignored.
+#[derive(Debug, Clone, Default)]
+pub struct NamedItems {
+    pub verdicts: Vec<Verdict>,
+    pub ignored: Vec<String>,
+}
+
+/// [`Engine::name_items`] against `generation`.
+pub(crate) fn name_items_in(
+    engine: &Engine,
+    generation: &Generation,
+    table: &AddressTable,
+) -> std::result::Result<NamedItems, crate::EngineError> {
+    let declared = &generation.bundle.manifest.declared_scalars;
+    let mut unique: Vec<(u16, &DeclaredScalar, &[Option<AddressValue>])> = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
+    for (name, cells) in &table.columns {
+        let found = declared
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.name == *name)
+            .filter(|_| generation.unique.get(name).is_some());
+        match found {
+            Some((at, d)) => unique.push((at as u16, d, cells)),
+            None => ignored.push(name.clone()),
+        }
     }
-    let integer: i128 = value.parse().map_err(|_| {
-        crate::EngineError::AddressMalformed(format!(
-            "'{value}' is not a value of '{}', which holds integers. Write it in decimal digits",
-            declared.name
-        ))
+    if table.rows == 0 {
+        return Ok(NamedItems {
+            verdicts: Vec::new(),
+            ignored,
+        });
+    }
+    resolve::require_identifier(table.tessera_id.is_some(), unique.len()).map_err(|e| {
+        crate::EngineError::AddressMalformed(format!("This request cannot address items: {e}"))
     })?;
+    let store = crate::EngineError::Store;
+    let no_item = |row| Verdict::Refused(resolve::Refusal::NamesNoItem { row });
+
+    // One column alone, the common case, is decided without a row's identity per row.
+    let verdicts = match (&table.tessera_id, unique.as_slice()) {
+        (Some(ids), []) => {
+            let present: Vec<(usize, TesseraId)> = ids
+                .iter()
+                .enumerate()
+                .filter_map(|(at, id)| id.map(|id| (at, id)))
+                .collect();
+            let wanted: Vec<TesseraId> = present.iter().map(|(_, id)| *id).collect();
+            let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
+            let found = engine.tessera_ids_in(generation, &wanted).map_err(store)?;
+            for ((at, _), entity) in present.iter().zip(found) {
+                verdicts[*at] = match entity {
+                    Some(entity) => Verdict::Names(entity),
+                    None => Verdict::Refused(resolve::Refusal::UnknownTesseraId { row: *at }),
+                };
+            }
+            verdicts
+        }
+        (None, [(position, d, cells)]) => {
+            let mut keys = Vec::with_capacity(table.rows);
+            let mut from = Vec::with_capacity(table.rows);
+            for (at, cell) in cells.iter().enumerate() {
+                let Some(value) = cell else { continue };
+                if let Some(key) = key_of_value(d, value)? {
+                    keys.push(key);
+                    from.push(at);
+                }
+            }
+            let mut verdicts: Vec<Verdict> = (0..table.rows).map(no_item).collect();
+            let field = resolve::Identifier::Unique(*position);
+            for (at, entity) in crate::unique::holders(generation, &d.name, &keys).map_err(store)? {
+                let row = from[at];
+                verdicts[row] = match &verdicts[row] {
+                    Verdict::Names(held) if *held != entity => {
+                        Verdict::Refused(resolve::Refusal::NamesTwo {
+                            row,
+                            named: vec![(field, *held), (field, entity)],
+                        })
+                    }
+                    Verdict::Refused(resolve::Refusal::NamesTwo { .. }) => continue,
+                    _ => Verdict::Names(entity),
+                };
+            }
+            verdicts
+        }
+        _ => {
+            let mut rows = vec![RowIdentity::default(); table.rows];
+            if let Some(ids) = &table.tessera_id {
+                for (row, id) in rows.iter_mut().zip(ids) {
+                    row.tessera_id = *id;
+                }
+            }
+            for (position, d, cells) in &unique {
+                for (row, cell) in rows.iter_mut().zip(cells.iter()) {
+                    let Some(value) = cell else { continue };
+                    if let Some(key) = key_of_value(d, value)? {
+                        row.unique.push((*position, key.widen()));
+                    }
+                }
+            }
+            let holdings = Addressed {
+                engine,
+                generation,
+            };
+            resolve::resolve(&rows, &holdings, Batch::Names).map_err(store)?
+        }
+    };
+    Ok(NamedItems { verdicts, ignored })
+}
+
+/// A unique value as a caller wrote it, as its field's index keys it.
+fn key_of_value(
+    declared: &DeclaredScalar,
+    value: &AddressValue,
+) -> std::result::Result<Option<UniqueKey>, crate::EngineError> {
+    let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
+    let integer = match (value, keyword) {
+        (AddressValue::Text(text), true) => return Ok(Some(UniqueKey::keyword(text))),
+        (AddressValue::Integer(n), true) => return Ok(Some(UniqueKey::keyword(&n.to_string()))),
+        (AddressValue::Integer(n), false) => *n,
+        (AddressValue::Text(text), false) => text.parse().map_err(|_| {
+            crate::EngineError::AddressMalformed(format!(
+                "'{text}' is not a value of '{}', which holds integers. Write it in decimal digits",
+                declared.name
+            ))
+        })?,
+    };
     Ok(tessera_store::unique::key_of_integer(
         declared.arrow_type,
         integer,
     ))
-}
-
-/// [`Engine::resolve_unique_values`] against `generation`.
-pub(crate) fn resolve_unique_values_in(
-    generation: &Generation,
-    field: &str,
-    values: &[String],
-) -> std::result::Result<Vec<Option<EntityId>>, crate::EngineError> {
-    let (_, declared) = unique_field(generation, field)?;
-    let mut keys = Vec::with_capacity(values.len());
-    let mut from = Vec::with_capacity(values.len());
-    for (at, value) in values.iter().enumerate() {
-        if let Some(key) = key_of_text(declared, value)? {
-            keys.push(key);
-            from.push(at);
-        }
-    }
-    let mut named = vec![None; values.len()];
-    for (at, entity) in crate::unique::holders(generation, field, &keys)
-        .map_err(crate::EngineError::Store)?
-    {
-        named[from[at]] = Some(entity);
-    }
-    Ok(named)
 }
 
 /// Who holds what for a call that addresses items: the unique indexes and their live entries,
@@ -161,18 +204,14 @@ struct Addressed<'a> {
 impl resolve::Holdings for Addressed<'_> {
     type Error = StoreError;
 
-    fn holders(&self, field: u16, keys: &[resolve::Key]) -> Result<Vec<Vec<EntityId>>, StoreError> {
+    fn holders(&self, field: u16, keys: &[resolve::Key]) -> Result<Vec<(usize, EntityId)>, StoreError> {
         let declared = &self.generation.bundle.manifest.declared_scalars[usize::from(field)];
         let kind = KeyKind::of(declared.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        let mut out = vec![Vec::new(); keys.len()];
-        for (at, entity) in crate::unique::holders(self.generation, &declared.name, &keys)? {
-            out[at].push(entity);
-        }
-        Ok(out)
+        crate::unique::holders(self.generation, &declared.name, &keys)
     }
 
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, StoreError> {

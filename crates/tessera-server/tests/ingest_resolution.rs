@@ -4,8 +4,10 @@
 //! carrying a position creates one. A row naming two items, naming an item or setting a unique
 //! value an earlier row does, or naming a `tessera_id` nobody holds is refused: listed with its
 //! reason while the batch applies its other rows, or, under `strict=true`, refusing the batch with
-//! `409`. A row creating an item with no position, or carrying one coordinate, is `422`. A resent
-//! batch answers its first `tessera_id`s and refused rows across a restart.
+//! `409`. A row naming no item and carrying no position is refused as naming no item, and a batch
+//! in which no row carries a position needs a column to name items by, or is `422`. A row carrying
+//! one coordinate is `422`. A resent batch answers its first `tessera_id`s and refused rows across
+//! a restart.
 //!
 //! The engine's rules are pinned by `tessera-engine/tests/identity_model.rs`; this file pins the
 //! route's decode and answers.
@@ -338,4 +340,23 @@ async fn a_folded_away_items_tessera_id_names_nothing() {
     assert_eq!(status, 409, "{body}");
     let resp = changes(change("suppress")).await.unwrap();
     assert_eq!(resp.status(), 404, "a change naming it names nothing");
+}
+
+/// **A batch that creates nothing addresses items, and needs a column to address them by**: with
+/// no row carrying a position, a batch with neither a `tessera_id` nor a unique column is `422`,
+/// and one whose unique column is null in a row refuses that row as naming no item.
+#[tokio::test]
+async fn a_batch_that_only_addresses_items_needs_a_column_to_name_them_by() {
+    let served = Served::build(fixture).await;
+    let (status, body) = ingest(&served, "no-identifier", json!([{ "code": "c9" }])).await;
+    assert_eq!(status, 422, "{body}");
+    let (status, body) = ingest(
+        &served,
+        "null-identifier",
+        json!([{ "gid": null, "code": "c9" }, { "gid": gid_of(3), "code": "c3" }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(body["unchanged"], 1, "{body}");
 }

@@ -26,14 +26,13 @@ impl Holdings for Held {
         &self,
         field: u16,
         keys: &[resolve::Key],
-    ) -> std::result::Result<Vec<Vec<EntityId>>, Self::Error> {
+    ) -> std::result::Result<Vec<(usize, EntityId)>, Self::Error> {
         Ok(keys
             .iter()
-            .map(|key| {
-                self.holder
-                    .get(&(field, *key))
-                    .map(|&item| vec![EntityId::new(u64::from(item))])
-                    .unwrap_or_default()
+            .enumerate()
+            .filter_map(|(at, key)| {
+                let item = self.holder.get(&(field, *key))?;
+                Some((at, EntityId::new(u64::from(*item))))
             })
             .collect())
     }

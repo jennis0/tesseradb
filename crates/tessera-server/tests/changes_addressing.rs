@@ -157,7 +157,7 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
 
     let three = tessera_id_of(&server, 3);
     let request = serde_json::json!([
-        { "op": "suppress", "match": { "id": 1 } },
+        { "op": "suppress", "match": { "id": 1, "name": "ignored" } },
         { "op": "suppress", "match": { "tessera_id": u64::MAX.to_string() } },
         { "op": "suppress", "match": { "id": 999_999 } },
         { "op": "suppress", "match": { "id": 2, "tessera_id": three.to_string() } },
@@ -178,6 +178,7 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
     assert_eq!(resp.status(), 200);
     let answer: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(answer["accepted"], 1);
+    assert_eq!(answer["ignored_columns"], serde_json::json!(["name"]));
     assert_eq!(
         answer["refused"],
         serde_json::json!([
@@ -215,7 +216,7 @@ async fn a_malformed_change_request_is_refused_whole() {
             serde_json::json!([{ "op": "suppress", "tessera_id": id.to_string() }]),
         ),
         (
-            "an undeclared field is not unique",
+            "no column that names items",
             serde_json::json!([{ "op": "suppress", "match": { "nothing": 5 } }]),
         ),
         (

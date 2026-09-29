@@ -189,7 +189,7 @@ fn built_gid(source: u64) -> u64 {
 /// any row changes one.
 fn built_entities(engine: &Engine) -> BTreeMap<u64, u64> {
     let gids: Vec<String> = (0..BUILT).map(|s| built_gid(s).to_string()).collect();
-    let found = engine.resolve_unique_values("gid", &gids).unwrap();
+    let found = unique_holders(engine, "gid", &gids).unwrap();
     (0..BUILT)
         .zip(found)
         .map(|(source, entity)| (source, entity.expect("a built item holds its gid").raw()))
@@ -1110,6 +1110,7 @@ impl Run {
                 rows,
                 artifacts: Default::default(),
                 strict: true,
+                tessera_id_column: false,
             })
     }
 
@@ -2182,6 +2183,7 @@ fn an_item_older_than_a_views_newest_rows_joins_it_in_place() {
                 rows,
                 artifacts: Default::default(),
                 strict: false,
+                tessera_id_column: false,
             })
             .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
     };

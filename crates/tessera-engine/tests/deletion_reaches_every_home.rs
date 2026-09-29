@@ -1145,6 +1145,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 rows: vec![row],
                 artifacts: Default::default(),
                 strict: false,
+                tessera_id_column: false,
             })
             .expect("the batch is accepted")
     };

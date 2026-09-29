@@ -12,10 +12,11 @@ single item addresses it. One naming none creates an item in an ingest batch whe
 position, and is otherwise refused as `names_no_item`: in an ingest row without coordinates, and
 in every row of a request that only addresses items, a change or a member table.
 
-An ingest batch keeps the first of two rows that collide, in row order, and refuses the later one.
-A later row naming an item an earlier kept row names is `one_item_twice`; a later row carrying a
-unique value an earlier kept row carries is `one_value_twice`. A refused row blocks nothing after
-it, whatever its reason. Changes and member tables do not apply these two reasons, since many rows may name one item.
+An ingest batch decides its rows in row order, each against the rows kept before it. A row naming
+an item an earlier kept row names is `one_item_twice`; a row carrying a unique value an earlier kept
+row carries is `one_value_twice`. A refused row, whatever its reason, claims neither its item nor its
+values, so it refuses no later row. Changes and member tables do not apply these two reasons, since
+many rows may name one item.
 
 Every row is resolved against what is held before the request. A deleted item names nothing, so its
 values are free for a new item. A null is no value: it names nothing, and in an ingest row naming
@@ -25,11 +26,16 @@ an item it clears the value that item holds.
 member request is `404` where that row names no item or an unknown `tessera_id`, and `409` where it
 names two.
 
-The spec does not order the reasons when two apply to one row. This model checks the row's
-`tessera_id` first, then how many items it names, then whether a row naming none can create, then
-the collisions with earlier rows. A `tessera_id` naming no item refuses the row whatever its other
-values name, and an ingest row naming nothing without a position is `names_no_item` even where it
-carries a value an earlier row carries.
+Where two reasons apply to one row, the rule's stated order decides which is given: a `tessera_id`
+naming no item, then values naming two items, then naming no item in a row that cannot create, then
+an item an earlier kept row names, then a value an earlier kept row sets.
+
+A column of a member table, and a key of a change's `match`, that is neither `tessera_id` nor a
+unique field is ignored and listed in the answer's `ignored_columns`. A `match` left with no key
+names nothing. A request with rows none of which carries `tessera_id` or a unique column is
+malformed, `422`; a member table with no rows is an empty membership. An ingest batch whose rows can
+only edit, because it has no view or no row carries a position, is malformed in the same way when
+no row carries `tessera_id` or a unique column.
 
 This module is written from the rule's statement and the HTTP contract, without reference to the
 server's resolver, so that the two agreeing on a request is evidence about both.
@@ -158,6 +164,30 @@ def named_by(
 def positioned(row: Mapping[str, object]) -> bool:
     """Whether an ingest row carries a position, and so may create an item."""
     return any(row.get(column) is not None for column in POSITION)
+
+
+def identifying(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> bool:
+    """Whether any row carries `tessera_id` or a unique column, null or not."""
+    return any(c == TESSERA_ID or c in holdings.unique for row in rows for c in row)
+
+
+def ignored_columns(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> set[str]:
+    """The columns of member rows or `match`es that name nothing and are ignored."""
+    return {c for row in rows for c in row if c != TESSERA_ID and c not in holdings.unique}
+
+
+def malformed_addressing(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> bool:
+    """Whether a change or member request is `422` for carrying rows and no identifying column.
+    `rows` are every `match`, or every row of every member table, of the request."""
+    return bool(rows) and not identifying(holdings, rows)
+
+
+def malformed_ingest(
+    holdings: Holdings, rows: Sequence[Mapping[str, object]], *, view: bool = True
+) -> bool:
+    """Whether an ingest batch is `422` for being able only to edit, with no identifying column."""
+    edits_only = not view or not any(positioned(row) for row in rows)
+    return edits_only and not identifying(holdings, rows)
 
 
 def resolve_ingest(holdings: Holdings, rows: Sequence[Mapping[str, object]]) -> list[Verdict]:

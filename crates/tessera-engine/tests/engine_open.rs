@@ -368,6 +368,7 @@ fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
             rows,
             artifacts: Default::default(),
             strict: false,
+            tessera_id_column: false,
         })
         .expect("the batch is accepted")
         .tessera_ids

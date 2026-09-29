@@ -54,6 +54,8 @@ pub struct IngestRequest {
     pub artifacts: BatchArtifacts,
     /// Refuse the whole batch at its first refused row, instead of applying the other rows.
     pub strict: bool,
+    /// The batch carries a `tessera_id` column, whether or not any row gives one.
+    pub tessera_id_column: bool,
 }
 
 /// What an accepted batch did.
@@ -257,6 +259,25 @@ impl Engine {
             true => resolve::Batch::Creates,
             false => resolve::Batch::Edits,
         };
+        // A batch that only addresses items needs a column to address them by, as a build's
+        // attribute file does.
+        if !creates && !request.rows.is_empty() {
+            let tessera = request.tessera_id_column
+                || request.rows.iter().any(|row| row.tessera_id.is_some());
+            let unique = declared.iter().enumerate().any(|(at, d)| {
+                d.unique
+                    && request
+                        .rows
+                        .iter()
+                        .any(|row| at < row.scalars.len() && !row.omitted.contains(&at))
+            });
+            resolve::require_identifier(tessera, usize::from(unique)).map_err(|e| {
+                AcceptError::Contract(format!(
+                    "this batch creates no item, since no row carries a position, so its rows \
+                     address items, and {e}"
+                ))
+            })?;
+        }
         let mut verdicts = resolve::resolve(&identities, &holdings, batch)?;
         let unplaced: Vec<usize> = (0..request.rows.len())
             .filter(|at| {
@@ -1194,20 +1215,15 @@ struct Held<'a> {
 impl resolve::Holdings for Held<'_> {
     type Error = AcceptError;
 
-    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<Vec<EntityId>>, AcceptError> {
+    fn holders(&self, field: u16, keys: &[Key]) -> Result<Vec<(usize, EntityId)>, AcceptError> {
         let d = &self.declared[usize::from(field)];
         let kind = KeyKind::of(d.arrow_type).expect("a unique column's type takes a key");
         let keys: Vec<UniqueKey> = keys
             .iter()
             .map(|k| UniqueKey::of_widened(kind, *k))
             .collect();
-        let found = crate::unique::holders(self.generation, &d.name, &keys)
-            .map_err(|e| AcceptError::Unreadable(e.to_string()))?;
-        let mut out = vec![Vec::new(); keys.len()];
-        for (at, entity) in found {
-            out[at].push(entity);
-        }
-        Ok(out)
+        crate::unique::holders(self.generation, &d.name, &keys)
+            .map_err(|e| AcceptError::Unreadable(e.to_string()))
     }
 
     fn tessera_holders(&self, ids: &[TesseraId]) -> Result<Vec<Option<EntityId>>, AcceptError> {

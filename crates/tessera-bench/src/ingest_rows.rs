@@ -41,6 +41,7 @@ impl IngestRows for Engine {
             rows,
             artifacts: Default::default(),
             strict: false,
+            tessera_id_column: false,
         })?;
         Ok(self
             .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())

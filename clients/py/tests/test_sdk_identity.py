@@ -206,10 +206,63 @@ def test_a_remove_naming_nothing_is_refused_by_row_and_strict_refuses_the_whole_
     ] == [404]
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
 
-    # A column that is neither `tessera_id` nor a unique attribute: the server refuses the call.
-    with pytest.raises(Refusal):
-        db.remove({"title": ["p6"]})
+
+
+def test_a_column_naming_no_item_is_ignored_and_named_in_the_report(served, corpus):
+    """A column that is neither `tessera_id` nor a unique attribute is not sent, and the report
+    names it; the rows are applied by the columns that name items."""
+    db = served(string_ids)
+    report = db.remove({"paper": ["p0", "p1"], "title": ["one", "two"]})
+    assert report.ok and report.accepted == 2 and report.refused == [], report
+    assert report.ignored_columns == ["title"] and "title" in str(report)
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+    report = db.suppress({"paper": ["p2"], "note": ["x"]})
+    assert report.accepted == 1 and report.ignored_columns == ["note"], report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 17
+    report = db.unsuppress({"note": ["x"], "paper": ["p2"]})
+    assert report.accepted == 1 and report.ignored_columns == ["note"], report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+
+def test_items_the_call_would_misread_are_refused_and_nothing_is_applied(served, corpus):
+    """A string would be read one character per item, a list of dicts is a table written by rows,
+    columns of different lengths pair no rows, and a table whose every column names no item names
+    nothing: each is refused before a request is sent."""
+    db = served(string_ids)
+    for items in (
+        "p0",
+        [{"paper": "p0"}],
+        {"paper": ["p0", "p1"], "tessera_id": ["1"]},
+        {"paper": "p0"},
+        {"title": ["p0"]},
+    ):
+        for verb in (db.remove, db.suppress):
+            with pytest.raises(Refusal):
+                verb(items)
+        with pytest.raises(Refusal):
+            db.leave("clusters", "c0", items)
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 20
+    assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 20
+
+
+def test_a_none_in_a_list_names_no_item_and_is_refused_by_row(served, corpus):
+    """A `None` among `tessera_id`s is sent as a null, which names no item: the server refuses
+    that row and applies the rest, whether it is the only row or not."""
+    db = served(string_ids)
+    [held] = db.lookup("map", "paper", ["p0"]).column("tessera_id").to_pylist()
+    report = db.remove([None, held])
+    assert report.ok and report.accepted == 1, report
+    assert report.refused == [{"row": 0, "reason": "names_no_item"}]
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
+
+    report = db.remove([None])
+    assert report.accepted == 0 and report.refused_by_reason == {"names_no_item": 1}, report
+
+    # A row whose cells are all null names no item the same way.
+    report = db.remove({"paper": [None, "p1"]})
+    assert report.accepted == 1 and report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
 
 
 def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, corpus):
@@ -252,3 +305,59 @@ def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, c
     )
     with pytest.raises(Refusal):
         db.commit(strict=True)
+
+
+def test_a_member_structs_fields_naming_no_item_are_ignored_and_named_in_the_report(
+    served, corpus
+):
+    """A member struct is read by its `tessera_id` and unique fields, as a table's columns are;
+    another field is not sent, and the plan and the commit name it."""
+    db = served(string_ids)
+    [by_id] = db.lookup("map", "paper", ["p3"]).column("tessera_id").to_pylist()
+    member = pa.struct(
+        [("paper", pa.string()), ("tessera_id", pa.string()), ("note", pa.string())]
+    )
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {
+                "level": pa.array([0], pa.uint32()),
+                "key": pa.array(["c2"]),
+                "members": pa.array(
+                    [[{"paper": "p1", "tessera_id": None, "note": "x"},
+                      {"paper": None, "tessera_id": str(by_id), "note": "y"}]],
+                    pa.list_(member),
+                ),
+            }
+        ),
+        key="key",
+        level="level",
+        members="members",
+    )
+    plan = db.check()
+    assert plan.ok and plan.ignored_columns == {"clusters": ["note"]}, plan
+    report = db.commit()
+    assert report.ok and report.ignored_columns == {"clusters": ["note"]}, report
+    assert "note" in str(report) and report.refused == []
+    counts = {row["key"]: row["masked_count"] for row in browse(db, "map", "clusters")["artifacts"]}
+    assert counts == {"c0": 20, "c2": 2}
+
+    # Members whose every field names no item name nothing, which is refused before sending.
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {
+                "level": pa.array([0], pa.uint32()),
+                "key": pa.array(["c3"]),
+                "members": pa.array(
+                    [[{"note": "x"}]], pa.list_(pa.struct([("note", pa.string())]))
+                ),
+            }
+        ),
+        key="key",
+        level="level",
+        members="members",
+    )
+    assert db.check().findings
+    with pytest.raises(Refusal):
+        db.commit()

@@ -510,8 +510,9 @@ async fn an_arrow_row_addressed_by_tessera_id_fills_its_cell() {
     assert_eq!(item_fields(&served, id).await["tag"], json!("alpha"));
 }
 
-/// A row may name its item by both forms where they agree, and a row naming it by neither and
-/// carrying no position is refused with no effect.
+/// A row may name its item by both forms where they agree. A batch whose rows carry no position
+/// and no column to name items by is `422`; a row whose identifying cell is null is refused as
+/// naming no item. Neither has any effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_row_naming_its_item_by_both_forms_or_neither() {
     let served = serve().await;
@@ -534,6 +535,14 @@ async fn a_row_naming_its_item_by_both_forms_or_neither() {
         "values-neither",
         Some("s0"),
         json!([{"tag": "beta"}]),
+    )
+    .await;
+    assert_eq!(status, 422, "{answer}");
+    let (status, answer) = values(
+        &served,
+        "values-null",
+        Some("s0"),
+        json!([{"id": null, "tag": "beta"}]),
     )
     .await;
     assert_eq!(status, 200, "{answer}");

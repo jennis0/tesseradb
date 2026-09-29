@@ -24,6 +24,9 @@ from oracle.naming import (
     apply_changes,
     apply_ingest,
     first_refusal,
+    ignored_columns,
+    malformed_addressing,
+    malformed_ingest,
     refused,
     resolve_addresses,
     resolve_ingest,
@@ -119,6 +122,35 @@ def test_a_refused_row_blocks_nothing_after_it():
     ]
 
 
+def test_a_row_refused_for_a_value_does_not_claim_its_item():
+    # Row 1 names item 2 and carries the value row 0 set, so it is refused, and item 2 is still
+    # unclaimed when row 2 names it.
+    rows = [{"tessera_id": "1", "code": "v"}, {"tessera_id": "2", "code": "v"}, {"tessera_id": "2"}]
+    assert resolve_ingest(held(), rows) == [Names(1), Refused(ONE_VALUE_TWICE), Names(2)]
+
+
+def test_a_row_refused_for_its_item_does_not_claim_its_values():
+    rows = [{"code": "a"}, {"tessera_id": "1", "num": 77}, {"code": "new", "num": 77, **AT}]
+    assert resolve_ingest(held(), rows) == [Names(1), Refused(ONE_ITEM_TWICE), Creates()]
+
+
+def test_where_two_reasons_apply_the_first_in_the_rules_order_is_given():
+    rows = [
+        {"code": "a", "num": 30},  # kept: claims item 1 and 30
+        {"tessera_id": "99", "code": "a", "num": 20},  # unknown, two items, item and value twice
+        {"code": "a", "num": 20},  # two items, and item 1 twice
+        {"code": "zz", "num": 30},  # names nothing without a position, and 30 twice
+        {"tessera_id": "1", "num": 30},  # item 1 twice, and 30 twice
+    ]
+    assert resolve_ingest(held(), rows) == [
+        Names(1),
+        Refused(UNKNOWN_TESSERA_ID),
+        Refused(NAMES_TWO_ITEMS),
+        Refused(NAMES_NO_ITEM),
+        Refused(ONE_ITEM_TWICE),
+    ]
+
+
 def test_rows_resolve_against_what_was_held_before_the_batch():
     # Row 0 moves item 1 off "a"; row 1 still names item 1 by "a", so it is its second row.
     rows = [{"tessera_id": "1", "code": "moved"}, {"code": "a"}]
@@ -195,3 +227,24 @@ def test_a_member_table_is_read_row_by_row():
     assert table_rows({}) == []
     with pytest.raises(ValueError):
         table_rows({"tessera_id": ["1"], "code": []})
+
+
+def test_a_column_naming_nothing_is_ignored_and_a_match_left_empty_names_nothing():
+    rows = [{"tessera_id": "1", "label": "x"}, {"label": "y"}, {}]
+    assert ignored_columns(held(), rows) == {"label"}
+    assert resolve_addresses(held(), rows) == [Names(1), Refused(NAMES_NO_ITEM), Refused(NAMES_NO_ITEM)]
+    assert not malformed_addressing(held(), rows)
+
+
+def test_a_request_with_rows_and_no_identifying_column_is_malformed():
+    assert malformed_addressing(held(), [{}])
+    assert malformed_addressing(held(), [{"label": "y"}, {}])
+    assert not malformed_addressing(held(), [{"code": None}])
+    assert not malformed_addressing(held(), table_rows({}))
+
+
+def test_an_ingest_that_can_only_edit_needs_an_identifying_column():
+    assert malformed_ingest(held(), [{"label": "y"}, {}])
+    assert not malformed_ingest(held(), [{"label": "y"}, AT])
+    assert malformed_ingest(held(), [{"label": "y"}], view=False)
+    assert not malformed_ingest(held(), [{"label": "y"}, {"num": None}])

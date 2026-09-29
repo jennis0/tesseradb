@@ -45,6 +45,8 @@ pub(crate) struct ParsedBatch {
     pub(crate) clipped: u64,
     /// Rows outside the view's extent, moved onto its edge.
     pub(crate) clamped: u64,
+    /// The batch carries a `tessera_id` column, null in every row or not.
+    pub(crate) tessera_id_column: bool,
 }
 
 /// The frame an ingest batch's coordinates are read against: its view's projection and extent.
@@ -331,6 +333,7 @@ pub(crate) fn parse_ingest_batch(
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
     let (mut clipped, mut clamped) = (0u64, 0u64);
+    let mut tessera_id_column = false;
     for batch in batches {
         let (batch, omitted) = batch?;
         // Where this record batch's rows start in the request's numbering, which a membership
@@ -338,6 +341,7 @@ pub(crate) fn parse_ingest_batch(
         let offset = items.len();
 
         let tessera = tessera_id_col(body_name, &batch)?;
+        tessera_id_column |= tessera.is_some();
         let has_column = |name: &str| batch.column_by_name(name).is_some();
         let (x, y) = match &frame {
             None => {
@@ -463,6 +467,7 @@ pub(crate) fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         clipped,
         clamped,
+        tessera_id_column,
     })
 }
 

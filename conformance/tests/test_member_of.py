@@ -167,10 +167,10 @@ def test_an_unknown_a_foreign_a_suppressed_and_a_withheld_artifact_are_one_respo
     # Suppressed: served to the broad principal a moment ago, and an empty operand from the ack.
     before = matched_sum(server, broad, withheld)
     assert before == strip.masked_count
-    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}])
+    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     assert bytes_of(broad, withheld) == bytes_of(broad, unknown)
-    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}])
+    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     assert matched_sum(server, broad, withheld) == before
 

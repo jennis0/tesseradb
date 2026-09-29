@@ -185,6 +185,9 @@ class Planner:
         self.limits = control.limits()
         self.findings: list[Finding] = []
         self.pages: list[Page] = []
+        #: By layer, the member struct fields and declared membership columns that name no item,
+        #: which the plan does not send.
+        self.ignored_columns: dict[str, list[str]] = {}
         #: What the database says it already carries: the views, the groups and the layers
         #: `/v1/meta` lists. A declaration it names is one this commit does not send again.
         self.held_views = {str(view.get("id")) for view in meta.get("views", [])}
@@ -673,7 +676,10 @@ class Planner:
                 )
             )
             return
-        rows = _artifact_rows(artifacts, members, inline, self._struct_columns())
+        ignored: dict[str, None] = {}
+        rows = _artifact_rows(artifacts, members, inline, self.db._identifying_columns(), ignored)
+        if ignored:
+            self.ignored_columns[layer] = list(ignored)
         if not rows:
             return
         columns = self._member_columns(layer, rows)
@@ -698,12 +704,6 @@ class Planner:
             return
         self._publish(block, rows, columns)
 
-    def _struct_columns(self) -> dict[str, str]:
-        """The member table's column for each field a member struct may carry: `tessera_id`, and
-        each unique attribute under the column its block reads it from."""
-        named = {self.db._unique_column(one): one for one in self.db.blocks.unique_names()}
-        return {"tessera_id": "tessera_id", **named}
-
     def _member_columns(self, layer: str, rows: list[dict]) -> list[str] | None:
         """The columns every member table of this layer's requests carries, or `None` after a
         finding where a member is written as a plain value, or no member carries a column: either
@@ -725,11 +725,14 @@ class Planner:
                     return None
                 columns.update(dict.fromkeys(member))
         if members and not columns:
+            ignored = self.ignored_columns.get(layer)
+            carried = f" (they carry {', '.join(ignored)})" if ignored else ""
             self.findings.append(
                 Finding(
                     "members that name items by no column",
-                    f"layer '{layer}': its members carry no column to name items by. Write each "
-                    f"member as a struct whose fields are tessera_id or a unique attribute",
+                    f"layer '{layer}': its members carry no column to name items by{carried}. "
+                    f"Write each member as a struct whose fields are tessera_id or a unique "
+                    f"attribute's column",
                 )
             )
             return None
@@ -1100,21 +1103,24 @@ def _blank(key: str, level: int, view: str | None = None) -> dict:
 
 
 def _artifact_rows(
-    artifacts, members, inline=None, struct_columns: dict | None = None
+    artifacts, members, inline=None, identifying: dict | None = None,
+    ignored: dict | None = None,
 ) -> list[dict]:
     """One layer's inserted tables as artifact records: the key, its parts and its sets.
 
     Every member is a row of `{column: value}` naming it by `tessera_id` and unique attributes: a
     members table's row by the columns the insert carries of them, a member struct by its fields
-    under the columns `struct_columns` maps them to, and the declaration's own membership table
-    `{attribute: [values]}` by its entries at one position. A member table's grain is `(key,
+    under the names `identifying` maps them to, and the declaration's own membership table
+    `{attribute: [values]}` by its entries at one position. A struct field or declared column
+    that names no item is left out and its name added to `ignored`. A member table's grain is `(key,
     member, rank)`: a null rank is the membership and rank *k* is content *k*'s generating set. An
     artifacts table's `contents` is one value list per rank, positional over the kinds the layer
     declares. A shape column, `space` and `excluding` are columns of the artifact row, and the
     publication record carries each as the row wrote it. Every column is the one the insert named,
     or the artifact table's own name for it where the insert renamed nothing.
     """
-    struct_columns = struct_columns or {}
+    identifying = identifying or {}
+    ignored = {} if ignored is None else ignored
     rows: dict[tuple[int, str, str | None], dict] = {}
     for insert in artifacts or []:
         for record in _records(insert.table(), insert):
@@ -1137,7 +1143,7 @@ def _artifact_rows(
     for row in rows.values():
         for part in ("members", "excluding"):
             if row.get(part) is not None:
-                row[part] = _member_rows(row[part], struct_columns)
+                row[part] = _member_rows(row[part], identifying, ignored)
     for insert in members or []:
         table = insert.table()
         columns = insert.columns
@@ -1164,22 +1170,30 @@ def _artifact_rows(
     return list(rows.values())
 
 
-def _member_rows(members: Any, struct_columns: dict) -> list:
+def _member_rows(members: Any, identifying: dict, ignored: dict) -> list:
     """A membership as member rows: the declaration's table `{attribute: [values]}` by position,
-    and a list of structs by each struct's fields. A plain value is kept as it is, for the plan
-    to refuse."""
+    keeping `tessera_id` and the unique attributes, and a list of structs by each struct's fields
+    that `identifying` maps to them. What names no item is added to `ignored` by name. A plain
+    value is kept as it is, for the plan to refuse."""
     if isinstance(members, dict):
-        names = list(members)
+        names = set(identifying.values())
+        ignored.update(dict.fromkeys(name for name in members if name not in names))
+        kept = [name for name in members if name in names]
         return [
-            {name: value for name, value in zip(names, values) if value is not None}
-            for values in zip(*(members[name] for name in names))
+            {name: value for name, value in zip(kept, values) if value is not None}
+            for values in zip(*(members[name] for name in kept))
         ]
-    return [
-        {struct_columns.get(name, name): value for name, value in one.items() if value is not None}
-        if isinstance(one, dict)
-        else one
-        for one in members
-    ]
+    out = []
+    for one in members:
+        if isinstance(one, dict):
+            ignored.update(dict.fromkeys(name for name in one if name not in identifying))
+            one = {
+                identifying[name]: value
+                for name, value in one.items()
+                if name in identifying and value is not None
+            }
+        out.append(one)
+    return out
 
 
 def _members_of(row: dict) -> list:
@@ -1330,6 +1344,8 @@ def _fold(report, page: Page, answer: Answer) -> None:
             )
     elif page.kind in ("publish", "grow"):
         report.refused += refused_members(page, body)
+        if body.get("ignored_columns"):
+            add_ignored(report.ignored_columns.setdefault(page.name, []), body)
     if page.kind == "points":
         view = page.view or ""
         # A row that created an item or added one to the view is added here; one that named an
@@ -1372,6 +1388,13 @@ def _fold(report, page: Page, answer: Answer) -> None:
         for one in body.get("artifacts", []):
             report.memberships_joined += int(one.get("joined", 0))
             report.already_present += int(one.get("filled", 0))
+
+
+def add_ignored(ignored: list, body: dict) -> None:
+    """The columns an answer says the server ignored, added to those already named."""
+    for name in body.get("ignored_columns", []):
+        if name not in ignored:
+            ignored.append(name)
 
 
 def _detail(answer: Answer) -> str:

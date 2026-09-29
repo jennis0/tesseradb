@@ -118,7 +118,7 @@ export type RefusedMember = {
  * A unique field's value is a string for a keyword, and a number or a string of decimal digits
  * for an integer or a timestamp. `null` names nothing. Every value names the item that holds it;
  * a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field
- * is refused with `422`.
+ * names nothing: it is ignored and listed in the answer's `ignored_columns`.
  *
  * @category Control plane
  */
@@ -130,7 +130,8 @@ export type AddressRow = {
 /**
  * Items, one row per item, as columns of equal length keyed by `tessera_id` and unique field
  * names. A cell is as in an {@link AddressRow}, and `null` where its column does not name the
- * row's item. `{}` holds no item. Columns of different lengths are refused with `422`.
+ * row's item. `{}` holds no item. Columns of different lengths are refused with `422`; a column that
+ * is neither `tessera_id` nor a unique field is ignored and listed in `ignored_columns`.
  *
  * @category Control plane
  */
@@ -332,6 +333,8 @@ export type ChangesApplied = PublicationAck & {
   accepted: number;
   /** The changes refused, in the order sent. Empty with `strict`. */
   refused: RefusedRow[];
+  /** The `match` keys that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  ignored_columns: string[];
 };
 
 /**
@@ -378,6 +381,8 @@ export type ArtifactsPublished = PublicationAck & {
   joined: number;
   /** The members the identity rule refused, which the artifacts were published without. Empty with `strict`. */
   refused: RefusedMember[];
+  /** The member tables' columns that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  ignored_columns: string[];
   /** Present where the request carried a shape or authored shape content. */
   shapes?: ShapeReport[];
 };
@@ -392,6 +397,8 @@ export type MembershipsGrown = PublicationAck & {
   artifacts: {key: string; tessera_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
   /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
   refused: RefusedMember[];
+  /** The member tables' columns that are neither `tessera_id` nor a unique field, which named nothing and were ignored. */
+  ignored_columns: string[];
   /** Present where the request filled authored shape content. */
   shapes?: ShapeReport[];
 };

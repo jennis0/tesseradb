@@ -352,9 +352,8 @@ fn concurrent_ingest_and_change_both_survive() {
     let engine = Arc::new(engine);
 
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let suppress_entity = engine
-        .resolve_unique_values("id", &[member(SUPPRESS_SOURCE_ID)])
-        .expect("resolve_unique_values should not fail for a healthy bundle")[0]
+    let suppress_entity = unique_holders(&engine, "id", &[member(SUPPRESS_SOURCE_ID)])
+        .expect("the lookup does not fail for a healthy bundle")[0]
         .expect("fixture item must resolve");
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -389,6 +388,7 @@ fn concurrent_ingest_and_change_both_survive() {
                 rows: vec![row],
                 artifacts: Default::default(),
                 strict: false,
+                tessera_id_column: false,
             })
             .expect("ingest should be accepted");
         let tessera_id = receipt.tessera_ids[0].expect("an accepted row has a tessera_id");

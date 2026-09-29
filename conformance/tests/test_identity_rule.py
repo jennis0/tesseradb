@@ -198,17 +198,22 @@ class Deployment:
 
     def ingest(
         self,
-        rows: list[dict],
+        rows: list[dict] | bytes,
         *,
         strict: bool = False,
         batch_id: str | None = None,
         wait: bool = True,
     ) -> requests.Response:
-        """One JSON batch, answered once its rows are served unless `wait` is false."""
+        """One batch, JSON rows or bytes of an Arrow stream, answered once its rows are served
+        unless `wait` is false."""
         batch_id = batch_id or f"identity-{next(self.batches)}"
         params = {"strict": str(strict).lower()}
         if wait:
             params["wait"] = "visible"
+        if isinstance(rows, bytes):
+            content_type, data = "application/vnd.apache.arrow.stream", rows
+        else:
+            content_type, data = "application/json", json.dumps(rows)
         return requests.post(
             f"{self.server.control_base}/control/ingest",
             params=params,
@@ -216,9 +221,9 @@ class Deployment:
                 "Authorization": f"Bearer {self.server.operator_credential}",
                 "x-tessera-batch-id": batch_id,
                 "x-tessera-view": VIEW,
-                "Content-Type": "application/json",
+                "Content-Type": content_type,
             },
-            data=json.dumps(rows),
+            data=data,
             timeout=60,
         )
 
@@ -342,7 +347,10 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
                     if rng.random() < 0.5
                     else fresh_position()
                 )
-            if "code" not in row and rng.random() < 0.3:
+            if set_here and rng.random() < 0.3:  # a value an earlier row of this batch set
+                column, value = rng.choice(set_here)
+                row.setdefault(column, value)
+            elif "code" not in row and rng.random() < 0.3:
                 row["code"] = fresh_code()
                 set_here.append(("code", row["code"]))
             named_here.append(item)
@@ -365,6 +373,12 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
             row = {"code": fresh_code()} if rng.random() < 0.5 else {"num": fresh_num()}
         elif kind == 10:  # nulls and a position
             row = {"tessera_id": None, "code": None, "num": None, **fresh_position()}
+        elif kind == 11 and set_here:  # a held item with a value an earlier row set, then again
+            item = rng.choice(held)
+            column, value = rng.choice(set_here)
+            rows.append({"tessera_id": str(item), column: value})
+            row = identifiers_of(rng, item, holdings.items[item])
+            named_here.append(item)
         else:
             continue
         rows.append(row)
@@ -376,11 +390,39 @@ def generate_batch(rng: random.Random, holdings: Holdings, n: int) -> list[dict]
 # ---------------------------------------------------------------------------------------------
 
 
-def check_ingest(dep: Deployment, rows: list[dict]) -> list:
-    """Send `rows` per row, compare the receipt with the model, apply the model and compare what is
-    served. Answers the model's verdicts."""
+def as_arrow(rows: list[dict]) -> tuple[bytes, list[dict]]:
+    """`rows` as one Arrow stream, and the rows as the service reads that stream. Every row carries
+    every column, so a cell a JSON row leaves out is a null there, which clears what an item holds;
+    a null position is no position."""
+    types = {
+        "tessera_id": pa.string(),
+        "code": pa.string(),
+        "num": pa.uint64(),
+        "x": pa.float64(),
+        "y": pa.float64(),
+    }
+    columns = sorted({c for row in rows for c in row})
+    cells = [
+        {c: (int(row[c]) if c == "num" and row.get(c) is not None else row.get(c)) for c in columns}
+        for row in rows
+    ]
+    table = pa.table({c: pa.array([cell[c] for cell in cells], types[c]) for c in columns})
+    sink = io.BytesIO()
+    with ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    read = [
+        {c: v for c, v in cell.items() if c not in naming.POSITION or v is not None}
+        for cell in cells
+    ]
+    return sink.getvalue(), read
+
+
+def check_ingest(dep: Deployment, rows: list[dict], *, arrow: bytes | None = None) -> list:
+    """Send `rows`, compare the receipt with the model, apply the model and compare what is served.
+    `arrow` is sent in place of `rows` as JSON, an Arrow stream the service reads as `rows`. Answers
+    the model's verdicts."""
     verdicts = naming.resolve_ingest(dep.holdings, rows)
-    resp = dep.ingest(rows)
+    resp = dep.ingest(rows if arrow is None else arrow)
     assert resp.status_code == 200, resp.text
     receipt = resp.json()
     assert receipt["refused"] == naming.refused(verdicts), rows
@@ -407,13 +449,28 @@ def check_ingest(dep: Deployment, rows: list[dict]) -> list:
 def test_generated_ingest_batches_are_resolved_row_by_row_as_the_model_resolves_them(
     deployment, seed
 ):
+    """The middle batch of each seed is sent as Arrow, the others as JSON."""
     rng = random.Random(seed)
     reached: set = set()
-    for _ in range(3):
+    cascaded = 0
+    for batch in range(3):
         rows = generate_batch(rng, deployment.holdings, 40)
-        verdicts = check_ingest(deployment, rows)
+        arrow = None
+        if batch == 1:
+            arrow, rows = as_arrow(rows)
+        held = deployment.holdings.holders()
+        named = [naming.named_by(deployment.holdings, held, row) for row in rows]
+        verdicts = check_ingest(deployment, rows, arrow=arrow)
+        # A row refused for a value an earlier row set, whose item a later row is kept naming.
+        cascaded += sum(
+            v == Refused(naming.ONE_VALUE_TWICE)
+            and len(named[i] or ()) == 1
+            and Names(*named[i]) in verdicts[i + 1 :]
+            for i, v in enumerate(verdicts)
+        )
         reached |= {v.reason if isinstance(v, Refused) else type(v) for v in verdicts}
     assert reached == {Creates, Names, *naming.REASONS}, "the batches reach every verdict"
+    assert cascaded, "a row refused for a value leaves its item to a later row"
 
 
 def test_the_worked_example_of_two_unique_fields(deployment):
@@ -507,11 +564,13 @@ def test_a_replayed_batch_answers_its_first_acceptance(deployment):
 
 
 def check_changes(dep: Deployment, changes: list[dict]) -> list:
-    verdicts = naming.resolve_addresses(dep.holdings, [c["match"] for c in changes])
+    matches = [c["match"] for c in changes]
+    verdicts = naming.resolve_addresses(dep.holdings, matches)
     resp = dep.changes(changes)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["refused"] == naming.refused(verdicts), changes
+    assert set(body["ignored_columns"]) == naming.ignored_columns(dep.holdings, matches), body
     assert body["accepted"] == naming.apply_changes(dep.holdings, changes, verdicts)
     dep.assert_serves_the_model()
     return verdicts
@@ -591,9 +650,36 @@ def test_a_strict_change_request_is_refused_whole_with_the_status_of_its_first_r
     assert resp.json()["refused"] == [] and resp.json()["accepted"] == 1
 
 
-def test_a_request_in_which_no_change_names_its_item_by_any_column_is_malformed(deployment):
-    resp = deployment.changes([{"op": "delete", "match": {}}])
+def test_a_match_key_naming_nothing_is_ignored_and_a_match_left_empty_names_no_item(deployment):
+    dep = deployment
+    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    v = dep.holdings.items
+    verdicts = check_changes(
+        dep,
+        [
+            {"op": "suppress", "match": {"tessera_id": str(items[0]), "colour": "red"}},
+            {"op": "suppress", "match": {"colour": "blue"}},
+            {"op": "suppress", "match": {}},
+            {"op": "suppress", "match": {"code": v[items[1]]["code"], "size": 3}},
+        ],
+    )
+    assert verdicts == [
+        Names(items[0]),
+        Refused(naming.NAMES_NO_ITEM),
+        Refused(naming.NAMES_NO_ITEM),
+        Names(items[1]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "matches", [[{}], [{"colour": "red"}], [{}, {"colour": "red", "size": 3}]]
+)
+def test_a_change_request_naming_items_by_no_column_is_malformed(deployment, matches):
+    assert naming.malformed_addressing(deployment.holdings, matches)
+    before = deployment.served()
+    resp = deployment.changes([{"op": "delete", "match": m} for m in matches])
     assert resp.status_code == 422, resp.text
+    assert deployment.served() == before
 
 
 # ---------------------------------------------------------------------------------------------
@@ -664,6 +750,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
     assert resp.status_code == 201, resp.text
     published = resp.json()
     assert published["refused"] == expected_refused(dep.holdings, lists)
+    assert published["ignored_columns"] == []
     ids = {row["key"]: row["tessera_id"] for row in published["artifacts"]}
 
     visible = dep.holdings.visible()
@@ -686,6 +773,7 @@ def test_a_publication_and_its_growth_name_members_by_the_rule(deployment):
     assert grown["refused"] == expected_refused(
         dep.holdings, [(i, "members", rows) for i, rows in enumerate(joining.values())]
     )
+    assert grown["ignored_columns"] == []
     for row, (key, rows) in zip(grown["artifacts"], joining.items()):
         new = named(dep.holdings, rows) - membership[key]
         assert row["joined"] == len(new), (key, row)
@@ -707,6 +795,46 @@ def test_a_member_table_may_name_members_by_any_mix_of_columns(deployment):
     assert resp.json()["refused"] == []
     tid = resp.json()["artifacts"][0]["tessera_id"]
     assert dep.members(GROUPS, tid) == set(items)
+
+
+def test_a_member_table_column_naming_nothing_is_ignored(deployment):
+    """A column that is neither `tessera_id` nor a unique field is ignored, on a publication and a
+    growth; a table left with no identifying column names nothing in each row, and a request in
+    which no table has one is malformed."""
+    dep = deployment
+    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    v = dep.holdings.items
+    tagged = [{"tessera_id": str(items[0]), "colour": "red"}, {"code": v[items[1]]["code"], "colour": None}]
+    untagged = [{"colour": "blue"}, {"colour": "green"}]
+    body = {
+        "artifacts": [
+            {"key": "tagged", "members": member_table(tagged)},
+            {"key": "untagged", "members": member_table(untagged)},
+        ]
+    }
+    resp = dep.artifacts("PUT", GROUPS, body)
+    assert resp.status_code == 201, resp.text
+    published = resp.json()
+    assert set(published["ignored_columns"]) == naming.ignored_columns(dep.holdings, tagged + untagged)
+    assert published["refused"] == expected_refused(
+        dep.holdings, [(0, "members", tagged), (1, "members", untagged)]
+    )
+    ids = {row["key"]: row["tessera_id"] for row in published["artifacts"]}
+    assert dep.members(GROUPS, ids["tagged"]) == {items[0], items[1]}
+    assert dep.members(GROUPS, ids["untagged"]) == set()
+
+    joining = [{"tessera_id": str(items[2]), "weight": 2}]
+    resp = dep.artifacts("PATCH", GROUPS, {"artifacts": [{"key": "untagged", "members": member_table(joining)}]})
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()["ignored_columns"]) == naming.ignored_columns(dep.holdings, joining)
+    assert resp.json()["refused"] == []
+    assert dep.members(GROUPS, ids["untagged"]) == {items[2]}
+
+    for method, table in (("PUT", {"colour": ["red"]}), ("PATCH", {"colour": ["red", "blue"]})):
+        assert naming.malformed_addressing(dep.holdings, naming.table_rows(table))
+        resp = dep.artifacts(method, GROUPS, {"artifacts": [{"key": "untagged", "members": table}]})
+        assert resp.status_code == 422, resp.text
+    assert dep.members(GROUPS, ids["untagged"]) == {items[2]}
 
 
 @pytest.mark.parametrize("method", ["PUT", "PATCH"])
@@ -734,7 +862,8 @@ def test_a_strict_member_request_is_refused_whole_with_the_status_of_its_first_r
         assert dep.members(GROUPS, held_id) == {items[0]}, "a refused growth applies nothing"
     else:
         resp = dep.artifacts("PUT", GROUPS, {"artifacts": [{"key": "strict", "members": {}}]})
-        assert resp.status_code == 201, "a refused publication created nothing"
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["created"] == 1, "a refused publication created nothing"
 
 
 def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(deployment):
@@ -770,7 +899,8 @@ def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(de
         ]
     }
     resp = dep.artifacts("PUT", TOPICS, body)
-    assert resp.status_code == 201, "the refused publications created nothing"
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["created"] == 1, "the refused publications created nothing"
     assert resp.json()["refused"] == []
 
     # Leaving a generating set names members by the same rule, row by row.
@@ -780,6 +910,41 @@ def test_a_generating_set_naming_nothing_or_two_items_refuses_the_publication(de
     assert resp.status_code == 200, resp.text
     assert resp.json()["refused"] == expected_refused(dep.holdings, [(0, "leaving", leaving)])
     assert resp.json()["artifacts"][0]["left"] == 1
+
+
+def test_members_joining_a_generating_set_that_name_nothing_or_two_refuse_the_growth(deployment):
+    """Strict or not; members leaving it are refused row by row."""
+    dep = deployment
+    items = sorted(t for t, v in dep.holdings.items.items() if "code" in v)
+    v = dep.holdings.items
+    body = {
+        "artifacts": [
+            {
+                "key": "t0",
+                "members": {"tessera_id": [str(t) for t in items[:4]]},
+                "content": [{"values": ["a topic"], "generated_from": {"tessera_id": [str(items[0])]}}],
+            }
+        ]
+    }
+    resp = dep.artifacts("PUT", TOPICS, body)
+    assert resp.status_code == 201, resp.text
+    tid = resp.json()["artifacts"][0]["tessera_id"]
+    before = dep.members(TOPICS, tid)
+    joining = {"tessera_id": str(items[1])}
+    unknown = {"tessera_id": unissued_tessera_id(random.Random(3), dep.holdings)}
+    for bad in ({"code": fresh_code()}, unknown, {"tessera_id": str(items[2]), "code": v[items[3]]["code"]}):
+        rows = [joining, bad]
+        _, reason = naming.first_refusal(naming.resolve_addresses(dep.holdings, rows))
+        grow = {"artifacts": [{"key": "t0", "rank": 0, "members": member_table(rows)}]}
+        for strict in (False, True):
+            resp = dep.artifacts("PATCH", TOPICS, grow, strict=strict)
+            assert resp.status_code == naming.ADDRESSING_STRICT_STATUS[reason], resp.text
+            assert dep.members(TOPICS, tid) == before
+
+    grow = {"artifacts": [{"key": "t0", "rank": 0, "members": member_table([joining])}]}
+    resp = dep.artifacts("PATCH", TOPICS, grow)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["refused"] == []
 
 
 def test_the_arrow_growth_names_members_by_the_struct_fields(deployment):
@@ -807,3 +972,27 @@ def test_the_arrow_growth_names_members_by_the_struct_fields(deployment):
     assert resp.status_code == 200, resp.text
     assert resp.json()["refused"] == expected_refused(dep.holdings, [(0, "members", rows)])
     assert dep.members(GROUPS, tid) == named(dep.holdings, rows)
+
+
+# ---------------------------------------------------------------------------------------------
+# An ingest that can only edit
+# ---------------------------------------------------------------------------------------------
+
+
+def test_an_ingest_that_can_only_edit_and_names_items_by_no_column_is_malformed(deployment):
+    """A batch in which no row carries a position can only edit items, so it needs `tessera_id` or
+    a unique column to name them by. One carrying either, or a row that can create, is resolved row
+    by row."""
+    dep = deployment
+    before = dep.served()
+    for rows in ([{}, {}], [{"x": None, "y": None}]):
+        assert naming.malformed_ingest(dep.holdings, rows)
+        assert dep.ingest(rows).status_code == 422
+        assert dep.served() == before
+    resp = dep.ingest(as_arrow([{"x": None, "y": None}])[0])
+    assert resp.status_code == 422, resp.text
+    assert dep.served() == before
+
+    for rows in ([{}, {"code": None}], [{"tessera_id": None}], [{}, fresh_position()]):
+        assert not naming.malformed_ingest(dep.holdings, rows)
+        check_ingest(dep, rows)

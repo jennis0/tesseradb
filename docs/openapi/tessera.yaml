@@ -1309,7 +1309,9 @@ paths:
         holds a value it is a change. The coordinates are `x` and `y` on a view whose projection is
         `none`, and `lon` and `lat` in degrees on any other, `float32` or `float64` in Arrow; a row
         carries both or neither. A row that creates an item needs them: a row naming no item and
-        carrying none is refused as naming no item.
+        carrying none is refused as naming no item. A batch in which no row carries coordinates
+        creates nothing and only addresses items, so it needs a `tessera_id` or a unique column,
+        null in every row or not; without one it is `422`.
         A coordinate outside the view's extent is stored on its edge and counted in `clamped`; one
         outside the projection's domain is counted in `clipped`; a non-finite one is `422`.
         `access` holds the row's access labels: in JSON a string or a list of strings, in Arrow a
@@ -1417,6 +1419,7 @@ paths:
             - A cell does not fit its column
             - A key is not in a closed vocabulary or layer
             - A row creates an item with no label on a view with no default
+            - No row carries coordinates, and the batch has neither a `tessera_id` nor a unique column
             - A row carries one coordinate and not the other, or coordinates in a batch naming no view
             - The batch is over the row cap
           content:
@@ -1502,7 +1505,7 @@ paths:
 
             - The body is not a JSON array of change items, is over 2 MiB or carries more than 10,000 items
             - An unknown `op`, or an item without `match`
-            - No change names its item by any column
+            - No change names its item by an identifying column
             - A `tessera_id` that is not a decimal string
             - A `match` key that is neither `tessera_id` nor a field declared unique, or a value that is not one of its field's
           content:
@@ -2271,7 +2274,7 @@ paths:
             - An artifact with neither `members` nor `excluding` that attaches to nothing, or with both
             - An exclusion list over its cap
             - `view` missing on a layer scoped to a group or present on another
-            - A member table whose columns differ in length, or a column that is neither `tessera_id` nor a field declared unique
+            - A member table whose columns differ in length, or tables left with no identifying column
             - A `tessera_id` that is not a decimal string, or a value that is not one of its field's
             - A member deleted after it was resolved, or one that names no item with a row
             - An unknown layer or level, or a layer whose membership is an attribute
@@ -2303,13 +2306,14 @@ paths:
         `members` and `leaving` are `MemberTable`s, as on a publication. A member whose values name
         no item, or name two, is left out and listed in `refused`; with `strict=true` the request
         is `404` or `409` at the first instead. On a row with a `rank`, a member joining the
-        generating set refuses the request so whether strict or not, as a publication's
+        generating set and naming no item, or two, refuses the request, strict or not, as a publication's
         `generated_from` does.
 
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
-        `large_list<struct>` whose struct fields are the member table's columns (`tessera_id` as
-        `utf8`, a unique field as `utf8` or an integer type), and optionally `view` as `utf8` and
+        `large_list<struct>` whose struct fields are the member table's columns, each named once:
+        `tessera_id` as `utf8` or `large_utf8`, a unique field as either or as a signed or unsigned
+        integer of any width, and any other type `422`; optionally `view` as `utf8` and
         `access` in any form ingest's `access` takes, with `level` in the schema's metadata as a
         string. It carries joining members and access labels only; every other part travels as
         JSON. Any other column or metadata key is `422`.
@@ -2368,7 +2372,7 @@ paths:
             - A layer whose membership is not `enumerated`
             - `leaving` without a `rank`
             - `view` missing on a layer scoped to a group or present on another
-            - A member table whose columns differ in length, or a column that is neither `tessera_id` nor a field declared unique
+            - A member table whose columns differ in length, or tables left with no identifying column
             - A `tessera_id` that is not a decimal string, or a value that is not one of its field's
             - A member deleted after it was resolved, or one that names no item with a row
             - A shape the layer does not take
@@ -4113,7 +4117,7 @@ components:
             pattern: "^[0-9]+$"
         refused:
           type: array
-          description: The rows the identity rule refused, in the order sent. The batch applied every other row. Empty with `strict=true`, which refuses the batch instead. A replay answers the first acceptance's.
+          description: The rows the identity rule refused, in the order sent. The batch applied every other row. A strict batch with a refused row is refused instead, so a batch first accepted with `strict=true` lists none; a replay answers the first acceptance's list, whatever the replay's `strict` says.
           items:
             $ref: "#/components/schemas/RefusedRow"
         minted:
@@ -4150,7 +4154,7 @@ components:
 
     AddressRow:
       type: object
-      description: "One item, named by its `tessera_id` and the values of fields declared unique, keyed by column. Every value names the item that holds it; a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field is `422`."
+      description: "One item, named by its `tessera_id` and the values of fields declared unique, keyed by column. Every value names the item that holds it; a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field names nothing: it is ignored, as a build ignores it, and the answer lists it in `ignored_columns`. A request none of whose rows carries an identifying key is `422`."
       properties:
         tessera_id:
           type: [string, "null"]
@@ -4162,7 +4166,7 @@ components:
 
     MemberTable:
       type: object
-      description: "Members, one row per member, as columns of equal length keyed by `tessera_id` and unique field names; a cell is as in an `AddressRow`, and `null` where that column does not name the row's member. `{}` holds no member. Columns of different lengths, or a key that is neither `tessera_id` nor a unique field, are `422`."
+      description: "Members, one row per member, as columns of equal length keyed by `tessera_id` and unique field names; a cell is as in an `AddressRow`, and `null` where that column does not name the row's member. `{}` holds no member. Columns of different lengths are `422`. A key that is neither `tessera_id` nor a unique field is ignored and listed in `ignored_columns`; a request whose tables are left with no identifying column is `422`."
       properties:
         tessera_id:
           type: array
@@ -4173,6 +4177,12 @@ components:
         type: array
         items:
           type: [string, integer, "null"]
+
+    IgnoredColumns:
+      type: array
+      description: The keys of the request's `match`es or member tables that are neither `tessera_id` nor a unique field, which named nothing and were ignored, each once.
+      items:
+        type: string
 
     RefusedRow:
       type: object
@@ -4210,12 +4220,12 @@ components:
     RefusalReason:
       type: string
       enum: [names_two_items, unknown_tessera_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier row names the same item. `one_value_twice`: an earlier row sets the same unique value."
+      description: "`names_two_items`: the row's values name more than one item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier kept row names the same item. `one_value_twice`: an earlier kept row sets the same unique value. Rows are decided in row order against the rows kept before them, so a refused row refuses no later row. Where two reasons apply to one row the first in this order is given: `unknown_tessera_id`, `names_two_items`, `names_no_item`, `one_item_twice`, `one_value_twice`."
 
     ChangesApplied:
       type: object
       additionalProperties: false
-      required: [accepted, refused, publication]
+      required: [accepted, refused, ignored_columns, publication]
       properties:
         accepted:
           type: integer
@@ -4226,6 +4236,8 @@ components:
           description: The changes refused, in the order sent. Empty with `strict=true`.
           items:
             $ref: "#/components/schemas/RefusedRow"
+        ignored_columns:
+          $ref: "#/components/schemas/IgnoredColumns"
         publication:
           type: integer
           minimum: 0
@@ -4919,7 +4931,7 @@ components:
     ArtifactsPublished:
       type: object
       additionalProperties: false
-      required: [artifacts, created, without_content, filled, joined, refused, publication]
+      required: [artifacts, created, without_content, filled, joined, refused, ignored_columns, publication]
       properties:
         artifacts:
           type: array
@@ -4956,6 +4968,8 @@ components:
           description: The members the identity rule refused, which the artifacts were published without. Empty with `strict=true`.
           items:
             $ref: "#/components/schemas/RefusedMember"
+        ignored_columns:
+          $ref: "#/components/schemas/IgnoredColumns"
         shapes:
           type: array
           description: Present when the batch carried a shape or authored shape content.
@@ -5123,7 +5137,7 @@ components:
     MembershipsGrown:
       type: object
       additionalProperties: false
-      required: [artifacts, refused, publication]
+      required: [artifacts, refused, ignored_columns, publication]
       properties:
         artifacts:
           type: array
@@ -5159,6 +5173,8 @@ components:
           description: The members the identity rule refused, which the artifacts were grown without. Empty with `strict=true`.
           items:
             $ref: "#/components/schemas/RefusedMember"
+        ignored_columns:
+          $ref: "#/components/schemas/IgnoredColumns"
         shapes:
           type: array
           description: Present when the batch filled authored shape content.
