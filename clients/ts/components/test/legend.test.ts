@@ -445,16 +445,16 @@ describe('the Colour heading under a layer with several depths served', () => {
     return {host, el};
   }
 
-  it('names the level shortly, lists every depth, and gives the colour-by name as its tooltip', async () => {
+  it('names the level as its option does, lists every depth, and gives the colour-by name as its tooltip', async () => {
     const {host, el} = await mountHeading();
-    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Deepest');
+    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Deepest level');
     const options = [...(deep(host, '[part="level-select"]') as HTMLSelectElement).options].map((o) => o.textContent);
     expect(options).toEqual(['Deepest level', 'Level 0', 'Level 1', 'Level 2']);
     expect(deep(host, '[part="colour-by"] .t')?.getAttribute('title')).toBe(TITLE);
 
     el.autoLevel = 1;
     await settle(host);
-    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Level 1');
+    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Automatic (Level 1)');
     const select = deep(host, '[part="level-select"]') as HTMLSelectElement;
     select.value = '2';
     select.dispatchEvent(new Event('change'));

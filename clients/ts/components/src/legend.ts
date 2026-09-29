@@ -80,8 +80,8 @@ type Picking = {column: string; key: string; title: string};
  * a category column the menu offers the palettes, and for a number column the ramps, a linear or
  * log scale and reversal, unless `hide-palettes` is set. The colour choices are shared with every
  * map reading the same store. A *Level* choice appears in the heading after Colour by, under colour
- * by a levelled layer with several levels served. It shows a short label ("Deepest", "Level 3")
- * and lists the declared level titles. The Colour by name keeps its room: where the two do not fit
+ * by a levelled layer with several levels served. It shows the name of the option chosen, a level
+ * title or the automatic choice, and lists the rest. The Colour by name keeps its room: where the two do not fit
  * on one line, the Level choice moves to a line of its own under the heading, and only then is the
  * name cut short, with the whole name as its tooltip. Which layers are drawn is
  * `<tessera-layer-picker>`'s.
@@ -782,13 +782,12 @@ export class TesseraLegend extends TesseraElement {
       : nothing;
     const column = columns.find((c) => c.name === colourBy) ?? null;
     const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
-    // The level the select shows, by number: the one chosen, else the explorer's; `null` is the deepest.
-    const levelShown = this.level ?? this.autoLevel;
+    const automatic = this.autoLevel === null ? 'Deepest level' : `Automatic (${levelTitle(this.autoLevel)})`;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
-        ? html`<span part="level" class="choice"><span class="t" aria-hidden="true">${levelShown === null ? 'Deepest' : `Level ${levelShown}`}</span>
+        ? html`<span part="level" class="choice"><span class="t" aria-hidden="true">${this.level === null ? automatic : levelTitle(this.level)}</span>
             <select part="level-select" aria-label="Level" @change=${(e: Event) => this.chooseLevel((e.target as HTMLSelectElement).value)}>
-              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'Deepest level' : `Automatic (${levelTitle(this.autoLevel)})`}</option>
+              <option value="" ?selected=${this.level === null}>${automatic}</option>
               ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${levelTitle(l)}</option>`)}
             </select>${icon('chev', 12, 1.4)}</span>`
         : nothing;
