@@ -237,6 +237,7 @@ export class TesseraFilterPanel extends TesseraElement {
         font-weight: 600;
       }
       .adder {
+        position: relative;
         padding: 10px var(--_tessera-panel-inline, 16px) 12px;
       }
       [part='add'] {

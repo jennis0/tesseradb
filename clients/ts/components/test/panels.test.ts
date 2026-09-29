@@ -301,6 +301,22 @@ describe('<tessera-filter> on a category', () => {
   });
 });
 
+describe('<tessera-filter> on a category, its suggestions', () => {
+  it('show while the box has focus and close as focus leaves it', async () => {
+    const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}}));
+    const entry = await type(host, 'c');
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS')], more: false, total: null}}});
+    await settle(host);
+    expect(deepAll(host, '[part~="tick"]')).toHaveLength(1);
+    entry.dispatchEvent(new Event('blur'));
+    await settle(host);
+    expect(deep(host, '[part="values"]')).toBeNull();
+    entry.dispatchEvent(new Event('focus'));
+    await settle(host);
+    expect(deepAll(host, '[part~="tick"]')).toHaveLength(1);
+  });
+});
+
 describe('<tessera-filter> on a category, before anything is typed', () => {
   const empty = () => filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}});
   const TOP = aggregateEntry([{rows: [{key: 'cs', title: 'Computer science', count: 600}, {key: 'math', count: 300}, {key: 'stat', count: 100}], groups: 38, total: 1000}]);

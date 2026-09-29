@@ -39,17 +39,19 @@ const TOP_VALUES = 5;
  * a bar, its share of the set. The five are counted by the aggregate route (`Store.setAggregate`):
  * in the filter position without the column's own clause, so a value its clause excludes is still
  * counted, and in the highlight position under the whole filter. The control keeps that aggregate
- * registered while it is drawn. The suggestions open over what sits below the box. Each value suggested shows its count in the current view among the items
- * passing the filter, and a bar, its share of the total the server counted over. In the filter
- * position the count leaves out the column's own clause, so a value counts what choosing it as well
- * would add. In the highlight position the count is under the whole filter, and a value counted 0
- * is greyed, marked "none match" and cannot be chosen, though one already chosen can be taken out.
- * The arrow keys move through the suggestions, and Enter chooses the one reached, the first by
- * default, or takes it out where it is chosen; text that suggests nothing chooses nothing. Emptying
- * the box, or removing the control, has the store stop asking for the column. The values chosen
- * that are not among the five sit under them as chips, each with a ×. The heading says how many
- * values the current set holds, from the same aggregate, or where it has not answered, how many
- * the legend holds.
+ * registered while it is drawn. The heading says how many values that set holds, once the
+ * aggregate has answered.
+ *
+ * The suggestions open over what sits below the box while the box has focus and holds text. Each
+ * value suggested shows its count in the current view among the items passing the filter, and a
+ * bar, its share of the total the server counted over. In the filter position the count leaves out
+ * the column's own clause, so a value counts what choosing it as well would add. In the highlight
+ * position the count is under the whole filter, and a value counted 0 is greyed, marked "none
+ * match" and cannot be chosen, though one already chosen can be taken out. The arrow keys move
+ * through the suggestions, and Enter chooses the one reached, the first by default, or takes it out
+ * where it is chosen; text that suggests nothing chooses nothing. Emptying the box, or removing the
+ * control, has the store stop asking for the column. The values chosen that are not among the five
+ * sit under them as chips, each with a ×.
  *
  * A number is two inputs, and a date two text inputs that read and write dates as day, month and
  * year (`1 Jan 2019`); a date typed as a month or a year means its first day in the lower input
@@ -321,6 +323,8 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor search = '';
   /** The suggestion the arrow keys moved to, by code; `null` is the first that can be chosen. @internal */
   @state() accessor activeCode: number | null = null;
+  /** Whether the category box has focus, which its suggestions show only while it does. @internal */
+  @state() accessor focused = false;
   /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
   @state() accessor invalid: {gte?: string; lte?: string} = {};
   private sent: ColumnDraft | null = null;
@@ -501,7 +505,7 @@ export class TesseraFilter extends TesseraElement {
   /** The heading's right-hand side: a category's number of values, or Clear on a range. */
   private aside(draft: ColumnDraft): TemplateResult | typeof nothing {
     if (draft.family === 'category') {
-      const n = this.topValues()?.groups ?? this.resolvedStore?.get('legend').categories[this.column]?.length ?? null;
+      const n = this.topValues()?.groups ?? null;
       return n === null ? nothing : html`<span part="aside">${n.toLocaleString('en-GB')} ${n === 1 ? 'value' : 'values'}</span>`;
     }
     if (draft.family === 'numeric' && isPopulated(draft)) {
@@ -582,7 +586,8 @@ export class TesseraFilter extends TesseraElement {
     const total = this.countedOver(suggestion);
     const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
     const typed = this.search !== '';
-    const rows = typed ? (suggestion?.values ?? []) : [];
+    // The suggestions show while the box has focus and holds text; the list closes as focus leaves.
+    const rows = typed && this.focused ? (suggestion?.values ?? []) : [];
     // In the highlight position, a value no item passing the filter carries cannot be lit; one
     // already lit can still be taken out.
     const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0 && !chosen.has(v.key);
@@ -597,7 +602,10 @@ export class TesseraFilter extends TesseraElement {
     const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
         role="combobox" aria-expanded=${rows.length > 0 ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${active ? `value-${active.code}` : nothing}
         .value=${this.search}
+        @focus=${() => (this.focused = true)}
+        @blur=${() => (this.focused = false)}
         @input=${(e: Event) => {
+          this.focused = true;
           this.search = (e.target as HTMLInputElement).value;
           this.activeCode = null;
           this.ask(this.search);
@@ -621,7 +629,7 @@ export class TesseraFilter extends TesseraElement {
       const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
       return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
         aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
-        @click=${() => !left && toggle(v.key)}>
+        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => !left && toggle(v.key)}>
         <span class="opt">
           <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">none match</span>` : nothing}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
