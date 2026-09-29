@@ -334,12 +334,12 @@ struct RawServe {
     max_aggregate_cells: Option<u64>,
     /// The most bytes one `POST /v1/aggregate` response carries before it ends with a cursor to
     /// resume from. It runs under the viewport's admission, so this bounds what each one holds.
-    /// A value below `aggregate_page_bytes` is refused.
+    /// A value below `aggregate_page_bytes` or above 2147483648 is refused.
     ///
     /// Default: `16777216` (16 MiB).
     aggregate_response_bytes: Option<usize>,
-    /// The most bytes one page of an aggregate response holds, as Arrow before compression. `0`
-    /// is refused.
+    /// The most bytes one page of an aggregate response holds, as Arrow column bytes before
+    /// compression. `0` is refused, and so is a value above 2147483648.
     ///
     /// Default: `4194304` (4 MiB).
     aggregate_page_bytes: Option<usize>,
@@ -826,6 +826,14 @@ fn parse(text: &str) -> Result<Config> {
     let aggregate_response_bytes = serve
         .aggregate_response_bytes
         .unwrap_or(DEFAULT_AGGREGATE_RESPONSE_BYTES);
+    for (key, value) in [
+        ("serve.aggregate_page_bytes", aggregate_page_bytes),
+        ("serve.aggregate_response_bytes", aggregate_response_bytes),
+    ] {
+        if value > MAX_PAGE_BYTES_CEILING {
+            return Err(ConfigError::AggregateBytesTooLarge { key, value });
+        }
+    }
     if aggregate_response_bytes < aggregate_page_bytes {
         return Err(ConfigError::AggregateResponseBelowPage {
             response_bytes: aggregate_response_bytes,
@@ -1478,6 +1486,30 @@ mod tests {
             serving_blocking_threads(&config),
             config.compute_admission + 3 + config.ingest_admission + BLOCKING_THREAD_RESERVE
         );
+    }
+
+    #[test]
+    fn the_aggregate_byte_keys_are_refused_where_no_response_could_proceed() {
+        assert!(matches!(
+            parse(&valid_toml("aggregate_page_bytes = 0")),
+            Err(ConfigError::Zero { key: "serve.aggregate_page_bytes" })
+        ));
+        for keys in [
+            "aggregate_page_bytes = 4294967296\naggregate_response_bytes = 4294967296",
+            "aggregate_response_bytes = 4294967296",
+        ] {
+            assert!(
+                matches!(parse(&valid_toml(keys)), Err(ConfigError::AggregateBytesTooLarge { .. })),
+                "{keys}"
+            );
+        }
+        assert!(matches!(
+            parse(&valid_toml("aggregate_page_bytes = 4096\naggregate_response_bytes = 4095")),
+            Err(ConfigError::AggregateResponseBelowPage {
+                response_bytes: 4095,
+                page_bytes: 4096
+            })
+        ));
     }
 
     #[test]

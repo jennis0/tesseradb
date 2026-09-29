@@ -1054,8 +1054,9 @@ paths:
         groups named in `values` or `artifacts`. `cells` divides the set, or each group, into the
         cells of `view` at `depth`: depths 0 to 16 are the cells of the map's tiles at that zoom,
         and 17 to 32 divide them down to the stored position. `cells.area` is a bbox in the form
-        and units the viewport's `bbox` takes, absent for the view's whole extent; only the cells
-        at `depth` that intersect it are listed, as a viewport lists tiles for its `bbox`, each
+        and units the viewport's `bbox` takes, absent for the view's whole extent, and an area
+        partly outside the extent is clamped to the edge cells as the viewport's `bbox` is; only
+        the cells at `depth` that intersect it are listed, as a viewport lists tiles for its `bbox`, each
         with all of its items. The table head's `total`, `reference_total` and `groups`, and the
         counts that rank `top`, stay the whole set's. The cells at `depth` in the area, a matter of
         geometry alone, may number at most `selection.max_aggregate_cells`, however many groups
@@ -1091,8 +1092,9 @@ paths:
         **Reading a whole result.** A response carries at most `pages` pages and runs within its
         own byte budget, `serve.aggregate_response_bytes` (16 MiB by default), and the bulk
         reads' time budget. A page holds at most `page_rows` rows and `serve.aggregate_page_bytes`
-        Arrow bytes (4 MiB by default); one can hold fewer rows than `page_rows` before the table
-        ends. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
+        (4 MiB by default); one can hold fewer rows than `page_rows` before the table ends. Both
+        budgets count the Arrow column bytes of the rows; the framing, the schema, the dictionary
+        messages and buffer padding add a little to each page on the wire. Pass the trailer's `next` back as `cursor`, unchanged, until it is null. Every
         page composes the visible set again, so a deletion or suppression accepted during a read
         applies from the next page, and the pages of one table can count different states of a
         changing corpus. Which groups a table lists under `top` is fixed at its first page and
@@ -3651,7 +3653,7 @@ components:
               minItems: 4
               maxItems: 4
               items: { type: number }
-              description: "As the viewport's `bbox`: `[x0, y0, x1, y1]` in the coordinates of the view's quantisation extent, with `x0 ≤ x1`, `y0 ≤ y1`, all finite. Only the cells at `depth` that intersect it are listed, each with all of its items. Absent is the view's whole extent."
+              description: "As the viewport's `bbox`: `[x0, y0, x1, y1]` in the coordinates of the view's quantisation extent, with `x0 ≤ x1`, `y0 ≤ y1`, all finite. Only the cells at `depth` that intersect it are listed, each with all of its items; a corner outside the extent is clamped to the edge cell, as the viewport's `bbox` is. Absent is the view's whole extent."
 
     AggregateBy:
       description: |

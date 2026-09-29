@@ -251,6 +251,11 @@ impl std::fmt::Display for AggregateRefused {
             AggregateRefused::LevelRequired(layer) => {
                 write!(f, "layer '{layer}' has several levels; name one with level")
             }
+            AggregateRefused::TooManyCells { limit: 0, .. } => write!(
+                f,
+                "selection.max_aggregate_cells is 0, so no cell level can be served; ask \
+                 without cells"
+            ),
             AggregateRefused::TooManyCells {
                 depth,
                 count,

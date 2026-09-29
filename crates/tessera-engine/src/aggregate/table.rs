@@ -422,7 +422,9 @@ impl Plan {
                         }
                     }
                 };
-                let rows_left = response_bytes_left.saturating_sub(dictionary as u64) * 8
+                let rows_left = response_bytes_left
+                    .saturating_sub(dictionary as u64)
+                    .saturating_mul(8)
                     / row_bits as u64;
                 let walk = Walk {
                     cx,
@@ -450,7 +452,7 @@ impl Plan {
             }
         };
         let total: usize = runs.iter().map(Run::len).sum();
-        let fits = max_page_bytes.saturating_sub(dictionary) * 8 / row_bits;
+        let fits = max_page_bytes.saturating_sub(dictionary).saturating_mul(8) / row_bits;
         let most = total.min(limit).min(fits.max(1));
         // A long run goes out as its own page, sent as the columns it was counted into.
         let (page, rest) = split_runs(
@@ -508,7 +510,7 @@ impl Plan {
         Ok(Some(Page {
             head,
             batch,
-            bytes: (kept * row_bits).div_ceil(8) + dictionary,
+            bytes: kept.saturating_mul(row_bits).div_ceil(8).saturating_add(dictionary),
             cut_by_bytes,
             next,
         }))

@@ -242,12 +242,13 @@ kind 8  page end   one after each records frame JSON {next, ended_by}
 kind 4  trailer    exactly one, last            JSON {pages, rows, next, ended_by, recomposed?, stream_us}
 ```
 
-`recomposed` is present, as `true`, only where a page counted a different state of the corpus
-from the page before it. A response can end part-way through a table. The next response, sent with the trailer's `next` as
-`cursor`, opens with that table's head again, with `resumed` true. The rules of the items read
-hold: no trailer means incomplete, and a whole result passes `next` back until it is null. A
-table's rows are the batches between its head and the next head or the trailer, joined across
-responses. A field's `key` and `title` are dictionaries whose values differ from page to page.
+`recomposed` is present, as `true`, only where a page counted a different state of the corpus from
+the page before it. A response can end part-way through a table. The next response, sent with the
+trailer's `next` as `cursor`, opens with that table's head again, with `resumed` true. The rules of
+the items read hold: no trailer means incomplete, and a whole result passes `next` back until it is
+null. A table's rows are the batches between its head and the next head or the trailer, joined
+across responses. A field's `key` and `title` are dictionaries whose values differ from page to
+page.
 
 **Python, with `pyarrow`**, reusing `frames` from the items decode:
 

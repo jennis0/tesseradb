@@ -482,8 +482,10 @@ through the cursor. A request stops its work when the client disconnects.
 **Not built yet:** histograms, minimum, maximum and mean of number and timestamp fields;
 breakdowns of keyword and integer fields; a grouping of one kind inside another of the same kind,
 such as cells within cells; and counts across views. A caller asks for each such figure through
-`/v1/items` and computes it. **Not built yet:** the TypeScript, Python and command-line clients do
-not call this route; a caller of those uses HTTP directly.
+`/v1/items` and computes it.
+
+**Not built yet:** the TypeScript, Python and command-line clients do not call this route; a caller
+of those uses HTTP directly.
 
 ## What is not built
 

@@ -275,6 +275,10 @@ fn by_of(
                 CategoryColumn::Unknown => Err(ApiError::Contract(format!(
                     "field '{field}' is unknown; name a field /v1/meta publishes"
                 ))),
+                CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+                    "field '{field}' is scoped to view group '{group}' and view '{view}' is not \
+                     one of its views; pin the view it means as '{field}@<key>'"
+                ))),
             }
         }
         (None, Some(layer)) => {
