@@ -81,8 +81,9 @@ longitude, and a `P` that marks it as a populated place. Further along, its popu
 A population of 0 means GeoNames doesn't have a figure, which is true of most places here. Only
 1,119 of the 29,935 have a population at all. That will matter when we come to filter by it.
 
-For this demo we'll keep six of the 19 columns: the id, the name, the latitude and longitude, the class of place
-and the population.
+For this demo we'll keep five of the 19 columns: the name, the latitude and longitude, the class of
+place and the population. We'll leave the GeoNames id behind. Tessera doesn't need one to build a
+map, and when we check the declaration we'll see what an id column would have changed.
 
 ## Convert it to Parquet
 
@@ -326,9 +327,11 @@ tessera check
 
 ```
 ...
+  identity     source 'points': names items by nothing: each row is an item of its own
+  identity     view 'ireland': names items by nothing: each row is an item of its own
 projected views, from the declaration alone:
   ireland              web_mercator, asked for lon [-11, -5], lat [51, 55.5]
-                       snapped outward to the square at z5 (15, 10) — x [0.46875, 0.5], y [0.3125, 0.34375]
+                       snapped outward to the square at z5 (15, 10) — lon [-11.25, 0], lat [48.922499263758255, 55.7765730186677]
 
 views
   ireland                    labels from default_only, default 'public'
@@ -336,10 +339,10 @@ views
 vocabularies
   feature_class              public, closed, 9 declared value(s)
 
-attributes (in declaration order, which is the stored column order)
+attributes
   name                       text, index, from column 'name'
-  feature_class              u8 over vocabulary 'feature_class', hot, from column 'feature_class'
-  population                 i64, hot, from column 'population'
+  feature_class              u8 over vocabulary 'feature_class', render, from column 'feature_class'
+  population                 i64, render, from column 'population'
 
 check OK: 2 source(s), 1 view(s), 0 view group(s) over 0 declared view(s), 1 vocabulary(ies), 3 attribute(s), 0 layer(s), 0 warning(s)
 ```
@@ -347,19 +350,27 @@ check OK: 2 source(s), 1 view(s), 0 view group(s) over 0 declared view(s), 1 voc
 `check OK` on the last line is what we want to see. Above it, the check describes what the build is
 going to do.
 
-The first section holds a surprise. We asked for a rectangle, but the check says the view has been
-snapped outward to a square. Tessera stores positions on a grid that lines up with the standard map
-tiles, so that any tile the map asks for, at any zoom, falls exactly on the grid. To make that work
-it widens our extent to the smallest standard tile that contains it. At zoom level 5 the world is 32
-tiles across, and ours is the tile in column 15, row 10, counting from zero at the top left. The
-numbers in square brackets are the same tile in the projection's own units, where the whole world
-runs from 0 to 1 in each direction.
-
-The rest repeats what we declared. `labels from default_only` means no column supplies access
-labels, so every place gets the default, `public`. `hot` is the check's word for `render = true`.
-
 The last line counts two sources, though we only have one file. The check reads the file's schema
 twice, once for the attributes and once for the view's positions.
+
+The `identity` lines, one for each reading, say how the build will tell one place from another. A
+database usually does that with a key. Tessera's equivalent is an attribute declared
+`unique = true`, such as the GeoNames id. A row carrying an id that a place already holds then names
+that place and changes it. We declared no unique attribute, so nothing in our file names a place,
+and each row becomes a place of its own. That's all a map built once from one file needs. If you later wanted to
+correct or delete a place by its GeoNames id, you'd keep the `geonameid` column in `convert.py` and
+declare it as an `i64` attribute with `unique = true`. Tessera would then keep an index from each id
+to its place.
+
+The projected views section holds a surprise. We asked for a rectangle, but the check says the
+view has been snapped outward to a square. Tessera stores positions on a grid that lines up with the
+standard map tiles, so that any tile the map asks for, at any zoom, falls exactly on the grid. To
+make that work it widens our extent to the smallest standard tile that contains it. At zoom level 5
+the world is 32 tiles across, and ours is the tile in column 15, row 10, counting from zero at the
+top left. In degrees, that tile runs from longitude −11.25 to 0 and from latitude 48.9 to 55.8.
+
+The rest repeats what we declared. `labels from default_only` means no column supplies access
+labels, so every place gets the default, `public`.
 
 While nothing depends on it yet, try making a mistake. Open `corpus.toml`, change the last
 attribute's name to `populaton`, and run the check again.
@@ -422,9 +433,16 @@ It takes a few seconds. Most of the report confirms what we expected. All 29,935
 default label, and every one of them has a value for each attribute. Every feature class was one of
 our nine letters, too. If one hadn't been, the build would have stopped and named it.
 
-The second line gives the snapped tile in degrees, from longitude −11.25 to 0 and latitude 48.9 to
-55.8. The fourth line says one place fell outside that tile. The build has clamped it, which means
-it moved the place onto the nearest edge of the tile instead of dropping it.
+Just above the last line, a line beginning `built` names the new bundle's directory and counts
+`29935 items`, one for each row, as the check's `identity` lines promised. It ends with
+`0 row(s) refused`. A build refuses a row that names a place an earlier row already named, such as
+a second row carrying the same GeoNames id. It keeps the first row, leaves the later one out, prints
+what it left out and writes the list to `bundle/reports/refused.json`. With no unique attribute,
+nothing in our file can name a place twice.
+
+The second line gives the snapped tile in degrees, as the check did. The fourth line says one place
+fell outside that tile. The build has clamped it, which means it moved the place onto the nearest
+edge of the tile instead of dropping it.
 
 That place is Saint Patrick's Bridge. GeoNames lists three places of that name in Ireland. One is a
 spit on the Wexford coast, and another is the bridge over the Lee in Cork, filed as a historic site

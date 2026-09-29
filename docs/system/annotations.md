@@ -89,14 +89,15 @@ hierarchy  = { kind = "nested" }
 
 [layer.members]
 source = "cluster_assignments"
-fields = { key = "cluster_id", entity = "point_id" }
+fields = { key = "cluster_id", doi = "paper_doi" }
 
 [layer.content]
 computed = ["centroid", "hull"]
 ```
 
 *A trimmed layer declaration: an enumerated clustering, drawn on one view, whose artifacts each
-carry a computed centroid and hull.*
+carry a computed centroid and hull. Each row of the members file names its point by `doi`, an
+attribute declared `unique`, kept in the file's `paper_doi` column.*
 
 The three sources age differently. An enumerated membership is fixed at whatever a member table or
 column last said: a newly ingested point sits on the map, visible as a point, until the layer is

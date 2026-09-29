@@ -189,8 +189,8 @@ lists what the server left out under `refused`.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
 frame is inserted again and sent again, and what happens then is the database's answer: rows
-naming items it holds edit them, or change nothing where they carry what the items hold, and rows
-with no id are loaded a second time. Databases are stateful, and this one says so rather than
+naming items it holds edit them, or change nothing where they carry what the items hold, and points
+rows carrying no unique value are loaded a second time. Databases are stateful, and this one says so rather than
 guessing.
 
 Every declaration is made at any commit, and the next commit sends it to the running service: a
@@ -269,17 +269,20 @@ A page carries a fresh random batch id, made once when the request is built, and
 request carries it again: a `429` is backpressure and is retried after its `Retry-After` with the
 same id and identical bytes. Nothing is kept beyond the commit, and no id is derived from what a
 page contains, so the same frame inserted and committed five times is five loads: on the second,
-rows carrying an id name the items the first created and change nothing, and rows without one are
-loaded again. A request that reached no server is a refusal of that page; whether it landed is the
+rows carrying a unique value name the items the first created and change nothing, and points rows
+carrying none are loaded again. A request that reached no server is a refusal of that page; whether it landed is the
 database's to say.
 
 The pre-flight runs before a byte is sent and it sends nothing while a finding stands: `check()`
-reports the finding and `commit()` raises with it, and neither drops or rewrites a row. Rows
-outside a view's frame are listed with the frame, rows with no id where the insert names an id
-column are listed, a key column inserted into a layer that declares supplied content is named with
-the artifacts-table route as the remedy, a label insert whose clustering is neither held nor
-inserted is named, and a polygon inserted after the first commit as WKB is named with both
-encodings: the build reads a `geometry` column as WKB and the publication route takes WKT text.
+reports the finding and `commit()` raises with it, and neither drops or rewrites a row. The
+findings are these. A key column inserted into a layer that declares supplied content is named with
+the artifacts-table route as the remedy. A vocabulary insert naming `code=` is named, since the
+server assigns codes. An insert into a group-scoped attribute with no view column is named. A label
+insert whose clustering is neither held nor inserted is named. A polygon inserted after the first
+commit as WKB is named with both encodings: the build reads a `geometry` column as WKB and the
+publication route takes WKT text. A member written as a plain value, or members carrying no
+`tessera_id` or unique column to name items by, are named with the struct to write instead. An
+exclusion list longer than the publication route's bound is named with the bound.
 
 `remove(items, strict=False)`, `suppress(items, strict=False)` and `unsuppress(items,
 strict=False)` take a list of `tessera_id`s, or a table (a pandas or polars data frame, a pyarrow

@@ -270,21 +270,28 @@ publishes the field's `unique` flag, and in `filter_operands` it gives `eq` and 
 unique field with neither `render` nor `index`, because the index is then the field's only filter
 structure ([queries](queries.md#filters)).
 
-A build refuses a corpus in which two items hold one value of a unique field. The refusal says how
-many values are held more than once and names up to ten of them.
+A build is an ingest into an empty database, and it names items by the rule an ingest uses
+([resolving a batch](write-path.md#resolving-a-batch)). It reads its files in declaration order:
+each view's points, the attribute files, the access relation, then each layer's members. A
+points row whose unique values name no item creates one, as does a points row carrying no unique
+value, so a corpus that declares no unique field makes each row of its points an item of its own.
+A points row carrying a value an earlier view's points gave names that item, and this is how one
+item comes to be in two views. A row of any other file must name an item, so a file other than a
+view's points that carries no unique field's column is refused. An empty database holds no
+`tessera_id`, so a row naming an item by one is refused.
 
-A build joins its source files on one unique field, the one `[defaults].join_field` names, which
-must be a keyword or an integer. Each view's points, each attribute file, each layer's members and
-the access relation name their item by that field's value. One value on two rows of one view's
-points is refused, with the same count and examples; one value in two views' points is one item in
-both views. A corpus that names no join field makes each row of its points file an item of its own,
-and then refuses a second view and any file that would need a join
-([corpus reference](../reference/corpus-toml.md#defaults)).
+A build leaves out a row that names two items, names an item or sets a value an earlier row of its
+file names or sets, or names no item in a file that cannot create one. Of two rows naming one item,
+the first is kept. The build goes on without the refused rows, prints a count for each file and
+reason with the values of up to ten of the rows, and writes the same list to
+`reports/refused.json` in the bundle. `tessera build --strict` refuses the build at the first file
+with a refused row instead ([CLI reference](../reference/cli.md)).
 
 `unique` is the one part of a field's declaration that can change once the field exists, at a
 build or at a running service. Declaring it `true` at a running service builds the index over every
 stored value, and the declaration takes effect once that finds no value held twice. Otherwise it is
-refused with the same count and examples, and the field stays as it was. Declaring it `false` drops
+refused with a count of the values held more than once and up to ten of them, and the field stays
+as it was. Declaring it `false` drops
 the index at once and keeps the values. Both survive a restart. How the index is built while writes
 continue is in [the write path](write-path.md#unique-values). An ingest row carrying a unique value
 names the item that holds it; a row whose values name two items is refused, as is a later row

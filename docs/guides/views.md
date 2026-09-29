@@ -49,7 +49,6 @@ unprojected embedding.
 ```toml
 [defaults]
 source          = "world"
-join_field      = "geonameid"
 allocation_view = "world"     # breaks entity-id ties within a signature group at build time
 
 [[attribute]]
@@ -58,12 +57,17 @@ type   = "i64"
 unique = true
 ```
 
-`join_field` names the unique attribute every file names its place by: each view's points, each
-attribute file and each layer's members. One `geonameid` in two views' points is one item in both
-views.
+A unique attribute is what ties a place's rows together across files. A build reads each view's
+points in declaration order, and a row carrying a `geonameid` an earlier view's points already gave
+names that place, so one `geonameid` in two views' points is one item in both views. Every other
+file (an attribute file, the access relation, a layer's members) names its places the same way, by
+the column of a unique attribute it carries. A corpus with no unique attribute makes each row of
+each view's points an item of its own. A row that names two items, or an item an earlier row of its
+file already named, is left out and reported
+([data model](../system/data-model.md#unique-fields)).
 
 Entity ids are permanent, so the tie-break is a declaration rather than a default that could
-silently re-key a rebuild if the file's block order changed (decision 0112).
+re-key a rebuild if the file's block order changed.
 
 ## Declare a group of timeslices
 
