@@ -28,8 +28,8 @@ export const MAX_DISPLACEMENT = 40;
 
 /** The spatial hash's cell, in pixels: a few labels a cell, so an overlap check reads a few. */
 const CELL = 64;
-/** Space kept between two labels. */
-const GAP = 2;
+/** Space kept between two labels, in pixels: about half the line box of a name set at 13 to 16 px. */
+const GAP = 8;
 
 type Rect = {x0: number; y0: number; x1: number; y1: number};
 
@@ -67,8 +67,8 @@ class SpatialHash {
 function offsetsFor(width: number, height: number, maxDisplacement: number): [number, number][] {
   const out: [number, number][] = [[0, 0]];
   for (const ring of [1, 2]) {
-    const dx = ring * (width + 6);
-    const dy = ring * (height + 6);
+    const dx = ring * (width + GAP);
+    const dy = ring * (height + GAP);
     for (const [ux, uy] of [[0, -1], [0, 1], [1, 0], [-1, 0], [1, -1], [-1, -1], [1, 1], [-1, 1]] as [number, number][]) {
       if (Math.hypot(ux * dx, uy * dy) <= maxDisplacement) out.push([ux * dx, uy * dy]);
     }

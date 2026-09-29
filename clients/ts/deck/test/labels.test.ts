@@ -34,6 +34,9 @@ describe('label placement (§5.10)', () => {
         const a = placed[i]!;
         const b = placed[j]!;
         expect(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1, `${a.id} over ${b.id}`).toBe(false);
+        // Neighbours keep clear space of about half a line between them.
+        const clear = Math.max(b.x0 - a.x1, a.x0 - b.x1, b.y0 - a.y1, a.y0 - b.y1);
+        expect(clear, `${a.id} beside ${b.id}`).toBeGreaterThanOrEqual(8);
       }
     }
     // The first to be left out is a low priority, never the highest.
@@ -47,9 +50,9 @@ describe('label placement (§5.10)', () => {
   });
 
   it('never leads a label across the map: a move beyond 40 px drops the label instead', () => {
-    // Two wide labels on one spot: the lower would have to move its own width (206 px) sideways
-    // or its height (30 px) up or down. Up and down are taken by two more; nothing else is within
-    // reach, so it is left out rather than drawn 206 px away on a leader.
+    // Two wide labels on one spot: the lower would have to move its own width (208 px) sideways
+    // or its height (32 px) up or down. Up and down are taken by two more; nothing else is within
+    // reach, so it is left out rather than drawn 208 px away on a leader.
     const wide = (id: number, priority: number) => at(id, 500, 500, priority, 200, 24);
     const placed = placeLabels([wide(1, 100), wide(2, 90), wide(3, 80), wide(4, 70)]);
     expect(placed.map((p) => p.id)).toEqual([1n, 2n, 3n]);
@@ -60,7 +63,7 @@ describe('label placement (§5.10)', () => {
     // A wider bound admits the sideways try: the rule is the bound, not the ring.
     const loose = placeLabels([wide(1, 100), wide(2, 90), wide(3, 80), wide(4, 70)], 300);
     expect(loose.length).toBe(4);
-    expect(Math.abs(loose.find((p) => p.id === 4n)!.dx)).toBe(206);
+    expect(Math.abs(loose.find((p) => p.id === 4n)!.dx)).toBe(208);
     expect(MAX_DISPLACEMENT).toBe(40);
   });
 
@@ -115,6 +118,14 @@ describe('a name on one line', () => {
     expect(line).toBe('Large language models: alignment…');
     // A first word longer than the line is cut inside the word.
     expect(labelLine('x'.repeat(MAX_LABEL_CHARS + 10))).toBe(`${'x'.repeat(MAX_LABEL_CHARS)}…`);
+  });
+
+  it('moves a label that would sit closer than half a line to a neighbour', () => {
+    // Two one-line names 20 px apart on 16 px boxes leave 4 px between them: too close.
+    const line = (id: number, y: number, priority: number) => at(id, 0, y, priority, 100, 16);
+    const placed = placeLabels([line(1, 0, 2), line(2, 20, 1)]);
+    expect(placed.find((p) => p.id === 1n)).toEqual({id: 1n, dx: 0, dy: 0, leader: false});
+    expect(placed.find((p) => p.id === 2n)?.leader).toBe(true);
   });
 
   it('places a label by the box it actually draws', () => {
