@@ -1,10 +1,11 @@
-//! **`GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
+//! **`/v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
 //!
 //! One gate with `/v1/categories` (`tests/categories.rs` covers that gate's own mechanics in
 //! depth — a public and a derived column, an interleaved narrow principal), so these cases cover
 //! what is new here: the wire shape (`match`, `count`, `more`), the two refusals the enumeration
-//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, and the
-//! per-session admission (`value-suggestion.md` §5.1).
+//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, the
+//! per-session admission (`value-suggestion.md` §5.1), and the `POST` form's counts under a filter
+//! and its compute admission.
 
 mod common;
 
@@ -108,7 +109,8 @@ fn build_categories(dir: &Path) {
         ],
     );
     write_pairs_n(&pairs, N);
-    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+    let schema = format!("{SCHEMA_TOML}\n{ID_ATTRIBUTE}");
+    build_declared(&dir.join("bundle"), &points, &pairs, &schema);
 }
 
 /// A copy of [`build_categories`]' bundle in `tmp`, built once for this binary.
@@ -494,4 +496,322 @@ async fn at_most_one_suggest_in_flight_per_session() {
     drop(guard);
     let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a").await;
     assert_eq!(status, 200, "{body}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `POST` form: counts under a filter
+// ---------------------------------------------------------------------------------------------
+
+async fn post(
+    server: &TestServer,
+    token: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> (u16, reqwest::header::HeaderMap, serde_json::Value) {
+    let resp = server
+        .client
+        .post(server.viewer_url(path))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    (status, headers, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **A filtered count is the items this principal may see in the view that pass the filter and
+/// carry the value**, for a principal who sees everything and one who sees a third, under a filter
+/// over a column with no index, so it is answered by the view's rows, and a region. The values
+/// offered are the `GET` form's, and the region's verdict is in `x-tessera-region`.
+#[tokio::test]
+async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _) = serve(&tmp).await;
+    let departments = ["d01", "d03", "d04"];
+    let (lo, hi) = (100.5, 800.5);
+    let filter = serde_json::json!({ "all_of": [
+        { "department": { "in": departments } },
+        { "region": { "bbox": [lo, lo, hi, hi] } },
+    ] });
+    let passes = |e: u64| {
+        let (x, y) = scatter(e);
+        departments.contains(&department_of(e).as_str())
+            && (lo..=hi).contains(&x)
+            && (lo..=hi).contains(&y)
+    };
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (_, unfiltered) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=&limit=20&counts=true&view=s0")
+                .await;
+        let (status, headers, body) = post(
+            &server,
+            &token,
+            "/v1/categories/archive/suggest",
+            &serde_json::json!({ "q": "", "limit": 20, "counts": true, "view": "s0", "filters": filter }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["x-tessera-region"], "exact");
+        assert_eq!(keys_of(&body), keys_of(&unfiltered), "{terms:?}: {body}");
+        let mut total = 0;
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..N)
+                .filter(|&e| sees(e) && passes(e) && archive_of(e) == key)
+                .count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+            total += expected;
+        }
+        assert!(total > 0, "the filter passes some item for {terms:?}");
+    }
+}
+
+/// **A value the filter excludes is offered with count 0**, and a filter on the counted column
+/// itself narrows the counts to its own values.
+#[tokio::test]
+async fn a_value_the_filter_excludes_is_offered_with_zero() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, _, body) = post(
+        &server,
+        &token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({
+            "q": "", "limit": 20, "counts": true, "view": "s0",
+            "filters": { "archive": { "in": ["cond"] } },
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // The server's `max_suggestions` is 4.
+    assert_eq!(keys_of(&body), ["astro", "cond", "hep", "math"], "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let expected = if value["key"] == "cond" {
+            (0..N).filter(|&e| archive_of(e) == "cond").count() as u64
+        } else {
+            0
+        };
+        assert_eq!(value["count"], expected, "{body}");
+    }
+}
+
+/// `filters` needs `view`, is parsed as the viewport parses it, and without `counts` changes
+/// nothing.
+#[tokio::test]
+async fn the_post_forms_refusals() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let path = "/v1/categories/archive/suggest";
+    let filter = serde_json::json!({ "archive": { "in": ["cond"] } });
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "filters": filter }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": { "nonesuch": { "in": ["x"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, headers, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "view": "s0", "filters": filter }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(headers.get("x-tessera-region").is_none());
+    assert!(body["values"].as_array().unwrap().iter().all(|v| v.get("count").is_none()));
+}
+
+/// **A suggest counting within a view takes a compute permit, and one that does not open a view
+/// does not**: with the gate's one permit held and no queue, a count within a view is shed with
+/// `429` in either form, filtered or not, and a count across the database and a page without
+/// counts are served.
+#[tokio::test]
+async fn a_suggest_counting_within_a_view_is_subject_to_compute_admission() {
+    let tmp = TempDir::new().unwrap();
+    copy_categories(&tmp);
+    let server = spawn_server_with_config_and_gate(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        default_engine_config(),
+        tessera_server::state::ComputeGate::new(1, 0, 250),
+    )
+    .await;
+    let token = token_for(&server, &["0"]).await;
+    let held = server.state.compute_gate.admit().await.expect("the one permit is free");
+    let path = "/v1/categories/archive/suggest";
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, _, body) =
+        post(&server, &token, path, &serde_json::json!({ "counts": true, "view": "s0" })).await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, body) =
+        get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true&view=s0").await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&view=s0").await;
+    assert_eq!(status, 200, "{body}");
+    drop(held);
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+/// The counts a filtered `POST` serves for `archive` in `s0`, by key, and the whole body.
+async fn filtered_counts(
+    server: &TestServer,
+    token: &str,
+    filters: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let (status, _, body) = post(
+        server,
+        token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": filters }),
+    )
+    .await;
+    (status, body)
+}
+
+/// **A `member_of` leaf counts the artifact's members this principal may see**; an artifact
+/// withheld from the principal answers exactly as an identifier naming nothing, and a layer the
+/// principal cannot reach is refused exactly as one that does not exist.
+#[tokio::test]
+async fn a_member_of_filter_counts_the_members_and_withholds_as_absence() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let mut teams = flat_layer("teams");
+    teams["artifact_visibility"] = serde_json::json!({ "field": "team", "default": "inherited" });
+    register(&server, teams).await;
+    let mut hidden = flat_layer("hidden");
+    hidden["visibility"] = serde_json::json!("secret");
+    register(&server, hidden).await;
+    let publish = |layer: &'static str, artifacts: serde_json::Value| {
+        let server = &server;
+        async move {
+            let resp = server
+                .client
+                .put(server.control_url(&format!("/control/layers/{layer}/artifacts")))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!({ "field": "id", "artifacts": artifacts }))
+                .send()
+                .await
+                .unwrap();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            body["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["tessera_id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let ids = publish(
+        "teams",
+        serde_json::json!([
+            { "key": "open", "members": members(0..30), "access": null },
+            { "key": "withheld", "members": members(30..50), "access": ["secret"] },
+        ]),
+    )
+    .await;
+    publish("hidden", serde_json::json!([{ "key": "h", "members": members(0..10), "access": null }]))
+        .await;
+    let (open, withheld) = (&ids[0], &ids[1]);
+
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (status, body) = filtered_counts(
+            &server,
+            &token,
+            serde_json::json!({ "member_of": { "layer": "teams", "artifact": open } }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..30).filter(|&e| sees(e) && archive_of(e) == key).count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+        }
+    }
+
+    let withheld_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": withheld } }),
+    )
+    .await;
+    let nothing_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": "123456789" } }),
+    )
+    .await;
+    assert_eq!(withheld_answer, nothing_answer);
+    assert!(withheld_answer.1["values"].as_array().unwrap().iter().all(|v| v["count"] == 0));
+
+    let (unreachable_status, unreachable) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "hidden", "artifact": open } }),
+    )
+    .await;
+    let (unknown_status, unknown) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "nowhere", "artifact": open } }),
+    )
+    .await;
+    assert_eq!(unreachable_status, 422, "{unreachable}");
+    assert_eq!(unknown_status, unreachable_status);
+    assert_eq!(unknown["error"], unreachable["error"]);
+    assert_eq!(
+        unknown["detail"].as_str().unwrap().replace("nowhere", "hidden"),
+        unreachable["detail"].as_str().unwrap()
+    );
+}
+
+/// **A negated filter counts the items carrying a value in its column that match none of it.**
+#[tokio::test]
+async fn a_negated_filter_counts_what_it_leaves() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, body) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "none_of": [{ "department": { "in": ["d01", "d02"] } }] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let key = value["key"].as_str().unwrap();
+        let expected = (0..N)
+            .filter(|&e| !["d01", "d02"].contains(&department_of(e).as_str()) && archive_of(e) == key)
+            .count() as u64;
+        assert_eq!(value["count"], expected, "{key}: {body}");
+    }
 }

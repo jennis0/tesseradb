@@ -11,6 +11,8 @@
 
 mod common;
 
+use tessera_engine::SuggestRequest;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
@@ -521,7 +523,20 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     // And the suggest verb, whose index the declaration built for a vocabulary no build column
     // named: a value a visible member carries is offered, one nothing carries is not.
     let suggested = engine
-        .suggest(&session, "tag", None, "e", 20, false, 100_000, 0)
+        .suggest(
+            &session,
+            SuggestRequest {
+                column: "tag",
+                view: None,
+                filter: None,
+                q: "e",
+                limit: 20,
+                counts: false,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
         .expect("a runtime category's vocabulary has a suggestion index")
         .expect("the column answers");
     let keys: Vec<&str> = suggested.values.iter().map(|v| v.key.as_str()).collect();

@@ -33,10 +33,11 @@ def viewer_operations(contract: Path) -> set[str]:
 
 
 #: The operations Python reaches under another name: a selection's count and sample are the
-#: viewport route, and a category listing given a prefix is the suggestion route.
+#: viewport route, and a category listing given a prefix is the suggestion route, in either form.
 REACHED_AS = {
     "viewport": [(Selection, "count"), (Selection, "sample")],
     "suggestCategoryValues": [(Viewer, "categories")],
+    "suggestCategoryValuesFiltered": [(Viewer, "categories")],
 }
 
 

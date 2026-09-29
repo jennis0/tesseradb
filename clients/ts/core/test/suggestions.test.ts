@@ -60,7 +60,7 @@ describe('the category typeahead', () => {
     let calls = 0;
     const ask = vi.fn(async (column: string, q: string): Promise<SuggestResult> => {
       calls++;
-      if (calls === 1) return {status: 'superseded', retryAfterS: 1};
+      if (calls === 1) return {status: 'superseded', retryAfterS: 1, detail: null};
       return ok(column, q);
     });
     const {clock, part, state} = typeahead(ask);
@@ -112,7 +112,7 @@ describe('the category typeahead', () => {
     let calls = 0;
     const ask = vi.fn(async (): Promise<SuggestResult> => {
       calls++;
-      return {status: 'superseded', retryAfterS: 0};
+      return {status: 'superseded', retryAfterS: 0, detail: null};
     });
     const {clock, part, state} = typeahead(ask);
 

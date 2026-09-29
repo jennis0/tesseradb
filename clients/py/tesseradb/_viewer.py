@@ -958,6 +958,7 @@ class Viewer:
         prefix: Optional[str] = None,
         view: Optional[str] = None,
         codes: Optional[Sequence[int]] = None,
+        filters: Optional[dict] = None,
     ):
         """The values of a category column that this reader may see, as a pyarrow table.
 
@@ -976,6 +977,9 @@ class Viewer:
         - `codes`: list only these codes, such as the codes in a sample's category column. A
           code with no value this reader may see is left out. It cannot be combined with
           `prefix`.
+        - `filters`: with `prefix` and `view`, count only the items in the view that pass this
+          filter expression. The values listed and their order do not change; a value the
+          filter excludes has a count of 0.
 
         Without a prefix the rows are in key order; with one, in the order of the matched text.
         `.to_pandas()` on the table gives a DataFrame, where pandas is installed.
@@ -983,6 +987,7 @@ class Viewer:
             v.categories("venue")
             v.categories("venue", prefix="neur")
             v.categories("venue", codes=sample.column("venue").unique().to_pylist())
+            v.categories("venue", prefix="", view="papers", filters={"year": {"gte": 2020}})
         """
         import pyarrow as pa
 
@@ -1001,6 +1006,17 @@ class Viewer:
                 "categories: codes= lists the values of codes you hold and prefix= searches the "
                 "values by text. Give one of them"
             )
+        if filters is not None and codes is not None:
+            raise Refusal(
+                "categories: codes= resolves codes and carries no counts for filters= to narrow; "
+                "give prefix= with filters= in place of codes="
+            )
+        if filters is not None and prefix is None:
+            raise Refusal(
+                "categories: filters= narrows the counts of a listing by prefix=; give prefix= as "
+                "well, where an empty one lists values from the start up to the server's "
+                "max_suggestions"
+            )
         path = f"/v1/categories/{urllib.parse.quote(column, safe='')}"
         query: dict = {} if view is None else {"view": view}
         if codes is not None:
@@ -1013,7 +1029,11 @@ class Viewer:
             return table(values)
         if prefix is not None:
             query.update(q=prefix, counts="true")
-            page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
+            if filters is None:
+                page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
+            else:
+                body = {**query, "counts": True, "filters": filters}
+                page = json.loads(self._request("POST", path + "/suggest", body))
             more = "true" if page.get("more") else "false"
             return table(page["values"], counted=True).replace_schema_metadata(
                 {"tessera.more": more}
