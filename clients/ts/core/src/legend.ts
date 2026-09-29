@@ -1,6 +1,5 @@
 import type {Composition} from './compose.js';
 import {ValueReservoir, countCodesCached, countCodesInPiece, extendRanks, lacksValues, sizesPoints, widenDomain, widenDomainOver, type Domain, type Ranks, type ValueSample} from './encoding.js';
-import type {Masked} from './counts.js';
 import {refusalOf, type Refusal} from './presented.js';
 import type {CategoryValue, DeclaredScalar} from './types.js';
 
@@ -41,12 +40,6 @@ export type LegendProjection = {
   colourBy: string | null;
   /** The number column the points are sized by, as `setSizeBy` last set it, or `null` for one size. */
   sizeBy: string | null;
-  /**
-   * Exact counts per category value, per column, by category key, over the viewer's current set,
-   * for the count beside each legend entry. Not built yet: no route serves per-value counts, so the
-   * store never sets this and the legend shows no counts. The marks are a sample and give no count.
-   */
-  counts?: Record<string, Record<string, Masked>>;
 };
 
 /** The legend with nothing accumulated and nothing chosen. */

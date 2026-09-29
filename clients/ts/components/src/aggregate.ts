@@ -1,0 +1,70 @@
+import type {AggregateEntry, AggregateSpec, AggregateTable, Store} from '@tesseradb/client';
+
+/** One listed group of an aggregate table: its key (an artifact's `tessera_id` in decimal), title and count. */
+export type GroupCount = {key: string; title: string | null; count: number};
+
+/**
+ * The listed groups of `table`, in the server's order: largest count first for a `top` grouping,
+ * the order named otherwise. The `rest` and `none` rows are left out.
+ */
+export function listedGroups(table: AggregateTable | undefined): GroupCount[] {
+  if (!table) return [];
+  const rows = table.rows;
+  const group = rows.getChild('group');
+  const key = rows.getChild('key');
+  const title = rows.getChild('title');
+  const count = rows.getChild('count');
+  if (!group || !key || !count) return [];
+  const out: GroupCount[] = [];
+  for (let i = 0; i < rows.numRows; i++) {
+    if (group.get(i) !== 'listed') continue;
+    const k = key.get(i) as unknown;
+    if (k === null || k === undefined) continue;
+    const t = title?.get(i) as unknown;
+    out.push({key: String(k), title: typeof t === 'string' ? t : null, count: Number(count.get(i) as bigint | number)});
+  }
+  return out;
+}
+
+/** Every listed group's count across the tables of `entry`, by key; `null` before an answer lands. */
+export function countsByKey(entry: AggregateEntry | undefined): Map<string, number> | null {
+  const result = entry?.result;
+  if (!result) return null;
+  const out = new Map<string, number>();
+  for (const table of result.tables) for (const g of listedGroups(table)) out.set(g.key, g.count);
+  return out;
+}
+
+let registered = 0;
+
+/**
+ * One aggregate an element keeps registered with its store under an id of its own. {@link set}
+ * registers a spec only when it differs from the one held, since each registration sends a
+ * request; `null` drops it.
+ */
+export class HeldAggregate {
+  readonly id: string;
+  private store: Store | null = null;
+  private held = '';
+
+  constructor(prefix: string) {
+    registered += 1;
+    this.id = `${prefix}#${registered}`;
+  }
+
+  /** Register `spec` with `store`, or drop the registration where `spec` is `null` or the store changed. */
+  set(store: Store | null, spec: AggregateSpec | null): void {
+    const key = spec === null ? '' : JSON.stringify(spec, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+    if (store === this.store && key === this.held) return;
+    if (this.store && (this.store !== store || key === '')) this.store.setAggregate(this.id, null);
+    this.store = store;
+    this.held = key;
+    if (store && spec) store.setAggregate(this.id, spec);
+    if (!spec) this.store = null;
+  }
+
+  /** The entry the store holds for this registration. */
+  entry(): AggregateEntry | undefined {
+    return this.store?.get('aggregates').get(this.id);
+  }
+}

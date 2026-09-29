@@ -554,7 +554,9 @@ export interface Store {
    * given, and {@link Store.requestFilters} as its `filters`, so the counts are over what the map
    * counts. With `spec.without` naming a column, its control in the filter position is left out of
    * `filters`, as {@link withoutClause} empties it, so a filter control's own counts keep showing
-   * the values its clause would exclude while every other clause still narrows them. A `429` or
+   * the values its clause would exclude while every other clause still narrows them. With
+   * `spec.withoutMembersOf` naming a layer, that layer's `member_of` clauses in the filter position
+   * are left out in the same way. A `429` or
    * `503` is sent again as the map's requests are, with the same backoff, and published as
    * `retrying` meanwhile. The store asks again, aborting the request it replaces, when `setAggregate` is called
    * for the id again, when the filters, the `member_of` clauses or the selected region change, at a
@@ -847,7 +849,7 @@ export function createStore(options: StoreOptions): Store {
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
-      const filters = spec.without === undefined ? requestFilters() : filtersWithout(spec.without);
+      const filters = aggregateFilters(spec);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
       const result = await client.aggregate(
         asked.token,
@@ -1609,6 +1611,18 @@ export function createStore(options: StoreOptions): Store {
   /** {@link requestFilters} without `column`'s filter-position control. */
   function filtersWithout(column: string): FilterExpr | null {
     return withSelected(filtersBesideRegion(withoutClause(projections.filters.draft, column, 'filter')));
+  }
+
+  /**
+   * {@link requestFilters} less the filter-position control `spec.without` names and the
+   * filter-position `member_of` clauses on the layer `spec.withoutMembersOf` names.
+   */
+  function aggregateFilters(spec: AggregateSpec): FilterExpr | null {
+    const {draft, members} = projections.filters;
+    const kept = spec.without === undefined ? draft : withoutClause(draft, spec.without, 'filter');
+    const layer = spec.withoutMembersOf;
+    const clauses = layer === undefined ? members : members.filter((m) => m.verb !== 'filter' || m.layer !== layer);
+    return withSelected(withMembers(composeFilters(kept, 'filter'), clauses, 'filter'));
   }
 
   /** `expr` with the selected region's leaf joined. */

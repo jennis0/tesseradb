@@ -229,8 +229,10 @@ the whole visible set. It chooses no grouping. A registration can name one colum
 the filter draft keys its controls, and the store then sends its filters less that column's
 control. A category control uses this to list its own values: with its clause set, the values it
 excludes are still counted, and every other clause, the `member_of` clauses and the selected
-region still narrow them. `without` names a draft control only, so the `member_of` clauses and the
-region are always sent, and nothing is left out unless a registration names it. A `429` or `503`
+region still narrow them. A registration can also name one layer in `withoutMembersOf`, and the
+store then leaves out that layer's `member_of` clauses in the filter position; a cluster control
+uses this to keep counting the clusters its own clauses exclude. The region is always sent, and
+nothing is left out unless a registration names it. A `429` or `503`
 is sent again as the map's own requests are, after the same backoff or the server's
 `Retry-After` where that is longer, and a newer change cancels the wait. `selection.aggregate` sends the selection's filters
 and box as the request's `filters`, so every grouping's total is the selection's count.
