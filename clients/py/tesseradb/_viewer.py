@@ -971,7 +971,9 @@ class Viewer:
           this text, ignoring case. The rows then also have `count`, the number of
           items this reader may see that carry the value. The server returns at most its
           `max_suggestions` setting of such values; the table's schema metadata
-          `tessera.more` is `"true"` when more matched than were returned.
+          `tessera.more` is `"true"` when more matched than were returned, and
+          `tessera.total` is the number of items the counts are taken over, so a count divided
+          by it is the value's share.
         - `view`: the view to read the column in. A column declared for a view group holds
           different values in each of the group's views, so it needs this.
         - `codes`: list only these codes, such as the codes in a sample's category column. A
@@ -1036,7 +1038,7 @@ class Viewer:
                 page = json.loads(self._request("POST", path + "/suggest", body))
             more = "true" if page.get("more") else "false"
             return table(page["values"], counted=True).replace_schema_metadata(
-                {"tessera.more": more}
+                {"tessera.more": more, "tessera.total": str(page["total"])}
             )
         values: list = []
         while True:

@@ -564,6 +564,8 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
       s.switching = false;
     });
     explorer.titleField = dataset.titleField ?? '';
+    // The heading names the dataset as the dataset picker does.
+    explorer.datasetTitle = dataset.label;
     writeViewToUrl(opening.id);
     followCameraWithBasemap(opening);
     void installBasemap(opening);

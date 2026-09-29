@@ -396,20 +396,191 @@ describe('suggest in the store', () => {
     const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
     await clock.advance(1);
 
-    store.suggest('archive', '');
+    store.suggest('archive', '', 'filter');
     await clock.advance(200);
-    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0', counts: true});
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+    expect(suggest).toHaveBeenCalledWith('tok', 'archive', '', {view: 's0', counts: true, signal: expect.any(AbortSignal)});
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', verb: 'filter', values: [], more: false, total: null});
 
     store.clear();
     expect(store.get('filters').suggestions).toEqual({});
     expect(store.get('filters').suggestErrors).toEqual({});
 
     // The dedupe is cleared with the projection, so asking again for the same q reaches the client.
-    store.suggest('archive', '');
+    store.suggest('archive', '', 'filter');
     await clock.advance(200);
     expect(suggest).toHaveBeenCalledTimes(2);
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', verb: 'filter', values: [], more: false, total: null});
+  });
+
+  it('counts a filter-position ask under the filter less its own clause, a highlight-position ask under the whole filter, and asks again when the filter changes', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const suggest = vi.fn(async (_token: string, column: string, q: string, _opts: {filters?: unknown}) => ({status: 'ok' as const, column, q, values: [], more: false, total: 7}));
+    (client as unknown as {suggest: typeof suggest}).suggest = suggest;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    const filtersOfLastAsk = () => suggest.mock.calls.at(-1)?.[3].filters;
+
+    store.setFilters({
+      filter: {archive: {family: 'category', keys: ['cs']}, primary_category: {family: 'category', keys: ['cs.LG']}},
+      highlight: {}
+    });
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    expect(filtersOfLastAsk()).toEqual({primary_category: {in: ['cs.LG']}});
+    expect(store.get('filters').suggestions['archive']).toEqual({q: 'c', verb: 'filter', values: [], more: false, total: 7});
+
+    store.suggest('archive', 'c', 'highlight');
+    await clock.advance(200);
+    expect(filtersOfLastAsk()).toEqual({all_of: [{archive: {in: ['cs']}}, {primary_category: {in: ['cs.LG']}}]});
+
+    // The filter changed, so the held ask is asked again under the new one.
+    store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
+    await clock.advance(200);
+    expect(suggest).toHaveBeenCalledTimes(3);
+    expect(filtersOfLastAsk()).toEqual({archive: {in: ['cs']}});
+
+    // In the filter position the column's own clause is all there is, so nothing narrows the count.
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    expect(suggest).toHaveBeenCalledTimes(4);
+    expect(suggest.mock.calls.at(-1)?.[3]).not.toHaveProperty('filters');
+  });
+});
+
+describe('suggest in the store, with requests held in flight', () => {
+  type Held = {column: string; q: string; filters: unknown; signal: AbortSignal; answer: (over?: Partial<{total: number; shed: boolean}>) => void};
+
+  /** A store over a client whose suggest requests wait until the test answers them. */
+  async function holding() {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client} = fakeClient(() => response('ck'));
+    const sent: Held[] = [];
+    const suggest = (_token: string, column: string, q: string, opts: {filters?: unknown; signal?: AbortSignal}) =>
+      new Promise((resolve, reject) => {
+        const signal = opts.signal!;
+        signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        sent.push({
+          column,
+          q,
+          filters: opts.filters ?? null,
+          signal,
+          answer: (over = {}) =>
+            resolve(over.shed ? {status: 'shed', retryAfterS: 0, detail: 'one suggest in flight'} : {status: 'ok', column, q, values: [], more: false, total: over.total ?? 1})
+        });
+      });
+    Object.assign(client, {suggest});
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    const inFlight = () => sent.filter((h) => !h.signal.aborted && !answered.has(h));
+    const answered = new Set<Held>();
+    const answer = (h: Held, over?: Partial<{total: number; shed: boolean}>) => {
+      answered.add(h);
+      h.answer(over);
+    };
+    return {clock, store, sent, inFlight, answer};
+  }
+
+  const filterOn = (keys: Record<string, string[]>) => ({
+    filter: Object.fromEntries(Object.entries(keys).map(([column, k]) => [column, {family: 'category' as const, keys: k}])),
+    highlight: {}
+  });
+
+  it('keeps the page while a refresh is in flight, cancels a superseded refresh, and lands the latest', async () => {
+    const {clock, store, sent, inFlight, answer} = await holding();
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    answer(sent[0]!, {total: 10});
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['archive']?.total).toBe(10);
+
+    store.setFilters(filterOn({primary_category: ['cs.LG']}));
+    await clock.advance(200);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.filters).toEqual({primary_category: {in: ['cs.LG']}});
+    expect(store.get('filters').suggestions['archive']?.total).toBe(10);
+
+    store.setFilters(filterOn({primary_category: ['cs.CV']}));
+    expect(sent[1]!.signal.aborted).toBe(true);
+    await clock.advance(200);
+    expect(inFlight()).toEqual([sent[2]]);
+    expect(sent[2]!.filters).toEqual({primary_category: {in: ['cs.CV']}});
+    answer(sent[2]!, {total: 4});
+    await clock.advance(1);
+    expect(store.get('filters').suggestions['archive']).toEqual({q: 'c', verb: 'filter', values: [], more: false, total: 4});
+  });
+
+  it('keeps the page when a refresh is shed until its retries run out, and reports nothing', async () => {
+    const {clock, store, sent, inFlight, answer} = await holding();
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    answer(sent[0]!, {total: 10});
+    await clock.advance(1);
+
+    store.setFilters(filterOn({primary_category: ['cs.LG']}));
+    for (let i = 0; i < 10; i++) {
+      await clock.advance(1_000);
+      for (const h of inFlight()) answer(h, {shed: true});
+    }
+    expect(sent.length).toBe(7);
+    expect(store.get('filters').suggestions['archive']?.total).toBe(10);
+    expect(store.get('filters').suggestErrors).toEqual({});
+  });
+
+  it('reports backpressure when an ask typed into the box is still shed after its retries', async () => {
+    const {clock, store, inFlight, answer} = await holding();
+    store.suggest('archive', 'c', 'filter');
+    for (let i = 0; i < 10; i++) {
+      await clock.advance(1_000);
+      for (const h of inFlight()) answer(h, {shed: true});
+    }
+    expect(store.get('filters').suggestErrors['archive']).toEqual({code: 'backpressure', detail: 'one suggest in flight'});
+  });
+
+  it('does not ask again for a change the request would not carry', async () => {
+    const {clock, store, sent, answer} = await holding();
+    store.setFilters(filterOn({archive: ['cs'], primary_category: ['cs.LG']}));
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    answer(sent[0]!);
+    await clock.advance(1);
+
+    // A highlight clause, and a chip on the asking column's own filter clause.
+    store.setFilters({...filterOn({archive: ['cs'], primary_category: ['cs.LG']}), highlight: {archive: {family: 'category', keys: ['cs']}}});
+    store.setFilters(filterOn({archive: ['cs', 'math'], primary_category: ['cs.LG']}));
+    await clock.advance(1_000);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('sends one request at a time, the latest ask per column', async () => {
+    const {clock, store, sent, inFlight, answer} = await holding();
+    store.suggest('archive', 'c', 'filter');
+    store.suggest('primary_category', 'cs', 'filter');
+    await clock.advance(200);
+    expect(inFlight().map((h) => h.column)).toEqual(['archive']);
+    // Typed on while it waits: the queued ask for the column is replaced.
+    store.suggest('primary_category', 'cs.', 'filter');
+    await clock.advance(200);
+    answer(sent[0]!);
+    await clock.advance(1);
+    expect(inFlight().map((h) => [h.column, h.q])).toEqual([['primary_category', 'cs.']]);
+    expect(sent).toHaveLength(2);
+  });
+
+  it('forgets a column: its page goes and a change of filter asks nothing for it', async () => {
+    const {clock, store, sent, answer} = await holding();
+    store.suggest('archive', 'c', 'filter');
+    await clock.advance(200);
+    answer(sent[0]!);
+    await clock.advance(1);
+
+    store.forgetSuggestions('archive');
+    expect(store.get('filters').suggestions['archive']).toBeUndefined();
+    store.setFilters(filterOn({primary_category: ['cs.LG']}));
+    await clock.advance(1_000);
+    expect(sent).toHaveLength(1);
   });
 });
 
@@ -1080,7 +1251,7 @@ describe('the token', () => {
     const described = store.describe(8n);
     const opened = store.openArtifact(9n);
     store.needShape(10n);
-    store.suggest('archive', 'c');
+    store.suggest('archive', 'c', 'filter');
     await clock.advance(1_000);
     land!();
     await Promise.all([picked, opened]);
@@ -1105,7 +1276,7 @@ describe('the token', () => {
 
     await store.pick(7n);
     expect(await store.describe(8n)).toBeNull();
-    store.suggest('archive', 'c');
+    store.suggest('archive', 'c', 'filter');
     await clock.advance(1_000);
 
     expect(store.get('selection').itemRefusal?.code).toBe('bad-credential');
@@ -1132,7 +1303,7 @@ describe('the token', () => {
 
     const opened = store.openArtifact(9n);
     store.needShape(10n);
-    store.suggest('archive', 'c');
+    store.suggest('archive', 'c', 'filter');
     const browsed = store.browse({layer: 'l'});
     await clock.advance(1_000);
     land!();
@@ -1164,7 +1335,7 @@ describe('the token', () => {
     const before = store.get('selection');
 
     const waiting = [store.pick(7n), store.openArtifact(9n), store.describe(8n), store.browse({layer: 'l'}).catch(() => null)];
-    store.suggest('archive', 'c');
+    store.suggest('archive', 'c', 'filter');
     await clock.advance(1_000);
     store.dispose();
     land!();

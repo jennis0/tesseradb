@@ -3094,6 +3094,10 @@ components:
         more:
           type: boolean
           description: "`true` where the walk stopped before its range was exhausted: the page filled, or `selection.max_suggestion_walk` values were examined. Answered from the session's set of visible values, it means only that the page filled. There is no cursor; a client asks for more by extending `q`."
+        total:
+          type: integer
+          minimum: 0
+          description: Present only with `counts=true`. The number of items in the set each `count` is taken over. That set is the items this principal may see, within `view` where the request names one, passing `filters` where the request has them. A value's share of that set is `count / total`.
 
     Pin:
       type: object

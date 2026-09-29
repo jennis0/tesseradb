@@ -1,7 +1,7 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestValue} from '@tesseradb/client';
+import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@tesseradb/client';
 import {TesseraElement, columnCaption, emit, keyTitle, parseDateText, shortDateText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -30,12 +30,14 @@ const BAR_FLOOR = 2;
  * the box says so. A text clause set from outside that no query writes shows read-only, with Clear.
  *
  * A category is a search box over `/v1/categories/{column}/suggest`, which lists nothing until
- * something is typed. Each value suggested shows its count in the current view and a bar, its
- * share of every item the viewer can see in the view, which is what the counts are counted over.
- * In the highlight position a value the column's filter leaves out is greyed, counted 0 and cannot
- * be chosen. The arrow keys move through the suggestions, and Enter chooses the one reached, the
- * first by default, or takes it out where it is chosen; text that suggests nothing chooses
- * nothing. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
+ * something is typed. Each value suggested shows its count in the current view among the items
+ * passing the filter, and a bar, its share of the total the server counted over. In the filter
+ * position the count leaves out the column's own clause, so a value counts what choosing it as well
+ * would add. In the highlight position the count is under the whole filter, and a value counted 0
+ * is greyed, marked "none match" and cannot be chosen, though one already chosen can be taken out.
+ * The arrow keys move through the suggestions, and Enter chooses the one reached, the first by
+ * default, or takes it out where it is chosen; text that suggests nothing chooses nothing. Emptying
+ * the box, or removing the control, has the store stop asking for the column. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
  * column's values, the heading says how many there are.
  *
  * A number is two inputs, and a date two text inputs that read and write dates as day, month and
@@ -60,9 +62,9 @@ const BAR_FLOOR = 2;
  * @csspart hint - The line under a text column's box saying how to write a query.
  * @csspart mode - The keyword column's operator select.
  * @csspart values - The typeahead's suggestions.
- * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` where the filter
- *   leaves it out.
- * @csspart bar - A suggested value's share of the items matched.
+ * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` in the highlight
+ *   position where it is counted 0 and not chosen.
+ * @csspart bar - A suggested value's share of the items its count is taken over.
  * @csspart value-count - A suggested value's count.
  * @csspart chosen - A chosen category value's chip.
  * @csspart more - The hint that more values match than one page holds.
@@ -303,10 +305,10 @@ export class TesseraFilter extends TesseraElement {
     return this.resolvedStore?.get('meta')?.filterOperands.find((o) => o.column === this.column) ?? null;
   }
 
-  /** The suggestion page for `this.search`, or `null` while it is stale or has not landed. */
-  private get resolvedSuggestion(): {q: string; values: SuggestValue[]; more: boolean} | null {
+  /** The suggestion page for `this.search` in this position, or `null` while it is stale or has not landed. */
+  private get resolvedSuggestion(): SuggestionPage | null {
     const s = this.resolvedStore?.get('filters').suggestions[this.column];
-    return s && s.q === this.search ? s : null;
+    return s && s.q === this.search && s.verb === this.verb ? s : null;
   }
 
   private get resolvedSuggestRefusal(): Refusal | null {
@@ -314,21 +316,32 @@ export class TesseraFilter extends TesseraElement {
   }
 
   /**
-   * The number the suggestion counts are counted over, which a value's bar is a share of: every item
-   * this viewer can see in the view, since the suggest route counts within the view and not within
-   * the filter. `null` before the view is counted.
+   * The number the suggestion counts are counted over, which a value's bar is a share of: the
+   * page's `total`. `null` where the page has none or it is 0.
    */
-  private countedOver(): number | null {
-    const visible = this.resolvedStore?.get('view').visible;
-    return visible && visible.value > 0 ? visible.value : null;
+  private countedOver(page: SuggestionPage | null): number | null {
+    return page?.total ? page.total : null;
   }
 
-  /** Ask the store's typeahead for `q`, once per distinct `q`; nothing is asked before anything is typed. */
+  /**
+   * Ask the store's typeahead for `q`, once per distinct `q`. An emptied box asks nothing and has
+   * the store forget the column, so a change of filter does not ask for it.
+   */
   private ask(q: string): void {
     const s = this.resolvedStore;
-    if (!s || q === '' || this.lastAsked === q) return;
+    if (!s || this.lastAsked === q) return;
+    if (q === '') {
+      if (this.lastAsked !== null) s.forgetSuggestions(this.column);
+      this.lastAsked = null;
+      return;
+    }
     this.lastAsked = q;
-    s.suggest(this.column, q);
+    s.suggest(this.column, q, this.verb);
+  }
+
+  override disconnectedCallback(): void {
+    this.ask('');
+    super.disconnectedCallback();
   }
 
   protected override onStoreChange(): void {
@@ -358,6 +371,9 @@ export class TesseraFilter extends TesseraElement {
       this.pending?.();
       this.draft = null;
       this.sent = null;
+      // The other position counts under another filter.
+      this.lastAsked = null;
+      this.ask(this.search);
       this.invalid = {};
     }
   }
@@ -493,14 +509,13 @@ export class TesseraFilter extends TesseraElement {
     const suggestion = this.resolvedSuggestion;
     const refusal = this.resolvedSuggestRefusal;
     const chosen = new Set(draft.keys);
-    // In the highlight position, the values the column's own filter leaves out cannot be lit.
-    const filtered = this.verb === 'highlight' ? s?.get('filters').draft.filter[this.column] : undefined;
-    const kept = filtered?.family === 'category' && filtered.keys.length > 0 ? new Set(filtered.keys) : null;
-    const total = this.countedOver();
+    const total = this.countedOver(suggestion);
     const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
     const typed = this.search !== '';
     const rows = typed ? (suggestion?.values ?? []) : [];
-    const out = (v: SuggestValue) => kept !== null && !kept.has(v.key);
+    // In the highlight position, a value no item passing the filter carries cannot be lit; one
+    // already lit can still be taken out.
+    const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0 && !chosen.has(v.key);
     // The row the keys act on: the one the arrows reached, else the first that can be chosen.
     const choosable = rows.filter((v) => !out(v));
     const active = choosable.find((v) => v.code === this.activeCode) ?? choosable[0] ?? null;
@@ -526,18 +541,19 @@ export class TesseraFilter extends TesseraElement {
           } else if (e.key === 'Escape' && this.search) {
             e.stopPropagation();
             this.search = '';
+            this.ask('');
           }
         }} /></div>`;
 
     const option = (v: SuggestValue) => {
       const left = out(v);
-      const count = left ? 0 : v.count;
+      const count = v.count;
       const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
       return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
         aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
         @click=${() => !left && toggle(v.key)}>
         <span class="opt">
-          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">filtered out</span>` : nothing}</span>
+          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">none match</span>` : nothing}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
         </span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
