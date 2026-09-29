@@ -271,19 +271,21 @@ unique field with neither `render` nor `index`, because the index is then the fi
 structure ([queries](queries.md#filters)).
 
 A build is an ingest into an empty database, and it names items by the rule an ingest uses
-([resolving a batch](write-path.md#resolving-a-batch)). It reads its files in declaration order:
-each view's points, the attribute files, the access relation, then each layer's members. A
-points row whose unique values name no item creates one, as does a points row carrying no unique
-value, so a corpus that declares no unique field makes each row of its points an item of its own.
-A points row carrying a value an earlier view's points gave names that item, and this is how one
-item comes to be in two views. A row of any other file must name an item, so a file other than a
-view's points that carries no unique field's column is refused. An empty database holds no
-`tessera_id`, so a row naming an item by one is refused.
+([resolving a batch](write-path.md#resolving-a-batch)). It reads its files by kind, and the files of
+one kind in declaration order: each view's points, then the attribute files, the access relation and
+each layer's members. A points row whose unique values name no item creates one, as does a points
+row carrying no unique value, so a corpus that declares no unique field makes each row of its
+points an item of its own. A points row carrying a value an earlier view's points gave names that
+item, and this is how one item comes to be in two views. A row of any other file must name an
+item, so the build is refused where a file other than a view's points carries neither a
+`tessera_id` column nor a unique field's column. A `tessera_id` column meets that requirement, but
+an empty database holds no `tessera_id`, so each row naming an item by one is refused as
+`unknown_tessera_id`.
 
 A build leaves out a row that names two items, names an item or sets a value an earlier row of its
 file names or sets, or names no item in a file that cannot create one. Of two rows naming one item,
-the first is kept. The build goes on without the refused rows, prints a count for each file and
-reason with the values of up to ten of the rows, and writes the same list to
+the first is kept. The build goes on without the refused rows and prints a count for each file and
+reason with the values of up to ten of the rows. Where it refused any, it writes the same list to
 `reports/refused.json` in the bundle. `tessera build --strict` refuses the build at the first file
 with a refused row instead ([CLI reference](../reference/cli.md)).
 
@@ -291,12 +293,12 @@ with a refused row instead ([CLI reference](../reference/cli.md)).
 build or at a running service. Declaring it `true` at a running service builds the index over every
 stored value, and the declaration takes effect once that finds no value held twice. Otherwise it is
 refused with a count of the values held more than once and up to ten of them, and the field stays
-as it was. Declaring it `false` drops
-the index at once and keeps the values. Both survive a restart. How the index is built while writes
-continue is in [the write path](write-path.md#unique-values). An ingest row carrying a unique value
-names the item that holds it; a row whose values name two items is refused, as is a later row
-setting a value an earlier row of its batch sets. A refused row is listed in the answer and the
-batch's other rows apply, unless the caller asks for a strict batch, which is refused whole
+as it was. Declaring it `false` drops the index at once and keeps the values. Both survive a
+restart. How the index is built while writes continue is in
+[the write path](write-path.md#unique-values). An ingest row carrying a unique value names the item
+that holds it; a row whose values name two items is refused, as is a later row setting a value an
+earlier row of its batch sets. A refused row is listed in the answer and the batch's other rows
+apply, unless the caller asks for a strict batch, which is refused whole
 ([resolving a batch](write-path.md#resolving-a-batch)).
 
 ## Vocabularies

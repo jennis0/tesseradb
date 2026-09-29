@@ -355,12 +355,12 @@ twice, once for the attributes and once for the view's positions.
 
 The `identity` lines, one for each reading, say how the build will tell one place from another. A
 database usually does that with a key. Tessera's equivalent is an attribute declared
-`unique = true`, such as the GeoNames id. A row carrying an id that a place already holds then names
-that place and changes it. We declared no unique attribute, so nothing in our file names a place,
-and each row becomes a place of its own. That's all a map built once from one file needs. If you later wanted to
-correct or delete a place by its GeoNames id, you'd keep the `geonameid` column in `convert.py` and
-declare it as an `i64` attribute with `unique = true`. Tessera would then keep an index from each id
-to its place.
+`unique = true`, such as the GeoNames id. A row carrying an id that a place already holds then
+names that place and changes it. We declared no unique attribute, so nothing in our file names a
+place, and each row becomes a place of its own. That's all a map built once from one file needs.
+If you later wanted to correct or delete a place by its GeoNames id, you'd keep the `geonameid`
+column in `convert.py` and declare it as an `i64` attribute with `unique = true`. Tessera would
+then keep an index from each id to its place.
 
 The projected views section holds a surprise. We asked for a rectangle, but the check says the
 view has been snapped outward to a square. Tessera stores positions on a grid that lines up with the
@@ -383,7 +383,7 @@ tessera check
 ...
   FAILED       attribute 'populaton': declared type 'i64', read from a column named 'populaton', which source 'points' does not carry. Its columns are: lon, lat, name, feature_class, population
 ...
-check FAILED: 1 finding(s) across 2 source(s). Nothing was read but Parquet schemas, so a clean check is not a clean build: it cannot see a value against a closed vocabulary, a member id that resolves to nothing, or where the data sits inside a view's extent
+check FAILED: 1 finding(s) across 2 source(s). Nothing was read but Parquet schemas, so a clean check is not a clean build: it cannot see a value against a closed vocabulary, which rows the identity rule refuses, or where the data sits inside a view's extent
 ```
 
 The check names the attribute, says which column it went looking for, and lists the columns the file
@@ -426,19 +426,13 @@ attribute 'name': 29,935 of 29,935 entities have a value
 attribute 'feature_class': 29,935 of 29,935 entities have a value
 attribute 'population': 29,935 of 29,935 entities have a value
 ...
+built /home/you/ireland/bundle (v00000): 29935 items, 1 terms, 29935 pairs, 2197486 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s), 0 row(s) refused
   view ireland: 29935 row(s)
 ```
 
 It takes a few seconds. Most of the report confirms what we expected. All 29,935 places took the
 default label, and every one of them has a value for each attribute. Every feature class was one of
 our nine letters, too. If one hadn't been, the build would have stopped and named it.
-
-Above the last line, a line beginning `built` names the new bundle's directory and counts
-`29935 items`, one for each row, as the check's `identity` lines promised. It ends with
-`0 row(s) refused`. A build refuses a row that names a place an earlier row already named, such as
-a second row carrying the same GeoNames id. It keeps the first row, leaves the later one out, prints
-what it left out and writes the list to `bundle/reports/refused.json`. With no unique attribute,
-nothing in our file can name a place twice.
 
 The second line gives the snapped tile in degrees, as the check did. The fourth line says one place
 fell outside that tile. The build has clamped it, which means it moved the place onto the nearest
@@ -453,6 +447,14 @@ Germany. The build has pinned it to the eastern edge of our map.
 We'll leave it there, since it makes a handy landmark. To correct it, you'd fix the longitude in
 `IE.txt`, run `convert.py` again, delete the `bundle` directory and build again. The build won't
 write over an existing bundle.
+
+The line beginning `built` names the new bundle's directory, which on your machine is the full
+path of your own `ireland` directory; we've written it as `/home/you/ireland` here. It counts
+`29935 items`, one for each row, as the check's `identity` lines promised, and ends with
+`0 row(s) refused`. A build refuses a row that names a place an earlier row already named, such as
+a second row carrying the same GeoNames id. It keeps the first row, leaves the later one out, prints
+what it left out and writes the list to `bundle/reports/refused.json`. With no unique attribute,
+nothing in our file can name a place twice.
 
 ## Serve it
 

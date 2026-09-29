@@ -165,9 +165,11 @@ viewer can see that item, and the receipt answers its `tessera_id`. An ingest ro
 two items, as one setting a unique value another item holds does, is refused and listed by its
 position and reason; in a strict batch the batch is refused with `409`, naming the values and the
 holders' `tessera_id`s so that the operator can find the item to change. It names the
-`tessera_id`, never the entity id. A
-build or a declaration of `unique` refused because values are held twice names how many there are
-and up to ten of the values, and no item.
+`tessera_id`, never the entity id. A declaration of `unique` at a running service is refused
+where values are held twice, and the refusal names how many there are and up to ten of the values,
+and no item. A build leaves out each later row naming an item or setting a value an earlier row of
+its file named or set. Its report counts the rows it left out and names up to ten of their values,
+and it names no item.
 
 ## An incomplete answer is refused
 
