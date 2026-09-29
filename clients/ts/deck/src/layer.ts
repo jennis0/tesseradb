@@ -131,7 +131,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
    * The smallest and largest radius and the scale a number column sizes marks on, under the
    * legend's `sizeBy`. A mark with no value, NaN or an infinity draws as a ring, at the smallest
    * radius or 3 px, whichever is larger. A radius that is not a finite number above zero is the
-   * default's. Defaults to {@link DEFAULT_SIZING}.
+   * default's. Under `rank` the store keeps the sample ranked against only where it was asked to,
+   * with `setSizeBy(column, {rank: true})`. Defaults to {@link DEFAULT_SIZING}.
    */
   sizing?: Sizing;
   /**

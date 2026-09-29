@@ -382,10 +382,47 @@ describe('<tessera-map> display', () => {
     const store = fakeStore({meta: meta(), status: status({})});
     map.store = store;
     await settle(host);
-    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations']);
+    // Sized by rank, the store is asked to keep a sample of the column's values.
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args)).toEqual([['citations', {rank: true}]]);
     expect(sizingOf(store)).toEqual({min: 3, max: 11, scale: 'rank'});
     map.sizeBy = 'none';
     await settle(host);
     expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations', null]);
+  });
+
+  it('asks the store to sample the size column when the scale moves to rank, and to stop when it moves off', async () => {
+    await import('../src/map.js');
+    const host = await mount('<tessera-map></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown; sizeScale: string};
+    const store = fakeStore({meta: meta(), status: status({})});
+    store.set('legend', {...store.get('legend'), sizeBy: 'citations'});
+    map.store = store;
+    await settle(host);
+    map.sizeScale = 'rank';
+    await settle(host);
+    map.sizeScale = 'log';
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args)).toEqual([
+      ['citations', {rank: true}],
+      ['citations', {rank: false}]
+    ]);
+  });
+
+  it('ignores a size that is not a finite number above zero, as it ignores such a budget', async () => {
+    await import('../src/map.js');
+    const {sizingOf} = await import('../src/colouring.js');
+    const host = await mount('<tessera-map size-min="-3" size-max="NaN"></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown; sizeMin: number; sizeMax: number};
+    const store = fakeStore({meta: meta(), status: status({})});
+    map.store = store;
+    await settle(host);
+    expect(sizingOf(store)).toEqual({min: 2, max: 9, scale: 'linear'});
+    map.sizeMax = Infinity;
+    map.sizeMin = 0;
+    await settle(host);
+    expect(sizingOf(store)).toEqual({min: 2, max: 9, scale: 'linear'});
+    map.sizeMax = 12;
+    await settle(host);
+    expect(sizingOf(store).max).toBe(12);
   });
 });
