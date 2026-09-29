@@ -877,6 +877,7 @@ fn report_column_routes(
 /// that stood before this existed.
 pub(crate) fn build(
     args: &BuildArgs,
+    frames: &[crate::Framing],
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
@@ -885,7 +886,7 @@ pub(crate) fn build(
     // commits behind the tree its figures were read against.
     eprintln!("tessera build: commit {}", crate::BUILD_COMMIT);
     validate_args(args)?;
-    let outcome = build_bundle(args, observer, route);
+    let outcome = build_bundle(args, frames, observer, route);
     if outcome.is_err() {
         let prefix = args.out.join(PREFIX);
         if prefix.is_dir() {
@@ -908,6 +909,7 @@ pub(crate) fn build(
 
 fn build_bundle(
     args: &BuildArgs,
+    frames: &[crate::Framing],
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
@@ -936,6 +938,15 @@ fn build_bundle(
     let mut numbering = crate::ids::number_streaming(args, tmp.path())?;
     let n = numbering.items;
     let refused = std::mem::take(&mut numbering.refused);
+    // The frames fitted over the rows the pass kept, which every view reads from here on.
+    let fitted;
+    let args = match frames {
+        [] => args,
+        frames => {
+            fitted = crate::fit_frames(args, frames, &numbering)?;
+            &fitted
+        }
+    };
     // Each view's own anchors — how many of its rows name an item and an order-independent mixed
     // sum of their numbers ([`mix64`]) — are on its numbers, and the geometry pass below is checked
     // against them: a points file swapped mid-build would otherwise hand every item of that view

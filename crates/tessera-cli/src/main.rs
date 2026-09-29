@@ -52,15 +52,18 @@ enum Command {
         /// elsewhere.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Build only the rows whose value of the declaration's one unique integer attribute is
-        /// below this value, in every file that carries its column.
+        /// Build only the items whose value of the declaration's one unique integer attribute is
+        /// below this value, and the rows of every file that name them.
         ///
-        /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
-        /// drops it, and so does a null in a view's points. Refused when the declaration has no
-        /// unique integer attribute, or more than one. In any other file a row whose value is at
-        /// or above the limit is left out and reported as outside it. A row of a file without the
-        /// column is read, and one that names an item the limit left out names no item and is
-        /// refused.
+        /// A view's points row whose value is at or above the limit, or null, creates no item. A
+        /// negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops
+        /// it. Refused when the declaration has no unique integer attribute, or more than one. A
+        /// row that names a kept item by any unique field is read whatever its own value. A row
+        /// that names none is left out: in a view's points it creates no item where its value is
+        /// at or above the limit or null, and in any other file it is reported as outside the
+        /// limit, since it may name an item the limit left out. The exception is a file that
+        /// names items by the limit's attribute alone, whose row naming no item is refused where
+        /// its value is below the limit.
         #[arg(long, value_name = "VALUE")]
         limit: Option<u64>,
         /// Refuse the build at the first file with a row the identity rule refuses.
@@ -1110,16 +1113,13 @@ fn main() -> ExitCode {
             };
             // `--limit`'s attribute: the declaration's one unique integer attribute, refused
             // before any file is read where there is not exactly one.
-            let limit_attribute =
-                match tessera_build::ids::Limit::of(&config.schema, limit) {
-                    Ok(found) => {
-                        found.map(|found| (config.schema.attributes[usize::from(found.position)].clone(), found.below))
-                    }
-                    Err(e) => {
-                        eprintln!("build refused: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                };
+            let limited = match tessera_build::ids::Limit::of(&config.schema, limit) {
+                Ok(found) => found.is_some(),
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
             // The files this build reads, resolved from the declaration and any overrides — and
             // every absence a refusal here rather than an empty read (configuration.md §8).
             let acquired = match config.acquire() {
@@ -1149,7 +1149,10 @@ fn main() -> ExitCode {
             // nothing else, so `auto` is fitted over the union of their sources and a stated
             // extent is surveyed against every one of them. The views of a group are contiguous
             // in the registry, so the fold is a scan.
-            let mut frames: Vec<usize> = Vec::with_capacity(registry.len());
+            //
+            // Under `--limit` the build fits each frame once the identity pass has decided which
+            // rows it keeps, and each view holds a placeholder until then.
+            let mut framings: Vec<tessera_build::Framing> = Vec::new();
             let mut extents: Vec<tessera_spatial::Bounds> = Vec::with_capacity(registry.len());
             let mut frame_of: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
@@ -1160,7 +1163,6 @@ fn main() -> ExitCode {
                 };
                 match frame_of.get(owner) {
                     Some(&first) => {
-                        frames.push(first);
                         extents.push(extents[first]);
                         continue;
                     }
@@ -1175,26 +1177,39 @@ fn main() -> ExitCode {
                     })
                     .map(|(i, _)| i)
                     .collect();
+                let subject = match &view.group {
+                    Some(membership) => format!("view group '{}'", membership.group),
+                    None => format!("view '{}'", view.id),
+                };
+                if limited {
+                    framings.push(tessera_build::Framing {
+                        subject,
+                        projection: view.projection,
+                        extent: view.extent,
+                        views: members,
+                    });
+                    extents.push(tessera_spatial::Bounds {
+                        x_min: 0.0,
+                        x_max: 1.0,
+                        y_min: 0.0,
+                        y_max: 1.0,
+                    });
+                    continue;
+                }
                 let sources: Vec<tessera_build::config::FrameSource> = members
                     .iter()
                     .map(|&i| tessera_build::config::FrameSource {
                         points: &acquired_views[i].points,
                         fields: &acquired_views[i].point_fields,
                         select: acquired_views[i].select.as_ref(),
+                        kept: None,
                     })
                     .collect();
-                let subject = match &view.group {
-                    Some(membership) => format!("view group '{}'", membership.group),
-                    None => format!("view '{}'", view.id),
-                };
                 let frame = match tessera_build::config::frame_of(
                     &subject,
                     view.projection,
                     &view.extent,
                     &sources,
-                    limit_attribute
-                        .as_ref()
-                        .map(|(attribute, below)| (attribute, *below)),
                 ) {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -1203,9 +1218,9 @@ fn main() -> ExitCode {
                     }
                 };
                 eprintln!("{}", frame.report());
-                frames.push(index);
                 extents.push(frame.extent);
             }
+
             let view_args: Vec<tessera_build::ViewArgs> = registry
                 .iter()
                 .zip(acquired_views)
@@ -1344,9 +1359,9 @@ fn main() -> ExitCode {
                     .then(tessera_build::observer::JsonStageTimings::new),
             };
             let built = if stage_timings || stage_timings_json.is_some() {
-                tessera_build::build_observed(&args, &observer)
+                tessera_build::build_framed(&args, &framings, &observer)
             } else {
-                tessera_build::build(&args)
+                tessera_build::build_framed(&args, &framings, &tessera_build::NoopObserver)
             };
             // Written whether the build succeeded or failed: a build that died in `layers` is
             // exactly the one whose per-stage record is worth having, and the records collected

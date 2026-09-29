@@ -523,6 +523,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         points,
         fields: &fields,
         select: None,
+        kept: None,
     };
 
     let group = frame_of(
@@ -530,7 +531,6 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         tessera_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2), of(q3)],
-        None,
     )
     .expect("one frame over both sources");
     let alone = frame_of(
@@ -538,7 +538,6 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         tessera_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2)],
-        None,
     )
     .expect("one frame over one source");
 

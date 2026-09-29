@@ -162,3 +162,48 @@ fn a_build_refusing_nothing_writes_no_report() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(refused(tmp.path()), None);
 }
+
+/// **`--limit` fits an `auto` frame over the rows the build keeps**, and a member naming an item it
+/// left out is outside the limit, so `--strict` builds.
+#[test]
+fn a_limited_build_frames_the_rows_it_keeps() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path(), &[1, 2, 3, 4], &[1, 3]);
+    let schema = std::fs::read_to_string(tmp.path().join("schema.toml")).unwrap();
+    let schema = schema.replace("{ min = 0.0, max = 10.0 }", "\"auto\"");
+    std::fs::write(tmp.path().join("schema.toml"), schema).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tessera"))
+        .args(["build", "--strict", "--limit", "3"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("the binary runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        refused(tmp.path()).expect("the member left out is reported"),
+        [("layer 'groups' members".to_string(), "outside_limit".to_string(), 1)]
+    );
+    let bundle = tessera_store::read::open_bundle(&tmp.path().join("bundle")).unwrap();
+    assert_eq!(bundle.manifest.entity_id_high_water, 2);
+    // The kept rows sit at (0, 0) and (1, 1), and the rows left out at (2, 2) and (3, 3).
+    let frame = bundle.manifest.views[0].quantisation;
+    assert!(frame.x_min <= 0.0 && frame.x_max >= 1.0 && frame.x_max < 2.0, "{frame:?}");
+}
+
+/// **A build that refuses nothing removes a report left at its output**, so the bundle's report
+/// is the rows its own build refused.
+#[test]
+fn a_build_refusing_nothing_removes_a_report_left_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path(), &[1, 2, 3, 2], &[1, 3]);
+    let output = build(tmp.path(), false);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report = std::fs::read(tmp.path().join("bundle/reports/refused.json")).unwrap();
+    std::fs::remove_dir_all(tmp.path().join("bundle")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("bundle/reports")).unwrap();
+    std::fs::write(tmp.path().join("bundle/reports/refused.json"), report).unwrap();
+
+    project(tmp.path(), &[1, 2, 3, 4], &[1, 3]);
+    let output = build(tmp.path(), false);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(refused(tmp.path()), None);
+}

@@ -1899,15 +1899,14 @@ impl Frame {
 /// nothing, and a Morton points file carries no coordinates to frame (that one is refused by
 /// [`crate::input::survey_points`], naming the extent to write instead).
 ///
-/// `limit` is `--limit`'s attribute and value ([`crate::ids::Limit`]): the frame is fitted to the
-/// rows whose value of it is below the value, in a file that carries it.
+/// The frame is fitted over every row of the view's points. Under `--limit` the build fits it
+/// after the identity pass, over the rows that pass kept ([`crate::Framing`]).
 pub fn frame_view(
     view: &str,
     projection: Projection,
     extent: &Extent,
     points: &Path,
     fields: &Fields,
-    limit: Option<(&Attribute, u64)>,
 ) -> Result<Frame> {
     frame_of(
         &format!("view '{view}'"),
@@ -1917,8 +1916,8 @@ pub fn frame_view(
             points,
             fields,
             select: None,
+            kept: None,
         }],
-        limit,
     )
 }
 
@@ -1929,6 +1928,8 @@ pub struct FrameSource<'a> {
     pub points: &'a Path,
     pub fields: &'a Fields,
     pub select: Option<&'a ViewSelector>,
+    /// The rows the identity pass kept, where the frame is fitted after it.
+    pub kept: Option<crate::input::KeptRows<'a>>,
 }
 
 /// [`frame_view`] over **several** sources, which is what a group's one frame is fitted to.
@@ -1944,31 +1945,22 @@ pub fn frame_of(
     projection: Projection,
     extent: &Extent,
     sources: &[FrameSource],
-    limit: Option<(&Attribute, u64)>,
 ) -> Result<Frame> {
     let survey_all = |against: Option<&Bounds>| -> Result<PointSurvey> {
         let mut surveys = Vec::with_capacity(sources.len());
         for source in sources {
-            let limit = limit.map(|(attribute, below)| {
-                (
-                    source
-                        .fields
-                        .unique_column(&attribute.name)
-                        .unwrap_or(attribute.column()),
-                    below,
-                )
-            });
             surveys.push(crate::input::survey_points(
                 source.points,
                 source.fields,
                 projection,
-                limit,
+                source.kept,
                 source.select,
                 against,
             )?);
         }
         union_surveys(name, surveys)
     };
+
     let margin = match extent {
         Extent::Fixed(bounds) => {
             let survey = survey_all(Some(bounds))?;
