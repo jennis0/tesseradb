@@ -16,6 +16,11 @@ def quote(segment: str) -> str:
 # ---------------------------------------------------------------------------------------------
 
 
+#: Every write the workload sends is strict: it sends only rows it expects applied, so a row the
+#: identity rule refuses fails the request rather than being listed and passed over.
+STRICT = {"strict": "true"}
+
+
 class Control:
     def __init__(self, base: str, cred: str, view: str | None = None):
         self.base = base
@@ -32,6 +37,7 @@ class Control:
         t0 = time.perf_counter()
         r = session.post(
             f"{self.base}/control/ingest",
+            params=STRICT,
             headers=self.headers
             | {"x-tessera-batch-id": batch_id, "Content-Type": "application/vnd.apache.arrow.stream"}
             | ({"x-tessera-view": self.view} if self.view else {}),
@@ -43,7 +49,11 @@ class Control:
     def changes(self, items: list[dict], timeout=600):
         t0 = time.perf_counter()
         r = requests.post(
-            f"{self.base}/control/changes", headers=self.headers, json=items, timeout=timeout
+            f"{self.base}/control/changes",
+            params=STRICT,
+            headers=self.headers,
+            json=items,
+            timeout=timeout,
         )
         return r, time.perf_counter() - t0
 
@@ -80,6 +90,7 @@ class Control:
         t0 = time.perf_counter()
         r = session.patch(
             f"{self.base}/control/layers/{quote(layer)}/artifacts",
+            params=STRICT,
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,
@@ -94,6 +105,7 @@ class Control:
         t0 = time.perf_counter()
         r = session.put(
             f"{self.base}/control/layers/{quote(layer)}/artifacts",
+            params=STRICT,
             headers=self.headers | {"Content-Type": "application/json"},
             data=body,
             timeout=timeout,

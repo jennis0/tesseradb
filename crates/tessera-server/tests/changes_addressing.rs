@@ -1,5 +1,6 @@
-//! `/control/changes` names an item two ways: by its `tessera_id`, or by a unique field and a
-//! value of it.
+//! `/control/changes` names each item in `match`, by its `tessera_id` and the values of unique
+//! fields, under the identity rule: a change naming no item, or two, is refused, listed in the
+//! answer while the rest apply, or refusing the request under `strict=true`.
 //!
 //! A `tessera_id` is a keyed permutation of entity space, so a record carrying one would resolve
 //! under whatever key the bundle holds at replay. It is inverted once, at admission, and the
@@ -74,105 +75,125 @@ async fn ingest_anonymous(server: &TestServer, batch_id: &str) -> u64 {
     ingested_ids(&json)[0]
 }
 
+async fn post_strict(server: &TestServer, body: &serde_json::Value) -> reqwest::Response {
+    server
+        .client
+        .post(server.control_url("/control/changes?strict=true"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
 /// An item holding no unique value is suppressed and unsuppressed by its `tessera_id`.
 #[tokio::test]
 async fn an_item_holding_no_unique_value_is_suppressible_by_tessera_id() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let _ = authorise(&server, &["0"]).await;
-    // No token needed: this case asserts acceptance, not a count (see below).
 
     let tessera_id = ingest_anonymous(&server, "anon-1").await;
 
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "tessera_id": tessera_id.to_string(), "op": "suppress" },
-        ]),
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        200,
-        "an item holding no unique value is named by its tessera_id"
-    );
-
-    // **Not asserted through a viewport count, deliberately.** The item is still buffered: it has
-    // no row, so it is in no count either before or after, and a count assertion here would pass
-    // for the wrong reason on any build. What is observable is that the disposition was accepted
-    // and is in force — an unsuppress of the same identifier round-trips, which it could not if
-    // the suppress had resolved to nothing.
-    let resp = post_changes(
-        &server,
-        &serde_json::json!([
-            { "tessera_id": tessera_id.to_string(), "op": "unsuppress" },
+            { "op": "suppress", "match": { "tessera_id": tessera_id.to_string() } },
         ]),
     )
     .await;
     assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(answer["accepted"], 1);
+    assert_eq!(answer["refused"], serde_json::json!([]));
+
+    // Not asserted through a viewport count: the item is still buffered, so it is in no count
+    // before or after. An unsuppress of the same identifier is accepted, which it could not be
+    // had the suppress named nothing.
+    let resp = post_changes(
+        &server,
+        &serde_json::json!([
+            { "op": "unsuppress", "match": { "tessera_id": tessera_id.to_string() } },
+        ]),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["accepted"], 1);
 }
 
-/// One batch, both address forms, applied together — bulk is the list, and its elements may be
-/// addressed either way.
+/// One request names items by a unique value, by a `tessera_id`, and by both agreeing.
 #[tokio::test]
-async fn a_mixed_bulk_batch_applies_both_address_forms() {
+async fn a_change_names_its_item_by_any_identifier_it_holds() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let token = token_for(&server, &["0"]).await;
 
-    // Two different fixture items, named two different ways.
-    let by_value = member(5);
-    let by_tessera = a_drawn_tessera_id(&server, &token).await;
+    let by_tessera = tessera_id_of(&server, 9);
+    let both = tessera_id_of(&server, 7);
     let before = visible(&server, &token).await;
 
     let resp = post_changes(
         &server,
         &serde_json::json!([
-            { "field": "id", "value": by_value, "op": "suppress" },
-            { "tessera_id": by_tessera.to_string(), "op": "suppress" },
+            { "op": "suppress", "match": { "id": 5 } },
+            { "op": "suppress", "match": { "tessera_id": by_tessera.to_string() } },
+            { "op": "suppress", "match": { "id": "7", "tessera_id": both.to_string() } },
         ]),
     )
     .await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        visible(&server, &token).await,
-        before - 2,
-        "both address forms reached the same overlay"
-    );
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap()["accepted"], 3);
+    assert_eq!(visible(&server, &token).await, before - 3);
 }
 
-/// **The permutation is total** — every `u64` inverts to *something* — so the range check is the
-/// whole of the misdirection guard, and a batch containing one unresolvable identifier applies
-/// **nothing**, including the elements that were addressable.
+/// A change naming no item, or two, is refused and listed with its reason, and the others apply.
+/// Under `strict=true` the first refused change refuses the request: 404 for naming nothing, 409
+/// for naming two, and nothing applies.
 #[tokio::test]
-async fn an_out_of_range_tessera_id_refuses_the_whole_batch() {
+async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_request() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let token = token_for(&server, &["0"]).await;
 
-    let good = ingest_anonymous(&server, "anon-1").await;
+    let three = tessera_id_of(&server, 3);
+    let request = serde_json::json!([
+        { "op": "suppress", "match": { "id": 1 } },
+        { "op": "suppress", "match": { "tessera_id": u64::MAX.to_string() } },
+        { "op": "suppress", "match": { "id": 999_999 } },
+        { "op": "suppress", "match": { "id": 2, "tessera_id": three.to_string() } },
+        { "op": "suppress", "match": {} },
+        { "op": "suppress", "match": { "id": null } },
+    ]);
     let before = visible(&server, &token).await;
 
-    let resp = post_changes(
-        &server,
-        &serde_json::json!([
-            { "tessera_id": good.to_string(), "op": "suppress" },
-            { "tessera_id": u64::MAX.to_string(), "op": "suppress" },
-        ]),
-    )
-    .await;
-    assert_eq!(resp.status(), 404);
+    let first = serde_json::json!([request[0], request[1]]);
+    let resp = post_strict(&server, &first).await;
+    assert_eq!(resp.status(), 404, "a tessera_id naming nothing");
+    let two = serde_json::json!([request[0], request[3]]);
+    let resp = post_strict(&server, &two).await;
+    assert_eq!(resp.status(), 409, "values naming two items");
+    assert_eq!(visible(&server, &token).await, before, "a strict refusal applies nothing");
+
+    let resp = post_changes(&server, &request).await;
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(answer["accepted"], 1);
     assert_eq!(
-        visible(&server, &token).await,
-        before,
-        "the whole batch applied nothing"
+        answer["refused"],
+        serde_json::json!([
+            { "row": 1, "reason": "unknown_tessera_id" },
+            { "row": 2, "reason": "names_no_item" },
+            { "row": 3, "reason": "names_two_items" },
+            { "row": 4, "reason": "names_no_item" },
+            { "row": 5, "reason": "names_no_item" },
+        ])
     );
+    assert_eq!(visible(&server, &token).await, before - 1, "only the first applied");
 }
 
-/// Exactly one address form, and a `field` declared unique. Every shape below is a wholesale
-/// refusal before anything is enqueued.
+/// A malformed request applies nothing, whatever `strict` says.
 #[tokio::test]
-async fn an_element_names_exactly_one_address_form() {
+async fn a_malformed_change_request_is_refused_whole() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let token = token_for(&server, &["0"]).await;
@@ -182,32 +203,28 @@ async fn an_element_names_exactly_one_address_form() {
 
     for (what, body) in [
         (
-            "both forms is ambiguous",
-            serde_json::json!([{ "field": "id", "value": member(5), "tessera_id": id.to_string(), "op": "suppress" }]),
+            "no change names an item by any column",
+            serde_json::json!([{ "op": "suppress", "match": {} }]),
         ),
         (
-            "neither form is unaddressable",
+            "a change without a match",
             serde_json::json!([{ "op": "suppress" }]),
         ),
         (
-            "a field without a value names nothing",
-            serde_json::json!([{ "field": "id", "op": "suppress" }]),
-        ),
-        (
-            "a value without a field names nothing",
-            serde_json::json!([{ "value": member(5), "op": "suppress" }]),
+            "the old flat form",
+            serde_json::json!([{ "op": "suppress", "tessera_id": id.to_string() }]),
         ),
         (
             "an undeclared field is not unique",
-            serde_json::json!([{ "field": "nothing", "value": member(5), "op": "suppress" }]),
+            serde_json::json!([{ "op": "suppress", "match": { "nothing": 5 } }]),
         ),
         (
             "an integer field's value is decimal digits",
-            serde_json::json!([{ "field": "id", "value": "five", "op": "suppress" }]),
+            serde_json::json!([{ "op": "suppress", "match": { "id": "five" } }]),
         ),
         (
             "a bare number is what loses u64s past 2^53 in a browser",
-            serde_json::json!([{ "tessera_id": id, "op": "suppress" }]),
+            serde_json::json!([{ "op": "suppress", "match": { "tessera_id": id } }]),
         ),
     ] {
         assert_eq!(
@@ -216,11 +233,7 @@ async fn an_element_names_exactly_one_address_form() {
             "refused wholesale: {what}"
         );
     }
-    assert_eq!(
-        visible(&server, &token).await,
-        before,
-        "and none of them applied anything"
-    );
+    assert_eq!(visible(&server, &token).await, before);
 }
 
 /// A `tessera_id` never enters the WAL: the record carries the resolved entity, so a restart
@@ -242,7 +255,7 @@ async fn a_tessera_addressed_deny_replays_to_the_same_entity() {
         let resp = post_changes(
             &server,
             &serde_json::json!([
-                { "tessera_id": id.to_string(), "op": "suppress" },
+                { "op": "suppress", "match": { "tessera_id": id.to_string() } },
             ]),
         )
         .await;
