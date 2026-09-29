@@ -214,6 +214,22 @@ as given, choosing no fields and no order on the caller's behalf.
 `selection.items` sends the selection's own filters and box as the read's filter, so its rows are
 the items the selection counts.
 
+## Counts by group
+
+`POST /v1/aggregate` answers how a set is distributed, one table of counts per grouping.
+
+| Client | Call | What it gives back |
+|---|---|---|
+| TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
+| TypeScript store | `store.setAggregate(id, {groupings, reference})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
+| Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
+
+The store sends a reference only where the component registered one, as a filter expression or as
+the whole visible set. It chooses no grouping. `selection.aggregate` sends the selection's filters
+and box as the request's `filters`, so its first grouping's total is the selection's count.
+
+**Not built yet:** the command-line client does not call this route.
+
 ## Not built
 
 Switching between two views that use different layouts refits the camera without animating an

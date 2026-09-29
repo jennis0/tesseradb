@@ -484,8 +484,14 @@ breakdowns of keyword and integer fields; a grouping of one kind inside another 
 such as cells within cells; and counts across views. A caller asks for each such figure through
 `/v1/items` and computes it.
 
-**Not built yet:** the TypeScript, Python and command-line clients do not call this route; a caller
-of those uses HTTP directly.
+The TypeScript client reads a whole result with `TesseraClient.aggregate`, and its store keeps
+each aggregate a component registers with `Store.setAggregate` counted over the store's current
+filters and selected region, asking again when either changes. The Python client reads one with
+`Viewer.aggregate`, `Database.aggregate` and `Selection.aggregate`, each table a `pyarrow.Table`.
+Both follow the cursor until the result is whole.
+
+**Not built yet:** the command-line client does not call this route; a caller of it uses HTTP
+directly.
 
 ## What is not built
 
