@@ -5,10 +5,11 @@
 //! 1. **Scan.** Each unique field the file carries goes into an external sort as `(key, row)`
 //!    ([`KeySpill`]). A row carrying a `tessera_id` is refused here.
 //! 2. **Merge.** Each field's sorted rows are merged against the run of `(key, item)` the earlier
-//!    files built for that field. A row whose key is held names that item. The later rows of a
-//!    run of equal keys are the rows [`collisions`] finds: where the file carries one field they
-//!    are refused here, one item or one value twice; where it carries several they are decided
-//!    once every field has been merged. Every decision is routed by row to a partition.
+//!    files built for that field. A row whose key is held names that item. Where the file carries
+//!    one field, the later rows of a run of equal keys are refused here, one item or one value
+//!    twice; where it carries several, one pass in row order decides them once every field has
+//!    been merged, so that a refused row claims neither its item nor its values. Every decision
+//!    is routed by row to a partition.
 //! 3. **Walk.** The partition is replayed in row order into the file's numbers, deciding each row
 //!    by [`name_row`] over the items its fields named, and numbering the rows that create items in
 //!    row order.
@@ -628,56 +629,90 @@ impl Pass {
         drop(updates);
 
         // ---- 4. with several fields: one item twice, one value twice, then the numbers --------
+        // Decided in one pass in row order, so that a row refused for any reason claims neither its
+        // item nor its values. Each row naming an item is linked to the row before it naming that
+        // item, and carries whether any row of that chain up to it was kept.
         if deferred {
             let numbers = rows.slice();
+            let mut chains: Option<(MappedArray<u32>, MappedArray<u64>)> = None;
             if let Some(named) = named_items {
-                let mut later = KeySpill::<u32>::create(&self.tmp, share).map_err(store)?;
-                // A run of one item is held as its first row and the row after it.
-                let mut run: Vec<(u32, usize)> = Vec::with_capacity(2);
+                let name = self.name("before");
+                let mut before = MappedArray::<u32>::zeroed(&self.tmp, &name, total as usize)?;
+                let links = before.as_mut_slice();
+                let mut last: Option<(u32, u32)> = None;
                 named
                     .drain(|item, row| {
-                        if run.first().is_some_and(|&(held, _)| held != item) {
-                            run.clear();
+                        if let Some((_, earlier)) = last.filter(|&(held, _)| held == item) {
+                            links[row as usize] = earlier + 1;
                         }
-                        run.push((item, row as usize));
-                        for (_, refused) in resolve::collisions(run.iter().copied()) {
-                            later.push(refused as u32, 0)?;
-                        }
-                        run.truncate(1);
+                        last = Some((item, row));
                         Ok(())
                     })
                     .map_err(store)?;
-                later
-                    .drain(|row, _| {
-                        numbers[row as usize] = 0;
-                        tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
-                        Ok(())
-                    })
-                    .map_err(store)?;
+                let words = total.div_ceil(64) as usize;
+                let name = self.name("kept");
+                let kept = MappedArray::<u64>::zeroed(&self.tmp, &name, words)?;
+                chains = Some((before, kept));
             }
             let total_candidates: u64 = merged.iter().map(|m| m.candidates).sum();
+            let name = self.name("claimed");
+            let mut claimed = match total_candidates {
+                0 => None,
+                n => Some(MappedArray::<u64>::zeroed(&self.tmp, &name, n.div_ceil(64) as usize)?),
+            };
+            let mut step = |row: u32, bits: &[u64], tally: &mut Tally| {
+                let stored = &mut numbers[row as usize];
+                let names_item = !matches!(*stored, 0 | PENDING | LEFT_OUT);
+                if let Some((before, kept)) = chains.as_mut().filter(|_| names_item) {
+                    let earlier = before.as_mut_slice()[row as usize];
+                    let kept = kept.as_mut_slice();
+                    let is_kept = |row: u32| kept[(row / 64) as usize] & (1 << (row % 64)) != 0;
+                    let claimed_before = earlier.checked_sub(1).is_some_and(is_kept);
+                    let keep = match claimed_before {
+                        true => {
+                            *stored = 0;
+                            tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
+                            true
+                        }
+                        false => {
+                            if let Some(claimed) = claimed.as_mut() {
+                                claim(stored, row, bits, claimed.as_mut_slice(), creates, tally);
+                            }
+                            *stored != 0
+                        }
+                    };
+                    if keep {
+                        kept[(row / 64) as usize] |= 1 << (row % 64);
+                    }
+                    return;
+                }
+                if let Some(claimed) = claimed.as_mut() {
+                    claim(stored, row, bits, claimed.as_mut_slice(), creates, tally);
+                }
+            };
+            // Each candidate value's bit: its field's first, plus its number in the field.
+            let firsts: Vec<u64> = merged
+                .iter()
+                .scan(0u64, |sum, m| {
+                    let first = *sum;
+                    *sum += m.candidates;
+                    Some(first)
+                })
+                .collect();
+            let mut next = 0u32;
             if let Some(candidates) = candidates.filter(|_| total_candidates > 0) {
-                // Each candidate value's bit: its field's first, plus its number in the field.
-                let firsts: Vec<u64> = merged
-                    .iter()
-                    .scan(0u64, |sum, m| {
-                        let first = *sum;
-                        *sum += m.candidates;
-                        Some(first)
-                    })
-                    .collect();
-                let name = self.name("claimed");
-                let words = total_candidates.div_ceil(64) as usize;
-                let mut claimed = MappedArray::<u64>::zeroed(&self.tmp, &name, words)?;
-                let claimed = claimed.as_mut_slice();
                 let mut at: Option<u32> = None;
                 let mut bits: Vec<u64> = Vec::new();
                 candidates
                     .drain(|key, number| {
                         let row = (key >> 16) as u32;
                         if let Some(done) = at.filter(|&done| done != row) {
-                            let stored = &mut numbers[done as usize];
-                            claim(stored, done, &bits, claimed, creates, &mut tally);
+                            while next < done {
+                                step(next, &[], &mut tally);
+                                next += 1;
+                            }
+                            step(done, &bits, &mut tally);
+                            next = done + 1;
                             bits.clear();
                         }
                         at = Some(row);
@@ -686,9 +721,22 @@ impl Pass {
                     })
                     .map_err(store)?;
                 if let Some(done) = at {
-                    claim(&mut numbers[done as usize], done, &bits, claimed, creates, &mut tally);
+                    while next < done {
+                        step(next, &[], &mut tally);
+                        next += 1;
+                    }
+                    step(done, &bits, &mut tally);
+                    next = done + 1;
                 }
             }
+            while u64::from(next) < total {
+                step(next, &[], &mut tally);
+                next += 1;
+            }
+            drop(step);
+            drop(chains);
+            drop(claimed);
+            let numbers = rows.slice();
             for (row, number) in numbers.iter_mut().enumerate() {
                 numbering.decide(number, row as u64, &mut tally)?;
             }

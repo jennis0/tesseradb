@@ -582,6 +582,42 @@ fn two_unique_fields_build_one_bundle_both_ways() {
     assert_eq!(b("p"), Vec::<u32>::new());
 }
 
+/// **A refused row refuses no later row.** In the notes, (a=1, b=new) edits the first item;
+/// (a=2, b=new) sets the value that row set and is refused; (a=2) then names the second item and
+/// is kept, the first row to name it that was kept. Both builds decide so.
+#[test]
+fn a_row_refused_for_its_value_claims_no_item() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    points(
+        &dir.join("points.parquet"),
+        &[Some(1), Some(2), Some(3)],
+        vec![("b", strings(&[Some("p"), Some("q"), Some("r")]))],
+    );
+    write(
+        &dir.join("notes.parquet"),
+        vec![
+            ("a", u64s(&[Some(1), Some(2), Some(2), Some(3)])),
+            ("b", strings(&[Some("new"), Some("new"), None, None])),
+            ("note", i64s(&[10, 20, 30, 40])),
+        ],
+    );
+    let declaration = ONE_VIEW.replace(
+        "points = \"points.parquet\"\n",
+        "points = \"points.parquet\"\nnotes  = \"notes.parquet\"\n",
+    ) + "\n[[attribute]]\nname = \"b\"\ntype = \"keyword\"\nunique = true\n\
+         \n[[attribute]]\nname = \"note\"\ntype = \"i64\"\nsource = \"notes\"\n";
+    let (out, report) = both_ways(dir, &declaration);
+    let notes = "attribute source 'notes'";
+    assert_eq!(refused(&report, notes, "one_value_twice").map(|e| e.rows), Some(1));
+    assert_eq!(refused(&report, notes, "one_item_twice"), None);
+    let b = |value: &str| holders(&out, "b", &[UniqueKey::keyword(value)]).remove(0);
+    assert_eq!(b("new"), vec![item(&out, "a", 1)]);
+    assert_eq!(b("q"), vec![item(&out, "a", 2)]);
+    let records = records(&out);
+    assert!(records[&item(&out, "a", 2)].contains(&(2, RecordValue::I64(30))));
+}
+
 /// **(g) A file whose rows address items and that carries no unique column is refused**, at the
 /// build and at `tessera check`, in one sentence.
 #[test]
