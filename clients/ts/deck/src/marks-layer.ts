@@ -2,6 +2,8 @@ import type {Texture} from '@luma.gl/core';
 import type {DefaultProps} from '@deck.gl/core';
 import {ScatterplotLayer, type ScatterplotLayerProps} from '@deck.gl/layers';
 import {LUT_SHIFT, LUT_WIDTH} from './lut.js';
+import {ANTIALIAS_ABOVE_PX} from './marks-style.js';
+import {hollowRadius, sizingRadius, type Sizing} from './size.js';
 
 /**
  * The mark layer: deck's `ScatterplotLayer` with three more per-instance attributes, the session
@@ -26,6 +28,8 @@ layout(std140) uniform tesseraLutUniforms {
   float sizing;
   float sizeMin;
   float sizeMax;
+  float sizeRadius;
+  float sizeHollow;
   vec3 dullColour;
 } tesseraLut;
 `;
@@ -48,6 +52,8 @@ const lutUniforms = {
     sizing: 'f32',
     sizeMin: 'f32',
     sizeMax: 'f32',
+    sizeRadius: 'f32',
+    sizeHollow: 'f32',
     dullColour: 'vec3<f32>'
   } as const
 };
@@ -108,7 +114,7 @@ function passCode(pass: HighlightPass): number {
 }
 
 /** The width in pixels of the ring a mark with no value draws, under sizing by a column. */
-export const HOLLOW_RING_PX = 1.5;
+export const HOLLOW_RING_PX = 1;
 
 export type MarksLayerProps = ScatterplotLayerProps & {
   /** Whether the fill colour comes from the lookup texture rather than the colour attribute. */
@@ -125,10 +131,10 @@ export type MarksLayerProps = ScatterplotLayerProps & {
   /** The colour a dulled mark takes, RGB from 0 to 1; see {@link DULL_COLOUR}. */
   dullColour?: [number, number, number];
   /**
-   * The radii in pixels of the smallest and largest size, under sizing by a column; null draws
-   * every mark at `getRadius`. Under sizing, `getRadius` must be `max`.
+   * The sizes drawn under sizing by a column, as {@link drawnSizing} gives them; null draws every
+   * mark at `getRadius`. Under sizing, `getRadius` must be {@link sizingRadius} of it.
    */
-  sizing?: {min: number; max: number} | null;
+  sizing?: Sizing | null;
   /** The size fraction per mark, from 0 to 1, or -1 for no value, bound as the ordinal is. */
   getSize?: number | ((d: unknown) => number);
 };
@@ -166,11 +172,13 @@ float tesseraInPass(float lit) {
 }
 // The multiple of the layer's radius this mark draws at. A lit mark is drawn larger than a dulled
 // one, and its glow larger still; the passes not drawing this mark collapse it to zero size. Under
-// sizing the layer's radius is the largest size, and the mark's own size is a fraction of it.
+// sizing the layer's radius is sizeRadius, and the mark's own radius, or the ring's for a mark
+// with no value, is a fraction of it.
 float tesseraSizeFactor() {
   float lit = step(0.5, instanceHighlights);
   float glow = step(2.5, tesseraLut.pass);
-  float own = tesseraLut.sizing > 0.5 ? mix(tesseraLut.sizeMin, tesseraLut.sizeMax, max(instanceSizes, 0.0)) / tesseraLut.sizeMax : 1.0;
+  float drawn = instanceSizes < 0.0 ? tesseraLut.sizeHollow : mix(tesseraLut.sizeMin, tesseraLut.sizeMax, instanceSizes);
+  float own = tesseraLut.sizing > 0.5 ? drawn / tesseraLut.sizeRadius : 1.0;
   return own * mix(tesseraLut.dullRadius, tesseraLut.litRadius, lit) * mix(1.0, ${GLOW_RADIUS_SCALE.toFixed(3)}, glow) * tesseraInPass(lit);
 }`,
         'vs:DECKGL_FILTER_SIZE': /* glsl */ `\
@@ -184,11 +192,21 @@ vTesseraHollow = tesseraLut.sizing > 0.5 && instanceSizes < 0.0 ? 1.0 : 0.0;
 `,
         'fs:#decl': /* glsl */ `in float vTesseraHollow;
 `,
-        // A ring's inside is clear except to picking, so a mark with no value is found where it is drawn.
+        // Under sizing deck feathers every edge, and a mark drawn below the feathering threshold
+        // takes its hard edge back, as an unsized mark that small is drawn. A ring's inside is
+        // clear except to picking, so a mark with no value is found where it is drawn.
         'fs:#main-end': /* glsl */ `\
-if (vTesseraHollow > 0.5 && picking.isActive < 0.5) {
-  float inner = outerRadiusPixels - ${HOLLOW_RING_PX.toFixed(3)};
-  fragColor.a *= smoothstep(inner - 0.5, inner + 0.5, length(unitPosition) * outerRadiusPixels);
+if (tesseraLut.sizing > 0.5 && picking.isActive < 0.5) {
+  float tesseraDistance = length(unitPosition) * outerRadiusPixels;
+  if (outerRadiusPixels < ${ANTIALIAS_ABOVE_PX.toFixed(3)}) {
+    if (tesseraDistance > outerRadiusPixels) discard;
+    float feather = smoothedge(tesseraDistance, outerRadiusPixels);
+    if (feather > 0.0) fragColor.a /= feather;
+  }
+  if (vTesseraHollow > 0.5) {
+    float inner = outerRadiusPixels - ${HOLLOW_RING_PX.toFixed(3)};
+    fragColor.a *= smoothstep(inner - 0.5, inner + 0.5, tesseraDistance);
+  }
 }
 `,
         // The colour from whichever source is on, then the highlight over it. With no highlight
@@ -227,6 +245,7 @@ if (tesseraLut.pass > 2.5) {
   override draw(opts: Parameters<ScatterplotLayer['draw']>[0]): void {
     const model = (this.state as {model?: {shaderInputs: {setProps(p: unknown): void}; setBindings(b: Record<string, unknown>): void}}).model;
     const texture = this.props.lutTexture ?? null;
+    const sizing = this.props.sizing ?? null;
     if (model) {
       model.shaderInputs.setProps({
         tesseraLut: {
@@ -239,9 +258,11 @@ if (tesseraLut.pass > 2.5) {
           litRadius: this.props.highlighting ? LIT_RADIUS_SCALE : 1,
           pass: this.props.highlighting ? passCode(this.props.highlightPass ?? 'all') : 0,
           dullColour: this.props.dullColour ?? DULL_COLOUR.dark,
-          sizing: this.props.sizing ? 1 : 0,
-          sizeMin: this.props.sizing?.min ?? 1,
-          sizeMax: Math.max(this.props.sizing?.max ?? 1, 1e-3)
+          sizing: sizing ? 1 : 0,
+          sizeMin: sizing?.min ?? 1,
+          sizeMax: sizing?.max ?? 1,
+          sizeRadius: sizing ? sizingRadius(sizing) : 1,
+          sizeHollow: sizing ? hollowRadius(sizing) : 1
         }
       });
       if (texture) model.setBindings({lutTexture: texture});

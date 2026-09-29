@@ -16,7 +16,7 @@ const meta = {
 } as unknown as Meta;
 
 function legend(over: Partial<LegendProjection> = {}): LegendProjection {
-  return {ranks: {}, domains: {citations: {min: 0, max: 999}}, samples: {citations: {values: [1, 2, 3, 100, 1000], seen: 5}}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: 'citations', ...over};
+  return {ranks: {}, domains: {citations: {min: 0, max: 999}}, samples: {citations: {values: [1, 2, 3, 100, 1000], seen: 5}}, missing: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: 'citations', ...over};
 }
 
 /** Citation counts as a column; `null` is a point with no value. */
@@ -44,7 +44,7 @@ describe('sizing by a number column', () => {
     expect(round([1, 2, 3, 100, 1000].map((v) => sizeFraction(v, rank)))).toEqual([0, 0.25, 0.5, 0.75, 1]);
     // Outside the sample it takes the nearest end; between two values, the middle of the gap.
     expect(round([0, 5000, 50].map((v) => sizeFraction(v, rank)))).toEqual([0, 1, 0.625]);
-    const tied = {kind: 'rank', column: 'citations', sample: [0, 0, 0, 7]} as SizeEncoding;
+    const tied: SizeEncoding = {kind: 'rank', column: 'citations', sample: [0, 0, 0, 7], seen: 4};
     expect(sizeFraction(0, tied)).toBeCloseTo(1 / 3, 6);
     expect(valueAtSize(1, rank)).toBe(1000);
   });
@@ -68,6 +68,23 @@ describe('sizing by a number column', () => {
     const none = slab.sync([b], 2, {kind: 'uniform'}, null, '', {kind: 'none'});
     expect([...none.sizes]).toEqual([0, 0, 0, 0]);
   });
+
+  it('rewrites the bands already held when a new sample is published, though its length and ends are the same', () => {
+    const slab = new MarkSlab();
+    const b = band(2, 1n, 3, {scalars: {citations: citations([5, 50, 500])}});
+    const first = sizeEncodingOf(meta, legend({samples: {citations: {values: [5, 6, 7, 500], seen: 4}}}), 'rank');
+    expect(round(slab.sync([b], 2, {kind: 'uniform'}, null, '', first).sizes)).toEqual([0, 0.833, 1]);
+    const next = sizeEncodingOf(meta, legend({samples: {citations: {values: [5, 60, 70, 500], seen: 8}}}), 'rank');
+    expect(round(slab.sync([b], 2, {kind: 'uniform'}, null, '', next).sizes)).toEqual([0, 0.167, 1]);
+  });
+
+  it('draws a value NaN or infinite as one with no value', () => {
+    const slab = new MarkSlab();
+    const b = band(2, 1n, 3, {scalars: {score: {arrowType: 'f64', values: Float64Array.from([1, NaN, Infinity])}}});
+    const scored = {declaredScalars: [{name: 'score', arrowType: 'f64', category: null, render: true}]} as unknown as Meta;
+    const encoding = sizeEncodingOf(scored, legend({sizeBy: 'score', domains: {score: {min: 0, max: 2}}}), 'linear');
+    expect(round(slab.sync([b], 2, {kind: 'uniform'}, null, '', encoding).sizes)).toEqual([0.5, -1, -1]);
+  });
 });
 
 describe('the marks drawn under sizing', () => {
@@ -85,7 +102,7 @@ describe('the marks drawn under sizing', () => {
 
   it('draws each mark between the sizes chosen, picking as before, and at one radius with no size column', () => {
     const sized = drawn({legend: legend(), sizing: {min: 3, max: 11, scale: 'log'}});
-    expect(sized.sizing).toEqual({min: 3, max: 11});
+    expect(sized.sizing).toEqual({min: 3, max: 11, scale: 'log'});
     // The layer's radius is the largest; the shader draws each mark at its own fraction of it.
     expect(sized.getRadius).toBe(11);
     expect(sized.pickable).toBe(true);
@@ -93,5 +110,13 @@ describe('the marks drawn under sizing', () => {
     const plain = drawn({legend: legend({sizeBy: null}), radius: 4, sizing: {min: 3, max: 11, scale: 'log'}});
     expect(plain.sizing).toBeNull();
     expect(plain.getRadius).toBe(4);
+  });
+
+  it('draws a radius that is not a finite number above zero at the default, and the layer’s radius covers every mark drawn', () => {
+    const nonsense = drawn({legend: legend(), sizing: {min: -2, max: Number.NaN, scale: 'linear'}});
+    expect(nonsense.sizing).toEqual({min: 2, max: 9, scale: 'linear'});
+    // Below a pixel the quad is a pixel, and a mark with no value draws at 3 px.
+    expect(drawn({legend: legend(), sizing: {min: 0.2, max: 0.8, scale: 'linear'}}).getRadius).toBe(3);
+    expect(drawn({legend: legend(), sizing: {min: 12, max: 4, scale: 'linear'}}).getRadius).toBe(12);
   });
 });

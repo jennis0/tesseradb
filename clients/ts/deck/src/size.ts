@@ -7,7 +7,7 @@
  * drawn, and one with no value draws at the smallest size, hollow.
  */
 import type {LegendProjection, Meta, ScalarColumn} from '@tesseradb/client';
-import {numericValues} from '@tesseradb/client/internal';
+import {numericValues, sizesPoints} from '@tesseradb/client/internal';
 import {fractionOf} from './colour.js';
 
 /**
@@ -43,6 +43,32 @@ export type Sizing = {
 export const DEFAULT_SIZING: Sizing = {min: 2, max: 9, scale: 'linear'};
 
 /**
+ * The smallest radius in pixels a point with no value draws at, so the hole inside its ring shows.
+ * It draws at the smallest size where that is larger.
+ */
+export const HOLLOW_MIN_RADIUS = 3;
+
+/** `sizing` as drawn: a radius that is not a finite number above zero is the default's. */
+export function drawnSizing(sizing: Sizing): Sizing {
+  const ok = (r: number) => Number.isFinite(r) && r > 0;
+  return {min: ok(sizing.min) ? sizing.min : DEFAULT_SIZING.min, max: ok(sizing.max) ? sizing.max : DEFAULT_SIZING.max, scale: sizing.scale};
+}
+
+/** The radius a point with no value draws at under `sizing`. */
+export function hollowRadius(sizing: Sizing): number {
+  return Math.max(sizing.min, HOLLOW_MIN_RADIUS);
+}
+
+/**
+ * The radius the mark layer draws every quad at under `sizing`, of which each mark's own radius is
+ * a fraction: the largest radius any mark draws at, and at least one pixel, which deck.gl's
+ * `radiusMinPixels` would otherwise impose.
+ */
+export function sizingRadius(sizing: Sizing): number {
+  return Math.max(sizing.min, sizing.max, hollowRadius(sizing), 1);
+}
+
+/**
  * How a column is being sized. `none` is one size for every mark. `pending` names a column with no
  * value drawn yet, and draws every mark at the smallest size.
  */
@@ -50,14 +76,9 @@ export type SizeEncoding =
   | {kind: 'none'}
   | {kind: 'pending'; column: string}
   | {kind: 'linear' | 'log'; column: string; domain: {min: number; max: number}}
-  | {kind: 'rank'; column: string; sample: readonly number[]};
+  | {kind: 'rank'; column: string; sample: readonly number[]; seen: number};
 
 export const NO_SIZE: SizeEncoding = {kind: 'none'};
-
-/** Whether a declared column can size points: a rendered number that is not a category or a time. */
-export function sizesPoints(column: Meta['declaredScalars'][number]): boolean {
-  return column.render && column.category === null && !['bool', 'utf8', 'timestamp_us'].includes(column.arrowType);
-}
 
 /** The size encoding for the legend's `sizeBy`, from the range and sample it holds and the scale chosen. */
 export function sizeEncodingOf(meta: Meta | null, legend: LegendProjection | null, scale: SizeScale): SizeEncoding {
@@ -66,23 +87,24 @@ export function sizeEncodingOf(meta: Meta | null, legend: LegendProjection | nul
   if (!legend || !column || !sizesPoints(column)) return NO_SIZE;
   if (scale === 'rank') {
     const sample = legend.samples[column.name];
-    return sample && sample.values.length > 0 ? {kind: 'rank', column: column.name, sample: sample.values} : {kind: 'pending', column: column.name};
+    return sample && sample.values.length > 0 ? {kind: 'rank', column: column.name, sample: sample.values, seen: sample.seen} : {kind: 'pending', column: column.name};
   }
   const domain = legend.domains[column.name];
   return domain ? {kind: scale, column: column.name, domain} : {kind: 'pending', column: column.name};
 }
 
-/** A key equal for two encodings that size alike. A domain only widens and a sample is replaced whole, so their bounds and length identify them. */
+/**
+ * A key equal for two encodings that size alike. A domain only widens, so its bounds identify it; a
+ * sample is replaced whole with more marks seen, so the count identifies it.
+ */
 export function sizeSignature(encoding: SizeEncoding): string {
   switch (encoding.kind) {
     case 'none':
       return 'none';
     case 'pending':
       return `pending|${encoding.column}`;
-    case 'rank': {
-      const s = encoding.sample;
-      return `rank|${encoding.column}|${s.length}|${s[0]}|${s[s.length >> 1]}|${s[s.length - 1]}`;
-    }
+    case 'rank':
+      return `rank|${encoding.column}|${encoding.seen}`;
     default:
       return `${encoding.kind}|${encoding.column}|${encoding.domain.min}|${encoding.domain.max}`;
   }

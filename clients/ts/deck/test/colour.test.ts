@@ -114,6 +114,7 @@ describe('encodingOf', () => {
     ranks: {field: {1: 0, 2: 1}},
     domains: {},
     samples: {},
+    missing: {},
     categories: {field: [{code: 1, key: 'cs.LG', title: null}, {code: 2, key: 'cs.CV', title: null}]},
     categoryErrors: {},
     colourBy: 'field',

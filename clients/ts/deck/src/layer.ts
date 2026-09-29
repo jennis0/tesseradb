@@ -28,8 +28,8 @@ import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidat
 import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
-import {ANTIALIAS_ABOVE_PX, deckOpacity, markStyle} from './marks-style.js';
-import {DEFAULT_SIZING, buildSizeAttribute, sizeEncodingOf, sizeSignature, type SizeEncoding, type Sizing} from './size.js';
+import {deckOpacity, markStyle} from './marks-style.js';
+import {DEFAULT_SIZING, buildSizeAttribute, drawnSizing, sizeEncodingOf, sizeSignature, sizingRadius, type SizeEncoding, type Sizing} from './size.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
@@ -129,8 +129,9 @@ export type TesseraLayerProps = CompositeLayerProps & {
   radius?: number | null;
   /**
    * The smallest and largest radius and the scale a number column sizes marks on, under the
-   * legend's `sizeBy`. A mark with no value draws at the smallest radius as a ring. Defaults to
-   * {@link DEFAULT_SIZING}.
+   * legend's `sizeBy`. A mark with no value, NaN or an infinity draws as a ring, at the smallest
+   * radius or 3 px, whichever is larger. A radius that is not a finite number above zero is the
+   * default's. Defaults to {@link DEFAULT_SIZING}.
    */
   sizing?: Sizing;
   /**
@@ -203,7 +204,7 @@ export type LayerTimings = {
   outlinesDrawn: number;
   /** Labels placed. */
   labels: number;
-  /** The mark radius drawn, in pixels. */
+  /** The mark radius drawn, in pixels; under sizing by a column, the largest. */
   markRadius: number;
   /** The alpha the marks are composited at, from 0 to 1, as a fraction of their colour's own alpha. */
   markAlpha: number;
@@ -981,7 +982,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const membershipLayer = clusterLayer ?? r.artifacts?.layers[0] ?? '';
     const useLut = clusterLayer !== null && lut.gpu !== null;
     const highlighting = this.props.highlighting ?? false;
-    const sizing = this.props.sizing ?? DEFAULT_SIZING;
+    const sizing = drawnSizing(this.props.sizing ?? DEFAULT_SIZING);
     const size = sizeEncodingOf(r.meta, r.legend, sizing.scale);
     const sized = size.kind !== 'none';
     const slabStarted = performance.now();
@@ -1003,13 +1004,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
 
     const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer, sized ? size.column : null);
     const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null, this.props.pointOpacity ?? null);
-    // Under sizing the layer's radius is the largest, and each mark's own is a fraction of it.
-    const radius = sized ? sizing.max : style.radius;
-    const antialiasing = sized ? sizing.min >= ANTIALIAS_ABOVE_PX : style.antialiasing;
-    const sizeRange = sized ? {min: sizing.min, max: sizing.max} : null;
+    // Under sizing the layer's radius is the largest any mark draws at, and each mark's own is a
+    // fraction of it. The edges are feathered, and the shader keeps a small mark's edge hard.
+    const radius = sized ? sizingRadius(sizing) : style.radius;
+    const antialiasing = sized ? true : style.antialiasing;
+    const sizeRange = sized ? sizing : null;
     const opacity = deckOpacity(style.alpha);
     const dullColour = DULL_COLOUR[this.props.scheme ?? 'dark'];
-    timings.markRadius = style.radius;
+    timings.markRadius = sized ? sizing.max : style.radius;
     timings.markAlpha = style.alpha;
     timings.markCount = slab.drawn + standIn.count;
 
