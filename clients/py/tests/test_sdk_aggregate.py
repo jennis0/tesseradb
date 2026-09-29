@@ -9,14 +9,16 @@ the same result read in one.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 
 import pytest
 
 pytest.importorskip("pyarrow")
 
-from tesseradb import Refusal  # noqa: E402
-from test_sdk_records import papers  # noqa: E402
+from conftest import post  # noqa: E402
+from tesseradb import PartialRead, Refusal, connect  # noqa: E402
+from test_sdk_records import Proxy, end_of, papers  # noqa: E402
 
 
 @pytest.fixture
@@ -122,3 +124,54 @@ def test_a_refusal_says_what_the_server_said(db):
         db.aggregate("map", [{"by": {"field": "title", "top": 2}}])
     with pytest.raises(Refusal, match="404"):
         db.aggregate("nowhere", [{}])
+
+
+def test_a_response_cut_short_raises_the_tables_read_and_the_cursor_to_read_on(db):
+    """Cut after the first table's page: the error holds that table whole and a cursor from which
+    the server sends the rest, which is the rest of the result read in one."""
+    groupings = [{}, {"by": {"field": "venue", "top": 2}, "cells": {"depth": 3}}]
+    whole = db.aggregate("map", groupings)
+    through = Proxy(db.viewer_url)
+    try:
+        through.plan.append(("cut", lambda body: end_of(body, 8, 1)))
+        with pytest.raises(PartialRead) as stopped:
+            connect(through.url, db.token().token).aggregate("map", groupings)
+    finally:
+        through.server.shutdown()
+        through.server.server_close()
+    assert [rows(t) for t in stopped.value.rows] == [rows(whole[0])]
+    assert stopped.value.cursor is not None and not stopped.value.done
+    rest = post(
+        f"{db.viewer_url}/v1/aggregate",
+        db.token().token,
+        {"view": "map", "groupings": groupings, "cursor": stopped.value.cursor},
+    )
+    at, heads = 0, []
+    while at < len(rest):
+        length = int.from_bytes(rest[at + 1 : at + 5], "little")
+        if rest[at] == 9:
+            heads.append(json.loads(rest[at + 5 : at + 5 + length])["grouping"])
+        at += 5 + length
+    assert heads == [1]
+
+
+def test_a_later_request_refused_raises_the_tables_read(db, monkeypatch):
+    """One row to a response, and the third request refused: the error holds the rows before it
+    and the cursor that request carried."""
+    urlopen = urllib.request.urlopen
+    bodies = []
+
+    def refusing(request, *args, **kwargs):
+        if request.full_url.endswith("/v1/aggregate"):
+            body = {**json.loads(request.data), "page_rows": 1, "pages": 1}
+            bodies.append(body)
+            if len(bodies) == 3:
+                raise urllib.error.HTTPError(request.full_url, 429, "busy", {}, None)
+            request.data = json.dumps(body).encode()
+        return urlopen(request, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", refusing)
+    with pytest.raises(PartialRead) as stopped:
+        db.viewer().aggregate("map", [{"cells": {"depth": 4}}])
+    assert stopped.value.cursor == bodies[2]["cursor"]
+    assert [len(t) for t in stopped.value.rows] == [2]

@@ -104,12 +104,12 @@ def split_frames(body: bytes) -> list[tuple[int, bytearray]]:
 
 
 class PartialRead(Refusal):
-    """A read from `items` or `artifacts` that stopped part of the way: a response cut short, or
-    a later request refused. Every page given before the stop is whole.
+    """A read from `items`, `artifacts` or `aggregate` that stopped part of the way: a response
+    cut short, or a later request refused. Every page given before the stop is whole.
 
     - `rows`: on a read into one table, the rows read before the stop, as a pyarrow table, or
       `None` where no page had arrived. `None` from `batches=True`, whose pages were given as they
-      came.
+      came. From `aggregate`, a list of one table per grouping read so far, as it returns them.
     - `cursor`: the cursor to pass as `cursor` to read the rows after them, or `None` to read
       from the start.
     - `done`: `True` where every row had arrived before the stop, so none is left to read.
@@ -126,6 +126,8 @@ class PartialRead(Refusal):
     def __str__(self) -> str:
         if self.rows is None:
             kept = "The pages given before it are whole."
+        elif isinstance(self.rows, list):
+            kept = f"The {len(self.rows)} tables read before it are this error's `rows`."
         else:
             kept = f"The {self.rows.num_rows} rows read before it are this error's `rows`."
         if self.done:
@@ -1003,8 +1005,10 @@ class Viewer:
         server's region verdict where a filter had a `region` leaf.
 
         The server answers a page at a time, and each response ends with a cursor for the next.
-        This requests responses until none is left and joins each table's pages. A refusal, and a
-        response cut short, raise `Refusal`. `.to_pandas()` on a table gives a DataFrame.
+        This requests responses until none is left and joins each table's pages. A refusal of the
+        first request raises `Refusal`. A response cut short, or a later request refused, raises a
+        `PartialRead` whose `rows` are the tables read before it and whose `cursor` reads on: pass
+        it as the request's `cursor` over HTTP. `.to_pandas()` on a table gives a DataFrame.
 
             [size, venues] = v.aggregate("papers", [{}, {"by": {"field": "venue", "top": 10}}])
             venues.to_pandas()
@@ -1019,15 +1023,43 @@ class Viewer:
         if reference is not None:
             request["reference"] = reference
         what = "POST /v1/aggregate"
+
+        def joined() -> list:
+            tables = []
+            for grouping in sorted(pages):
+                figures = {k: v for k, v in heads[grouping].items() if k != "resumed"}
+                metadata = {
+                    "tessera.head": json.dumps(figures),
+                    "tessera.recomposed": "true" if recomposed else "false",
+                }
+                if region is not None:
+                    metadata["tessera.region"] = region
+                table = pa.Table.from_batches(pages[grouping]).unify_dictionaries()
+                tables.append(table.replace_schema_metadata(metadata))
+            return tables
+
+        def stopped(why: str) -> PartialRead:
+            partial = PartialRead(why, resume, False)
+            partial.rows = joined()
+            return partial
+
         heads: dict = {}
         pages: dict = {}
         recomposed = False
         region = None
         cursor = None
         while True:
-            body = request if cursor is None else {**request, "cursor": cursor}
+            # Where a read stopped in this response resumes: after its last whole page.
+            resume = cursor
+            if cursor is None:
+                response = self._open("POST", "/v1/aggregate", request)
+            else:
+                try:
+                    response = self._open("POST", "/v1/aggregate", {**request, "cursor": cursor})
+                except (Refusal, OSError, http.client.HTTPException) as refused:
+                    raise stopped(str(refused)) from None
             table, pending, trailer, carried = None, None, None, [0, 0]
-            with self._open("POST", "/v1/aggregate", body) as response:
+            with response:
                 region = region or response.headers.get("x-tessera-region")
                 for kind, payload in _frames(response):
                     if kind == FRAME_TABLE_HEAD:
@@ -1046,12 +1078,13 @@ class Viewer:
                         pages[table].append(pending)
                         carried = [carried[0] + 1, carried[1] + pending.num_rows]
                         pending = None
+                        resume = json.loads(payload)["next"]
                     elif kind == FRAME_TRAILER:
                         trailer = json.loads(payload)
                     else:
                         raise Refusal(f"{what}: a frame has the unknown kind {kind}")
             if trailer is None:
-                raise Refusal(f"{what}: the response ended before its trailer, so it is incomplete")
+                raise stopped(f"{what}: the response ended before its trailer")
             if [trailer["pages"], trailer["rows"]] != carried:
                 raise Refusal(
                     f"{what}: the trailer counts {trailer['pages']} pages and {trailer['rows']} "
@@ -1060,19 +1093,7 @@ class Viewer:
             recomposed = recomposed or trailer.get("recomposed") is True
             cursor = trailer["next"]
             if cursor is None:
-                break
-        tables = []
-        for grouping in sorted(pages):
-            figures = {key: value for key, value in heads[grouping].items() if key != "resumed"}
-            metadata = {
-                "tessera.head": json.dumps(figures),
-                "tessera.recomposed": "true" if recomposed else "false",
-            }
-            if region is not None:
-                metadata["tessera.region"] = region
-            joined = pa.Table.from_batches(pages[grouping]).unify_dictionaries()
-            tables.append(joined.replace_schema_metadata(metadata))
-        return tables
+                return joined()
 
     def categories(
         self,
