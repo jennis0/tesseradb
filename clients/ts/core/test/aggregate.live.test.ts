@@ -87,6 +87,7 @@ describe('aggregates against a live server', () => {
     expect(several.tables.map((t) => dump(t.rows))).toEqual(one.tables.map((t) => dump(t.rows)));
     // The whole visible set as the reference: every lift is 1.
     expect(one.tables[0]!.referenceTotal).toBe(await matched());
+    expect(new Set([...one.tables[0]!.rows.getChild('lift')!])).toEqual(new Set([1]));
   });
 
   it('keeps the store’s aggregate in step with its filters', async (ctx) => {

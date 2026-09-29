@@ -1,5 +1,6 @@
 import {Dictionary, Int8, Int32, Table, tableToIPC, Uint64, Utf8, vectorFromArray} from 'apache-arrow';
 import {describe, expect, it} from 'vitest';
+import {PartialAggregate} from '../src/aggregate.js';
 import {TesseraClient, TesseraError} from '../src/client.js';
 import type {Frame} from '../src/frame.js';
 import type {AggregateRequest} from '../src/types.js';
@@ -66,6 +67,18 @@ function clientFor(answers: Record<string, () => Response>) {
     }) as typeof fetch
   });
   return {client, sent};
+}
+
+/** The bytes of a body's last frame, its trailer. */
+function trailerBytes(body: Uint8Array): number {
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  let at = 0;
+  let last = 0;
+  while (at < body.byteLength) {
+    last = at;
+    at += 5 + view.getUint32(at + 1, true);
+  }
+  return body.byteLength - last;
 }
 
 /** The rows of a table as plain objects. */
@@ -144,7 +157,7 @@ describe('TesseraClient.aggregate', () => {
 
   it('reads the first response alone without follow, and says where the read continues', async () => {
     const {client, sent} = clientFor(TWO);
-    const first = await client.aggregate('tok', REQUEST, undefined, false);
+    const first = await client.aggregate('tok', REQUEST, undefined, {follow: false});
     expect(sent).toHaveLength(1);
     expect(first.next).toBe('c1');
     expect(first.recomposed).toBe(false);
@@ -182,10 +195,22 @@ describe('TesseraClient.aggregate', () => {
     expect(rowsOf(result.tables[0]!.rows)).toEqual([{count: 1n}]);
   });
 
-  it('throws on a body that ends without its trailer, and on a trailer that miscounts the pages', async () => {
-    const whole = responseOf([{head: {grouping: 0, total: 1, resumed: false}, pages: [{table: countPage(1n), next: null}]}], null);
-    const cut = whole.slice(0, whole.byteLength - 20);
-    await expect(clientFor({'': () => chunked(cut)}).client.aggregate('tok', {view: 's0', groupings: [{}]})).rejects.toThrow(Error);
+  it('throws a body cut before its trailer as a partial result, which resumes from its cursor without repeating a row', async () => {
+    const second = responseOf([{head: {grouping: 1, total: 10, groups: 5, resumed: false}, pages: [{table: fieldPage([['listed', 'cs', 4n], ['listed', 'hep', 3n]]), next: 'p2'}]}], 'c1');
+    const firstOnly = responseOf([{head: {grouping: 0, total: 10, resumed: false}, pages: [{table: countPage(10n), next: 'p1'}]}], null);
+    // The first table's page and its page end, then the second table's head and part of its page.
+    const cut = new Uint8Array([...firstOnly.slice(0, firstOnly.byteLength - trailerBytes(firstOnly)), ...second.slice(0, 60)]);
+    const {client} = clientFor({'': () => chunked(cut), p1: TWO.c1 as () => Response});
+    const stopped = await client.aggregate('tok', REQUEST).catch((error: unknown) => error);
+    expect(stopped).toBeInstanceOf(PartialAggregate);
+    const partial = (stopped as PartialAggregate).result;
+    expect(partial.next).toBe('p1');
+    expect(partial.tables.map((t) => [t.grouping, t.rows.numRows])).toEqual([[0, 1], [1, 0]]);
+    const rest = await client.aggregate('tok', {...REQUEST, cursor: partial.next!});
+    expect(rest.tables.map((t) => [t.grouping, t.rows.numRows])).toEqual([[1, 2]]);
+  });
+
+  it('throws on a trailer that miscounts the pages, and on a records frame before any table head', async () => {
     const miscounted = responseOf([{head: {grouping: 0, total: 1, resumed: false}, pages: [{table: countPage(1n), next: null}]}], null, {pages: 2});
     await expect(clientFor({'': () => chunked(miscounted)}).client.aggregate('tok', {view: 's0', groupings: [{}]})).rejects.toThrow(Error);
     // A records frame with no table head before it.

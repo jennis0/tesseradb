@@ -283,7 +283,7 @@ function zstdDecode(data: Uint8Array): Uint8Array {
 }
 
 type RawPageEnd = {next?: unknown; ended_by: PageEnd['endedBy']};
-type RawTrailer = {pages?: unknown; rows?: unknown; next?: unknown; ended_by: RecordsTrailer['endedBy']; stream_us: number};
+export type RawTrailer = {pages?: unknown; rows?: unknown; next?: unknown; ended_by: RecordsTrailer['endedBy']; stream_us: number};
 
 const isCursor = (value: unknown): value is string | null => value === null || typeof value === 'string';
 
@@ -293,8 +293,13 @@ export function pageEndOf(payload: Uint8Array): PageEnd {
   return {next: raw.next, endedBy: raw.ended_by};
 }
 
-export function trailerOf(payload: Uint8Array): RecordsTrailer {
-  const raw = (JSON.parse(new TextDecoder().decode(payload)) ?? {}) as RawTrailer;
+function trailerOf(payload: Uint8Array): RecordsTrailer {
+  return trailerFrom(JSON.parse(new TextDecoder().decode(payload)) as RawTrailer | null);
+}
+
+/** A trailer's JSON, parsed, checked and translated. */
+export function trailerFrom(parsed: RawTrailer | null): RecordsTrailer {
+  const raw = parsed ?? ({} as RawTrailer);
   if (!isCursor(raw.next)) throw new Error('the trailer has no `next`, which must be a cursor or null');
   if (!Number.isInteger(raw.pages) || !Number.isInteger(raw.rows)) throw new Error('the trailer does not count its pages and rows');
   return {pages: raw.pages as number, rows: raw.rows as number, next: raw.next, endedBy: raw.ended_by, streamUs: raw.stream_us};

@@ -10,7 +10,7 @@ import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import {readAggregate} from './aggregate.js';
+import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
 import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
@@ -967,18 +967,19 @@ export class TesseraClient {
    * console.log(tables[0]!.total, tables[1]!.rows.toArray());
    * ```
    *
-   * @param follow - Read the responses after the first. Defaults to `true`. With `false` the result
-   *   holds the first response's pages, and {@link AggregateResult.next} is where the read
-   *   continues, to be passed back as `cursor`.
+   * @param options - `follow`: read the responses after the first. Defaults to `true`. With `false`
+   *   the result holds the first response's pages, and {@link AggregateResult.next} is where the
+   *   read continues, to be passed back as `cursor`.
    * @throws {@link TesseraError} when the server refuses a request: `404` for an unknown view,
    *   `422` for a request the contract refuses, naming the limit where one is exceeded, and `429`
    *   under load.
-   * @throws `Error` for a body cut or ended without its trailer, and the signal's reason once it
-   *   aborts.
+   * @throws {@link PartialAggregate} for a body cut or ended without its trailer, holding the pages
+   *   read before it and the cursor to read on from; `Error` for a trailer that miscounts the body;
+   *   and the signal's reason once it aborts.
    */
-  aggregate(token: string, req: AggregateRequest, signal?: AbortSignal, follow = true): Promise<AggregateResult> {
+  aggregate(token: string, req: AggregateRequest, signal?: AbortSignal, options: {follow?: boolean} = {}): Promise<AggregateResult> {
     const request = (cursor?: string) => this.post('aggregate', token, cursor === undefined ? req : {...req, cursor}, signal);
-    return readAggregate(req, request, signal, follow);
+    return readAggregate(req, request, signal, options.follow ?? true);
   }
 
   /** One bulk read's request: each field of `given` that is set, under its wire name. */

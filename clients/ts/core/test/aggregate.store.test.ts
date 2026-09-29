@@ -35,7 +35,7 @@ function answer(req: AggregateRequest, total: number, identityKey = 'ik'): Aggre
  */
 async function storeWith(opts: {refuse?: boolean; identityKey?: string} = {}) {
   const clock = fakeClock();
-  const pending: {req: AggregateRequest; signal: AbortSignal; release: (total: number) => void}[] = [];
+  const pending: {req: AggregateRequest; signal: AbortSignal; release: (total: number, identityKey?: string) => void}[] = [];
   const aggregate = vi.fn(
     (_token: string, req: AggregateRequest, signal: AbortSignal) =>
       new Promise<AggregateResult>((resolve, reject) => {
@@ -43,7 +43,7 @@ async function storeWith(opts: {refuse?: boolean; identityKey?: string} = {}) {
         pending.push({
           req,
           signal,
-          release: (total) => (opts.refuse ? reject(new TesseraError(422, 'contract', 'refused')) : resolve(answer(req, total, opts.identityKey)))
+          release: (total, identityKey) => (opts.refuse ? reject(new TesseraError(422, 'contract', 'refused')) : resolve(answer(req, total, identityKey ?? opts.identityKey)))
         });
       })
   );
@@ -133,6 +133,26 @@ describe('the aggregates projection', () => {
     await flush();
     expect(pending[0]!.signal.aborted).toBe(true);
     expect(JSON.stringify(pending[1]!.req.filters)).toContain('region');
+  });
+
+  it('drops an answer under another identity key, forgets what it held and asks again', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('a', {groupings: [{}]});
+    await flush();
+    pending[0]!.release(7, 'first');
+    await flush();
+    store.setFilters(DRAFT);
+    await flush();
+    // Another viewer's key: the answer is not published, and the store reads meta and asks again.
+    pending[1]!.release(9, 'second');
+    await flush();
+    await flush();
+    expect(store.get('aggregates').get('a')).toEqual({status: 'loading', result: null, view: null, refusal: null});
+    expect(pending).toHaveLength(3);
+    pending[2]!.release(9, 'second');
+    await flush();
+    expect(store.get('aggregates').get('a')).toMatchObject({status: 'shown', view: 's0'});
+    expect(store.get('aggregates').get('a')!.result!.tables[0]!.total).toBe(9);
   });
 
   it('publishes a refusal, and drops an id set to null', async () => {

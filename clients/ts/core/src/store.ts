@@ -555,7 +555,8 @@ export interface Store {
    * counts. The store asks again, aborting the request it replaces, when `setAggregate` is called
    * for the id again, when the filters, the `member_of` clauses or the selected region change, at a
    * view switch, at {@link Store.refresh}, and once it has read `/v1/meta` again after forgetting
-   * what the server answered. Waits for `/v1/meta`.
+   * what the server answered. Waits for `/v1/meta`. Each call sends a new request, so call it when
+   * the component's spec changes, not on every render.
    */
   setAggregate(id: string, spec: AggregateSpec | null): void;
   /**

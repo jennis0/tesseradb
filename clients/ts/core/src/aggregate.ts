@@ -1,6 +1,6 @@
 import {Table, tableFromIPC} from 'apache-arrow';
 import {FRAME_PAGE_END, FRAME_RECORDS, FRAME_TABLE_HEAD, FRAME_TRAILER} from './frame.js';
-import {Frames, pageEndOf, registerZstd, trailerOf, type RecordsRequest} from './records.js';
+import {Frames, pageEndOf, registerZstd, trailerFrom, type RecordsRequest} from './records.js';
 import {parseRegionVerdict} from './region.js';
 import type {AggregateResult, AggregateTable, RegionVerdict} from './types.js';
 
@@ -14,8 +14,9 @@ type Reading = Omit<AggregateTable, 'rows'> & {pages: Table[]};
  * from the cursor the one before it ended with, until that cursor is null. A table carried over
  * several responses opens each one with its head again, and its pages are joined in order.
  *
- * A body that ends or is cut without its trailer throws, as does a trailer that counts other pages
- * or rows than the body carried. An abort of `signal` throws its reason.
+ * A body that ends or is cut without its trailer throws {@link PartialAggregate}, holding the whole
+ * pages read before it and the cursor to resume from. A trailer that counts other pages or rows
+ * than the body carried throws `Error`. An abort of `signal` throws its reason.
  */
 export async function readAggregate(
   given: {cursor?: string; compression?: 'zstd'},
@@ -37,6 +38,8 @@ export async function readAggregate(
     let table: Reading | null = null;
     let pending: Uint8Array | null = null;
     let trailer: Uint8Array | null = null;
+    // Where a read cut in this response resumes: after its last whole page.
+    let resume: string | null = cursor ?? null;
     let pages = 0;
     let rows = 0;
     try {
@@ -55,7 +58,7 @@ export async function readAggregate(
           // every page end.
           const page = tableFromIPC(pending!);
           pending = null;
-          pageEndOf(frame.payload);
+          resume = pageEndOf(frame.payload).next;
           table!.pages.push(page);
           pages += 1;
           rows += page.numRows;
@@ -63,22 +66,47 @@ export async function readAggregate(
           trailer = frame.payload;
         }
       }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const why = error instanceof Error ? error.message : String(error);
+      throw new PartialAggregate(why, {tables: whole(tables), region, recomposed, identityKey, next: resume});
     } finally {
       frames.release();
     }
     // A complete body has a trailer: the grammar refuses one without.
-    const ended = trailerOf(trailer!);
+    const raw = JSON.parse(new TextDecoder().decode(trailer!)) as Parameters<typeof trailerFrom>[0] & {recomposed?: unknown};
+    const ended = trailerFrom(raw);
     if (ended.pages !== pages || ended.rows !== rows) {
       throw new Error(`the trailer counts ${ended.pages} pages and ${ended.rows} rows, but the body carried ${pages} and ${rows}`);
     }
-    if ((JSON.parse(new TextDecoder().decode(trailer!)) as {recomposed?: unknown}).recomposed === true) recomposed = true;
+    if (raw.recomposed === true) recomposed = true;
     cursor = ended.next ?? undefined;
-    if (ended.next === null || !follow) {
-      const whole = [...tables.values()].sort((a, b) => a.grouping - b.grouping).map(({pages: read, ...head}) => ({...head, rows: joined(read)}));
-      return {tables: whole, region, recomposed, identityKey, next: ended.next};
-    }
+    if (ended.next === null || !follow) return {tables: whole(tables), region, recomposed, identityKey, next: ended.next};
     signal?.throwIfAborted();
   }
+}
+
+/**
+ * An aggregate read whose response ended or was cut before its trailer. {@link result} holds every
+ * whole page read before the stop, and its `next` is the cursor to pass as `cursor` to read on
+ * without repeating a row; `null` there means read again from the start.
+ *
+ * @category HTTP client
+ */
+export class PartialAggregate extends Error {
+  constructor(
+    why: string,
+    /** The tables as far as they were read. */
+    readonly result: AggregateResult
+  ) {
+    super(`${why}; the whole pages read before the stop are this error's result, and its next is the cursor to read on from`);
+    this.name = 'PartialAggregate';
+  }
+}
+
+/** Each table read, in grouping order, its pages joined. */
+function whole(tables: Map<number, Reading>): AggregateTable[] {
+  return [...tables.values()].sort((a, b) => a.grouping - b.grouping).map(({pages, ...head}) => ({...head, rows: joined(pages)}));
 }
 
 /** A table's pages as one table. Each page keeps its own dictionaries. */
