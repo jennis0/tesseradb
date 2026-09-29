@@ -594,6 +594,98 @@ fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
     let after = counts(&full_coverage_credential());
     assert_eq!(after[0], ("alpha".to_string(), 2), "the suppressed child is not counted");
     assert_eq!(counts(&subset_credential()), all(0));
+
+    let two = id_of(&fx, &full_coverage_credential(), "alpha-two");
+    let entity = fx.engine.resolve_tessera_ids(&[two]).unwrap()[0].unwrap();
+    fx.engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .unwrap();
+    let after = counts(&full_coverage_credential());
+    assert_eq!(after[0], ("alpha".to_string(), 1), "nor is the deleted one");
+    let children = browse(
+        &fx.engine,
+        &full_coverage_credential(),
+        BrowseForm::Children(alpha),
+        None,
+        100,
+    );
+    assert_eq!(key_set(&children), vec!["alpha-three"]);
+}
+
+/// **On a `dag` layer a child counts under each parent the principal is served, once.**
+///
+/// `wide` (300 members) is served to both principals; `thin` (60) and `thin-child` (60) only to
+/// the broad one, since the narrow one sees 20 of each and the criterion asks for 50. `both`
+/// names `wide` twice and `thin` once. The narrow principal is served `both` under `wide` alone,
+/// counted once, and each count equals the length of that row's children page.
+#[test]
+fn a_dag_child_counts_once_under_each_served_parent() {
+    const DAG: &str = "clusters/dag";
+    let fx = fixture(None);
+    let mut declaration = declaration(Some(ExistenceCriterion::Count(50)));
+    declaration.name = DAG.into();
+    declaration.hierarchy.kind = HierarchyKind::Dag;
+    declaration.content = ContentDeclaration::default();
+    fx.engine.register_layer(declaration).unwrap();
+    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
+    let artifact = |key: &str, members: std::ops::Range<u64>, parents: &[&str]| {
+        let mut a = IncomingArtifact::from_entities(
+            Some(key.into()),
+            members.map(|s| EntityId::new(map[&s])),
+        );
+        a.parent_keys = parents.iter().map(|p| p.to_string()).collect();
+        a
+    };
+    fx.engine
+        .publish_artifacts(
+            DAG.into(),
+            0,
+            vec![
+                artifact("wide", 0..300, &[]),
+                artifact("thin", 600..660, &[]),
+                artifact("both", 0..200, &["wide", "wide", "thin"]),
+                artifact("thin-child", 700..760, &["wide"]),
+            ],
+        )
+        .unwrap();
+
+    let walk = |credential: &[u8]| -> Vec<(String, u64)> {
+        let session = fx.engine.authorise(credential).unwrap();
+        let ask = |form| {
+            fx.engine
+                .browse(
+                    &session,
+                    BrowseRequest {
+                        view: "s0",
+                        layer: DAG,
+                        level: None,
+                        form,
+                        filter: None,
+                        limit: 100,
+                        cursor: None,
+                    },
+                )
+                .unwrap()
+        };
+        let mut out = Vec::new();
+        for row in ask(BrowseForm::Roots).artifacts {
+            let children = ask(BrowseForm::Children(row.tessera_id)).artifacts;
+            assert_eq!(
+                children.len() as u64,
+                row.child_count,
+                "{:?}: the children page is as long as the count",
+                row.key
+            );
+            out.push((row.key.unwrap_or_default(), row.child_count));
+        }
+        out.sort();
+        out
+    };
+    assert_eq!(
+        walk(&full_coverage_credential()),
+        vec![("thin".to_string(), 1), ("wide".to_string(), 2)]
+    );
+    assert_eq!(walk(&subset_credential()), vec![("wide".to_string(), 1)]);
 }
 
 /// **The order is total and the cursor walks it exactly.**
@@ -704,6 +796,7 @@ fn a_filter_adds_a_count_per_row_and_moves_nothing_else() {
                     row.masked_count, plain_counts[&row.tessera_id.raw()],
                     "and the same masked count beside them"
                 );
+                assert_eq!(row.child_count, 3, "and the same children, whatever they match");
                 let key = row.key.clone().unwrap_or_default();
                 let base = ROOTS
                     .iter()
