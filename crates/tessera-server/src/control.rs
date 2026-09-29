@@ -1642,7 +1642,8 @@ enum MemberColumn {
     /// Unsigned integers read as their decimal text: a `tessera_id` column, which a read sends as
     /// uint64.
     Decimal(arrow::array::UInt64Array),
-    Other(arrow::array::ArrayRef),
+    /// A column of any other type, and how a refusal shows its values.
+    Other(arrow::array::ArrayRef, String),
 }
 
 impl MemberColumn {
@@ -1687,7 +1688,7 @@ impl MemberColumn {
                     false => MemberColumn::Unsigned(column),
                 }
             }
-            _ => MemberColumn::Other(column.clone()),
+            other => MemberColumn::Other(column.clone(), format!("a {other} value")),
         }
     }
 
@@ -1710,8 +1711,8 @@ impl MemberColumn {
             MemberColumn::Decimal(c) => {
                 (!c.is_null(at)).then(|| AddressValue::Text(c.value(at).to_string()))
             }
-            MemberColumn::Other(c) => {
-                (!c.is_null(at)).then(|| AddressValue::Other(format!("a {} value", c.data_type())))
+            MemberColumn::Other(c, shown) => {
+                (!c.is_null(at)).then(|| AddressValue::Other(shown.clone()))
             }
         }
     }

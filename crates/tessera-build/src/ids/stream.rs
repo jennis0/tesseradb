@@ -327,6 +327,7 @@ struct Merged {
 /// a row's values in the order of the fields the file carries. The entry beside it is the value's
 /// number among its field's candidates.
 fn candidate_key(row: u32, field: usize) -> u64 {
+    debug_assert!((field as u64) < LINK, "a schema holds at most 65,535 unique fields");
     u64::from(row) << 16 | field as u64
 }
 

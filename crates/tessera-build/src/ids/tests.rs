@@ -704,11 +704,14 @@ source = "notes"
 /// does**, with its sorts spilling: rows naming an item two or three times far apart, by either
 /// field or both, naming two items, and giving a value several rows give; and its scratch stays
 /// within the forecast.
+///
+/// At the smallest sort budget a sort holds about 262,000 named items or 131,000 candidates and
+/// links before it spills; the file's million rows give each sort several times that.
 #[test]
 fn an_attribute_file_naming_items_out_of_order_numbers_as_the_rule_does() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let items = 150_000u64;
+    let items = 500_000u64;
     let a: Vec<u64> = (0..items).collect();
     let b: Vec<String> = a.iter().map(|v| format!("b{v:09}")).collect();
     let mut columns = vec![
