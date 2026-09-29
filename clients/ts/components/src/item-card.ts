@@ -1,4 +1,4 @@
-import {css, html, nothing, type TemplateResult} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
 import {GRID32} from '@tesseradb/client';
@@ -213,6 +213,16 @@ export class TesseraItemCard extends TesseraElement {
   @state() accessor expanded = false;
   private expandedFor: bigint | null = null;
 
+  /** Another item starts folded again; set before the render, so the render changes nothing it reads. */
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    const id = this.shown.item?.id ?? null;
+    if (id !== this.expandedFor) {
+      this.expandedFor = id;
+      this.expanded = false;
+    }
+  }
+
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
     // A card fed by property still takes the schema from an adopted store: declaration order and
     // view names and frames belong to the bundle.
@@ -225,11 +235,6 @@ export class TesseraItemCard extends TesseraElement {
 
   override render(): TemplateResult | typeof nothing {
     const {item, refusal, meta} = this.shown;
-    // Another item starts folded again.
-    if ((item?.id ?? null) !== this.expandedFor) {
-      this.expandedFor = item?.id ?? null;
-      this.expanded = false;
-    }
     const close = html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button>`;
     // The header row: what the card shows, and the close button where there is something to close.
     const head = (content: unknown, closable: boolean) => html`<div part="title" class="head">${content}${closable ? close : nothing}</div>`;
