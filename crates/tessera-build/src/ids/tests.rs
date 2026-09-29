@@ -671,6 +671,98 @@ type   = "keyword"
 unique = true
 "#;
 
+const OUT_OF_ORDER: &str = r#"
+[sources]
+world = "world.parquet"
+notes = "notes.parquet"
+
+[defaults]
+source = "world"
+
+[[view]]
+name             = "world"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "a"
+type   = "u64"
+unique = true
+
+[[attribute]]
+name   = "b"
+type   = "keyword"
+unique = true
+
+[[attribute]]
+name   = "note"
+type   = "i64"
+source = "notes"
+"#;
+
+/// **An attribute file carrying two fields that names items in no order numbers as the rule
+/// does**, with its sorts spilling: rows naming an item two or three times far apart, by either
+/// field or both, naming two items, and giving a value several rows give; and its scratch stays
+/// within the forecast.
+#[test]
+fn an_attribute_file_naming_items_out_of_order_numbers_as_the_rule_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let items = 150_000u64;
+    let a: Vec<u64> = (0..items).collect();
+    let b: Vec<String> = a.iter().map(|v| format!("b{v:09}")).collect();
+    let mut columns = vec![
+        ("a", Arc::new(UInt64Array::from(a)) as ArrayRef),
+        ("b", Arc::new(StringArray::from(b))),
+    ];
+    columns.extend(positions(items as usize));
+    write(&dir.join("world.parquet"), columns);
+    let mut draws = Draws(91);
+    let rows = 2 * items as usize;
+    let (mut a, mut b) = (Vec::with_capacity(rows), Vec::with_capacity(rows));
+    for _ in 0..rows {
+        let item = draws.next(items);
+        let (by_a, by_b) = match draws.next(10) {
+            0..=4 => (Some(item), Some(format!("b{item:09}"))),
+            5 | 6 => (Some(item), None),
+            7 => (None, Some(format!("b{item:09}"))),
+            8 => (Some(item), Some(format!("c{}", draws.next(items / 4)))),
+            _ => (Some(item), Some(format!("b{:09}", draws.next(items)))),
+        };
+        a.push(by_a);
+        b.push(by_b);
+    }
+    write(
+        &dir.join("notes.parquet"),
+        vec![
+            ("a", Arc::new(UInt64Array::from(a)) as ArrayRef),
+            ("b", Arc::new(StringArray::from(b))),
+            ("note", Arc::new(Int64Array::from_iter_values(0..rows as i64))),
+        ],
+    );
+    std::fs::write(dir.join("corpus.toml"), OUT_OF_ORDER).unwrap();
+
+    let args = args(dir, Some(16 << 20));
+    let scratch = dir.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let streamed = super::stream::number(&args, &scratch).expect("the sort-merge numbers");
+    let linear = super::linear::number(&args).expect("the rule numbers");
+    assert_eq!(numbers_of(&args, &streamed), numbers_of(&args, &linear));
+    assert_eq!(streamed.refused, linear.refused);
+    let twice = |reason: &str| {
+        streamed
+            .refused
+            .iter()
+            .filter(|refused| refused.reason == reason)
+            .map(|refused| refused.rows)
+            .sum::<u64>()
+    };
+    assert!(twice(tessera_lifecycle::resolve::Refusal::ONE_ITEM_TWICE) > 0);
+    assert!(twice(tessera_lifecycle::resolve::Refusal::ONE_VALUE_TWICE) > 0);
+    std::fs::remove_dir_all(&scratch).unwrap();
+    scratch_within_forecast(dir);
+}
+
 /// Number the corpus in `dir` at the smallest sort budget, sampling the scratch directory's bytes
 /// throughout, and hold the most it held within the forecast.
 fn scratch_within_forecast(dir: &Path) {

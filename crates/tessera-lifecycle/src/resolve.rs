@@ -471,8 +471,6 @@ mod tests {
         );
     }
 
-    /// Two rows naming one item keep the first and refuse the later, and so do two new items
-    /// given one value. Nulls are not values and never collide.
     /// A refused row claims neither its item nor its values: a row refused for a value an earlier
     /// row set does not make a later row naming its item the second to name it.
     #[test]
@@ -507,6 +505,8 @@ mod tests {
         );
     }
 
+    /// Two rows naming one item keep the first and refuse the later, and so do two new items
+    /// given one value. Nulls are not values and never collide.
     #[test]
     fn the_first_of_two_rows_naming_one_item_or_setting_one_value_is_kept() {
         let by_tessera = RowIdentity {
