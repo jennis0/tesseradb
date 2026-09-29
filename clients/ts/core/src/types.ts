@@ -1274,6 +1274,12 @@ export type BrowseRow = {
   rung: number;
   /** The artifact's parents that this principal is also served, ascending. A parent it is not served is absent. */
   parentIds: bigint[];
+  /**
+   * How many artifacts this principal is served name this one among their parents: the rows the
+   * children form with this artifact as `parent` lists across its pages. `0` for a leaf, and on a
+   * `flat` or `stacked` layer.
+   */
+  childCount: number;
 };
 
 /**

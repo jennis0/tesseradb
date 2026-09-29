@@ -17,6 +17,7 @@ const row = (id: string, masked: number, extra: Record<string, unknown> = {}) =>
   masked_count: masked,
   rung: 0,
   parent_ids: [],
+  child_count: 0,
   ...extra
 });
 
@@ -51,7 +52,7 @@ describe('browse', () => {
   });
 
   it('sends the children form with the parent as a decimal string, and reads its parents back', async () => {
-    const fetchMock = answering({artifacts: [row('7', 4)], parents: [row('3', 90)], next: 'c2'});
+    const fetchMock = answering({artifacts: [row('7', 4)], parents: [row('3', 90, {child_count: 5})], next: 'c2'});
     const page = await client().browse('tok', {view: 's0', layer: 'l', parent: 3n, limit: 50, cursor: 'c1'});
     expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, {body: string}])[1].body)).toEqual({
       view: 's0',
@@ -60,7 +61,8 @@ describe('browse', () => {
       limit: 50,
       cursor: 'c1'
     });
-    expect(page.parents.map((p) => p.tesseraId)).toEqual([3n]);
+    expect(page.parents.map((p) => [p.tesseraId, p.childCount])).toEqual([[3n, 5]]);
+    expect(page.artifacts[0]!.childCount).toBe(0);
     expect(page.next).toBe('c2');
   });
 
