@@ -71,7 +71,7 @@ pub use aggregate::{
 };
 pub use cancel::CancelToken;
 pub use categories::{
-    CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, Suggestion,
+    CategoryColumn, CategoryPage, CategoryQuery, CategoryValue, MatchSpan, SuggestPage, SuggestRequest, Suggestion,
 };
 // The fold's automatic trigger, as a value an operator's configuration builds. `tessera-server`
 // parses `ingest.compaction_*` into one of these and hands it over in `EngineConfig`; the executor

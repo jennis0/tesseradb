@@ -326,7 +326,7 @@ impl Engine {
 
         debug_assert!(
             !values.iter().any(|v| v.code == ABSENT_CODE),
-            "code 0 is the absent sentinel and is never bound to a key (§3.6)"
+            "code 0 is the absent sentinel and is never bound to a key"
         );
 
         Ok(Some(CategoryPage {
@@ -428,9 +428,8 @@ pub struct SuggestPage {
     /// budget was spent.
     ///
     /// **On a spent budget this is a thresholded, pre-mask count of the values under the prefix**,
-    /// hidden ones included: it says at least `walk_budget` values sit there. That is the quantity
-    /// `architecture.md` Appendix C registers as **C31**, at one bit of resolution, and it is
-    /// registered as on the wire and not only in time. The alternative — `false` on a spent budget,
+    /// hidden ones included: it says at least `walk_budget` values sit there, one bit of it on the
+    /// wire as well as in the time. The alternative — `false` on a spent budget,
     /// so the flag counted visible values alone — under-reports, and a broad prefix would hide
     /// visible values behind a flag saying there were none.
     pub more: bool,
@@ -439,9 +438,32 @@ pub struct SuggestPage {
     pub region: Option<crate::RegionVerdict>,
 }
 
+/// One `/v1/categories/{column}/suggest` request, as the engine sees it.
+#[derive(Debug, Clone)]
+pub struct SuggestRequest<'a> {
+    /// The resolved column: an entity-scoped name, or a group-scoped family as `name@view`.
+    pub column: &'a str,
+    /// A view this session reaches. With `counts`, only its items count.
+    pub view: Option<&'a str>,
+    /// Narrows the counts to the view's items passing it. Needs `view`.
+    pub filter: Option<&'a crate::filter::FilterExpr>,
+    /// The text typed.
+    pub q: &'a str,
+    pub limit: usize,
+    pub counts: bool,
+    /// The most values the walk examines, hidden ones included.
+    pub walk_budget: u64,
+    /// At or under this many visible entities a `derived` column is answered from the session's
+    /// set of visible values.
+    pub max_suggest_set_entities: u64,
+    /// Checked while the view opens and the filter is evaluated; a cancelled request ends as
+    /// [`EngineError::Cancelled`].
+    pub cancel: Option<crate::cancel::CancelToken>,
+}
+
 impl Engine {
-    /// `GET /v1/categories/{column}/suggest` (contracts §3.2): the values whose key, title or word
-    /// start begins with what the caller typed, and that this viewer may see.
+    /// `/v1/categories/{column}/suggest`: the values whose key, title or word start begins with
+    /// what the caller typed, and that this viewer may see.
     ///
     /// # Two doors, one gate
     ///
@@ -465,10 +487,8 @@ impl Engine {
     /// For a `public` column there is no predicate and every value in the range is emitted in
     /// order — which is the whole of the difference, as it is on the enumeration.
     ///
-    /// **The walk's cost is a function of how many values sit under the prefix, hidden ones
-    /// included.** That is the timing channel the owner accepted on 2026-09-02 and Appendix C
-    /// registers as **C31**; §8 of the design carries what bounds it. It is not a defect of this
-    /// implementation to fix, and closing it is §6.3's priced lever rather than a change here.
+    /// The walk's cost grows with how many values sit under the prefix, hidden ones included. The
+    /// timing row of `docs/system/security.md` accepts that channel.
     ///
     /// # Errors
     ///
@@ -482,27 +502,31 @@ impl Engine {
     ///
     /// With `counts`, each value carries the number of items carrying it that this viewer may see:
     /// the base, the extents and the buffered rows, from inside the composed candidate. With
-    /// `view`, only items holding a row in that view count. An item ingested and not yet flushed
-    /// holds no row in any view, so it counts without `view` and not with it. A value visible in
-    /// another view counts 0 here. An unknown or unreachable view is refused as [`EngineError::UnknownView`].
+    /// `view`, only items holding a row in the view's rows the session's projection covers count,
+    /// as on the map. An item ingested and not yet flushed holds no row in any view, so it counts
+    /// without `view` and not with it. A value visible in another view counts 0 here. An unknown
+    /// or unreachable view is refused as [`EngineError::UnknownView`].
     ///
     /// With `filter`, which needs `view`, only the view's items passing the filter count. The
     /// filter narrows the counted set and nothing else: which values are offered, and their order,
     /// are decided without it, so a value the filter excludes is offered with count 0. The filter
     /// is admitted before the walk, and evaluated only when counts were asked for.
-    #[allow(clippy::too_many_arguments)]
     pub fn suggest(
         &self,
         session: &Session,
-        column: &str,
-        view: Option<&str>,
-        filter: Option<&crate::filter::FilterExpr>,
-        q: &str,
-        limit: usize,
-        counts: bool,
-        walk_budget: u64,
-        max_suggest_set_entities: u64,
+        req: SuggestRequest<'_>,
     ) -> Result<Option<SuggestPage>> {
+        let SuggestRequest {
+            column,
+            view,
+            filter,
+            q,
+            limit,
+            counts,
+            walk_budget,
+            max_suggest_set_entities,
+            ref cancel,
+        } = req;
         let generation = self.generation.load_full();
         let Some(vocabulary_name) = vocabulary_of(&generation.bundle.manifest, column) else {
             return Ok(None);
@@ -516,22 +540,16 @@ impl Engine {
                 detail: format!("vocabulary '{vocabulary_name}' has no suggestion index"),
             });
         };
-        let row_space = match view {
-            None => None,
-            Some(view) => {
-                let unknown = || EngineError::UnknownView(view.to_string());
-                if !session.visible_views().contains_view(view) {
-                    return Err(unknown());
-                }
-                let data = generation
-                    .bundle
-                    .partitions
-                    .values()
-                    .find_map(|partition| partition.views.get(view))
-                    .ok_or_else(unknown)?;
-                Some(&data.row_space)
+        if let Some(view) = view {
+            let known = generation
+                .bundle
+                .partitions
+                .values()
+                .any(|partition| partition.views.contains_key(view));
+            if !known || !session.visible_views().contains_view(view) {
+                return Err(EngineError::UnknownView(view.to_string()));
             }
-        };
+        }
         if let Some(expr) = filter {
             if view.is_none() {
                 return Err(EngineError::FilterMalformed(
@@ -545,9 +563,8 @@ impl Engine {
         }
 
         // **The gate, before a single entry is read**, and it is `Engine::categories`' gate
-        // verbatim. A `public` set has no predicate at all; a `derived` one is derived from inside
-        // `M_auth` per request, against the composed candidate rather than against the request's
-        // filters (I3, I12).
+        // verbatim. A `public` set has no predicate at all; a `derived` one is derived per request
+        // from the composed candidate, never from the request's filter.
         //
         // A count is taken inside the candidate whatever the visibility says, so `counts` composes
         // it for a `public` column too. That only ever narrows a number; it never widens the set of
@@ -576,8 +593,7 @@ impl Engine {
             ),
             _ => None,
         };
-        // **The route** (§6.3, decision 0124). A `public` column has no predicate to answer, so it
-        // never wants a set; a `derived` one takes the set where this viewer's own composed
+        // **The route.** A `public` column has no predicate to answer, so it never wants a set; a `derived` one takes the set where this viewer's own composed
         // cardinality is at or under the deployment's ceiling and the column has an entity-space
         // value column to sweep. Every other request keeps the probe route, and the first keystroke
         // on a pair keeps it too — the sweep is dispatched here and nothing waits for it.
@@ -629,9 +645,8 @@ impl Engine {
                 // column composes a candidate above and builds a membership from it or refuses, so
                 // this pair cannot arise today. It is an error and not `Ok(true)` because the two
                 // wrong answers are not symmetric: `true` here publishes every value name of a
-                // `derived` vocabulary to a principal whose predicate was never evaluated, which is
-                // the C11 disclosure itself and would be invisible — the page would look like a
-                // wide principal's. A future edit that reorders the composition above turns that
+                // `derived` vocabulary to a principal whose predicate was never evaluated, and
+                // nothing would show it: the page would look like a wide principal's. A future edit that reorders the composition above turns that
                 // into a refusal instead.
                 (None, true) => Err(EngineError::VocabularyVisibilityUnavailable {
                     column: column.to_string(),
@@ -668,21 +683,29 @@ impl Engine {
         let mut region = None;
         let counted = match (&candidate, counts) {
             (Some(candidate), true) => {
+                // Under a view, both forms open it as the viewport does, so a count covers the
+                // rows the map shows.
                 let within;
-                let set = match (row_space, view.zip(filter)) {
-                    (None, _) => candidate,
-                    (Some(_), Some((view, expr))) => {
-                        let (filtered, verdict) =
-                            self.filtered_in_view(session, &generation, view, candidate, expr)?;
-                        region = verdict;
-                        within = filtered;
-                        &within
-                    }
-                    (Some(row_space), None) => {
-                        let through = row_space.extents().last().map(|e| e.seg_id.as_str());
-                        within = row_space
-                            .restrict_to_view(candidate, through)
-                            .expect("the last extent of a row space is one of its extents");
+                let set = match view {
+                    None => candidate,
+                    Some(view) => {
+                        let open = self.open_view(
+                            session,
+                            &generation,
+                            view,
+                            cancel,
+                            &mut crate::timing::Probe::new(),
+                        )?;
+                        within = match filter {
+                            None => crate::aggregate::set::in_view(&open, candidate)?,
+                            Some(expr) => {
+                                let (entities, verdict) = crate::aggregate::set::entities_passing(
+                                    self, &open, candidate, expr, cancel,
+                                )?;
+                                region = verdict;
+                                entities
+                            }
+                        };
                         &within
                     }
                 };
@@ -722,7 +745,7 @@ impl Engine {
 
         debug_assert!(
             !values.iter().any(|v| v.code == ABSENT_CODE),
-            "code 0 is the absent sentinel and is never bound to a key (§3.6)"
+            "code 0 is the absent sentinel and is never bound to a key"
         );
         Ok(Some(SuggestPage {
             column: column.to_string(),
@@ -730,26 +753,6 @@ impl Engine {
             more,
             region,
         }))
-    }
-
-    /// The members of `candidate` holding a row in `view` that pass `expr`, and the coarsest
-    /// verdict its region leaves reached, composed by the aggregate route's own set code.
-    fn filtered_in_view(
-        &self,
-        session: &Session,
-        generation: &crate::Generation,
-        view: &str,
-        candidate: &croaring::Bitmap,
-        expr: &crate::filter::FilterExpr,
-    ) -> Result<(croaring::Bitmap, Option<crate::RegionVerdict>)> {
-        let open = self.open_view(
-            session,
-            generation,
-            view,
-            &None,
-            &mut crate::timing::Probe::new(),
-        )?;
-        crate::aggregate::set::entities_passing(self, &open, candidate, expr)
     }
 }
 

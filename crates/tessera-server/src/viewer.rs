@@ -412,29 +412,30 @@ async fn categories(
 /// Resolves the column for `/v1/categories/{column}` and its `suggest` route, so the two cannot
 /// disagree on what a spelling names. A scoped family is addressed by `?view=` or a
 /// `{column}@{key}` pin; a view the session cannot reach is the unknown-view 404. Returns the
-/// resolved column and the resolved view's id, where the request named one.
-fn resolve_category_column(
-    meta: &tessera_engine::EngineMeta,
+/// resolved column and the resolved view, where the request named one.
+fn resolve_category_column<'m>(
+    meta: &'m tessera_engine::EngineMeta,
     column: &str,
     requested_view: Option<&str>,
     visible: &tessera_engine::gate::VisibleViews,
-) -> Result<(String, Option<String>), ApiError> {
+) -> Result<(String, Option<&'m tessera_engine::MetaView>), ApiError> {
     // `view` is resolved before the column, so an unknown or unreachable view is a 404 even for
     // an entity-scoped column.
-    let view = match requested_view {
-        None => "",
+    let resolved_view = match requested_view {
+        None => None,
         Some(requested) => match meta.resolve_visible_view(requested, visible) {
-            Some(view) => view.id.as_str(),
+            Some(view) => Some(view),
             None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
         },
     };
+    let view = resolved_view.map_or("", |view| view.id.as_str());
     match meta.resolve_category_column(column, view, visible) {
         // A non-category column gets the same 404 as no column at all.
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok((resolved, requested_view.map(|_| view.to_string()))),
+        } => Ok((resolved, resolved_view)),
         tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
             "'{column}' is scoped to view group '{group}' and this request names no view of \
              it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
@@ -504,7 +505,7 @@ async fn suggest(
 }
 
 /// `POST /v1/categories/{column}/suggest`: the same page, with counts taken under a filter. A
-/// request carrying `filters` runs behind the compute gate, as `/v1/items` does.
+/// request counting under `filters` runs behind the compute gate, as `/v1/viewport` does.
 async fn suggest_filtered(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
@@ -549,16 +550,12 @@ async fn suggest_page(
                 "`filters` is evaluated in a view; send `view` as well".to_string(),
             ))
         }
-        (Some(value), Some(view)) => {
-            let view = meta
-                .resolve_visible_view(view, visible)
-                .ok_or_else(|| ApiError::Unknown(format!("unknown view '{view}'")))?;
-            Some(
-                FilterParser::new(&meta, view, visible, state.limits.max_region_vertices)
-                    .parse(value)?,
-            )
-        }
+        (Some(value), Some(view)) => Some(
+            FilterParser::new(&meta, view, visible, state.limits.max_region_vertices)
+                .parse(value)?,
+        ),
     };
+    let view = view.map(|view| view.id.clone());
 
     // At most one suggestion walk per session, refused with a 429 before any work runs, so an
     // undebounced client cannot queue keystrokes.
@@ -572,27 +569,34 @@ async fn suggest_page(
     let walk_budget = state.limits.max_suggestion_walk;
     let max_suggest_set_entities = state.limits.max_suggest_set_entities;
     let q = req.q.clone();
-    let gated = filter.is_some();
+    let gated = filter.is_some() && counts;
+    // A client that goes away drops this handler, and the guard cancels the engine call, which
+    // stops at its next check and releases the permit and the session's suggest slot.
+    let cancel = CancelToken::new();
+    let _cancel_guard = CancelGuard::new(cancel.clone());
     let work = move |state: &AppState| {
         let _suggest_guard = suggest_guard;
         state
             .engine
             .suggest(
                 &session,
-                &resolved,
-                view.as_deref(),
-                filter.as_ref(),
-                &q,
-                limit,
-                counts,
-                walk_budget,
-                max_suggest_set_entities,
+                tessera_engine::SuggestRequest {
+                    column: &resolved,
+                    view: view.as_deref(),
+                    filter: filter.as_ref(),
+                    q: &q,
+                    limit,
+                    counts,
+                    walk_budget,
+                    max_suggest_set_entities,
+                    cancel: Some(cancel),
+                },
             )
             .map_err(map_engine_error)
     };
-    // A filtered count evaluates the filter over the whole view, so it takes a compute permit as
-    // `/v1/items` does. An unfiltered keystroke does not: queued behind viewport renders it would
-    // be useless.
+    // A count under a filter evaluates the filter over the whole view, so it takes a compute
+    // permit as `/v1/viewport` does. An unfiltered keystroke does not: queued behind viewport
+    // renders it would be useless.
     let page = if gated {
         state.gated(work).await?
     } else {

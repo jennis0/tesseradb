@@ -133,6 +133,10 @@ impl Set {
 }
 
 /// The members of `entities` holding a row in the view's rows the page's mask was projected over.
+pub(crate) fn in_view(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
+    restrict_under(open, entities)
+}
+
 fn restrict_under(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
     // The projection covers an extent of this generation's row space: a projection served from
     // the generation before is served only where this one extends it, which a merge does not.
@@ -191,18 +195,18 @@ pub(super) fn compose(
         &resolved,
         &req.cancel,
         |route| {
-            let routed = |expr: &crate::filter::FilterExpr| -> Result<Set> {
+            let route_one = |expr: &crate::filter::FilterExpr| -> Result<Set> {
                 check_cancelled(&req.cancel)?;
                 routed(engine, open, route(expr, prefer_row)?)
             };
             let set = match &req.filter {
                 None => whole(),
-                Some(expr) => routed(expr)?,
+                Some(expr) => route_one(expr)?,
             };
             let reference = match &req.reference {
                 None => None,
                 Some(Reference::Visible) => Some(whole()),
-                Some(Reference::Filter(expr)) => Some(routed(expr)?),
+                Some(Reference::Filter(expr)) => Some(route_one(expr)?),
             };
             Ok((set, reference))
         },
@@ -250,10 +254,13 @@ pub(crate) fn entities_passing(
     open: &OpenView<'_>,
     candidate: &Bitmap,
     expr: &crate::filter::FilterExpr,
+    cancel: &Option<CancelToken>,
 ) -> Result<(Bitmap, Option<RegionVerdict>)> {
+    check_cancelled(cancel)?;
     let resolved = ResolvedLeaves::default();
-    engine.route_filters_under(&open.served, &open.mask, candidate, &resolved, &None, |route| {
+    engine.route_filters_under(&open.served, &open.mask, candidate, &resolved, cancel, |route| {
         let set = routed(engine, open, route(expr, false)?)?;
+        check_cancelled(cancel)?;
         let entities = match set.held {
             Held::Entities(entities) => entities,
             Held::Rows(rows) => crossing(engine, open, &rows)?,
