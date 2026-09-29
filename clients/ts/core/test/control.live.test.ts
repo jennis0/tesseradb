@@ -1,4 +1,4 @@
-import {Field, Float64, List, Null, RecordBatch, Schema, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
+import {Field, Float64, List, Null, RecordBatch, Schema, Struct, Table, tableToIPC, Utf8, vectorFromArray} from 'apache-arrow';
 import {afterAll, beforeAll, describe, expect, it, vi, type TestContext} from 'vitest';
 import {clusterLayerDeclaration, labelLayerDeclaration} from '../../scripts/operator.js';
 import {TesseraClient} from '../src/client.js';
@@ -113,7 +113,7 @@ describe('Control against a live server', () => {
     expect(await seen()).toEqual({visible: 0n, ids: []});
 
     const inserted = await control.ingest(points(), {view: 's0'});
-    expect(inserted).toMatchObject({status: 200, body: {rows: 4, created: 4}});
+    expect(inserted).toMatchObject({status: 200, body: {rows: 4, created: 4, refused: []}});
     // The same rows again name the items they created, by their keys, and change nothing.
     const again = await control.ingest(points(), {view: 's0'});
     expect(again).toMatchObject({status: 200, body: {rows: 4, created: 0, unchanged: 4}});
@@ -146,6 +146,26 @@ describe('Control against a live server', () => {
     expect(other.body).toMatchObject({created: 1});
   });
 
+  it('refuses a row naming two items and stores the rest, or with strict refuses the page', async (ctx) => {
+    live(ctx);
+    const row0 = (await byKey()).get('row-0')!.toString();
+    // Row 0 names row-0 and changes nothing; row 1 names row-1 by its key and row-0 by its tessera_id.
+    const page = tableToIPC(
+      new Table({
+        [KEY]: vectorFromArray(['row-0', 'row-1'], new Utf8()),
+        tessera_id: vectorFromArray([null, row0], new Utf8())
+      }),
+      'stream'
+    );
+    const strict = await control.ingest(page, {view: 's0', strict: true});
+    expect(strict).toMatchObject({status: 409, ok: false});
+    const answer = await control.ingest(page, {view: 's0'});
+    expect(answer).toMatchObject({
+      status: 200,
+      body: {rows: 2, unchanged: 1, edited: 0, created: 0, tessera_ids: [row0, null], refused: [{row: 1, reason: 'names_two_items'}]}
+    });
+  });
+
   it('sets a declared column on rows it holds, which the item card then carries', async (ctx) => {
     live(ctx);
     const edited = await control.ingest(notes(), {view: 's0'});
@@ -164,26 +184,30 @@ describe('Control against a live server', () => {
     expect(refused).toMatchObject({status: 409, ok: false, attempts: 1});
   });
 
-  it('publishes an artifact over two rows and grows it by a third as JSON and a fourth as Arrow, each count read through the viewer', async (ctx) => {
+  it('publishes an artifact over two rows named by a unique column, leaving out one naming nothing, and grows it by a third as JSON and a fourth as Arrow, each count read through the viewer', async (ctx) => {
     live(ctx);
     // The declaration `publish-clusters.mjs` sends.
     const declaration = clusterLayerDeclaration({name: LAYER, title: 'picked rows', view: 's0', visibility: null, minVisible: 1, computed: ['centroid', 'box', 'hull']});
     expect((await control.declareLayer(declaration)).status).toBe(201);
-    const published = await control.publish(LAYER, {level: 0, field: KEY, artifacts: [{key: 'pair', members: ['row-2', 'row-3']}]});
-    expect(published.status).toBe(201);
+    const published = await control.publish(LAYER, {level: 0, artifacts: [{key: 'pair', members: {[KEY]: ['row-2', 'row-3', 'row-none']}}]});
+    expect(published).toMatchObject({status: 201, body: {refused: [{artifact: 0, list: 'members', row: 2, reason: 'names_no_item'}]}});
     pair = BigInt((published.body.artifacts as {key: string; tessera_id: string}[])[0]!.tessera_id);
     await flushed();
     expect(await client.artifact(token, pair, {view: 's0'})).toMatchObject({layer: LAYER, key: 'pair', maskedCount: 2n});
 
-    // By `tessera_id` where the body names no field.
     const row1 = (await byKey()).get('row-1')!;
-    const grown = await control.grow(LAYER, {level: 0, artifacts: [{key: 'pair', members: [row1.toString()]}]});
-    expect(grown.status).toBe(200);
+    const grown = await control.grow(LAYER, {level: 0, artifacts: [{key: 'pair', members: {tessera_id: [row1.toString()]}}]});
+    expect(grown).toMatchObject({status: 200, body: {refused: []}});
     await flushed();
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
 
-    const rows = new Table({key: vectorFromArray(['pair'], new Utf8()), members: vectorFromArray([['row-0']], new List(new Field('item', new Utf8(), true)))});
-    const schema = new Schema(rows.schema.fields, new Map([['field', KEY], ['level', '0']]));
+    // The members column is a list of structs whose fields are the member table's columns.
+    const member = new Struct([new Field(KEY, new Utf8(), true)]);
+    const rows = new Table({
+      key: vectorFromArray(['pair'], new Utf8()),
+      members: vectorFromArray([[{[KEY]: 'row-0'}]], new List(new Field('item', member, true)))
+    });
+    const schema = new Schema(rows.schema.fields, new Map([['level', '0']]));
     const arrow = tableToIPC(new Table(schema, rows.batches.map((b) => new RecordBatch(schema, b.data))), 'stream');
     expect((await control.grow(LAYER, arrow, {wait: true})).body).toMatchObject({visible: true});
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(4n);
@@ -195,12 +219,11 @@ describe('Control against a live server', () => {
     expect((await control.declareLayer(labelLayerDeclaration({name: labels, title: 'labels', view: 's0', clusters: LAYER}))).status).toBe(201);
     const published = await control.publish(labels, {
       level: 0,
-      field: KEY,
       artifacts: [
         {
           key: 'l-pair',
-          members: ['row-2', 'row-3'],
-          content: [{values: ['two rows'], generated_from: ['row-2', 'row-3']}],
+          members: {[KEY]: ['row-2', 'row-3']},
+          content: [{values: ['two rows'], generated_from: {[KEY]: ['row-2', 'row-3']}}],
           attached_to: {layer: LAYER, level: 0, key: 'pair'}
         }
       ]
@@ -249,8 +272,8 @@ describe('Control against a live server', () => {
   it('deletes a row, which the viewer no longer counts or opens', async (ctx) => {
     live(ctx);
     const gone = (await byKey()).get('row-0')!;
-    const deleted = await control.changes([{field: KEY, value: 'row-0', op: 'delete'}]);
-    expect(deleted.status).toBe(200);
+    const deleted = await control.changes([{op: 'delete', match: {[KEY]: 'row-0'}}]);
+    expect(deleted).toMatchObject({status: 200, body: {accepted: 1, refused: []}});
     const after = await seen();
     expect(after.visible).toBe(3n);
     expect(after.ids).not.toContain(gone);
@@ -258,14 +281,22 @@ describe('Control against a live server', () => {
     expect((await client.artifact(token, pair, {view: 's0'})).maskedCount).toBe(3n);
   });
 
-  it('suppresses a row from the moment it is accepted, and serves it again once lifted', async (ctx) => {
+  it('suppresses a row from the moment it is accepted, lists a change naming nothing, refuses a strict request holding one, and serves the row again once lifted', async (ctx) => {
     live(ctx);
     const hidden = (await byKey()).get('row-1')!;
-    expect((await control.changes([{tessera_id: hidden.toString(), op: 'suppress'}])).status).toBe(200);
+    const nobody = {[KEY]: 'row-none'};
+    const suppressed = await control.changes([
+      {op: 'suppress', match: {tessera_id: hidden.toString()}},
+      {op: 'suppress', match: nobody}
+    ]);
+    expect(suppressed).toMatchObject({status: 200, body: {accepted: 1, refused: [{row: 1, reason: 'names_no_item'}]}});
     expect((await seen()).visible).toBe(2n);
     await expect(client.item(token, hidden)).rejects.toMatchObject({status: 404});
 
-    expect((await control.changes([{field: KEY, value: 'row-1', op: 'unsuppress'}])).status).toBe(200);
+    const lift = [{op: 'unsuppress' as const, match: {[KEY]: 'row-1'}}];
+    expect(await control.changes([...lift, {op: 'unsuppress', match: nobody}], {strict: true})).toMatchObject({status: 404, ok: false});
+    expect((await seen()).visible).toBe(2n);
+    expect(await control.changes(lift)).toMatchObject({status: 200, body: {accepted: 1, refused: []}});
     const after = await seen();
     expect(after.visible).toBe(3n);
     expect(after.ids).toContain(hidden);

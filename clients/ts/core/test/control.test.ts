@@ -1,5 +1,17 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {Control, MAX_ATTEMPTS, MAX_BACKOFF, MIN_BACKOFF, UNANSWERED, type Answer, type WriteOptions} from '../src/control.js';
+import {
+  Control,
+  MAX_ATTEMPTS,
+  MAX_BACKOFF,
+  MIN_BACKOFF,
+  UNANSWERED,
+  type Answer,
+  type ChangeItem,
+  type GrowRequest,
+  type PublishRequest,
+  type StrictOptions,
+  type WriteOptions
+} from '../src/control.js';
 import {headersOf} from './support.js';
 
 /**
@@ -35,6 +47,15 @@ afterEach(() => {
 
 describe('each route', () => {
   const JSON_ROUTE = {'content-type': 'application/json'};
+  const PUBLISHED: PublishRequest = {
+    level: 0,
+    artifacts: [{key: 'c0', members: {tessera_id: ['12', null], doi: [null, '10.1/x']}, content: [{values: ['c'], generated_from: {geonameid: [5]}}]}]
+  };
+  const GROWN: GrowRequest = {level: 0, artifacts: [{key: 'c0', rank: 0, members: {}, leaving: {tessera_id: ['12']}}]};
+  const CHANGES: ChangeItem[] = [
+    {op: 'suppress', match: {doi: '10.1/x'}},
+    {op: 'delete', match: {tessera_id: '12', geonameid: 5}}
+  ];
   const cases: {name: string; call: (c: Control) => Promise<Answer>; method: string; path: string; headers?: Record<string, string>; json?: unknown}[] = [
     {name: 'status', call: (c) => c.status(), method: 'GET', path: '/control/status'},
     {name: 'declareLayer', call: (c) => c.declareLayer({name: 'a/b'}), method: 'PUT', path: '/control/layers', headers: JSON_ROUTE, json: {name: 'a/b'}},
@@ -44,9 +65,9 @@ describe('each route', () => {
     {name: 'vocabularyValues', call: (c) => c.vocabularyValues('v', {values: [{key: 'k'}]}), method: 'PATCH', path: '/control/vocabularies/v/values', headers: JSON_ROUTE, json: {values: [{key: 'k'}]}},
     {name: 'declareView', call: (c) => c.declareView('plain', {extent: {x: [0, 1], y: [0, 1]}}), method: 'PUT', path: '/control/views/plain', headers: JSON_ROUTE, json: {extent: {x: [0, 1], y: [0, 1]}}},
     {name: 'createView', call: (c) => c.createView('g', 'k 1', {metadata: {}}), method: 'PUT', path: '/control/views/g/k%201', headers: JSON_ROUTE, json: {metadata: {}}},
-    {name: 'publish', call: (c) => c.publish('clusters/kmeans', {level: 0}), method: 'PUT', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: {level: 0}},
-    {name: 'grow (JSON)', call: (c) => c.grow('clusters/kmeans', {level: 0}), method: 'PATCH', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: {level: 0}},
-    {name: 'changes', call: (c) => c.changes([{field: 'doi', value: '10.1/x', op: 'suppress'}]), method: 'POST', path: '/control/changes', headers: JSON_ROUTE, json: [{field: 'doi', value: '10.1/x', op: 'suppress'}]},
+    {name: 'publish', call: (c) => c.publish('clusters/kmeans', PUBLISHED), method: 'PUT', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: PUBLISHED},
+    {name: 'grow (JSON)', call: (c) => c.grow('clusters/kmeans', GROWN), method: 'PATCH', path: '/control/layers/clusters%2Fkmeans/artifacts', headers: JSON_ROUTE, json: GROWN},
+    {name: 'changes', call: (c) => c.changes(CHANGES), method: 'POST', path: '/control/changes', headers: JSON_ROUTE, json: CHANGES},
     {name: 'dropLayer', call: (c) => c.dropLayer('a/b'), method: 'DELETE', path: '/control/layers/a%2Fb'},
     {name: 'dropLayer waiting', call: (c) => c.dropLayer('a', {wait: true}), method: 'DELETE', path: '/control/layers/a?wait=visible'},
     {name: 'dropView', call: (c) => c.dropView('g', 'k'), method: 'DELETE', path: '/control/views/g/k'},
@@ -79,7 +100,7 @@ describe('each route', () => {
     {name: 'vocabularyValues', call: (c, o) => c.vocabularyValues('v', {}, o), path: '/control/vocabularies/v/values'},
     {name: 'declareView', call: (c, o) => c.declareView('p', {}, o), path: '/control/views/p'},
     {name: 'createView', call: (c, o) => c.createView('g', 'k', {}, o), path: '/control/views/g/k'},
-    {name: 'publish', call: (c, o) => c.publish('l', {}, o), path: '/control/layers/l/artifacts'},
+    {name: 'publish', call: (c, o) => c.publish('l', {artifacts: []}, o), path: '/control/layers/l/artifacts'},
     {name: 'grow', call: (c, o) => c.grow('l', rows, o), path: '/control/layers/l/artifacts'},
     {name: 'changes', call: (c, o) => c.changes([], o), path: '/control/changes'},
     {name: 'dropLayer', call: (c, o) => c.dropLayer('l', o), path: '/control/layers/l'},
@@ -95,6 +116,27 @@ describe('each route', () => {
       await w.call(control, {wait: true, signal});
       expect(sent.map((s) => s.url)).toEqual([`http://control${w.path}`, `http://control${w.path}?wait=visible`]);
       expect(sent.map((s) => s.signal)).toEqual([undefined, signal]);
+    });
+  }
+
+  const naming: {name: string; call: (c: Control, o: StrictOptions) => Promise<Answer>; path: string}[] = [
+    {name: 'ingest', call: (c, o) => c.ingest(rows, o), path: '/control/ingest'},
+    {name: 'changes', call: (c, o) => c.changes([], o), path: '/control/changes'},
+    {name: 'publish', call: (c, o) => c.publish('l', {artifacts: []}, o), path: '/control/layers/l/artifacts'},
+    {name: 'grow', call: (c, o) => c.grow('l', rows, o), path: '/control/layers/l/artifacts'}
+  ];
+
+  for (const w of naming) {
+    it(`${w.name} sends strict only when given, as given`, async () => {
+      const sent = recording({status: 200, body: {}});
+      await w.call(control, {});
+      await w.call(control, {strict: true});
+      await w.call(control, {strict: false, wait: true});
+      expect(sent.map((s) => s.url)).toEqual([
+        `http://control${w.path}`,
+        `http://control${w.path}?strict=true`,
+        `http://control${w.path}?wait=visible&strict=false`
+      ]);
     });
   }
 
@@ -232,7 +274,7 @@ describe('an answer', () => {
 
   it('is any other refusal as the server sent it, sent once', async () => {
     const sent = recording({status: 409, body: {error: 'conflict', detail: 'held'}});
-    const answer = await control.publish('l', {level: 0});
+    const answer = await control.publish('l', {level: 0, artifacts: []});
     expect(answer).toMatchObject({status: 409, ok: false, attempts: 1, body: {error: 'conflict', detail: 'held'}});
     expect(sent).toHaveLength(1);
   });
@@ -241,7 +283,7 @@ describe('an answer', () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('fetch failed');
     });
-    const answer = await control.changes([{tessera_id: '5', op: 'delete'}]);
+    const answer = await control.changes([{op: 'delete', match: {tessera_id: '5'}}]);
     expect(answer).toMatchObject({status: UNANSWERED, ok: false, attempts: 1});
   });
 

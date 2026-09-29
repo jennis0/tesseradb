@@ -32,42 +32,115 @@ export const MAX_ATTEMPTS = 600;
 export const UNANSWERED = 0;
 
 /**
- * One call's answer. Every status, a refusal included, is returned here; none is thrown.
+ * One call's answer. Every status, a refusal included, is returned here; none is thrown. Where
+ * `ok`, `body` is the route's answer, `B`; otherwise it is the refusal, with `error` and `detail`.
  *
  * @category Control plane
  */
-export type Answer = {
+export type Answer<B extends object = Record<string, unknown>> = {
   /** The HTTP status, or {@link UNANSWERED} where no server answered. */
   status: number;
-  /** Whether `status` is in the 2xx range. */
-  ok: boolean;
-  /**
-   * The body parsed as JSON: the object itself, any other JSON value wrapped as `{value}`, or `{}`
-   * where the body is not JSON. A refusal carries `error` and `detail`.
-   */
-  body: Record<string, unknown>;
   /** The body as text. Where no server answered, a sentence naming the URL and the error. */
   text: string;
   /** How many times the request was sent, counting each retry after a `429`. */
   attempts: number;
   /** Seconds from the first attempt to the answer, including every wait. */
   seconds: number;
-};
+} & (
+  | {
+      /** `status` is in the 2xx range. */
+      ok: true;
+      /** The body parsed as JSON. */
+      body: B;
+    }
+  | {
+      /** `status` is outside the 2xx range. */
+      ok: false;
+      /**
+       * The body parsed as JSON: the object itself, any other JSON value wrapped as `{value}`, or
+       * `{}` where the body is not JSON. A refusal carries `error` and `detail`.
+       */
+      body: Record<string, unknown>;
+    }
+);
 
 /**
  * The answer of `ingest`, with the batch id the request carried.
  *
  * @category Control plane
  */
-export type RowAnswer = Answer & {
+export type RowAnswer = Answer<IngestResponse> & {
   /** The batch id every attempt carried. Pass it as `batch` to send the same body again. */
   batch: string;
 };
 
 /**
- * One item of a `POST /control/changes` request, in the route's own field names. The item is
- * named by `tessera_id`, a decimal string, or by `field` and `value`: a unique attribute and one
- * of its values as text, a keyword itself or an integer or timestamp in decimal digits.
+ * Why the identity rule refused a row. `names_two_items`: the row's values name more than one
+ * item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`:
+ * its values name no item, in a request that creates none. `one_item_twice`: an earlier row of the
+ * batch names the same item. `one_value_twice`: an earlier row of the batch sets the same unique
+ * value. The last two are given by `ingest` only.
+ *
+ * @category Control plane
+ */
+export type RefusalReason = 'names_two_items' | 'unknown_tessera_id' | 'names_no_item' | 'one_item_twice' | 'one_value_twice';
+
+/**
+ * A row the identity rule refused.
+ *
+ * @category Control plane
+ */
+export type RefusedRow = {
+  /** The row's position in the request, from 0. */
+  row: number;
+  /** Why it was refused. */
+  reason: RefusalReason;
+};
+
+/**
+ * A member the identity rule refused, which the artifact was published or grown without.
+ *
+ * @category Control plane
+ */
+export type RefusedMember = {
+  /** The artifact's position in the request, from 0. */
+  artifact: number;
+  /** The member table the member was in. */
+  list: 'members' | 'excluding' | 'leaving';
+  /** The member's row in that table, from 0. */
+  row: number;
+  /** Why it was refused. */
+  reason: RefusalReason;
+};
+
+/**
+ * One item, named by its `tessera_id` and the values of fields declared unique, keyed by column.
+ * A unique field's value is a string for a keyword, and a number or a string of decimal digits
+ * for an integer or a timestamp. `null` names nothing. Every value names the item that holds it;
+ * a row naming no item, or two, is refused. A key that is neither `tessera_id` nor a unique field
+ * is refused with `422`.
+ *
+ * @category Control plane
+ */
+export type AddressRow = {
+  /** The item's `tessera_id`, a string of decimal digits. */
+  tessera_id?: string | null;
+} & {[field: string]: string | number | null};
+
+/**
+ * Items, one row per item, as columns of equal length keyed by `tessera_id` and unique field
+ * names. A cell is as in an {@link AddressRow}, and `null` where its column does not name the
+ * row's item. `{}` holds no item. Columns of different lengths are refused with `422`.
+ *
+ * @category Control plane
+ */
+export type MemberTable = {
+  /** Each row's `tessera_id`, a string of decimal digits. */
+  tessera_id?: (string | null)[];
+} & {[column: string]: (string | number | null)[]};
+
+/**
+ * One item of a `POST /control/changes` request, in the route's own field names.
  *
  * @category Control plane
  */
@@ -78,10 +151,250 @@ export type ChangeItem = {
    * moment the request is accepted.
    */
   op: 'delete' | 'suppress' | 'unsuppress';
-} & (
-  | {tessera_id: string}
-  | {field: string; value: string}
-);
+  /** The item. Many changes of one request may name one item. */
+  match: AddressRow;
+};
+
+/**
+ * The artifact another is attached to, such as the cluster a label names. The target exists
+ * already, on a layer the attached one's `depends_on` names.
+ *
+ * @category Control plane
+ */
+export type Attachment = {
+  /** The target's layer. */
+  layer: string;
+  /** The target's level; absent is 0. */
+  level?: number;
+  /** The target's key. */
+  key: string;
+};
+
+/**
+ * One artifact of a `publish` request, in the route's own field names. Its members are `members`
+ * or `excluding`; an artifact with `attached_to` may carry neither, and is served over its
+ * target's members.
+ *
+ * @category Control plane
+ */
+export type PublishedArtifact = {
+  /** The publisher's key, unique in the level. Needed to name the artifact as a parent or target, or to grow it. */
+  key?: string | null;
+  /** The key of the view the artifact belongs to. Required on a layer scoped to a view group, refused on any other. */
+  view?: string | null;
+  /** The members. `{}` is a membership that holds nobody. */
+  members?: MemberTable | null;
+  /** The view's items the membership leaves out; the membership is every other item of the view. Refused beside `members`. */
+  excluding?: MemberTable | null;
+  /**
+   * Ranked supplied content, most specific first: one value per supplied content the layer
+   * declares, and in `generated_from` the items it was made from, where the content requires them.
+   */
+  content?: {values: string[]; generated_from?: MemberTable | null}[];
+  /** The artifact this one is attached to. */
+  attached_to?: Attachment | null;
+  /** Parent keys, each held already or earlier in the request. */
+  parent?: string[];
+  /** `[min_x, min_y, max_x, max_y]`, on a layer whose `shape` is `bbox`. */
+  bbox?: number[] | null;
+  /** `[cx, cy, r]`, on a layer whose `shape` is `circle`. */
+  circle?: number[] | null;
+  /** `[cx, cy, a, b, angle_degrees]`, on a layer whose `shape` is `ellipse`. */
+  ellipse?: number[] | null;
+  /** A WKT polygon or multipolygon, on a layer whose `shape` is `polygon`. */
+  wkt?: string | null;
+  /** This artifact's space, in place of the request's `default_space`. */
+  space?: 'view' | 'wgs84' | null;
+  /** The artifact's own access labels. `null` or `[]` is no label. */
+  access?: string[] | null;
+};
+
+/**
+ * A `publish` request.
+ *
+ * @category Control plane
+ */
+export type PublishRequest = {
+  /** The level the artifacts go into; absent is 0. */
+  level?: number;
+  /** The space of a shape whose artifact names none: `view` takes the view's coordinates, `wgs84` degrees. Absent is `view`. */
+  default_space?: 'view' | 'wgs84';
+  /** The artifacts, at least one. */
+  artifacts: PublishedArtifact[];
+};
+
+/**
+ * One artifact of a `grow` request, named by the key it was published under. A row with only a key
+ * changes nothing; a part the artifact lacks is filled.
+ *
+ * @category Control plane
+ */
+export type GrowingArtifact = {
+  /** The key the artifact was published under. */
+  key: string;
+  /** The key of the view the artifact belongs to, as on a publication. */
+  view?: string | null;
+  /** Absent, `members` join the membership. Present, `members` and `leaving` move the generating set of the content at this rank. */
+  rank?: number | null;
+  /** Members joining. */
+  members?: MemberTable | null;
+  /** Members leaving a generating set, after the joins. Needs a `rank`. */
+  leaving?: MemberTable | null;
+  /** Parent keys. */
+  parent?: string[];
+  /** The artifact this one is attached to. */
+  attached_to?: Attachment | null;
+  /** Contents by rank. */
+  content?: {rank: number; values: string[]}[];
+  /** As on a publication. */
+  bbox?: number[] | null;
+  /** As on a publication. */
+  circle?: number[] | null;
+  /** As on a publication. */
+  ellipse?: number[] | null;
+  /** As on a publication. */
+  wkt?: string | null;
+  /** This row's space for authored shape content, in place of the request's `default_space`. */
+  space?: 'view' | 'wgs84' | null;
+  /** The artifact's access labels. */
+  access?: string[] | null;
+};
+
+/**
+ * A `grow` request in its JSON form.
+ *
+ * @category Control plane
+ */
+export type GrowRequest = {
+  /** As on a publication. */
+  level?: number;
+  /** As on a publication. */
+  default_space?: 'view' | 'wgs84';
+  /** The artifacts, at least one. */
+  artifacts: GrowingArtifact[];
+};
+
+/**
+ * Where a write becomes visible.
+ *
+ * @category Control plane
+ */
+export type PublicationAck = {
+  /** The first publication that includes the write. */
+  publication: number;
+  /** With `wait`, whether that publication was published before the answer. */
+  visible?: boolean;
+};
+
+/**
+ * The answer of `ingest`. The counts leave out refused rows.
+ *
+ * @category Control plane
+ */
+export type IngestResponse = PublicationAck & {
+  /** Rows the batch carried. */
+  rows: number;
+  /** Rows that named no item and created one. */
+  created: number;
+  /** Rows that edited an item they named. */
+  edited: number;
+  /** Rows that added an item they named to the batch's view. */
+  added: number;
+  /** Rows that named an item and changed nothing. */
+  unchanged: number;
+  /** Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored. */
+  over_bound: number;
+  /** The positions of the first 100 of those rows. */
+  over_bound_rows: number[];
+  /** Rows whose coordinates lay outside the projection's domain, stored on the frame's edge. */
+  clipped: number;
+  /** Rows whose coordinates lay outside the view's extent, stored on its edge. */
+  clamped: number;
+  /** One per row in the order sent: the item the row created or named, and `null` for a refused row. */
+  tessera_ids: (string | null)[];
+  /** The rows the identity rule refused. Empty with `strict`, which refuses the batch instead. */
+  refused: RefusedRow[];
+  /** Artifacts the batch's layer columns created. */
+  minted: number;
+  /** Memberships the batch's layer columns added. */
+  joined: number;
+  /** Present where the body was already accepted under this batch id, and nothing was written. */
+  replayed?: true;
+};
+
+/**
+ * The answer of `changes`.
+ *
+ * @category Control plane
+ */
+export type ChangesApplied = PublicationAck & {
+  /** Changes applied. */
+  accepted: number;
+  /** The changes refused, in the order sent. Empty with `strict`. */
+  refused: RefusedRow[];
+};
+
+/**
+ * What fitting one shape to each of its layer's views did.
+ *
+ * @category Control plane
+ */
+export type ShapeReport = {
+  /** The artifact's key. */
+  key: string | null;
+  /** The rank of the authored shape content reported on; absent for the artifact's own shape. */
+  content?: number;
+  /** One per view of the layer. */
+  views: {
+    view: string;
+    clipped: boolean;
+    outside: boolean;
+    rings_dropped: number;
+    degrees_looking: boolean;
+    vertices_in: number;
+    vertices_out: number;
+    parts: number;
+    rings: number;
+    interior_tiles: number;
+    boundary_cells: number;
+  }[];
+};
+
+/**
+ * The answer of `publish`.
+ *
+ * @category Control plane
+ */
+export type ArtifactsPublished = PublicationAck & {
+  /** One per artifact in the order sent, with the held artifact's own `tessera_id` where the key was held. */
+  artifacts: {key: string | null; tessera_id: string}[];
+  /** Artifacts the request created. */
+  created: number;
+  /** Of those, the ones with no content on a layer that declares some. */
+  without_content: number;
+  /** Parts filled on held artifacts. */
+  filled: number;
+  /** Memberships added, to created and held artifacts alike. */
+  joined: number;
+  /** The members the identity rule refused, which the artifacts were published without. Empty with `strict`. */
+  refused: RefusedMember[];
+  /** Present where the request carried a shape or authored shape content. */
+  shapes?: ShapeReport[];
+};
+
+/**
+ * The answer of `grow`.
+ *
+ * @category Control plane
+ */
+export type MembershipsGrown = PublicationAck & {
+  /** One per artifact in the order sent. */
+  artifacts: {key: string; tessera_id: string; joined: number; filled: number; left: number; withdrawn?: number}[];
+  /** The members the identity rule refused, which the artifacts were grown without. Empty with `strict`. */
+  refused: RefusedMember[];
+  /** Present where the request filled authored shape content. */
+  shapes?: ShapeReport[];
+};
 
 /**
  * Where a {@link Control} sends its requests, and how.
@@ -131,11 +444,25 @@ export type WriteOptions = CallOptions & {
 };
 
 /**
+ * What a write of rows that name items takes: `ingest`, `changes`, `publish` and `grow`.
+ *
+ * @category Control plane
+ */
+export type StrictOptions = WriteOptions & {
+  /**
+   * Sent as `strict` where given. `true` refuses the whole request at its first refused row, and
+   * nothing is written. Left out, the server applies the rows it accepts and lists each refused
+   * one in the answer's `refused`.
+   */
+  strict?: boolean;
+};
+
+/**
  * What `ingest` takes.
  *
  * @category Control plane
  */
-export type RowOptions = WriteOptions & {
+export type RowOptions = StrictOptions & {
   /**
    * The batch id, sent in `x-tessera-batch-id`. Defaults to a random id made once per call. Pass
    * the `batch` of an earlier {@link RowAnswer} to send its body again.
@@ -176,6 +503,8 @@ function withQuery(path: string, query: Record<string, string | undefined>): str
 }
 
 const waiting = (options: WriteOptions) => ({wait: options.wait ? 'visible' : undefined});
+
+const naming = (options: StrictOptions) => ({...waiting(options), strict: options.strict === undefined ? undefined : String(options.strict)});
 
 function decoded(text: string): Record<string, unknown> {
   try {
@@ -290,7 +619,8 @@ export class Control {
     const batch = options.batch ?? freshBatch();
     const headers: Record<string, string> = {'content-type': ARROW, 'x-tessera-batch-id': batch};
     if (options.view !== undefined) headers['x-tessera-view'] = options.view;
-    return {...(await this.send('POST', withQuery(path, waiting(options)), options, body, headers)), batch};
+    const answer = (await this.send('POST', withQuery(path, naming(options)), options, body, headers)) as Answer<IngestResponse>;
+    return {...answer, batch};
   }
 
   /**
@@ -313,7 +643,7 @@ export class Control {
 
   /**
    * `POST /control/ingest`: one page of rows, given as an Arrow IPC stream. A row names an item by
-   * its `tessera_id` or a unique column's value; a row naming none creates an
+   * its `tessera_id` and the value of every unique column it carries; a row naming none creates an
    * item at its position, one naming an item it matches changes nothing, one naming an item with
    * no row in the view adds it there, and any other edits the item, which keeps its `tessera_id`.
    * A row without coordinates changes only what it carries. Any column may be left out, which
@@ -321,8 +651,12 @@ export class Control {
    * `edited`, `added`, `unchanged`, `clipped` and `clamped`, counts in `joined` the annotation
    * memberships the rows added, lists each row's `tessera_id` in request order as a decimal
    * string, and names the `publication` the rows become visible in. A row that only places its
-   * item in an annotation changes the annotation, not the item, and is counted `unchanged`. A row
-   * whose values name two items is refused with `409`, and nothing in the page is stored.
+   * item in an annotation changes the annotation, not the item, and is counted `unchanged`.
+   *
+   * A row whose values name two items, whose `tessera_id` names no item, or which names an item or
+   * sets a unique value an earlier row of the page does, is refused: it is listed in `refused`
+   * with its reason, its `tessera_id` is `null`, and the other rows are stored. With `strict` the
+   * page is refused with `409` at its first refused row, and nothing is stored.
    */
   ingest(body: Uint8Array, options: RowOptions = {}): Promise<RowAnswer> {
     return this.rows('/control/ingest', body, options);
@@ -398,33 +732,46 @@ export class Control {
 
   /**
    * `PUT /control/layers/{name}/artifacts`: publishes artifacts into one level of a layer, with a
-   * first page of each one's members. The request is applied whole or not at all, and the answer
-   * gives each artifact a `tessera_id`.
+   * first page of each one's members, and answers with each artifact's `tessera_id`. Members,
+   * excluded items and a content's `generated_from` are each a {@link MemberTable}. A member
+   * naming no item, or two, is left out and listed in `refused`, and the rest are published; with
+   * `strict` the request is refused at the first, `404` where it names no item and `409` where it
+   * names two. A `generated_from` member naming no item, or two, refuses the request, strict or
+   * not. Every other refusal applies nothing.
    */
-  publish(layer: string, body: object, options: WriteOptions = {}): Promise<Answer> {
-    return this.sendJson('PUT', withQuery(`/control/layers/${segment(layer)}/artifacts`, waiting(options)), body, options);
+  publish(layer: string, body: PublishRequest, options: StrictOptions = {}): Promise<Answer<ArtifactsPublished>> {
+    const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, naming(options));
+    return this.sendJson('PUT', path, body, options) as Promise<Answer<ArtifactsPublished>>;
   }
 
   /**
    * `PATCH /control/layers/{name}/artifacts`: adds a page of members to artifacts the layer holds,
-   * and fills parts they lack. A part that differs from the one held is refused with `409`. The
-   * request is applied whole or not at all.
+   * or with a `rank` moves a content's generating set, and fills parts they lack. `members` and
+   * `leaving` are {@link MemberTable}s, whose refused members are listed in `refused` as on
+   * `publish`, or with `strict` refuse the request. A part that differs from the one held is
+   * refused with `409`, and such a refusal applies nothing.
    *
-   * @param body - A `Uint8Array` is sent as an Arrow IPC stream, anything else as JSON.
+   * @param body - A `Uint8Array` is sent as an Arrow IPC stream, anything else as JSON. The Arrow
+   *   form has one row per artifact: `key` as `utf8`, `members` as a list of structs whose fields
+   *   are the member table's columns, and optionally `view` and `access`, with `level` in the
+   *   schema's metadata.
    */
-  grow(layer: string, body: object | Uint8Array, options: WriteOptions = {}): Promise<Answer> {
-    const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, waiting(options));
-    if (body instanceof Uint8Array) return this.send('PATCH', path, options, body, {'content-type': ARROW});
-    return this.sendJson('PATCH', path, body, options);
+  grow(layer: string, body: GrowRequest | Uint8Array, options: StrictOptions = {}): Promise<Answer<MembershipsGrown>> {
+    const path = withQuery(`/control/layers/${segment(layer)}/artifacts`, naming(options));
+    const sent = body instanceof Uint8Array ? this.send('PATCH', path, options, body, {'content-type': ARROW}) : this.sendJson('PATCH', path, body, options);
+    return sent as Promise<Answer<MembershipsGrown>>;
   }
 
   /**
-   * `POST /control/changes`: deletes, suppresses and unsuppresses items. A deletion or suppression
-   * applies to every request from the moment it is accepted, without waiting for a publication.
-   * Every item is checked before any is applied, so a refused request applies nothing.
+   * `POST /control/changes`: deletes, suppresses and unsuppresses items, each named by its
+   * `match`. A deletion or suppression applies to every request from the moment it is accepted,
+   * without waiting for a publication. A change naming no item, or two, is listed in `refused` and
+   * the rest are applied; with `strict` the request is refused at the first, `404` where it names
+   * no item and `409` where it names two. Every item is checked before any is applied, so any
+   * other refusal applies nothing.
    */
-  changes(items: ChangeItem[], options: WriteOptions = {}): Promise<Answer> {
-    return this.sendJson('POST', withQuery('/control/changes', waiting(options)), items, options);
+  changes(items: ChangeItem[], options: StrictOptions = {}): Promise<Answer<ChangesApplied>> {
+    return this.sendJson('POST', withQuery('/control/changes', naming(options)), items, options) as Promise<Answer<ChangesApplied>>;
   }
 
   /**
