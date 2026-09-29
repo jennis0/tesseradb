@@ -43,6 +43,11 @@ function make<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<Reco
  */
 function store(over: Partial<Projections> = {}, answered = true): FakeStore {
   const s = fakeStore({meta: META, status: status({}), filters: filtersOf(emptyDraft()), ...over});
+  // Dropping the selection empties it, as the store does.
+  s.clearSelection = () => {
+    s.calls.push({name: 'clearSelection', args: []});
+    s.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
+  };
   if (!answered) return s;
   s.setAggregate = (id: string, spec: AggregateSpec | null) => {
     s.calls.push({name: 'setAggregate', args: [id, spec]});

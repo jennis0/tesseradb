@@ -119,8 +119,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * the headline, the `subtitle-field` field, three fields and "Show all N fields". Picking another
  * point replaces it unless Pin was pressed, which keeps it open; Close or Escape closes it and drops
  * the selection, and a click on the map that finds nothing does the same for the card that is not
- * pinned. The card is the next stop in the tab order after the map's own controls, is named by its
- * item's title, and gives focus back to the map as it closes. A picked cluster's card behaves the
+ * pinned. Tab from the map goes to the card, which is named by its item's title and gives focus back
+ * to the map as it closes. A picked cluster's card behaves the
  * same way. Where the map holds no position for the selection, as after following an item into
  * another view, the card goes first in the right column, as a region's does.
  *
@@ -1116,6 +1116,7 @@ export class TesseraExplorer extends TesseraElement {
           @tessera-viewchange=${() => this.onCamera()}
           @tessera-pick=${() => this.requestUpdate()}
           @tessera-miss=${() => this.onMiss()}
+          @keydown=${this.onMapKey}
           @click=${() => this.requestUpdate()}
         >
           ${narrow ? nothing : layersButton}
@@ -1238,7 +1239,7 @@ export class TesseraExplorer extends TesseraElement {
       ${repeat(
         cards,
         (c) => c.key,
-        (c) => html`<div part="callout" class="card" role="dialog" aria-label=${c.name} data-callout=${c.key} ?data-pinned=${c.pinned} @keydown=${this.onCalloutKey}>${c.body}</div>`
+        (c) => html`<div part="callout" class="card" role="dialog" tabindex="-1" aria-label=${c.name} data-callout=${c.key} ?data-pinned=${c.pinned} @keydown=${this.onCalloutKey}>${c.body}</div>`
       )}
     </div>`;
   }
@@ -1339,6 +1340,19 @@ export class TesseraExplorer extends TesseraElement {
       }
     });
   }
+
+  /**
+   * Tab from the map itself goes to the card beside the point, the selection's where it shows, so
+   * the card is the next stop after the map; from there Tab goes on in the page's order.
+   */
+  private onMapKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Tab' || e.shiftKey || e.composedPath()[0] !== this.map) return;
+    const shown = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]')).filter((c) => !c.hidden);
+    const card = shown.find((c) => c.dataset.callout === 'live') ?? shown[0];
+    if (!card) return;
+    e.preventDefault();
+    card.focus();
+  };
 
   /** Escape on a card: the card not pinned closes, dropping the selection; focus goes back to the map. */
   private onCalloutKey = (e: KeyboardEvent): void => {

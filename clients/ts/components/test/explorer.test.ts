@@ -319,7 +319,7 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(apart).toBe(true);
   });
 
-  it('is named by its item’s title, closes on Escape with the selection, and gives focus back to the map', async () => {
+  it('is named by its item’s title, is the next stop after the map, closes on Escape with the selection, and gives focus back to the map', async () => {
     const ctx = await explorer('<tessera-explorer layout="overlay" title-field="author"></tessera-explorer>');
     const map = ctx.shadow.querySelector('tessera-map') as Map;
     Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
@@ -332,6 +332,10 @@ describe('<tessera-explorer> the item card beside its point', () => {
     // The card follows the map in the tab order, before the left card.
     const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
     expect(order).toEqual(['tessera-map', 'callout', 'panel']);
+    // Tab from the map goes to the card.
+    map.focus();
+    map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));
+    expect(ctx.shadow.activeElement).toBe(card);
     card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
     card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
     await settle(ctx.host);
