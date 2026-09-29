@@ -79,8 +79,11 @@ type Picking = {column: string; key: string; title: string};
  * columns and every layer that can colour, drawn or not; colouring by a layer does not draw it. For
  * a category column the menu offers the palettes, and for a number column the ramps, a linear or
  * log scale and reversal, unless `hide-palettes` is set. The colour choices are shared with every
- * map reading the same store. A *Level* choice appears in the heading, before Colour by, under colour
- * by a levelled layer with several levels served. Which layers are drawn is
+ * map reading the same store. A *Level* choice appears in the heading after Colour by, under colour
+ * by a levelled layer with several levels served. It shows a short label ("Deepest", "Level 3")
+ * and lists the declared level titles. The Colour by name keeps its room: where the two do not fit
+ * on one line, the Level choice moves to a line of its own under the heading, and only then is the
+ * name cut short, with the whole name as its tooltip. Which layers are drawn is
  * `<tessera-layer-picker>`'s.
  *
  * @summary What the map's colours mean, and the colour controls.
@@ -109,6 +112,7 @@ type Picking = {column: string; key: string; title: string};
  * @csspart ramp-option - A ramp in the Colour by menu, with `data-ramp` and `aria-checked`.
  * @csspart scale - The Linear and Log choice in the Colour by menu.
  * @csspart reverse - The Reverse switch in the Colour by menu.
+ * @csspart level - The Level choice: its short label and the select over it.
  * @csspart level-select - The Level select.
  * @csspart swatches - The list of rows, with `data-columns` set to `1` or `2`.
  * @csspart entry - One row, with `data-key` for a category value and `data-state`: `out` for a
@@ -142,14 +146,27 @@ export class TesseraLegend extends TesseraElement {
       :host {
         display: block;
       }
+      /* The heading wraps only to move the Level choice under it; the lead keeps Colour by on the first line. */
       [part='title'] {
         margin-bottom: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        column-gap: 12px;
+        row-gap: 2px;
+      }
+      [part='title'] .lead {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: 1 1 auto;
+        min-width: 0;
       }
       [part='colour-by'] {
         display: inline-flex;
         align-items: center;
         gap: 4px;
         min-width: 0;
+        margin-left: auto;
         font-size: 12px;
         font-weight: 500;
         letter-spacing: 0;
@@ -161,19 +178,29 @@ export class TesseraLegend extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* The heading's choices: Level, then Colour by, each quiet text with a chevron. */
-      .choices {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        min-width: 0;
-      }
-      [part='title'] .choice {
+      /* The Level choice: a short label, with the select over it taking the clicks and keys. */
+      [part='level'] {
+        flex: 0 0 auto;
         font-size: 12px;
-        font-weight: 500;
+        font-weight: 400;
         letter-spacing: 0;
         text-transform: none;
-        color: var(--_tessera-ink);
+        color: var(--_tessera-ink-2);
+        border-radius: var(--_tessera-radius-control);
+      }
+      [part='level'] .t {
+        padding-right: 18px;
+        white-space: nowrap;
+      }
+      [part='level'] select {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        opacity: 0;
+      }
+      [part='level']:focus-within {
+        outline: 2px solid var(--_tessera-accent);
+        outline-offset: 1px;
       }
       [part='swatches'] {
         display: grid;
@@ -751,19 +778,21 @@ export class TesseraLegend extends TesseraElement {
             // One popover at a time: the menu takes the picker's place.
             this.picking = null;
             this.menuOpen = !this.menuOpen;
-          }}><span class="t">${current?.title ?? 'None'}</span>${icon('chev', 12, 1.4)}</button>`
+          }}><span class="t" title=${current?.title ?? 'None'}>${current?.title ?? 'None'}</span>${icon('chev', 12, 1.4)}</button>`
       : nothing;
     const column = columns.find((c) => c.name === colourBy) ?? null;
     const menu = this.selectable && this.menuOpen ? this.colourMenu(options, column, colouring) : nothing;
+    // The level the select shows, by number: the one chosen, else the explorer's; `null` is the deepest.
+    const levelShown = this.level ?? this.autoLevel;
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
-        ? html`<span class="choice">
+        ? html`<span part="level" class="choice"><span class="t" aria-hidden="true">${levelShown === null ? 'Deepest' : `Level ${levelShown}`}</span>
             <select part="level-select" aria-label="Level" @change=${(e: Event) => this.chooseLevel((e.target as HTMLSelectElement).value)}>
               <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'Deepest level' : `Automatic (${levelTitle(this.autoLevel)})`}</option>
               ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${levelTitle(l)}</option>`)}
             </select>${icon('chev', 12, 1.4)}</span>`
         : nothing;
-    const heading = html`<h2 part="title">Colour<span class="choices">${levelSelect}${colourByButton}</span></h2>`;
+    const heading = html`<h2 part="title"><span class="lead">Colour${colourByButton}</span>${levelSelect}</h2>`;
     const wrap = (body: unknown) => html`<div class="panel">${heading}${menu}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);

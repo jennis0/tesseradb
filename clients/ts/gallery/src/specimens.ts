@@ -157,6 +157,9 @@ const legendStore = (colourBy: string | null, over: Partial<Projections> = {}, c
   return s;
 };
 
+/** The corpus's meta with `topics` as a tree layer titled `title`, whose depths the Level choice lists. */
+const titled = (title: string) => ({...META, layers: META.layers.map((l) => (l.name === 'topics' ? {...l, title, levels: []} : l))});
+
 export const SECTIONS: Section[] = [
   {
     name: 'store',
@@ -301,6 +304,17 @@ export const SECTIONS: Section[] = [
       {
         state: 'selectable with readout, cluster with a level select',
         build: () => make('tessera-legend', {store: legendStore('cluster:topics', {artifacts: mapState().artifacts}), selectable: true, readout: true})
+      },
+      {
+        state: 'selectable, a tree layer with a medium name and its depths, 340 px',
+        pinned: 340,
+        build: () => make('tessera-legend', {store: legendStore('cluster:topics', {meta: titled('HDBSCAN clusters'), artifacts: mapState().artifacts}), selectable: true, readout: true})
+      },
+      {
+        state: 'selectable, a tree layer with a long name, the level chosen, 340 px',
+        pinned: 340,
+        build: () =>
+          make('tessera-legend', {store: legendStore('cluster:topics', {meta: titled('HDBSCAN clusters over SPECTER2 embeddings'), artifacts: mapState().artifacts}), selectable: true, readout: true, level: 1})
       }
     ]
   },
