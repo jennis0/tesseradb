@@ -59,8 +59,9 @@ export const PARTS = {
     ...STATE
   ],
   'layer-picker': ['entry', 'name', 'note', 'title', ...STATE],
-  filter: ['aside', 'bar', 'chosen', 'entry', 'hint', 'label', 'mode', 'more', 'tick', 'value-count', 'values', 'refusal'],
-  'filter-panel': ['add', 'add-list', 'add-option', 'add-search', 'any', 'chip', 'chips', 'clear', 'edit', 'field', 'mode', 'title', 'verb', ...STATE],
+  filter: ['aside', 'bar', 'chosen', 'entry', 'hint', 'label', 'mode', 'more', 'tick', 'top', 'top-value', 'value-count', 'values', 'refusal'],
+  'cluster-filter': ['chosen', 'entry', 'label', 'more', 'name', 'option', 'path', 'refusal', 'value-count', 'values'],
+  'filter-panel': ['add', 'add-list', 'add-option', 'add-search', 'any', 'chip', 'chips', 'clear', 'edit', 'field', 'mode', 'mode-count', 'title', 'verb', ...STATE],
   hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'dismiss', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
   'artifact-list': ['count', 'item', 'items', 'more', 'name', 'title', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],

@@ -38,7 +38,7 @@ const FORWARD = {
   'key-picker': exportparts('key-picker'),
   legend: exportparts('legend'),
   'layer-picker': exportparts('layer-picker'),
-  'filter-panel': exportparts('filter-panel', forwarded('filter')),
+  'filter-panel': exportparts('filter-panel', [...forwarded('filter'), ...forwarded('cluster-filter')]),
   hierarchy: exportparts('hierarchy'),
   'artifact-list': exportparts('artifact-list'),
   selection: exportparts('selection'),
@@ -202,6 +202,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart layer-picker-<part> - A part of the inner `<tessera-layer-picker>`.
  * @csspart filter-panel-<part> - A part of the inner `<tessera-filter-panel>`.
  * @csspart filter-<part> - A part of a `<tessera-filter>` inside the filter panel.
+ * @csspart cluster-filter-<part> - A part of a `<tessera-cluster-filter>` inside the filter panel.
  * @csspart hierarchy-<part> - A part of the inner `<tessera-hierarchy>`.
  * @csspart artifact-list-<part> - A part of the inner `<tessera-artifact-list>`.
  * @csspart selection-<part> - A part of the inner `<tessera-selection>`.

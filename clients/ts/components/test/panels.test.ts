@@ -635,8 +635,8 @@ describe('<tessera-filter-panel>', () => {
     };
     const chip = (host: HTMLElement, verb: string) => deep(host, `[part="chip"][data-column="archive"][data-verb="${verb}"]`)!;
 
-    it('shows two chips, and removing one leaves the other', async () => {
-      const {host, sent} = await mountPanel(both);
+    it('shows two chips under chips-only, and removing one leaves the other', async () => {
+      const {host, sent} = await mountPanel(both, 'chips-only');
       expect(deepAll(host, '[part="chip"]').map((c) => c.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
       (chip(host, 'highlight').querySelector(':scope > button:last-child') as HTMLButtonElement).click();
       expect(sent()).toEqual({filter: both.filter, highlight: {archive: {family: 'category', keys: []}}});
@@ -644,9 +644,9 @@ describe('<tessera-filter-panel>', () => {
       expect(sent()).toEqual({filter: {...both.filter, archive: {family: 'category', keys: []}}, highlight: both.highlight});
     });
 
-    it('opens a chip’s control in the chip’s position and focuses it', async () => {
+    it('shows a field in a position on show(), and focuses its control', async () => {
       const {host, panel, controls} = await mountPanel(both);
-      (chip(host, 'highlight').querySelector('[part="edit"]') as HTMLButtonElement).click();
+      panel.show('archive', 'highlight');
       await settle(host);
       await controls()[0]!.updateComplete;
       expect(panel.mode).toBe('highlight');
@@ -697,7 +697,7 @@ describe('<tessera-filter-panel>', () => {
   });
 
   it('marks a member_of chip with no label and no served name as unnamed, never by its key', async () => {
-    const {host} = await mountPanel({filter: {}, highlight: {}}, '', {members: [{layer: 'clusters', artifact: 4n, outside: false, verb: 'filter'}]});
+    const {host} = await mountPanel({filter: {}, highlight: {}}, 'chips-only', {members: [{layer: 'clusters', artifact: 4n, outside: false, verb: 'filter'}]});
     const chip = deep(host, '[part="chip"][data-artifact="4"]')!;
     expect(chip.textContent).toContain(UNNAMED);
     expect(chip.textContent).not.toContain('clusters');
@@ -705,7 +705,7 @@ describe('<tessera-filter-panel>', () => {
 
   it('draws an artifact filtered and highlighted as two chips, and removes one of them', async () => {
     const clause = {layer: 'mesh/descriptors', artifact: 546_790n, outside: false};
-    const {host, store} = await mountPanel({filter: {}, highlight: {}}, '', {
+    const {host, store} = await mountPanel({filter: {}, highlight: {}}, 'chips-only', {
       members: [
         {...clause, verb: 'filter'},
         {...clause, verb: 'highlight'}
@@ -716,6 +716,57 @@ describe('<tessera-filter-panel>', () => {
     expect(chips[1]!.querySelector('[part="verb"]')).not.toBeNull();
     (chips[0]!.querySelector('button') as HTMLButtonElement).click();
     expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([{...clause, verb: 'highlight'}]);
+  });
+});
+
+describe('<tessera-filter-panel> cluster fields', () => {
+  const layer = (name: string, over: Partial<Meta['layers'][number]> = {}) =>
+    ({name, title: `${name} title`, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1, ...over}) as Meta['layers'][number];
+  const LAYERED = {...META, layers: [layer('topics'), layer('labels', {depsOn: ['topics']}), layer('elsewhere', {views: ['s9']})]};
+  const topic = (id: bigint, verb: 'filter' | 'highlight', label?: string) => ({layer: 'topics', artifact: id, outside: false, verb, ...(label ? {label} : {})});
+
+  async function mountLayered(members: ReturnType<typeof topic>[] = []) {
+    const host = await mount('<tessera-filter-panel></tessera-filter-panel>');
+    const panel = host.querySelector('tessera-filter-panel') as TesseraFilterPanel;
+    const store = fakeStore({meta: LAYERED, status: status({}), filters: filtersOf({filter: {}, highlight: {}}, {members})});
+    store.set('view', {...store.get('view'), id: 's0'});
+    panel.store = store;
+    await settle(host);
+    return {host, panel, store};
+  }
+
+  it('offers each layer of the view that attaches to no other in Add filter, after the columns', async () => {
+    const {host} = await mountLayered();
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const options = deepAll(host, '[part~="add-option"]');
+    expect(options.map((o) => o.getAttribute('data-column') ?? `layer:${o.getAttribute('data-layer')}`)).toEqual(['archive', 'title', 'submitted_at', 'layer:topics']);
+    expect(options.at(-1)!.textContent).toContain('topics title');
+    (options.at(-1) as HTMLButtonElement).click();
+    await settle(host);
+    expect(deep(host, '[part~="field"][data-layer="topics"] tessera-cluster-filter')).not.toBeNull();
+  });
+
+  it('lists a layer holding a clause, counts each position’s clauses in the switch, and shows the clauses of the position shown as chips', async () => {
+    const {host, panel} = await mountLayered([topic(7n, 'filter', 'Neural networks'), topic(8n, 'highlight', 'Optics'), topic(9n, 'filter')]);
+    const counts = () => deepAll(host, '[part="mode"] button').map((b) => b.querySelector('[part="mode-count"]')?.textContent ?? '');
+    expect(counts()).toEqual(['2', '1']);
+    const chips = () => deepAll(host, '[part="chosen"]').map((c) => c.textContent!.trim());
+    expect(chips()).toEqual(['Neural networks', UNNAMED]);
+    panel.mode = 'highlight';
+    await settle(host);
+    expect(chips()).toEqual(['Optics']);
+  });
+
+  it('takes a layer off with every clause on it, in both positions, when its checked entry is chosen again', async () => {
+    const {host, store} = await mountLayered([topic(7n, 'filter'), topic(8n, 'highlight')]);
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const entry = deep(host, '[part~="add-option"][data-layer="topics"]') as HTMLButtonElement;
+    expect(entry.getAttribute('aria-checked')).toBe('true');
+    entry.click();
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([]);
   });
 });
 

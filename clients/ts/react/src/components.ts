@@ -21,6 +21,7 @@ import * as React from 'react';
 import {
   TesseraArtifactCard as ArtifactCardElement,
   TesseraArtifactList as ArtifactListElement,
+  TesseraClusterFilter as ClusterFilterElement,
   TesseraCount as CountElement,
   TesseraExplorer as ExplorerElement,
   TesseraFilter as FilterElement,
@@ -130,6 +131,8 @@ export const TesseraCount = wrap('tessera-count', CountElement, {});
 export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpen: ev('tessera-open'), onClose: ev('tessera-close'), onViewFollow: ev('tessera-viewfollow')});
 /** `<tessera-filter>` as a React component. Event prop: `onFilterChange` (`tessera-filterchange`). */
 export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChange: ev('tessera-filterchange')});
+/** `<tessera-cluster-filter>` as a React component. Event prop: `onClauseChange` (`tessera-clausechange`). */
+export const TesseraClusterFilter = wrap('tessera-cluster-filter', ClusterFilterElement, {onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`) and `onChipOpen` (`tessera-chipopen`).
@@ -179,6 +182,7 @@ export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onC
 export type {
   ArtifactCardElement,
   ArtifactListElement,
+  ClusterFilterElement,
   CountElement,
   ExplorerElement,
   FilterElement,
