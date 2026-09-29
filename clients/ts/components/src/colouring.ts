@@ -54,10 +54,15 @@ export function sizingOf(store: Store | null): Sizing {
   return store ? entry(store).sizing : DEFAULT_SIZING;
 }
 
-/** Change the size choices for `store` and tell every element watching them. */
+/**
+ * Change the size choices for `store` and tell every element watching them. A radius that is not a
+ * finite number above zero is ignored, as a budget that is not is, and so is a scale it does not
+ * name.
+ */
 export function setSizing(store: Store, patch: Partial<Sizing>): void {
   const held = entry(store);
-  const next = {...held.sizing, ...patch};
+  const radius = (r: number | undefined): r is number => typeof r === 'number' && Number.isFinite(r) && r > 0;
+  const next = {...held.sizing, ...(radius(patch.min) ? {min: patch.min} : {}), ...(radius(patch.max) ? {max: patch.max} : {}), ...(patch.scale === 'linear' || patch.scale === 'log' || patch.scale === 'rank' ? {scale: patch.scale} : {})};
   if (next.min === held.sizing.min && next.max === held.sizing.max && next.scale === held.sizing.scale) return;
   held.sizing = next;
   for (const fn of [...held.listeners]) fn();

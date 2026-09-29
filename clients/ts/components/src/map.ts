@@ -600,9 +600,8 @@ export class TesseraMap extends TesseraElement {
   private pushSizing(store: Store, changed?: PropertyValues<this>): void {
     const touched = (k: 'sizeMin' | 'sizeMax' | 'sizeScale') => !changed || changed.has(k);
     const patch: Partial<Sizing> = {};
-    const radius = (r: number | null) => r !== null && Number.isFinite(r) && r > 0;
-    if (touched('sizeMin') && radius(this.sizeMin)) patch.min = this.sizeMin!;
-    if (touched('sizeMax') && radius(this.sizeMax)) patch.max = this.sizeMax!;
+    if (touched('sizeMin') && this.sizeMin !== null) patch.min = this.sizeMin;
+    if (touched('sizeMax') && this.sizeMax !== null) patch.max = this.sizeMax;
     if (touched('sizeScale') && this.sizeScale !== '') patch.scale = this.sizeScale;
     if (Object.keys(patch).length > 0) setSizing(store, patch);
   }
