@@ -166,7 +166,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
         ],
         // `world`, first of `views`, is the anchor: within a signature group, ids are ordered by
         // the Morton code an item holds there.
-        ..build_args(&out, views)
+        ..with_id(build_args(&out, views), &world_points)
     })
     .expect("a nine-view build succeeds");
     out

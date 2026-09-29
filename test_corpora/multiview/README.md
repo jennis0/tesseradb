@@ -15,13 +15,11 @@ three decompose to 26,031 interior tiles in `world` and 29,469 in `world_flat`, 
 per-view canonicalisation means and what one frame for both would have hidden. `tessera verify` and
 `tessera verify --deep` pass on the result.
 
-**Two things in this fixture were wrong against the readers and were corrected** (2026-08-31),
-neither of them a views.md question: the `members` lists on both layer files were `int64` where an
-entity id is `u64` everywhere else, and the `contents` column was a list of strings where a ranked
-content is a list *of lists* — one entry per rank, each carrying a value per supplied kind, as the
-GeoNames rung writes it. The second needed the declaration to say what that value is, so both
-layers now carry a `[layer.content]` block with one supplied `tag`. The data and the declaration
-agreed with each other before and with the build's readers now.
+**Every file names a place by `geonameid`**, the one attribute the declaration marks `unique`, which
+every file carries as `entity_id`. The two layer files name their members the same way: `members`
+is a `list<struct<entity_id: int64>>`, one struct per member, whose field is `geonameid`'s column.
+Their `contents` column is a list of lists, one entry per rank carrying a value per supplied kind,
+and both layers declare one supplied `tag` for it.
 
 ## What is real-derived and what is synthetic
 
@@ -77,7 +75,7 @@ Output goes to `$TESSERA_LADDER/multiview/` (default `data/ladder/multiview/`, `
 | `attrs-constant.parquet` | 21,300 | the two entity-scoped attributes: `entity_id, importance, kind` |
 | `attrs-scoped.parquet` | ~32,800 | `coverage`, a scoped attribute's own source: `entity_id, quarter, coverage` |
 | `vocab-kind.parquet` | 9 | `kind`'s closed vocabulary: `key, code, title` |
-| `collections.parquet` | 6 | the unscoped layer: `key, contents, members, access` |
+| `collections.parquet` | 6 | the unscoped layer: `key, contents, members, access`, each member a `{entity_id}` struct |
 | `clusters-quarter.parquet` | 24 (6 × 4 quarters) | the scoped layer: `key, quarter, contents, members` |
 
 ## What each `views.md` feature is exercised by

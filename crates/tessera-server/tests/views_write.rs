@@ -1209,7 +1209,6 @@ quarter = "quarter.parquet"
 
 [defaults]
 allocation_view = "world"
-join_field      = "id"
 
 [[view]]
 name             = "world"

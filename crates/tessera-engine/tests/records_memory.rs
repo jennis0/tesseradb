@@ -174,9 +174,11 @@ fn bundle(dir: &Path, n: u64, note_of: impl Fn(u64) -> usize) -> Engine {
     write_pairs_n(&pairs, n);
     let schema_path = dir.join("schema.toml");
     std::fs::write(&schema_path, "[[attribute]]\nname = \"note\"\ntype = \"keyword\"\n").unwrap();
-    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
-        .map(|c| c.schema)
-        .expect("the schema parses");
+    let schema = with_id(
+        Config::parse(&schema_path, &std::collections::HashMap::new())
+            .map(|c| c.schema)
+            .expect("the schema parses"),
+    );
     let out = dir.join("bundle");
     build(&BuildArgs {
         views: vec![ViewArgs {
@@ -195,6 +197,7 @@ fn bundle(dir: &Path, n: u64, note_of: impl Fn(u64) -> usize) -> Engine {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

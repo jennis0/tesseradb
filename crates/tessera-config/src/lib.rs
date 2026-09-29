@@ -165,8 +165,9 @@ struct RawServe {
     /// Default: the number of CPUs the process may use.
     compute_threads: Option<usize>,
     /// Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and
-    /// single-artifact reads, `/v1/artifacts/browse` and `/session/authorise`, never the control
-    /// plane.
+    /// single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a
+    /// `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`,
+    /// never the control plane.
     ///
     /// Default: four per compute thread.
     compute_admission: Option<usize>,
@@ -260,8 +261,8 @@ struct RawServe {
     ///
     /// Default: `1000`.
     max_category_values: Option<usize>,
-    /// The most values one `GET /v1/categories/{column}/suggest` returns, and the `limit` of a
-    /// request that names none.
+    /// The most values one `/v1/categories/{column}/suggest` returns, `GET` or `POST`, and the
+    /// `limit` of a request that names none.
     ///
     /// Default: `20`.
     max_suggestions: Option<usize>,

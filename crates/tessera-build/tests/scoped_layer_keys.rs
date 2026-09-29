@@ -168,6 +168,12 @@ source = "points_a"
 key    = "b"
 source = "points_b"
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name = "clusters"
 title = "Clusters"
@@ -187,6 +193,7 @@ hierarchy = { kind = "flat", prune_children = false }
   # a second answer to the same question.
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 "#;
 
 /// A second group over the same points, and a label layer attached into `clusters`, scoped to
@@ -222,6 +229,7 @@ depends_on = ["clusters"]
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 "#;
 
 /// The label layer's artifacts: `c0` on each view, attached to that view's `c0` of `clusters`.
@@ -339,9 +347,13 @@ fn build_with_labels(
         anchor: 0,
         groups,
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            dir.join("a.parquet"),
+            &config.schema,
+        ),
         out: dir.join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers,
@@ -351,7 +363,7 @@ fn build_with_labels(
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema.clone(),
     })
 }
 

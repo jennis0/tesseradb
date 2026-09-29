@@ -180,7 +180,7 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     assert points.num_rows > 0, "no points were served, so nothing was checked"
 
     # The fixture planted `source_id -> fx_key`, so the join is identity -> entity -> **source**.
-    # The middle hop comes from the segment and the last from the bundle's index of the join field
+    # The middle hop comes from the segment and the last from the bundle's unique index of `serial`
     # (`catalogue.entities_by_source`); both are translations only the fixture may make, because on
     # the viewer plane an identity is opaque (I10) and this test is the fixture, not a viewer.
     #

@@ -105,7 +105,6 @@ yearly   = "yearly.parquet"
 
 [defaults]
 allocation_view = "papers"
-join_field      = "id"
 
 [[attribute]]
 name   = "id"
@@ -155,7 +154,7 @@ content = {{ computed = ["centroid", "box"] }}
 
   [layer.members]
   source = "{source}"
-  fields = {{ key = "cluster", entity = "entity_id" }}
+  fields = {{ key = "cluster" }}
 "#
     )
 }

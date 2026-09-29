@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, FixedSizeListArray, Float64Array, Int64Array, ListArray, ListBuilder, StringArray,
-    StringBuilder, UInt32Array, UInt64Array,
+    StringBuilder, StructArray, UInt32Array, UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
@@ -126,6 +126,12 @@ roster            = "roster.parquet"
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 /// A clustering, and a label layer attached into it — the shape the whole feature exists for.
@@ -144,6 +150,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "topics/x"
@@ -159,6 +166,7 @@ depends_on = ["clusters/a"]
 
   [layer.members]
   source = "topics_members"
+  fields = { id = "entity" }
 
   [[layer.content.supplied]]
   name = "topic"
@@ -330,6 +338,7 @@ fn inputs_over(ids: &[u64]) -> Inputs {
 }
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
+    let schema = common::with_id(Default::default());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -344,9 +353,13 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            inputs.points.clone(),
+            &schema,
+        ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -356,7 +369,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     }
 }
 
@@ -488,12 +501,9 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     }
 }
 
-/// **A member lands on the same entity whether the source ids are contiguous or gapped.** The
-/// join from a member's source id to its ordinal is a subtraction where the build's ids span
-/// exactly their own count and a binary search where they do not, and the two are separate code
-/// holding the id array for different lengths of time. What fixes the entity a member reaches is
-/// signature order and geometry, and the id table moves neither, so the two builds must publish
-/// the same memberships byte for byte.
+/// **A member lands on the same entity whether the ids are contiguous or gapped.** What fixes the
+/// entity a member reaches is signature order and geometry, and the values of the ids move
+/// neither, so the two builds must publish the same memberships byte for byte.
 #[test]
 fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
     let contiguous = inputs_over(&dense_ids());
@@ -521,40 +531,44 @@ fn contiguous_and_gapped_source_ids_place_a_member_on_the_same_entity() {
     }
 }
 
-/// **An id between two the build assigned is not a member of anything.** It falls inside the id
-/// range, so the subtraction the contiguous path uses would answer with an ordinal and hand the
-/// artifact some other item's entity. The gapped table is what makes the search the resolver, and
-/// its answer for an id it does not hold is the refusal every unknown member gets.
-#[test]
-fn a_member_in_a_gap_between_source_ids_refuses_the_build() {
-    let ids = gapped_ids();
-    let absent = ids[1] + 1;
-    let inputs = inputs_over(&ids);
-    write_members_rows(
-        &inputs.at("clusters_members.parquet"),
-        &cluster_member_rows_over(&ids, &[ids[0], ids[1], absent]),
-    );
-    let out = inputs.dir.join("bundle");
-    let err = run(&inputs, &out).expect_err("an id in a gap is not a member");
-    let message = format!("{err}");
-    assert!(message.contains(&format!("{absent}")), "{message}");
+/// The report's entries as `(object, reason, rows)`.
+fn refusals(report: &tessera_build::BuildReport) -> Vec<(&str, &str, u64)> {
+    report
+        .refused
+        .iter()
+        .map(|entry| (entry.object.as_str(), entry.reason.as_str(), entry.rows))
+        .collect()
 }
 
-/// **A member the build did not assign refuses the build.** Dropping it instead would move both
-/// the count a viewer is shown and the size a proportional criterion divides by, quietly, in the
-/// direction of hiding the artifact.
+/// **A member naming no item is refused, reported and left out**, and its artifact holds the rest:
+/// the bundle is the one the file without that row builds.
 #[test]
-fn a_member_naming_nothing_this_build_assigned_refuses_it() {
+fn a_member_naming_no_item_is_reported_and_left_out() {
+    let without = inputs();
+    write_members_rows(
+        &without.at("clusters_members.parquet"),
+        &cluster_member_rows(&[0, 1]),
+    );
+    let without_out = without.dir.join("bundle");
+    let clean = run(&without, &without_out).expect("the build without the row succeeds");
+    assert!(clean.refused.is_empty(), "{:?}", clean.refused);
+
     let inputs = inputs();
     write_members_rows(
         &inputs.at("clusters_members.parquet"),
         &cluster_member_rows(&[0, 1, N_ITEMS + 500]),
     );
     let out = inputs.dir.join("bundle");
-    let err = run(&inputs, &out).expect_err("an unknown member is a refusal");
-    let message = format!("{err}");
-    assert!(message.contains(&format!("{}", N_ITEMS + 500)), "{message}");
-    assert!(message.contains("refused"), "{message}");
+    let report = run(&inputs, &out).expect("a member naming no item is left out");
+    assert_eq!(
+        refusals(&report),
+        vec![("layer 'clusters/a' members", "names_no_item", 1)]
+    );
+    assert_eq!(
+        report.refused[0].values,
+        vec![format!("id = {}", N_ITEMS + 500)]
+    );
+    assert_bundles_identical(&without_out, &out, "a member naming no item");
 }
 
 /// The registry's own refusals reach the build unchanged: a layer must be declared after the
@@ -591,29 +605,41 @@ fn a_member_row_naming_an_undeclared_artifact_is_refused() {
     assert!(format!("{err}").contains("c-OOO0"), "{err}");
 }
 
-/// **A null entity is not entity zero.** Arrow reads the values buffer whatever the validity
-/// bitmap says, so a producer whose join missed a row would publish the corpus's lowest-numbered
-/// document into the artifact, moving its masked count for whoever can see that document.
+/// **A null member names no item, and is not the item holding id zero.** Arrow reads the values
+/// buffer whatever the validity bitmap says, so a reader taking the null's slot as a value would
+/// put item 0 in the artifact. The row is reported and left out.
 #[test]
-fn a_null_member_is_refused_rather_than_read_as_entity_zero() {
-    let inputs = inputs();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("key", DataType::Utf8, false),
-        Field::new("entity", DataType::UInt64, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["c-0000", "c-0000"])) as ArrayRef,
-            Arc::new(UInt64Array::from(vec![Some(7u64), None])),
-        ],
-    )
-    .unwrap();
-    write(&inputs.at("clusters_members.parquet"), schema, batch);
+fn a_null_member_names_no_item_rather_than_item_zero() {
+    let write_members = |inputs: &Inputs, entities: Vec<Option<u64>>| {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("entity", DataType::UInt64, true),
+        ]));
+        let keys = vec!["c-0000"; entities.len()];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(keys)) as ArrayRef,
+                Arc::new(UInt64Array::from(entities)),
+            ],
+        )
+        .unwrap();
+        write(&inputs.at("clusters_members.parquet"), schema, batch);
+    };
+    let without = inputs();
+    write_members(&without, vec![Some(7)]);
+    let without_out = without.dir.join("bundle");
+    run(&without, &without_out).expect("the build without the null succeeds");
 
+    let inputs = inputs();
+    write_members(&inputs, vec![Some(7), None]);
     let out = inputs.dir.join("bundle");
-    let err = run(&inputs, &out).expect_err("a null entity is a refusal");
-    assert!(format!("{err}").contains("null entity"), "{err}");
+    let report = run(&inputs, &out).expect("a null member is left out");
+    assert_eq!(
+        refusals(&report),
+        vec![("layer 'clusters/a' members", "names_no_item", 1)]
+    );
+    assert_bundles_identical(&without_out, &out, "a null member");
 }
 
 /// **Publication follows the declaration order, not the alphabet.** An attachment resolves against
@@ -716,6 +742,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "tree_members"
+  fields = { id = "entity" }
 "#;
 
 /// A three-node tree: one root and two children, written with `parent` on each child.
@@ -962,6 +989,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "admin_members"
+  fields = { id = "entity" }
 
 [[layer.levels]]
 level = 0
@@ -1159,32 +1187,42 @@ fn write_curated_with_members(path: &Path, artifacts: &[(&str, Vec<u64>)]) {
 }
 
 fn write_curated_column(path: &Path, column: &str, artifacts: &[(&str, Vec<u64>)]) {
+    let lists: Vec<Vec<u64>> = artifacts.iter().map(|(_, m)| m.clone()).collect();
+    let (field, lists) = member_lists(column, &DataType::UInt64, &lists);
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
-        Field::new(
-            column,
-            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-            true,
-        ),
+        field,
     ]));
-    let mut lists = ListBuilder::new(arrow::array::UInt64Builder::new());
-    for (_, members) in artifacts {
-        for &m in members {
-            lists.values().append_value(m);
-        }
-        lists.append(true);
-    }
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(StringArray::from(
                 artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             )) as ArrayRef,
-            Arc::new(lists.finish()),
+            lists,
         ],
     )
     .unwrap();
     write(path, schema, batch);
+}
+
+/// A membership column `name`: one list per artifact, each entry a struct naming its member by
+/// the unique `id`'s column, `entity_id`, holding the id at `ty` as [`id_column_at`] writes it.
+fn member_lists(name: &str, ty: &DataType, lists: &[Vec<u64>]) -> (Field, ArrayRef) {
+    let entry = Fields::from(vec![Field::new("entity_id", ty.clone(), true)]);
+    let ids: Vec<u64> = lists.iter().flatten().copied().collect();
+    let entries = StructArray::new(entry.clone(), vec![id_column_at(ty, &ids)], None);
+    let item = Arc::new(Field::new("item", DataType::Struct(entry), true));
+    let array = ListArray::new(
+        item.clone(),
+        OffsetBuffer::from_lengths(lists.iter().map(Vec::len)),
+        Arc::new(entries),
+        None,
+    );
+    (
+        Field::new(name, DataType::List(item), true),
+        Arc::new(array),
+    )
 }
 
 fn curated() -> Vec<(&'static str, Vec<u64>)> {
@@ -1207,7 +1245,9 @@ fn an_inline_layer_and_a_sourced_layer_build_the_same_bundle() {
         "{CURATED_LAYER}artifacts = [{}]\n",
         CURATED
             .iter()
-            .map(|(key, members)| format!("{{ key = \"{key}\", members = {members:?} }}"))
+            .map(|(key, members)| format!(
+                "{{ key = \"{key}\", members = {{ id = {members:?} }} }}"
+            ))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -1249,7 +1289,7 @@ fn a_row_membership_and_a_member_source_build_the_same_bundle() {
         write_curated_with_members(&inputs.at("curated.parquet"), &curated())
     });
     let in_a_source = format!(
-        "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n"
+        "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n  fields = {{ id = \"entity\" }}\n"
     );
     let (from_source, _b) = build_spelling(&in_a_source, |inputs| {
         let schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Utf8, false)]));
@@ -1285,21 +1325,19 @@ fn write_curated_ids_at(
         artifacts.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
     ));
     if !member_table {
-        let item = Arc::new(Field::new("item", ty.clone(), true));
+        let lists: Vec<Vec<u64>> = artifacts
+            .iter()
+            .map(|(_, m)| m.iter().map(|&id| id as u64).collect())
+            .collect();
+        let (field, lists) = member_lists("members", ty, &lists);
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
-            Field::new("members", DataType::List(item.clone()), true),
+            field,
         ]));
-        let lists = ListArray::new(
-            item,
-            OffsetBuffer::from_lengths(artifacts.iter().map(|(_, members)| members.len())),
-            ids(artifacts.iter().flat_map(|(_, m)| m.clone()).collect()),
-            None,
-        );
         write(
             &inputs.at("curated.parquet"),
             schema.clone(),
-            RecordBatch::try_new(schema, vec![keys, Arc::new(lists)]).unwrap(),
+            RecordBatch::try_new(schema, vec![keys, lists]).unwrap(),
         );
         return;
     }
@@ -1333,7 +1371,7 @@ fn write_curated_ids_at(
 fn curated_from(member_table: bool) -> String {
     if member_table {
         format!(
-            "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n"
+            "{CURATED_LAYER}source = \"curated\"\n  [layer.members]\n  source = \"curated_members\"\n  fields = {{ id = \"entity\" }}\n"
         )
     } else {
         format!("{CURATED_LAYER}source = \"curated\"\n")
@@ -1418,47 +1456,55 @@ fn twos_complement_ids() -> Vec<u64> {
     (0..N_ITEMS as i64).map(|o| (o - 5) as u64).collect()
 }
 
-/// **A negative point id is its two's-complement unsigned id.** A points file writing its ids at
-/// `int64` or `int32`, some of them negative, builds the same bundle as the same ids at `uint64`,
-/// with the pairs and the member tables naming them at `uint64`.
-#[test]
-fn a_negative_point_id_is_its_twos_complement_unsigned_id() {
-    let ids = twos_complement_ids();
-    let unsigned = inputs_over(&ids);
-    let unsigned_out = unsigned.dir.join("bundle");
-    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
-    for ty in [DataType::Int64, DataType::Int32] {
-        let signed = inputs_over(&ids);
-        retype_ids(&signed.points, "entity_id", &ty);
-        let signed_out = signed.dir.join("bundle");
-        run(&signed, &signed_out).expect("a build over negative point ids succeeds");
-        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} points"));
-    }
+/// `declaration` with the fixture's `id` declared `i64`.
+fn signed(declaration: &str) -> String {
+    declaration.replace("type   = \"u64\"", "type   = \"i64\"")
 }
 
-/// **A negative member id is its two's-complement unsigned id**, in a member table and in a list
-/// on the artifact row alike.
-#[test]
-fn a_negative_member_id_is_its_twos_complement_unsigned_id() {
-    let ids = twos_complement_ids();
-    let unsigned = inputs_over(&ids);
-    let unsigned_out = unsigned.dir.join("bundle");
-    run(&unsigned, &unsigned_out).expect("a build over uint64 ids succeeds");
-    for ty in [DataType::Int64, DataType::Int32] {
-        let signed = inputs_over(&ids);
-        for table in ["clusters_members.parquet", "topics_members.parquet"] {
-            retype_ids(&signed.at(table), "entity", &ty);
-        }
-        let signed_out = signed.dir.join("bundle");
-        run(&signed, &signed_out).expect("a build over negative member ids succeeds");
-        assert_bundles_identical(&unsigned_out, &signed_out, &format!("{ty:?} member tables"));
+/// [`inputs_over`] [`twos_complement_ids`] with `id` declared `i64`, so the first five items' ids
+/// are -5 to -1: the points file writes each id at `points_at`, the member tables at `members_at`
+/// and the pairs at `int64`.
+fn signed_inputs(points_at: &DataType, members_at: &DataType) -> Inputs {
+    let inputs = inputs_over(&twos_complement_ids());
+    std::fs::write(&inputs.config, signed(&format!("{VIEW_TOML}{LAYERS_TOML}"))).unwrap();
+    retype_ids(&inputs.points, "entity_id", points_at);
+    retype_ids(&inputs.pairs, "entity_id", &DataType::Int64);
+    for table in ["clusters_members.parquet", "topics_members.parquet"] {
+        retype_ids(&inputs.at(table), "entity", members_at);
     }
+    inputs
+}
+
+/// **A negative point id at `int32` names the item it names at `int64`**: the points file at
+/// either width builds the same bundle, with the pairs and the member tables at `int64`.
+#[test]
+fn a_negative_point_id_at_int32_builds_what_int64_builds() {
+    let wide = signed_inputs(&DataType::Int64, &DataType::Int64);
+    let wide_out = wide.dir.join("bundle");
+    run(&wide, &wide_out).expect("a build over int64 ids succeeds");
+    let narrow = signed_inputs(&DataType::Int32, &DataType::Int64);
+    let narrow_out = narrow.dir.join("bundle");
+    run(&narrow, &narrow_out).expect("a build over negative int32 point ids succeeds");
+    assert_bundles_identical(&wide_out, &narrow_out, "int32 points");
+}
+
+/// **A negative member id at `int32` names the item it names at `int64`**, in a member table and
+/// in a list on the artifact row alike.
+#[test]
+fn a_negative_member_id_at_int32_builds_what_int64_builds() {
+    let wide = signed_inputs(&DataType::Int64, &DataType::Int64);
+    let wide_out = wide.dir.join("bundle");
+    run(&wide, &wide_out).expect("a build over int64 ids succeeds");
+    let narrow = signed_inputs(&DataType::Int64, &DataType::Int32);
+    let narrow_out = narrow.dir.join("bundle");
+    run(&narrow, &narrow_out).expect("a build over negative int32 member ids succeeds");
+    assert_bundles_identical(&wide_out, &narrow_out, "int32 member tables");
 
     let lists = |ty: DataType| {
-        let inputs = inputs_over(&ids);
+        let inputs = signed_inputs(&DataType::Int64, &DataType::Int64);
         std::fs::write(
             &inputs.config,
-            format!("{VIEW_TOML}{}", curated_from(false)),
+            signed(&format!("{VIEW_TOML}{}", curated_from(false))),
         )
         .unwrap();
         let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
@@ -1467,34 +1513,34 @@ fn a_negative_member_id_is_its_twos_complement_unsigned_id() {
         run(&inputs, &out).expect("a build over negative member ids succeeds");
         (out, inputs)
     };
-    let (unsigned_lists, _a) = lists(DataType::UInt64);
-    for ty in [DataType::Int64, DataType::Int32] {
-        let (signed_lists, _b) = lists(ty.clone());
-        assert_bundles_identical(&unsigned_lists, &signed_lists, &format!("{ty:?} lists"));
-    }
+    let (wide_lists, _a) = lists(DataType::Int64);
+    let (narrow_lists, _b) = lists(DataType::Int32);
+    assert_bundles_identical(&wide_lists, &narrow_lists, "int32 lists");
 }
 
-/// **A negative inline member id is its two's-complement unsigned id**, as it is in a file.
+/// **A negative inline member names the item a negative id in a file names.**
 #[test]
-fn a_negative_inline_member_id_is_its_twos_complement_unsigned_id() {
-    let ids = twos_complement_ids();
-    let signed: Vec<(&str, Vec<i64>)> = vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
+fn a_negative_inline_member_builds_what_the_file_builds() {
+    let signed_members: Vec<(&str, Vec<i64>)> =
+        vec![("c-0", vec![-5, -4, 0]), ("c-1", vec![3, -1])];
     let build_with = |layer: String, write_sources: &dyn Fn(&Inputs)| {
-        let inputs = inputs_over(&ids);
-        std::fs::write(&inputs.config, format!("{VIEW_TOML}{layer}")).unwrap();
+        let inputs = signed_inputs(&DataType::Int64, &DataType::Int64);
+        std::fs::write(&inputs.config, signed(&format!("{VIEW_TOML}{layer}"))).unwrap();
         write_sources(&inputs);
         let out = inputs.dir.join("bundle");
         run(&inputs, &out).expect("a build over negative member ids succeeds");
         (out, inputs)
     };
     let (from_file, _a) = build_with(curated_from(false), &|inputs| {
-        write_curated_ids_at(inputs, false, &DataType::UInt64, &signed)
+        write_curated_ids_at(inputs, false, &DataType::Int64, &signed_members)
     });
     let inline = format!(
         "{CURATED_LAYER}artifacts = [{}]\n",
-        signed
+        signed_members
             .iter()
-            .map(|(key, members)| format!("{{ key = \"{key}\", members = {members:?} }}"))
+            .map(|(key, members)| format!(
+                "{{ key = \"{key}\", members = {{ id = {members:?} }} }}"
+            ))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -1507,7 +1553,8 @@ fn a_negative_inline_member_id_is_its_twos_complement_unsigned_id() {
 }
 
 /// **An inline member may be written as its decimal digits**, which is how a `u64` from 2^63 is
-/// written, TOML holding no integer that large. It builds what the same ids in a file build.
+/// written, TOML holding no integer that large. It builds what the same ids in a file build: here
+/// the first five items' `u64` ids are 2^64 - 5 to 2^64 - 1.
 #[test]
 fn an_inline_member_written_as_its_digits_builds_what_the_file_builds() {
     let ids = twos_complement_ids();
@@ -1528,38 +1575,54 @@ fn an_inline_member_written_as_its_digits_builds_what_the_file_builds() {
         signed
             .iter()
             .map(|(key, members)| {
-                let digits: Vec<String> =
-                    members.iter().map(|m| format!("\"{}\"", *m as u64)).collect();
-                format!("{{ key = \"{key}\", members = [{}] }}", digits.join(", "))
+                let digits: Vec<String> = members
+                    .iter()
+                    .map(|m| format!("\"{}\"", *m as u64))
+                    .collect();
+                format!(
+                    "{{ key = \"{key}\", members = {{ id = [{}] }} }}",
+                    digits.join(", ")
+                )
             })
             .collect::<Vec<_>>()
             .join(", ")
     );
     let (from_declaration, _b) = build_with(inline, &|_| {});
-    assert_bundles_identical(&from_file, &from_declaration, "digits inline against a file");
+    assert_bundles_identical(
+        &from_file,
+        &from_declaration,
+        "digits inline against a file",
+    );
 }
 
-/// **An excluded id this build did not assign refuses the build**, where an unknown *member*
-/// refuses it for the mirror-image reason: an exclusion that resolves to nothing silently widens
-/// the membership by the item it was written to keep out.
+/// **An exclusion naming no item is refused, reported and left out**, as an unknown member is:
+/// the artifact excludes the rest, and the bundle is the one the list without it builds.
 #[test]
-fn an_exclusion_naming_nothing_this_build_assigned_refuses_it() {
-    let inputs = inputs();
-    std::fs::write(
-        &inputs.config,
-        format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
-    )
-    .unwrap();
-    write_curated_column(
-        &inputs.at("curated.parquet"),
-        "excluding",
-        &[("c-0", vec![1, N_ITEMS + 500])],
+fn an_exclusion_naming_no_item_is_reported_and_left_out() {
+    let build_excluding = |excluded: Vec<u64>| {
+        let inputs = inputs();
+        std::fs::write(
+            &inputs.config,
+            format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
+        )
+        .unwrap();
+        write_curated_column(
+            &inputs.at("curated.parquet"),
+            "excluding",
+            &[("c-0", excluded)],
+        );
+        let out = inputs.dir.join("bundle");
+        let report = run(&inputs, &out).expect("an unknown exclusion is left out");
+        (out, report, inputs)
+    };
+    let (without_out, clean, _a) = build_excluding(vec![1]);
+    assert!(clean.refused.is_empty(), "{:?}", clean.refused);
+    let (out, report, _b) = build_excluding(vec![1, N_ITEMS + 500]);
+    assert_eq!(
+        refusals(&report),
+        vec![("layer 'curated/a' memberships", "names_no_item", 1)]
     );
-    let out = inputs.dir.join("bundle");
-    let err = run(&inputs, &out).expect_err("an unknown exclusion is a refusal");
-    let message = format!("{err}");
-    assert!(message.contains(&format!("{}", N_ITEMS + 500)), "{message}");
-    assert!(message.contains("exclusion"), "{message}");
+    assert_bundles_identical(&without_out, &out, "an exclusion naming no item");
 }
 
 /// **A file carrying both a `members` and an `excluding` column has two memberships for one
@@ -1573,31 +1636,19 @@ fn a_source_carrying_both_members_and_excluding_is_refused() {
         format!("{VIEW_TOML}{CURATED_LAYER}source = \"curated\"\n"),
     )
     .unwrap();
+    let (members_field, members) = member_lists("members", &DataType::UInt64, &[vec![0]]);
+    let (excluding_field, excluding) = member_lists("excluding", &DataType::UInt64, &[vec![1]]);
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
-        Field::new(
-            "members",
-            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-            true,
-        ),
-        Field::new(
-            "excluding",
-            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-            true,
-        ),
+        members_field,
+        excluding_field,
     ]));
-    let mut members = ListBuilder::new(arrow::array::UInt64Builder::new());
-    members.values().append_value(0);
-    members.append(true);
-    let mut excluding = ListBuilder::new(arrow::array::UInt64Builder::new());
-    excluding.values().append_value(1);
-    excluding.append(true);
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(StringArray::from(vec!["c-0"])) as ArrayRef,
-            Arc::new(members.finish()),
-            Arc::new(excluding.finish()),
+            members,
+            excluding,
         ],
     )
     .unwrap();
@@ -1651,6 +1702,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 
   [layer.labels]
   name = "topics/x"
@@ -1666,6 +1718,7 @@ content = { computed = ["centroid"] }
 
     [layer.labels.members]
     source = "topics_members"
+    fields = { id = "entity" }
 "#;
 
 /// The same thing, written out: every key the expansion supplies, spelled by hand.
@@ -1684,6 +1737,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "topics/x"
@@ -1699,6 +1753,7 @@ depends_on = ["clusters/a"]
 
   [layer.members]
   source = "topics_members"
+  fields = { id = "entity" }
 
   [[layer.content.supplied]]
   name = "topics/x"
@@ -1916,12 +1971,13 @@ fn write_cluster_members(path: &Path, clusters: &[Option<i64>]) {
 const FROM_POINTS: &str = r#"
   [layer.members]
   source = "points"
-  fields = { key = "cluster_id", entity = "entity_id" }
+  fields = { key = "cluster_id" }
 "#;
 
 const FROM_MEMBER_TABLE: &str = r#"
   [layer.members]
   source = "cluster_members"
+  fields = { id = "entity" }
 "#;
 
 /// Every point clustered, so the case turns on nothing but where the membership was read from.
@@ -2213,7 +2269,7 @@ fn layer_of_kind(kind: &str) -> String {
 const FROM_LINEAGE: &str = r#"
   [layer.members]
   source = "points"
-  fields = { key = "lineage", entity = "entity_id" }
+  fields = { key = "lineage" }
 "#;
 
 /// The equivalent enumeration: an artifact table carrying the edges, and a member table carrying
@@ -2221,11 +2277,13 @@ const FROM_LINEAGE: &str = r#"
 const FROM_TREE_TABLES: &str = r#"source = "tree"
   [layer.members]
   source = "tree_members"
+  fields = { id = "entity" }
 "#;
 
 const FROM_LEVELLED_TABLES: &str = r#"source = "admin"
   [layer.members]
   source = "admin_members"
+  fields = { id = "entity" }
 "#;
 
 /// Three levels, which is what a fixed-length list of three entries must agree with.
@@ -2886,6 +2944,12 @@ name  = "band"
 type  = "u32"
 index = true
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 {layer}
 "#
     )
@@ -3238,6 +3302,12 @@ vocabulary = "grade"
 render     = true
 index      = true
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name                      = "grades/by-value"
 views                     = ["s0"]
@@ -3346,7 +3416,7 @@ visibility                = "public"
 artifact_visibility       = { default = "inherited" }
 require_member_visibility = "none"
 artifacts = [
-  { key = "west", members = [0, 1, 2], contents = [["West", "POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))"]] },
+  { key = "west", members = { id = [0, 1, 2] }, contents = [["West", "POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))"]] },
 ]
 
   [[layer.content.supplied]]

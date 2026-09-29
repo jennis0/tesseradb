@@ -129,6 +129,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         // and an empty schema is what `common`'s builder uses for the same reason.
         schema: id_schema(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

@@ -656,6 +656,7 @@ class Selection:
         colour_by: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         height: int = 480,
+        size_by: Optional[str] = None,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -667,6 +668,7 @@ class Selection:
         - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
           none.
         - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -679,6 +681,7 @@ class Selection:
             filters=self.filters,
             height=height,
             bbox=self.box,
+            size_by=size_by,
         )
 
     def _expression(self) -> Optional[dict]:
@@ -763,6 +766,7 @@ class Viewer:
         colour_by: Optional[str] = None,
         filters: Optional[dict] = None,
         height: int = 480,
+        size_by: Optional[str] = None,
         **kwargs: Any,
     ) -> Map:
         """The interactive map, as a notebook widget, showing what this reader may see.
@@ -773,6 +777,7 @@ class Viewer:
         - `colour_by`: the column to colour points by, or `"cluster:<layer>"`.
         - `filters`: a filter expression to apply, as `Selection.filter` takes one.
         - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
 
         Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box. The
         page in the browser fetches its own data from the database with this reader's token. The
@@ -788,6 +793,7 @@ class Viewer:
             colour_by=colour_by,
             filters=filters,
             height=height,
+            size_by=size_by,
             **kwargs,
         )
 
@@ -1101,6 +1107,7 @@ class Viewer:
         prefix: Optional[str] = None,
         view: Optional[str] = None,
         codes: Optional[Sequence[int]] = None,
+        filters: Optional[dict] = None,
     ):
         """The values of a category column that this reader may see, as a pyarrow table.
 
@@ -1113,12 +1120,17 @@ class Viewer:
           this text, ignoring case. The rows then also have `count`, the number of
           items this reader may see that carry the value. The server returns at most its
           `max_suggestions` setting of such values; the table's schema metadata
-          `tessera.more` is `"true"` when more matched than were returned.
+          `tessera.more` is `"true"` when more matched than were returned, and
+          `tessera.total` is the number of items the counts are taken over, so a count divided
+          by it is the value's share.
         - `view`: the view to read the column in. A column declared for a view group holds
           different values in each of the group's views, so it needs this.
         - `codes`: list only these codes, such as the codes in a sample's category column. A
           code with no value this reader may see is left out. It cannot be combined with
           `prefix`.
+        - `filters`: with `prefix` and `view`, count only the items in the view that pass this
+          filter expression. The values listed and their order do not change; a value the
+          filter excludes has a count of 0.
 
         Without a prefix the rows are in key order; with one, in the order of the matched text.
         `.to_pandas()` on the table gives a DataFrame, where pandas is installed.
@@ -1126,6 +1138,7 @@ class Viewer:
             v.categories("venue")
             v.categories("venue", prefix="neur")
             v.categories("venue", codes=sample.column("venue").unique().to_pylist())
+            v.categories("venue", prefix="", view="papers", filters={"year": {"gte": 2020}})
         """
         import pyarrow as pa
 
@@ -1144,6 +1157,17 @@ class Viewer:
                 "categories: codes= lists the values of codes you hold and prefix= searches the "
                 "values by text. Give one of them"
             )
+        if filters is not None and codes is not None:
+            raise Refusal(
+                "categories: codes= resolves codes and carries no counts for filters= to narrow; "
+                "give prefix= with filters= in place of codes="
+            )
+        if filters is not None and prefix is None:
+            raise Refusal(
+                "categories: filters= narrows the counts of a listing by prefix=; give prefix= as "
+                "well, where an empty one lists values from the start up to the server's "
+                "max_suggestions"
+            )
         path = f"/v1/categories/{urllib.parse.quote(column, safe='')}"
         query: dict = {} if view is None else {"view": view}
         if codes is not None:
@@ -1156,10 +1180,14 @@ class Viewer:
             return table(values)
         if prefix is not None:
             query.update(q=prefix, counts="true")
-            page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
+            if filters is None:
+                page = json.loads(self._request("GET", path + "/suggest" + _query(query), None))
+            else:
+                body = {**query, "counts": True, "filters": filters}
+                page = json.loads(self._request("POST", path + "/suggest", body))
             more = "true" if page.get("more") else "false"
             return table(page["values"], counted=True).replace_schema_metadata(
-                {"tessera.more": more}
+                {"tessera.more": more, "tessera.total": str(page["total"])}
             )
         values: list = []
         while True:

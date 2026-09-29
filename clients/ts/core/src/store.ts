@@ -10,11 +10,11 @@ import type {Composition} from './compose.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, rectToRequestBbox, WORLD_SIZE} from './coords.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
 import {RETRY_DEFAULTS, type Clock, type DriverOptions, type ViewState as DriverViewState} from './driver.js';
-import {composeFilters, emptyDraft, withoutClause, type FilterDraft} from './filters.js';
+import {composeFilters, emptyDraft, withoutClause, type ClauseVerb, type FilterDraft} from './filters.js';
 import {HeldRecords, HeldShapes} from './held.js';
 import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
-import {CLUSTER_PREFIX, Legend, type LegendProjection} from './legend.js';
+import {CLUSTER_PREFIX, EMPTY_LEGEND, Legend, type LegendProjection} from './legend.js';
 import {withMembers, type MemberClause} from './members.js';
 import {attachedTextOf} from './names.js';
 import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
@@ -185,7 +185,7 @@ export type Projections = {
   region: RegionProjection | null;
   /** The filter controls, the expressions composed from them, the `member_of` clauses and the typeahead. */
   filters: FiltersProjection;
-  /** The colour column's legend. */
+  /** The legend of the colour and size columns. */
   legend: LegendProjection;
   /** How much the store's tile cache holds. */
   replica: ReplicaProjection;
@@ -564,14 +564,26 @@ export interface Store {
    */
   setAggregate(id: string, spec: AggregateSpec | null): void;
   /**
-   * Ask a category column's typeahead for `q`, 120 ms after the last call for that column. The page
-   * lands in `filters.suggestions[column]`, each value with its count in the current view, and a
-   * refusal in `filters.suggestErrors[column]`. A call
-   * repeating the `q` last asked for does nothing, and an answer to an earlier `q` is dropped. An ask
-   * the server sheds as `superseded` is retried after the wait it gives, at least 0.25 s, up to five
-   * times. Waits for `/v1/meta`.
+   * Ask a category column's typeahead for `q`, from a control in position `verb`, 120 ms after the
+   * last call for that column. The page lands in `filters.suggestions[column]`, each value with its
+   * count in the current view among the items passing a filter, and the `total` those counts are
+   * taken over. In `filter` the filter is {@link Store.requestFilters} without the column's own
+   * filter clause, so each value counts what choosing it as well would add; in `highlight` it is the
+   * whole of it, so a value the filter excludes counts 0. A refusal lands in
+   * `filters.suggestErrors[column]`. A call repeating the `q` and `verb` last asked for does nothing;
+   * any other call asks again and cancels the column's request before. A change of filter or region
+   * asks again for each column whose request would carry another filter, keeping its page until the
+   * new one lands. Requests are sent one at a time, since the server runs one suggestion per
+   * session. An ask the server sheds (`429`) is retried after the wait it gives, at least 0.25 s, up
+   * to five times; an ask from the box then reports `backpressure`, and one from a change of filter
+   * keeps the page it had. Waits for `/v1/meta`.
    */
-  suggest(column: string, q: string): void;
+  suggest(column: string, q: string, verb: ClauseVerb): void;
+  /**
+   * Stop asking for `column`'s suggestions and drop its page and refusal, so a change of filter no
+   * longer asks for it. A control calls this when its box is emptied and when it goes away.
+   */
+  forgetSuggestions(column: string): void;
   /**
    * Draw these layers, each with its closure ({@link layerClosure}); `[]` draws none. Filter layers
    * are dropped from the list. A layer newly named is fetched at once. Publishes `artifacts`. Called
@@ -586,6 +598,13 @@ export interface Store {
    * the points draw uniform.
    */
   setColourBy(column: string | null): void;
+  /**
+   * Size points by a declared number column, or `null` for one size. Publishes `legend`, whose
+   * `domains` and `missing` then accumulate the column from the marks drawn, and with `rank` set
+   * `samples` too, for sizing by rank. A `render` column arrives with every point, so choosing one
+   * sends no request. A column that is a category, not a number or not rendered sizes nothing.
+   */
+  setSizeBy(column: string | null, options?: {rank?: boolean}): void;
   /**
    * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
    * use does nothing.
@@ -793,9 +812,10 @@ export function createStore(options: StoreOptions): Store {
 
   const suggestions = new Suggestions(
     clock,
-    async (column, q) => {
+    (column, verb) => (verb === 'highlight' ? requestFilters() : filtersWithout(column)),
+    async (column, q, filters, signal) => {
       const asked = await viewed();
-      return client.suggest(asked.token, column, q, {view: asked.view, counts: true});
+      return client.suggest(asked.token, column, q, {view: asked.view, counts: true, ...(filters === null ? {} : {filters}), signal});
     },
     (state) => replaceProjection('filters', {...projections.filters, ...state})
   );
@@ -827,7 +847,7 @@ export function createStore(options: StoreOptions): Store {
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
-      const filters = requestFilters(spec.without);
+      const filters = spec.without === undefined ? requestFilters() : filtersWithout(spec.without);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
       const result = await client.aggregate(
         asked.token,
@@ -855,7 +875,7 @@ export function createStore(options: StoreOptions): Store {
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
-    legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
+    legend: EMPTY_LEGEND,
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
     aggregates: new Map()
   };
@@ -1153,8 +1173,8 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * After `meta` is read again, drop the host's inputs that name what it no longer offers: filter
-   * controls on columns it does not list, layers it does not list, and a colouring by a column or
-   * layer it does not list.
+   * controls on columns it does not list, layers it does not list, a colouring by a column or
+   * layer it does not list, and a sizing by a column it does not list.
    */
   function dropUnoffered(m: Meta): void {
     const columns = new Set(m.filterOperands.map((f) => f.column));
@@ -1179,6 +1199,8 @@ export function createStore(options: StoreOptions): Store {
         ? colourLayers(m.layers).some((l) => CLUSTER_PREFIX + l.name === colourBy)
         : m.declaredScalars.some((c) => c.name === colourBy));
     if (!offered) legend.setColourBy(null);
+    const sizeBy = legend.sizeBy;
+    if (sizeBy !== null && !m.declaredScalars.some((c) => c.name === sizeBy)) legend.setSizeBy(null);
   }
 
   function onStatus(status: PresentedStatus, refusal: Refusal | null): void {
@@ -1284,7 +1306,7 @@ export function createStore(options: StoreOptions): Store {
       verdict: replica?.lastRegionVerdict ?? null,
       fetched: p.fetched !== null,
       matched: Number(matched),
-      narrowed: filtersBesideRegion() !== null
+      narrowed: filtersBesideRegion(projections.filters.draft) !== null
     });
     legend.accumulate(frame, meta?.declaredScalars ?? []);
     colours.refresh();
@@ -1574,22 +1596,25 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  /**
-   * The filter-position controls and `member_of` clauses, without the region leaf, and without
-   * `column`'s control where one is named.
-   */
-  function filtersBesideRegion(column?: string): FilterExpr | null {
-    const draft = column === undefined ? projections.filters.draft : withoutClause(projections.filters.draft, column, 'filter');
+  /** The filter-position controls of `draft` and the `member_of` clauses, without the region leaf. */
+  function filtersBesideRegion(draft: FilterDraft): FilterExpr | null {
     return withMembers(composeFilters(draft, 'filter'), projections.filters.members, 'filter');
   }
 
-  /**
-   * One composition for the point path, the artifact channel and the region's count. An aggregate
-   * registered `without` a column's control composes the same less that control.
-   */
-  function requestFilters(without?: string): FilterExpr | null {
+  /** One composition for the point path, the artifact channel and the region's count. */
+  function requestFilters(): FilterExpr | null {
+    return withSelected(filtersBesideRegion(projections.filters.draft));
+  }
+
+  /** {@link requestFilters} without `column`'s filter-position control. */
+  function filtersWithout(column: string): FilterExpr | null {
+    return withSelected(filtersBesideRegion(withoutClause(projections.filters.draft, column, 'filter')));
+  }
+
+  /** `expr` with the selected region's leaf joined. */
+  function withSelected(expr: FilterExpr | null): FilterExpr | null {
     const selected = region.selected;
-    return withRegion(filtersBesideRegion(without), selected ? regionOperand(selected) : null, selected?.outside ?? false);
+    return withRegion(expr, selected ? regionOperand(selected) : null, selected?.outside ?? false);
   }
 
   /**
@@ -1611,6 +1636,8 @@ export function createStore(options: StoreOptions): Store {
     }
     contentKeyAtFrame = '';
     if (lastView) setView(lastView.input);
+    // Each suggestion count is taken under the filter.
+    suggestions.refresh();
     aggregates.refresh(false);
   }
 
@@ -1652,6 +1679,11 @@ export function createStore(options: StoreOptions): Store {
     traceUnknownColourLayer();
     if (colourLayer() !== before) askLayers();
     // Every declared column is in the held bands, so a column needs no refetch.
+    if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
+  }
+
+  function setSizeBy(column: string | null, options: {rank?: boolean} = {}): void {
+    legend.setSizeBy(column, options.rank ?? false);
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
@@ -1846,9 +1878,11 @@ export function createStore(options: StoreOptions): Store {
     setAggregate: (id, spec) => aggregates.set(id, spec),
     setFilters,
     setMembers,
-    suggest: (column, q) => suggestions.suggest(column, q),
+    suggest: (column, q, verb) => suggestions.suggest(column, q, verb),
+    forgetSuggestions: (column) => suggestions.forget(column),
     setLayers,
     setColourBy,
+    setSizeBy,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
     setCurrentView,

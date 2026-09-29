@@ -142,6 +142,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

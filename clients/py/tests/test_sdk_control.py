@@ -161,13 +161,12 @@ def test_a_commit_whose_pages_reach_no_server_reports_it_and_does_not_raise(tmp_
     db = create(tmp_path / "db")
     db.declare_view("map", extent={"min": 0.0, "max": 8.0})
     db.declare_attribute("id", type="i64", unique=True)
-    db.declare_join_field("id")
     rows = pd.DataFrame({"id": [1, 2], "x": [0.0, 1.0], "y": [0.0, 1.0],
                          "access": ["public", "public"]})
-    db.insert("map", rows, id="id", x="x", y="y", access="access")
+    db.insert("map", rows, x="x", y="y", access="access")
     try:
         assert db.commit().ok
-        db.insert("map", rows, id="id", x="x", y="y", access="access")
+        db.insert("map", rows, x="x", y="y", access="access")
         # The operator plane this commit's pages go to is an address nothing is listening on.
         server, base = serving()
         server.shutdown()

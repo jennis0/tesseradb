@@ -12,7 +12,7 @@ import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -725,48 +725,70 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}/suggest`: up to `limit` values of a category whose key, title or a
+   * `/v1/categories/{column}/suggest`: up to `limit` values of a category whose key, title or a
    * word start of either begins with `q`, compared after case folding. Values are ordered by the
    * matched text, and only values this principal may see are offered, as for
    * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
-   * its request.
+   * its request. Without `filters` this is a `GET`; with it, a `POST` carrying the same fields.
    *
-   * A session has one suggestion in flight at a time. The server refuses a second with `429`, and
-   * this returns `{status: 'superseded', retryAfterS}` for it instead of throwing.
+   * Every `429` the server answers is returned as `{status: 'shed', retryAfterS, detail}`
+   * rather than thrown; {@link SuggestResult} lists the causes.
    *
    * @param column - As for {@link TesseraClient.categories}.
    * @param q - The text typed. Empty matches every value.
    * @param opts.limit - The page size, capped at `selection.maxSuggestions`, which is also the
    *   default.
    * @param opts.counts - `true` adds each value's count of the items carrying it that this
-   *   principal may see.
-   * @param opts.view - As for `categories`.
+   *   principal may see, and the page's `total`, the number of items the counts are taken over.
+   * @param opts.view - As for `categories`, and the view `filters` is evaluated in.
+   * @param opts.filters - The filter expression the viewport takes. Each count is then of the items
+   *   in `view` that pass it. It changes nothing else: a value it excludes is offered with count
+   *   `0`. Needs `view`.
    * @throws {@link TesseraError} for any other refusal: `404` for a column that is not a category,
-   *   `422` for a `q` over 256 bytes or a malformed request.
+   *   `422` for a `q` over 256 bytes, `filters` without `view`, or a malformed request.
    */
   async suggest(
     token: string,
     column: string,
     q: string,
-    opts: {limit?: number; counts?: boolean; view?: string; signal?: AbortSignal} = {}
+    opts: {limit?: number; counts?: boolean; view?: string; filters?: FilterExpr; signal?: AbortSignal} = {}
   ): Promise<SuggestResult> {
-    const params = new URLSearchParams({q});
-    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-    if (opts.counts) params.set('counts', 'true');
-    if (opts.view !== undefined) params.set('view', opts.view);
-    const url = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest?${params.toString()}`;
-    const response = await this.send(url, {headers: {authorization: `Bearer ${token}`}, signal: opts.signal});
+    const route = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest`;
+    let response: Response;
+    if (opts.filters !== undefined) {
+      const body: Record<string, unknown> = {q, filters: opts.filters};
+      if (opts.limit !== undefined) body.limit = opts.limit;
+      if (opts.counts) body.counts = true;
+      if (opts.view !== undefined) body.view = opts.view;
+      response = await this.send(route, {
+        method: 'POST',
+        headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+        body: JSON.stringify(body),
+        signal: opts.signal
+      });
+    } else {
+      const params = new URLSearchParams({q});
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+      if (opts.counts) params.set('counts', 'true');
+      if (opts.view !== undefined) params.set('view', opts.view);
+      response = await this.send(`${route}?${params.toString()}`, {
+        headers: {authorization: `Bearer ${token}`},
+        signal: opts.signal
+      });
+    }
     if (response.status === 429) {
       // The body's `retry_after_s` is what the contract requires; the header is the fallback for
       // a body that does not parse.
       let retryAfterS = Number(response.headers.get('retry-after') ?? '1');
+      let detail: string | null = null;
       try {
-        const body = (await response.json()) as {retry_after_s?: number};
+        const body = (await response.json()) as {retry_after_s?: number; detail?: string};
         if (typeof body.retry_after_s === 'number') retryAfterS = body.retry_after_s;
+        if (typeof body.detail === 'string') detail = body.detail;
       } catch {
         // A non-JSON 429 (a proxy's) still yields a retryable outcome from the header alone.
       }
-      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1};
+      return {status: 'shed', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1, detail};
     }
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawSuggest;
@@ -781,7 +803,9 @@ export class TesseraClient {
         match: {field: v.match.field, start: v.match.start, len: v.match.len},
         ...(v.count !== undefined ? {count: v.count} : {})
       })),
-      more: body.more
+      more: body.more,
+      ...(body.total !== undefined ? {total: body.total} : {}),
+      ...regionOf(response)
     };
   }
 
@@ -1186,4 +1210,11 @@ type RawSuggest = {
     count?: number;
   }[];
   more: boolean;
+  total?: number;
 };
+
+/** `{region}` where the response carries `x-tessera-region`, and nothing otherwise. */
+function regionOf(response: Response): {region?: RegionVerdict} {
+  const region = parseRegionVerdict(response.headers.get('x-tessera-region'));
+  return region === null ? {} : {region};
+}

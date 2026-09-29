@@ -686,17 +686,9 @@ enum Spelling {
 fn write_teams(path: &std::path::Path, spelling: Spelling, padded: bool) {
     use arrow::array::{
         ArrayRef, DictionaryArray, Int64Array, ListBuilder, StringArray, StringBuilder,
-        UInt64Builder,
     };
     use arrow::datatypes::{DataType, Field, Int32Type, Schema};
     let keys = StringArray::from(BUILT.iter().map(|(k, _, _)| *k).collect::<Vec<_>>());
-    let mut members = ListBuilder::new(UInt64Builder::new());
-    for (_, range, _) in &BUILT {
-        for e in range.clone() {
-            members.values().append_value(e);
-        }
-        members.append(true);
-    }
     let pad = |label: &str| if padded { format!(" {label} ") } else { label.to_string() };
     let first: Vec<Option<String>> =
         BUILT.iter().map(|(_, _, labels)| labels.map(|l| pad(l[0]))).collect();
@@ -733,7 +725,8 @@ fn write_teams(path: &std::path::Path, spelling: Spelling, padded: bool) {
             std::sync::Arc::new(Int64Array::from(vec![Some(1i64); BUILT.len()]))
         }
     };
-    let members: ArrayRef = std::sync::Arc::new(members.finish());
+    let members: ArrayRef =
+        std::sync::Arc::new(id_member_lists(BUILT.iter().map(|(_, range, _)| range.clone())));
     let schema = std::sync::Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("members", members.data_type().clone(), false),
@@ -766,6 +759,7 @@ fn built_config(field: &str, padded: bool) -> String {
 points = "points.parquet"
 teams  = "teams.parquet"
 
+{ID_ATTRIBUTE}
 [[view]]
 name             = "s0"
 extent           = {{ min = 0.0, max = 1000.0 }}
@@ -793,8 +787,8 @@ artifact_visibility       = {{ field = "team", default = "{inline_default}" }}
 require_member_visibility = "none"
 hierarchy                 = {{ kind = "flat", prune_children = false }}
 artifacts = [
-  {{ key = "inline-red", members = [0, 1, 2], access = "{red}" }},
-  {{ key = "inline-open", members = [3, 4, 5]{open} }},
+  {{ key = "inline-red", members = {{ id = [0, 1, 2] }}, access = "{red}" }},
+  {{ key = "inline-open", members = {{ id = [3, 4, 5] }}{open} }},
 ]
 "#
     )
@@ -1079,7 +1073,7 @@ fn a_label_field_the_source_does_not_carry_is_refused() {
 #[test]
 fn an_inline_row_stating_no_labels_is_refused_at_a_build() {
     let unstated =
-        built_config("team", false).replace("members = [3, 4, 5], access = []", "members = [3, 4, 5]");
+        built_config("team", false).replace("[3, 4, 5] }, access = []", "[3, 4, 5] }");
     let dir = TempDir::new().unwrap();
     assert!(build_config(dir.path(), Spelling::List, false, &unstated).is_err());
     let dir = TempDir::new().unwrap();
@@ -1131,16 +1125,18 @@ fn a_key_a_member_file_would_mint_on_a_labelled_layer_is_refused_at_a_build() {
                 ),
             ],
         );
-        let toml = r#"
+        let toml = format!(
+            r#"
 [sources]
 points         = "points.parquet"
 minted         = "minted.parquet"
 minted_members = "minted_members.parquet"
 
+{ID_ATTRIBUTE}
 [[view]]
 name             = "s0"
-extent           = { min = 0.0, max = 1000.0 }
-point_visibility = { default = "public" }
+extent           = {{ min = 0.0, max = 1000.0 }}
+point_visibility = {{ default = "public" }}
 
 [[layer]]
 name                      = "minted"
@@ -1150,14 +1146,16 @@ source                    = "minted"
 membership                = "enumerated"
 value_set                 = "open"
 visibility                = "public"
-artifact_visibility       = { field = "team", default = "inherited" }
+artifact_visibility       = {{ field = "team", default = "inherited" }}
 require_member_visibility = "none"
-hierarchy                 = { kind = "flat", prune_children = false }
+hierarchy                 = {{ kind = "flat", prune_children = false }}
 
   [layer.members]
   source = "minted_members"
-"#;
-        build_config(dir, Spelling::List, false, toml)
+  fields = {{ id = "entity" }}
+"#
+        );
+        build_config(dir, Spelling::List, false, &toml)
     }
     let dir = TempDir::new().unwrap();
     assert!(with_members(dir.path(), &["declared", "stray"]).is_err());

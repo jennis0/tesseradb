@@ -30,7 +30,6 @@ def db(tmp_path):
     database = create(tmp_path / "db")
     database.declare_view("map")
     database.declare_attribute("paper", type="keyword", unique=True)
-    database.declare_join_field("paper")
     return database
 
 
@@ -104,19 +103,18 @@ def test_the_helper_reads_the_schema_and_returns_what_it_declared(db):
 
 def test_the_columns_a_frame_fills_are_matched_on_the_allocation_views_insert(db):
     db.declare_columns(frame(), skip=["paper", "x", "y", "terms"])
-    insert = db.insert("map", frame(), id="paper", x="x", y="y", access="terms")
+    insert = db.insert("map", frame(), x="x", y="y", access="terms")
     assert set(insert.named_attributes) == {
         "paper", "year", "open", "submitted", "title", "archive", "arxiv_id"
     }
     text = db.declaration
     assert text.count('source = "map"') == 1 + 7  # the view, and the seven columns it fills
-    assert 'join_field = "paper"' in text
 
 
 def test_a_second_views_insert_fills_nothing_by_name(db):
     db.declare_view("second")
     db.declare_columns(frame(), skip=["paper", "x", "y", "terms"])
-    insert = db.insert("second", frame(), id="paper", x="x", y="y", access="terms")
+    insert = db.insert("second", frame(), x="x", y="y", access="terms")
     assert insert.named_attributes == {}
     assert insert.ignored == ["year", "open", "submitted", "title", "archive", "arxiv_id"]
 
@@ -124,6 +122,6 @@ def test_a_second_views_insert_fills_nothing_by_name(db):
 def test_columns_names_one_attributes_value_column_explicitly(db):
     db.declare_attribute("year", type="i64", index=True)
     insert = db.insert(
-        "map", frame(), id="paper", x="x", y="y", columns={"year": "year"}
+        "map", frame(), x="x", y="y", columns={"year": "year"}
     )
     assert insert.named_attributes == {"paper": "paper", "year": "year"}

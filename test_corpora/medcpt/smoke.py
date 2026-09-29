@@ -123,7 +123,6 @@ points                = "points.parquet"
 {SOURCES_TOML}
 [defaults]
 source     = "points"
-join_field = "id"
 
 # One view. `extent = "auto"` fits the box to the coordinates as they are; the PCA output spans a
 # few units either side of zero and a stated frame would put the whole chunk in one corner of the
@@ -143,7 +142,8 @@ point_visibility = {{ field = "branches", default = "public" }}
 # than an empty list, so `default = "public"` never fires: a point falling through to the default
 # is one nothing states a policy for, and 13% of this chunk would have done so.
 
-# The join field: the row number `smoke.py` gives each article (`entity` in the member files).
+# The row number `smoke.py` gives each article. The points file names an article by it as
+# `entity_id`, the member file as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"

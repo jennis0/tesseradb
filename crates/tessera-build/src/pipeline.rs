@@ -17,7 +17,7 @@
 //!
 //! | pass | produces | bounded by |
 //! |---|---|---|
-//! | points ×2 | the ordinal space — an item's **ordinal** is its index in the sorted union | N/8 bits, or 8N mapped |
+//! | every file ×1 | each row's number — an item's **ordinal** is the number the rule gave it ([`crate::ids`]) | a sort share, 4 B/row mapped |
 //! | pairs ×1 | dictionary (streamed), term-lookup arrays, pre-dedup `row_counts`, histogram | 12T + 8T |
 //! | pairs ×1 | resolved `ordinal << 32 \| term` per **batch bucket** (RAM when it fits, spilled otherwise) | plan |
 //! | per batch | sort+dedup the bucket; per-ordinal `starts`; signature sort + refinement; entity ids; **band emit** | plan |
@@ -56,28 +56,18 @@
 //! positions within one), which `encode_posting`'s unconditional sortedness check re-verifies
 //! from disk: a corrupted or reordered spill fails the build, never bends a posting.
 //!
-//! ## Ordinal resolution never assumes anything about the ids themselves
+//! ## An ordinal is a number, and a pass walks a file in number order
 //!
-//! Source ids are the caller's join values: they may be dense, sparse,
-//! clustered, or arbitrary bit patterns, and no pass may exploit their shape. What the build
-//! *establishes* is the ordinal space ([`Ids`]): the sorted, duplicate-free union of every view's
-//! ids, and an item's ordinal is its index in it.
+//! Every row a pass reads arrives with its number ([`crate::ids`]): the item the identity rule
+//! decided it names or creates, numbered in creation order. The numbers are `0..n`, so an item's
+//! ordinal is its number with nothing to look up, and a view's points arrive in ascending ordinals
+//! in file order. Each pass that maps rows to ordinals buffers a bounded chunk, sorts it by
+//! ordinal ([`join_chunk`]) and walks the ordinal-indexed files it writes forwards.
 //!
-//! The union takes one of two shapes and pass one checks which rather than assuming it. Where it
-//! is the whole range `first..first + len`, an ordinal is `id - first` and there is no array: pass
-//! one proves the range from a presence bitmap an eighth of a bit per id in the span, and writes
-//! nothing. At the GBIF rung that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made.
-//! Where it is not a range, the union is an array under `.build-tmp/`, and each pass that must map
-//! a source id back to its ordinal ([`join_chunk`]) buffers a bounded chunk of rows, sorts the
-//! chunk, and resolves the whole chunk in **one sequential merge sweep** against it — sequential
-//! memory traffic for any id distribution, where a per-row binary search over an 8 GB array at 10⁹
-//! was a random cache-and-TLB miss per probe (measured as the dominant cost of the geometry pass,
-//! whose input arrives in Morton order).
-//!
-//! Within a chunk, rows carrying the same id keep no particular order; every consumer is
-//! insensitive to it (each call site argues why), so build output stays byte-deterministic. Both
-//! shapes hand a chunk the same sequence, so the output is the same bundle either way — which it
-//! must be, the ordinal being what the entity-id assignment breaks its last tie on (I9).
+//! Within a chunk, rows carrying the same ordinal keep the order the file gave them; every
+//! consumer is insensitive to the order otherwise (each call site argues why), so build output
+//! stays byte-deterministic. The ordinal is what the entity-id assignment breaks its last tie on
+//! (I9), so two builds of one corpus number its items identically.
 //!
 //! ## Parallelism does not participate in ordering decisions
 //!
@@ -215,7 +205,7 @@ impl SortRec {
 fn input_changed(detail: &str) -> BuildError {
     BuildError::Invalid(format!(
         "the input files changed while the build was reading them ({detail}); \
-         the points and pairs files must be immutable for the duration of a build"
+         the files a build reads must not change until it ends"
     ))
 }
 
@@ -299,142 +289,22 @@ fn staged_width(ty: ScalarType) -> usize {
     }
 }
 
-/// The build's ordinal space as a pass sees it. An **ordinal** is an id's index in the sorted,
-/// deduplicated union of every view's source ids.
+/// Sort a chunk of `(number, payload)` rows by number and hand each to `on_row` with its ordinal,
+/// which is its number, or `None` for a number outside the build's `n` items: whether that is an
+/// error, and which error, is the calling pass's decision.
 ///
-/// Two shapes, because a corpus that numbers its rows from zero needs no array to answer with.
-/// Where the union is the whole range `first..first + len`, an id's index is `id - first` and an
-/// index's id is `first + index`; where it is not, the array is the only route and every lookup
-/// reads it. Pass one decides which ([`read_source_ids_union`]) and writes no array where the
-/// range holds.
-///
-/// **Both arms are the same function.** The range arm is taken only where pass one has checked,
-/// id by id, that the union is exactly that range, so an ordinal is the same integer either way.
-/// The ordinal is identity-bearing three times over — the signature sort's last tiebreak
-/// ([`SortRec::order`]), the term ids' ranking by minimum ordinal ([`build_dictionary`]) and the
-/// batch partition — so an arm taken on a union that is not that range would move every entity id
-/// the build assigns, which I9 does not allow.
-#[derive(Clone, Copy)]
-pub(crate) enum Ids<'a> {
-    /// The union is `first..first + len`, proved before any array was written.
-    Contiguous { first: u64, len: usize },
-    /// The union, sorted and duplicate-free.
-    Sparse(&'a [u64]),
-}
-
-impl Ids<'_> {
-    fn len(&self) -> usize {
-        match self {
-            Ids::Contiguous { len, .. } => *len,
-            Ids::Sparse(ids) => ids.len(),
-        }
-    }
-
-    /// The id at an ordinal. An ordinal outside the space is a caller's bug, exactly as it was
-    /// when this was an index into the array.
-    fn id_of(&self, ordinal: usize) -> u64 {
-        match self {
-            Ids::Contiguous { first, len } => {
-                assert!(
-                    ordinal < *len,
-                    "ordinal {ordinal} is outside the {len} items this build holds"
-                );
-                first + ordinal as u64
-            }
-            Ids::Sparse(ids) => ids[ordinal],
-        }
-    }
-
-    /// The ordinal an id resolves to, for a caller that holds one id rather than a chunk of them.
-    ///
-    /// [`join_chunk`] is what every sequential pass uses; this is the random-access route, and on
-    /// the array arm it is the binary search that route exists for.
-    fn ordinal_of(&self, id: u64) -> Option<u32> {
-        match self {
-            Ids::Contiguous { first, len } => id
-                .checked_sub(*first)
-                .filter(|ordinal| *ordinal < *len as u64)
-                .map(|ordinal| ordinal as u32),
-            Ids::Sparse(ids) => ids.binary_search(&id).ok().map(|ordinal| ordinal as u32),
-        }
-    }
-
-    /// The first id where the union is one unbroken range, and `None` where it is not.
-    ///
-    /// The array arm checks the range rather than assuming it: the ids are sorted and
-    /// duplicate-free, so a span equal to their own count can only be `first + i` at every `i`.
-    /// `checked_sub` and `checked_add` because a union holding both 0 and `u64::MAX` spans one
-    /// more than the type holds, and that union is not a range.
-    ///
-    /// An empty union answers `None` on both arms: there is no first id, and a caller resolving
-    /// against no items takes the route that answers nothing rather than a subtraction.
-    fn contiguous_from(&self) -> Option<u64> {
-        match self {
-            Ids::Contiguous { first, len } => (*len > 0).then_some(*first),
-            Ids::Sparse(ids) => {
-                let first = *ids.first()?;
-                let last = *ids.last()?;
-                let span = last.checked_sub(first)?.checked_add(1)?;
-                (span == ids.len() as u64).then_some(first)
-            }
-        }
-    }
-}
-
-/// Resolve a chunk of `(source_id, payload)` rows to ordinals: a subtraction per row where the id
-/// space is a range, and otherwise by sorting the chunk and merging it against the sorted array in
-/// one sequential sweep. See the module docs: this is how every pass maps ids to ordinals without
-/// assuming anything about the ids' shape, and without a random-access probe per row.
-///
-/// `on_row` receives `(Some(ordinal), source_id, payload)` for a resolved row and
-/// `(None, source_id, payload)` for an id the space does not hold — whether an absent id is an
-/// error, and which error, is the calling pass's decision (the dictionary pass collects them;
-/// every later pass fails closed, because its first pass over the same file resolved them).
-///
-/// Rows with equal ids reach `on_row` in no particular order (the chunk sort is unstable and
-/// keyed on the id alone); callers must be — and each caller's site comments argue that they
-/// are — insensitive to that order. The chunk is drained; capacity is retained for reuse.
+/// **Stable**, so rows carrying the same number reach `on_row` in the order the file gave them,
+/// and a later row's value is the one an entity keeps (§7's last-write-wins). Sorted so that each
+/// caller walks the ordinal-indexed files it writes forwards. The chunk is drained; capacity is
+/// retained for reuse.
 fn join_chunk<P: Copy + Send>(
     chunk: &mut Vec<(u64, P)>,
-    ids: Ids<'_>,
+    n: u64,
     mut on_row: impl FnMut(Option<u32>, u64, P) -> Result<()>,
 ) -> Result<()> {
-    // **Stable**, so rows carrying the same source id resolve in the order the file gave them.
-    // Which of two duplicate rows' values an entity ends up with was previously whichever the
-    // sort happened to place last; a build that answers the same question twice should answer it
-    // the same way (§7's last-write-wins).
-    //
-    // The subtraction arm does not need the sort — each row resolves on its own — and keeps it
-    // anyway: that ordering is what every caller's own order-insensitivity argument is written
-    // against, and the two arms must hand `on_row` the same sequence. It sorts a bounded chunk,
-    // never the corpus.
     chunk.par_sort_by_key(|entry| entry.0);
-    match ids {
-        Ids::Contiguous { first, len } => {
-            for &(id, payload) in chunk.iter() {
-                let ordinal = id
-                    .checked_sub(first)
-                    .filter(|ordinal| *ordinal < len as u64)
-                    .map(|ordinal| ordinal as u32);
-                on_row(ordinal, id, payload)?;
-            }
-        }
-        Ids::Sparse(source_ids) => {
-            let mut i = 0usize;
-            for &(id, payload) in chunk.iter() {
-                // Both sides ascend, so `i` only ever moves forward; it does not advance past a
-                // match, so a run of rows carrying the same id all resolve to the same ordinal.
-                while i < source_ids.len() && source_ids[i] < id {
-                    i += 1;
-                }
-                let ordinal = if i < source_ids.len() && source_ids[i] == id {
-                    Some(i as u32)
-                } else {
-                    None
-                };
-                on_row(ordinal, id, payload)?;
-            }
-        }
+    for &(id, payload) in chunk.iter() {
+        on_row((id < n).then_some(id as u32), id, payload)?;
     }
     chunk.clear();
     Ok(())
@@ -451,20 +321,18 @@ fn join_chunk<P: Copy + Send>(
 fn resolve_pairs_chunk(
     chunk: &mut Vec<(u64, u64)>,
     resolved: &mut Vec<(u64, u64)>,
-    ids: Ids<'_>,
+    n: u64,
     term_keys: &[u64],
     term_ids: &[u32],
-    distinct_of_ordinal: &mut [u32],
+    distinct_of_ordinal: Option<&mut [u32]>,
     mut emit: impl FnMut(u64) -> Result<()>,
 ) -> Result<()> {
     resolved.clear();
-    join_chunk(chunk, ids, |ordinal, source_id, source_term| {
+    join_chunk(chunk, n, |ordinal, _, source_term| {
         // Established by the dictionary pass over this same file; a miss means the file is not
         // the one that pass read.
         let Some(ordinal) = ordinal else {
-            return Err(input_changed(&format!(
-                "the pairs file names entity {source_id}, which its first pass did not"
-            )));
+            return Err(input_changed("the pairs file names an item its first pass did not"));
         };
         resolved.push((source_term, ordinal as u64));
         Ok(())
@@ -474,15 +342,18 @@ fn resolve_pairs_chunk(
     resolved.par_sort_unstable();
     // **How many distinct terms this chunk gave each ordinal**, counted here because this is the
     // one place they are sorted and the chunk holds exactly one view's rows (`views.md` §7). The
-    // label-agreement refusal in the batch loop is a count identity over these tallies; the emit
-    // below is deliberately *not* deduplicated, the bucket sweep doing that and the pair total
-    // being checked against the dictionary pass's own row count.
-    let mut previous: Option<(u64, u64)> = None;
-    for &pair in resolved.iter() {
-        if previous != Some(pair) {
-            let slot = &mut distinct_of_ordinal[pair.1 as usize];
-            *slot = slot.saturating_add(1);
-            previous = Some(pair);
+    // label-agreement refusal in the batch loop is a count identity over these tallies, which a
+    // build of one view has no use for; the emit below is deliberately *not* deduplicated, the
+    // bucket sweep doing that and the pair total being checked against the dictionary pass's own
+    // row count.
+    if let Some(distinct_of_ordinal) = distinct_of_ordinal {
+        let mut previous: Option<(u64, u64)> = None;
+        for &pair in resolved.iter() {
+            if previous != Some(pair) {
+                let slot = &mut distinct_of_ordinal[pair.1 as usize];
+                *slot = slot.saturating_add(1);
+                previous = Some(pair);
+            }
         }
     }
     let mut i = 0usize;
@@ -675,8 +546,7 @@ fn plan_build(
     args: &BuildArgs,
     n: u64,
     route: crate::ExtentRoute,
-    ids: crate::residency::IdShape,
-    id_space: &crate::ids::IdSpace,
+    numbers_bytes: u64,
     pair_rows: usize,
     row_counts: &[u64],
     histogram: &[u64],
@@ -705,10 +575,8 @@ fn plan_build(
     // is not affected by the choice: every column's storage is a mapped term and the refusal counts
     // the anonymous ones.
     let free = available_disk(&args.out);
-    // **The supplied keys' arena is anonymous and has no spill route** (`crate::ids`), so the
-    // model charges it in every phase and sizes the stages around it.
     let (routes, tail) =
-        crate::residency::routes_for(args, n, ids, &payloads, free, route, id_space);
+        crate::residency::routes_for(args, n, numbers_bytes, &payloads, free, route);
     report_column_routes(args, &routes, &tail, free);
     let (phase, peak) = tail.memory_peak();
     if peak > budget {
@@ -1009,6 +877,7 @@ fn report_column_routes(
 /// that stood before this existed.
 pub(crate) fn build(
     args: &BuildArgs,
+    frames: &[crate::Framing],
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
@@ -1017,7 +886,7 @@ pub(crate) fn build(
     // commits behind the tree its figures were read against.
     eprintln!("tessera build: commit {}", crate::BUILD_COMMIT);
     validate_args(args)?;
-    let outcome = build_bundle(args, observer, route);
+    let outcome = build_bundle(args, frames, observer, route);
     if outcome.is_err() {
         let prefix = args.out.join(PREFIX);
         if prefix.is_dir() {
@@ -1040,6 +909,7 @@ pub(crate) fn build(
 
 fn build_bundle(
     args: &BuildArgs,
+    frames: &[crate::Framing],
     observer: &dyn BuildObserver,
     route: crate::ExtentRoute,
 ) -> Result<BuildReport> {
@@ -1047,16 +917,11 @@ fn build_bundle(
     let plugin = Passthrough::new();
     require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
-    // **How this declaration names a row, decided before pass one** (`crate::ids`): the identity
-    // column's type says whether a source id is the integer the file holds or the rank of a
-    // supplied key, and the supplied keys are interned here, once, for every pass below.
-    let id_space = crate::ids::IdSpace::prepare(args)?;
 
-    // ---- 1. pass one: entity space, once over every view's points (`views.md` §7) -----
-    // An item's *ordinal* is its index in this array. Ordinal order is source-id order over the
-    // **union** of every view's ids, which is the order the linear build walks items in — so
-    // "first appearance" below, and the source-id tiebreak in the signature sort, are both
-    // expressible as ordinal comparisons, exactly as they were when a build read one file.
+    // ---- 1. pass zero: which item each row of each file names (`crate::ids`) -----------
+    // An item's *ordinal* is the number the identity rule gave it, in creation order: the order
+    // the linear build walks items in, so "first appearance" below, and the tiebreak in the
+    // signature sort, are both ordinal comparisons.
     //
     // **`n = 0` is a bundle, not a refusal** (decision 0091): a deployment must be able to start
     // from a bundle with no points, with its frame stated, and take the whole corpus through
@@ -1066,34 +931,35 @@ fn build_bundle(
     // What is still refused is `extent = "auto"` over no rows, because a frame cannot be fitted to
     // nothing (`config::empty_auto_source`) — and that refusal already names the remedy.
     // Open here rather than at the bucket sink below, because the first thing under it is the
-    // source ids: `.build-tmp/` is the build's scratch from pass one to the segment write, and
+    // identity pass: `.build-tmp/` is the build's scratch from pass zero to the segment write, and
     // every structure in it is swept by the `close` at the end or by the next build's `create`.
     let tmp = spill::TmpDir::create(&args.out)?;
-    let (source_ids, view_anchors) = read_source_ids_union(args, tmp.path(), &id_space)?;
-    let n = source_ids.len() as u64;
-    if n > u32::MAX as u64 {
-        return Err(BuildError::Invalid(format!(
-            "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
-        )));
-    }
-    // The union's largest id, which sets the varint width the member spill's runs are charged at
-    // ([`crate::residency::IdShape`]). Zero over no items: it is a model's term and not a lookup,
-    // and a corpus with no ids spills no runs.
-    //
-    // Each view's own anchors — its row count and an order-independent mixed sum of its ids
-    // ([`mix64`]) — are in `view_anchors`, and the geometry pass below is checked against them: a
-    // points file swapped mid-build would otherwise hand every item of that view another item's
-    // position, with nothing to notice.
-    let ids_last = source_ids.extrema().map_or(0, |(_, last)| last);
+    crate::residency::report_identity_disk(args, available_disk(&args.out))?;
+    let mut numbering = crate::ids::number_streaming(args, tmp.path())?;
+    let n = numbering.items;
+    let refused = std::mem::take(&mut numbering.refused);
+    // The frames fitted over the rows the pass kept, which every view reads from here on.
+    let fitted;
+    let args = match frames {
+        [] => args,
+        frames => {
+            fitted = crate::fit_frames(args, frames, &numbering)?;
+            &fitted
+        }
+    };
+    // Each view's own anchors — how many of its rows name an item and an order-independent mixed
+    // sum of their numbers ([`mix64`]) — are on its numbers, and the geometry pass below is checked
+    // against them: a points file swapped mid-build would otherwise hand every item of that view
+    // another item's position, with nothing to notice.
 
-    timer.end(BuildStage::SourceIds, source_ids.len() as u64);
+    timer.end(BuildStage::SourceIds, n);
 
     // ---- 2. the dictionary -----------------------------------------------------------
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
-    let access = crate::plan_access(args, &id_space)?;
+    let access = crate::plan_access(args, &numbering)?;
     // Whether the label-agreement identity applies at all: a shared relation is entity space and
     // is scanned once, so its rows cannot disagree between views (`crate::AccessRoute`).
     let per_view_labels = !matches!(access.descriptors, crate::input::TermDescriptors::Ids);
@@ -1106,7 +972,7 @@ fn build_bundle(
         histogram,
         histogram_shift,
         dict_paths,
-    } = build_dictionary(args, &access, source_ids.ids(), &dict_dir, &id_space)?;
+    } = build_dictionary(args, &access, n, &dict_dir, &numbering)?;
     if term_count >= u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
             "{term_count} distinct terms exceeds the 2^32 term-ID space"
@@ -1120,16 +986,12 @@ fn build_bundle(
     // size is identity-bearing (I9), so it is derived deterministically here, recorded in
     // provenance when it batches, and never silently re-derived on a rebuild (the CLI replays
     // a carried bundle's recorded value).
-    let id_shape = crate::residency::IdShape {
-        slots: source_ids.slots() as u64,
-        max_id: ids_last,
-    };
+    let numbers_bytes = numbering.disk_bytes();
     let plan = plan_build(
         args,
         n,
         route,
-        id_shape,
-        &id_space,
+        numbers_bytes,
         pair_rows,
         &row_counts,
         &histogram,
@@ -1177,8 +1039,15 @@ fn build_bundle(
     // it is page cache the kernel may evict rather than memory the machine must have.
     // `plan_build`'s `loop_fixed` charges the same 4 B/item still, on purpose and for I9's sake:
     // the comment at that term says why.
-    let mut distinct_map =
-        spill::MappedU32::zeroed(tmp.path(), "distinct-of-ordinal.u32", n as usize)?;
+    //
+    // **Only where two views can disagree.** One view's labels are the item's, so a build of one
+    // view, and one whose labels come from a shared relation, writes neither this nor the
+    // appearances beside the geometry.
+    let agreement = per_view_labels && args.views.len() > 1;
+    let mut distinct_map = match agreement {
+        true => spill::MappedU32::zeroed(tmp.path(), "distinct-of-ordinal.u32", n as usize)?,
+        false => spill::MappedU32::empty(),
+    };
     let distinct_of_ordinal = distinct_map.as_mut_slice();
     let mut resolve = |chunk: &mut Vec<(u64, u64)>,
                        resolved: &mut Vec<(u64, u64)>,
@@ -1187,10 +1056,10 @@ fn build_bundle(
         resolve_pairs_chunk(
             chunk,
             resolved,
-            source_ids.ids(),
+            n,
             &term_keys,
             &term_ids,
-            distinct_of_ordinal,
+            agreement.then_some(distinct_of_ordinal),
             |value| {
                 pushed += 1;
                 sink.push(value)
@@ -1198,7 +1067,7 @@ fn build_bundle(
         )
     };
     let mut current: Option<(usize, u64)> = None;
-    crate::scan_access(args, &access, &id_space, |view, source_id, source_term| {
+    crate::scan_access(args, &access, &numbering, |view, source_id, source_term| {
         // A chunk **never spans two views**, and never splits a row: rows of one view arrive
         // contiguously (a view holds one row per entity), so the boundary is taken at the change
         // of view — always — or at the next change of entity once the chunk is full.
@@ -1252,7 +1121,10 @@ fn build_bundle(
     // **A mapped file**, on the same argument as the geometry beside it: 4 B an item is 13.3 GiB
     // at the GBIF rung, held from here to the end of the batch loop, and as anonymous memory it
     // was the largest term of that loop's residency that no model named.
-    let mut appearances = spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?;
+    let mut appearances = match agreement {
+        true => spill::MappedU32::zeroed(tmp.path(), "appearances.u32", n as usize)?,
+        false => spill::MappedU32::empty(),
+    };
     for (index, view) in args.views.iter().enumerate() {
         let mut x_map =
             spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
@@ -1275,24 +1147,25 @@ fn build_bundle(
                            appearances: &mut [u32],
                            points_seen: &mut u64,
                            geom_anchor: &mut u64| {
-                join_chunk(chunk, source_ids.ids(), |ordinal, source_id, (x, y)| {
+                join_chunk(chunk, n, |ordinal, source_id, (x, y)| {
                     let Some(ordinal) = ordinal else {
-                        return Err(input_changed(&format!(
-                            "the points file names entity {source_id}, which its first pass did \
-                             not"
-                        )));
+                        return Err(input_changed(
+                            "the points file names an item its first pass did not",
+                        ));
                     };
                     xs[ordinal as usize] = x;
                     ys[ordinal as usize] = y;
                     bit_set(present, ordinal as usize);
-                    appearances[ordinal as usize] += 1;
+                    if let Some(count) = appearances.get_mut(ordinal as usize) {
+                        *count += 1;
+                    }
                     *points_seen += 1;
                     *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
                     Ok(())
                 })
             };
             input::scan_points(
-                crate::view_source(view, args, &id_space),
+                crate::view_source(args, index, &numbering),
                 view.projection,
                 &view.extent,
                 |point| {
@@ -1326,14 +1199,15 @@ fn build_bundle(
                 &mut points_seen,
                 &mut geom_anchor,
             )?;
-            if points_seen != view_anchors[index].rows {
+            let anchor = numbering.points(index);
+            if points_seen != anchor.named {
                 return Err(input_changed(&format!(
-                    "view '{}': the points file yielded {points_seen} geometry rows, but its \
-                     first pass selected {}",
-                    view.view_id, view_anchors[index].rows
+                    "view '{}': the points file yielded {points_seen} geometry rows, but the \
+                     identity pass numbered {}",
+                    view.view_id, anchor.named
                 )));
             }
-            if geom_anchor != view_anchors[index].mixed {
+            if geom_anchor != anchor.mixed {
                 return Err(input_changed(&format!(
                     "view '{}': the points file's geometry pass carries different ids than its \
                      first pass did (row count unchanged)",
@@ -1345,7 +1219,7 @@ fn build_bundle(
             x: x_map,
             y: y_map,
             present,
-            rows: view_anchors[index].rows,
+            rows: numbering.points(index).named,
         });
     }
     // **The anchor's Morton code, with the declared fallback** (decision 0112): an item absent
@@ -1392,11 +1266,6 @@ fn build_bundle(
     };
     timer.end(BuildStage::GeometryRead, n);
 
-    // `source_ids` is **held** past this point rather than dropped and re-read: pass one unions
-    // several files, so recovering it later would be one re-read per view against anchors that
-    // would each have to be carried anyway. 8 B/item. Step 8c releases it: before the layer join
-    // where the ids are contiguous, since the join reads only their first value and their count
-    // there, and after it where they are not.
     drop(term_keys);
     drop(term_ids);
     drop(row_counts);
@@ -1517,11 +1386,10 @@ fn build_bundle(
         // item must have given it the same term set. The item's signature is the deduplicated
         // union over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
         // count — so the two agree exactly when every view contributed the whole union, and the
-        // identity is a refusal rather than a hash comparison. The first offending item is
-        // reported in ordinal order.
+        // identity is a refusal rather than a hash comparison.
         //
-        // Checked only on the per-view route: a shared relation is entity space already and is
-        // scanned once, so there is nothing for two views to disagree about
+        // Checked only where two views can disagree: on the per-view route, over more than one
+        // view. A shared relation is entity space already and is scanned once
         // (`crate::AccessRoute`).
         //
         // Here, ahead of the sort and the assignment walk, because it wants only `starts` and the
@@ -1532,18 +1400,22 @@ fn build_bundle(
         // paired runs). ⊘ Prefetching the walk's remaining gather, the ordinal-indexed write and
         // the `starts` read 24 records ahead, measured 35% slower on the same prefix's assignment
         // loop.
-        if per_view_labels {
+        if agreement {
             let appearances = appearances.as_slice();
-            for local in 0..batch_len {
-                let ordinal = ordinal_lo as usize + local;
-                let sig_len = (starts[local + 1] - starts[local]) as u64;
-                if distinct_of_ordinal[ordinal] as u64 != sig_len * appearances[ordinal] as u64 {
+            let disagreeing = (0..batch_len)
+                .filter(|&local| {
+                    let ordinal = ordinal_lo as usize + local;
+                    let sig_len = (starts[local + 1] - starts[local]) as u64;
+                    distinct_of_ordinal[ordinal] as u64 != sig_len * appearances[ordinal] as u64
+                })
+                .count();
+            if disagreeing > 0 {
+                {
                     return Err(BuildError::Invalid(format!(
-                        "entity_id {} carries different access labels in different views. A label \
-                         is the entity's, not the row's (views §7): it is one set wherever the \
-                         entity appears, and a re-label is a delete plus a re-ingest (decision \
-                         0047). The views this build reads are {}",
-                        source_ids.ids().id_of(ordinal),
+                        "{disagreeing} item(s) carry different access labels in different views. \
+                         A label is the item's, not the row's (views §7): it is one set wherever \
+                         the item appears, and a re-label is a delete plus a re-ingest. The views \
+                         this build reads are {}",
                         args.views
                             .iter()
                             .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
@@ -1773,13 +1645,11 @@ fn build_bundle(
     // axis, not coordinates: the cell code and its residual both fall out by shift and mask, so
     // no stage re-quantises (see `input::PointRow`).
     // The declared attribute tail, read **here** and not at the segment write, because this is
-    // where the two things that resolve it are still alive: `source_ids` maps a file's id to its
+    // where the two things that resolve it are still alive: each file's numbers name a row's
     // ordinal, and `entity_of_ordinal` maps that ordinal to the entity the build assigned it.
-    // Entity ids are assigned in *signature-sorted* order (§11.1), so a source id is emphatically
-    // not its own entity id — indexing the attribute arrays by source id gives every item another
-    // item's attributes, coherently and with no error anywhere. Caught at 2.4M against the source
-    // corpus; the geometry pass three statements above resolves through the same two structures
-    // for the same reason.
+    // Entity ids are assigned in *signature-sorted* order (§11.1), so a number is emphatically not
+    // its own entity id — indexing the attribute arrays by number gives every item another item's
+    // attributes, coherently and with no error anywhere.
     //
     // `minters` seeds one live minter per discovered vocabulary from what the schema already
     // pins; the scan mints into it for every novel key, and its final state — carried past this
@@ -1792,8 +1662,7 @@ fn build_bundle(
         args,
         n,
         &plan.routes,
-        source_ids.ids(),
-        &id_space,
+        &numbering,
         entity_of_ordinal,
         &mut minters,
         &scratch,
@@ -1805,15 +1674,14 @@ fn build_bundle(
     crate::report_attribute_coverage(&coverage);
 
     // ---- 8b. the group-scoped column families (`views.md` §5) --------------------------
-    // Here, beside the attribute tail, because it wants exactly what the tail wants: `source_ids`
+    // Here, beside the attribute tail, because it wants exactly what the tail wants: the numbers
     // and `entity_of_ordinal`, both alive, and entity ids final under I9. One column per view of
     // the group, in entity space; nothing per row space.
     let (scoped_paths, scoped_render) = write_scoped_columns(
         args,
         &partition_dir,
         n,
-        source_ids.ids(),
-        &id_space,
+        &numbering,
         entity_of_ordinal,
         &mut minters,
         &scratch,
@@ -1826,9 +1694,8 @@ fn build_bundle(
     timer.end(BuildStage::AttributeTail, n);
 
     // ---- 8c. layers and their artifacts ------------------------------------------------
-    // Resolved here for the reason the attribute tail is: this is where what turns a source id
-    // into the entity this build assigned it is still alive. A member is named by source id,
-    // exactly as the pairs file's ids are.
+    // Resolved here for the reason the attribute tail is: this is where what turns a member's
+    // number into the entity this build assigned it is still alive.
     //
     // **Its own stage boundary**, so an observer can say how much of the peak is here: the member
     // tables are read whole and the published memberships stay resident, and this ran unattributed
@@ -1841,14 +1708,14 @@ fn build_bundle(
         .map(|v| tessera_store::derived::ViewFrame::new(&v.view_id, v.projection, v.extent))
         .collect();
     let mut published_layers = if args.layers.is_empty() {
-        drop(source_ids);
+        drop(numbering);
         crate::layers::PublishedLayers::default()
     } else {
         let publication_batch = plan.sizing.publication_batch;
         let mut plan = crate::layers::read(
             &args.layers,
             &args.layer_inputs,
-            &id_space,
+            &numbering,
             &args.scoped_layers,
             // **A frame per view, never the anchor's for all of them** (decision 0111): a
             // shape layer is canonicalised in each view it is drawn in, against that view's
@@ -1869,64 +1736,19 @@ fn build_bundle(
             &minters,
             &|index| distinct_codes(attributes_by_entity[index].iter()),
         )?;
+        // The member rows are read, so every file's numbers have served their last reader.
+        drop(numbering);
         let prefix_dir = args.out.join(crate::PREFIX);
-        // **A contiguous id range makes the search a subtraction**, and whether it is
-        // contiguous is checked rather than assumed ([`Ids::contiguous_from`]): pass one either
-        // proved the range without writing an array, or wrote one that is sorted and free of
-        // duplicates, where a span equal to its own count can only be `first + i` at every `i`.
-        // The fast path is the same answer, not a convention about how a caller numbers its rows.
-        //
-        // It is worth the branch because this closure runs **once per member entry**: a
-        // lineage list per point at the Overture rung is 3×10⁸ of them, and a binary search
-        // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
-        let ordinals = source_ids.len() as u64;
-        let range = source_ids.ids().contiguous_from();
-        if let Some(first) = range {
-            // **Any array goes before the publication on this path, not after it.** The
-            // subtraction reads the first id and the count and never an element, so the 8 B/item
-            // would be dead weight beside what the publication does hold: the member tables it
-            // reads whole, the artifact allocator, and the memberships that stay resident. That
-            // is 1.74 GiB at rung 5's 2.33×10⁸ items and 26.4 GiB at the GBIF rung's 3.54×10⁹
-            // (modelled, items × 8 B). Where pass one proved the range there is no array to
-            // release, and this is the ordinary path either way: the ladder's corpora number
-            // their rows from zero.
-            //
-            // Two closures rather than one with a branch inside: a single closure would capture
-            // `source_ids` on both paths, and the borrow would hold the array across the call.
-            drop(source_ids);
-            crate::layers::publish(
-                &mut plan,
-                &|source| {
-                    source
-                        .checked_sub(first)
-                        .filter(|ordinal| *ordinal < ordinals)
-                        .map(|ordinal| entity_of_ordinal[ordinal as usize] as u64)
-                },
-                n,
-                &prefix_dir,
-                crate::PHASH,
-                &view_ids,
-                &derived,
-                publication_batch,
-            )?
-        } else {
-            let ids = source_ids.ids();
-            let published = crate::layers::publish(
-                &mut plan,
-                &|source| {
-                    ids.ordinal_of(source)
-                        .map(|ordinal| entity_of_ordinal[ordinal as usize] as u64)
-                },
-                n,
-                &prefix_dir,
-                crate::PHASH,
-                &view_ids,
-                &derived,
-                publication_batch,
-            )?;
-            drop(source_ids);
-            published
-        }
+        crate::layers::publish(
+            &mut plan,
+            &|number| (number < n).then(|| u64::from(entity_of_ordinal[number as usize])),
+            n,
+            &prefix_dir,
+            crate::PHASH,
+            &view_ids,
+            &derived,
+            publication_batch,
+        )?
     };
 
     crate::write_containment_report(&args.out, &published_layers)?;
@@ -2309,38 +2131,35 @@ fn build_bundle(
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     report.attribute_coverage = coverage;
+    report.refused = refused;
     report.artifact_levels = artifact_levels;
     report.spilled_columns = crate::spilled_column_names(&args.schema, &plan.routes);
-    report.source_id_slots = id_shape.slots;
     Ok(report)
 }
 
 /// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
 /// with one pass per attribute source.
 ///
-/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
-/// above resolves its own rows, and for the same reason: entity ids are assigned in
-/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
-/// hands every item another item's attributes. That is a defect with no symptom — every value is
+/// Resolved through each row's number → ordinal → `entity_of_ordinal`, exactly as the geometry
+/// pass above resolves its own rows, and for the same reason: entity ids are assigned in
+/// signature-sorted order (§11.1), so a number is not its own entity id and a direct index hands
+/// every item another item's attributes. That is a defect with no symptom — every value is
 /// present, every value is well-typed, and every value belongs to a different item.
 ///
 /// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
 /// build's `columns.arrow` byte-identical to the one it wrote before this existed.
 ///
-/// **An entity this pass never reaches keeps an absent slot, and that is a report rather than a
-/// failure** (`configuration.md` §1). The columns are filled absent before a row is read, so a
-/// column no source names for an entity is *absent* — the same state the source's own null
-/// produces, and the one every consumer already reads. Which entities came away with a value, and
-/// how many rows named entities this build never loaded, are counted per source and printed:
-/// a source covering a subset is a column that is simply absent for the rest, and a source
-/// covering a superset is the ordinary shape of a table that lives elsewhere.
+/// **Every item has a row in each source**, as a new item at a running service carries every
+/// declared column, and a row of nulls is how a source says it has none. Which entities came away
+/// with a value is counted per source and printed. The sweeps are [`crate::attribute_scans`], in
+/// the order the identity rule read the files, so a unique field's value is the one the rule
+/// decided.
 #[allow(clippy::too_many_arguments)]
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
     routes: &ColumnRoutes,
-    ids: Ids<'_>,
-    id_space: &crate::ids::IdSpace,
+    numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -2408,24 +2227,52 @@ fn read_attributes_by_entity(
         })
         .collect::<Result<_>>()?;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
-    // the file it is read from, so the groups are the passes; a build whose columns sit in three
-    // files reads three files, and each one joins on the identity column its own group declared.
-    let mut coverage = Vec::with_capacity(args.attribute_sources.len());
-    for group in &args.attribute_sources {
-        read_one_attribute_source(
+    // the file it is read from, so the sources are the passes; a build whose columns sit in three
+    // files reads three files.
+    let mut tallies: Vec<SourceTally> = args
+        .attribute_sources
+        .iter()
+        .map(|group| SourceTally {
+            met: Vec::new(),
+            matched: 0,
+            present: vec![0; group.attributes.len()],
+        })
+        .collect();
+    for scan in crate::attribute_scans(args, numbering)? {
+        read_one_attribute_scan(
             args,
-            group,
+            &scan,
             n,
-            ids,
-            id_space,
             entity_of_ordinal,
             minters,
             scratch,
             &mut by_entity,
             &mut spilled,
             &mut value_lanes,
-            &mut coverage,
+            &mut tallies,
         )?;
+    }
+    let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+    for (group, tally) in args.attribute_sources.iter().zip(tallies) {
+        let columns: Vec<&crate::config::Attribute> = group
+            .attributes
+            .iter()
+            .map(|&i| &args.schema.attributes[i])
+            .collect();
+        let met: u64 = tally.met.iter().map(|w| u64::from(w.count_ones())).sum();
+        if let Some(refusal) = input::items_without_a_row(&group.path, &columns, n - met) {
+            return Err(refusal);
+        }
+        coverage.push(crate::AttributeCoverage {
+            source: group.name.clone(),
+            entities: n,
+            matched_rows: tally.matched,
+            columns: columns
+                .iter()
+                .zip(&tally.present)
+                .map(|(a, &count)| (a.name.clone(), count))
+                .collect(),
+        });
     }
     // **The replay, once every source has been read.** A bucket at a time, in ascending entity
     // order: the records are scattered into a window over the bucket's own range and the window
@@ -2571,54 +2418,38 @@ fn spill_extent_chunk(
     Ok(count)
 }
 
-/// One attribute source's merge sweep into the entity-major columns.
+/// What one attribute source's sweeps met: the items with a row, the rows, and the values each
+/// column came away with.
+struct SourceTally {
+    met: Vec<u64>,
+    matched: u64,
+    present: Vec<u64>,
+}
+
+/// One sweep of the attribute join into the entity-major columns.
 #[allow(clippy::too_many_arguments)]
-fn read_one_attribute_source(
+fn read_one_attribute_scan(
     args: &BuildArgs,
-    group: &crate::config::AttributeSource,
+    scan: &crate::AttributeScan<'_>,
     n: u64,
-    ids: Ids<'_>,
-    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     spilled: &mut [crate::extents::ExtentColumn],
     value_lanes: &mut [Option<ValueLane>],
-    coverage: &mut Vec<crate::AttributeCoverage>,
+    tallies: &mut [SourceTally],
 ) -> Result<()> {
-    let filled: Vec<usize> = group.attributes.clone();
+    let filled: Vec<usize> = scan.attributes.clone();
     let columns: Vec<&crate::config::Attribute> =
         filled.iter().map(|&i| &args.schema.attributes[i]).collect();
     let attributes = &columns;
     let mut matched_rows = 0u64;
     // Which of the build's items met a row, by ordinal, so one that met none is refused.
     let mut met = vec![0u64; (n as usize).div_ceil(64)];
-    // **Counted, not refused** (`configuration.md` §1). A row naming an entity this build did not
-    // load is what a join does with a source that covers a superset — which every legitimate
-    // attribute table over a limited build is — and ignoring it is fail-closed in both directions
-    // that matter: an absent attribute matches fewer points in a filter, and an absent access
-    // label leaves a point visible to nobody.
-    let mut unknown_rows = 0u64;
 
-    // **[`join_chunk`]'s merge sweep, not a probe per row.** This pass used a `binary_search` into
-    // `source_ids` for every row, on the reasoning that it is "per-row work over a handful of
-    // narrow columns, not the corpus-scale join the geometry pass does". That holds while
-    // `source_ids` fits in cache and inverts well before it stops: at 2.5×10⁸ the array is 2 GB and
-    // the probes are uniformly scattered across it, so nearly every one of the ~28 comparisons is a
-    // cache miss.
-    //
-    // **Worth 1m49s of a ~19m build at 2.5×10⁸, not the "~20 minutes of one core" an earlier
-    // revision of this comment claimed.** That figure came from sampling the pass at 97% of one
-    // core for sixty seconds and taking the whole elapsed stretch to be it; the stretch included a
-    // suspended laptop, and the build's *total* CPU was 19m45s, which the pass alone plainly cannot
-    // exceed. Measured properly, by the cgroup's own accounting across two builds of the same
-    // corpus: 19min 45.7s of CPU before, 17min 56.8s after. Real, and worth keeping — the sweep is
-    // also the shape that stays sequential as the corpus grows, where the probe's cost per row does
-    // not — but a tenth of what was asserted.
-    //
-    // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
-    // pass makes for the same reason. The cost is a staging buffer, and **it is sized in bytes**:
+    // **[`join_chunk`]'s merge sweep, not a lookup per row.** Chunked, both sides ascend and the
+    // sweep is sequential, which is the same trade the geometry pass makes. The cost is a staging buffer, and **it is sized in bytes**:
     // see [`JOIN_STAGE_BYTES`] for why a row count is the wrong unit here.
     //
     // **At least one whole decoded batch**, because a batch is staged as a unit: the flush below
@@ -2651,20 +2482,19 @@ fn read_one_attribute_source(
                  spilled: &mut [crate::extents::ExtentColumn],
                  value_lanes: &mut [Option<ValueLane>],
                  matched: &mut u64,
-                 unknown: &mut u64,
                  met: &mut [u64],
                  present: &mut [u64]|
      -> Result<()> {
         resolved.clear();
-        join_chunk(chunk, ids, |ordinal, _source_id, pos| {
-            match ordinal {
-                None => *unknown += 1,
-                Some(ordinal) => {
-                    *matched += 1;
-                    met[ordinal as usize / 64] |= 1 << (ordinal % 64);
-                    resolved.push((entity_of_ordinal[ordinal as usize], pos));
-                }
-            }
+        join_chunk(chunk, n, |ordinal, _, pos| {
+            let Some(ordinal) = ordinal else {
+                return Err(input_changed(
+                    "an attribute file names an item the identity pass did not number",
+                ));
+            };
+            *matched += 1;
+            met[ordinal as usize / 64] |= 1 << (ordinal % 64);
+            resolved.push((entity_of_ordinal[ordinal as usize], pos));
             Ok(())
         })?;
         // **Ascending in the entity, so every lane's scatter is a forward sweep.** The sweep's own
@@ -2786,10 +2616,8 @@ fn read_one_attribute_source(
         Ok(())
     };
 
-    // An attribute source is entity space: one value per entity, in a file of its own, with no
-    // view to select (`views.md` §5).
     input::scan_attributes(
-        input::Source::new(&group.path, &group.fields, id_space).limited(args.limit),
+        input::Source::new(scan.path, scan.fields, scan.rows),
         attributes,
         minters,
         |batch| {
@@ -2806,7 +2634,6 @@ fn read_one_attribute_source(
                     spilled,
                     value_lanes,
                     &mut matched_rows,
-                    &mut unknown_rows,
                     &mut met,
                     &mut present,
                 )?;
@@ -2847,38 +2674,29 @@ fn read_one_attribute_source(
             spilled,
             value_lanes,
             &mut matched_rows,
-            &mut unknown_rows,
             &mut met,
             &mut present,
         )?;
     }
-    let unmet = met.iter().enumerate().find_map(|(word, &bits)| {
-        (bits != u64::MAX)
-            .then(|| word * 64 + (!bits).trailing_zeros() as usize)
-            .filter(|&ordinal| ordinal < n as usize)
-    });
-    if let Some(ordinal) = unmet {
-        return Err(input::item_without_a_row(
-            &group.path,
-            attributes,
-            id_space,
-            ids.id_of(ordinal),
-        ));
-    }
     drop(staged);
     drop(chunk);
     drop(resolved);
-    coverage.push(crate::AttributeCoverage {
-        source: group.name.clone(),
-        entities: n,
-        matched_rows,
-        unknown_rows,
-        columns: attributes
-            .iter()
-            .zip(&present)
-            .map(|(a, &count)| (a.name.clone(), count))
-            .collect(),
-    });
+    // A sweep of a source's own columns counts toward its coverage; one reading only the unique
+    // fields a file carries beside them counts toward none.
+    if let Some(group) = scan.group {
+        let tally = &mut tallies[group];
+        tally.matched += matched_rows;
+        if tally.met.is_empty() {
+            tally.met = met;
+        } else {
+            for (into, from) in tally.met.iter_mut().zip(&met) {
+                *into |= from;
+            }
+        }
+        for (into, from) in tally.present.iter_mut().zip(&present) {
+            *into += from;
+        }
+    }
     Ok(())
 }
 
@@ -2919,8 +2737,7 @@ fn write_scoped_columns(
     args: &BuildArgs,
     partition_dir: &Path,
     n: u64,
-    ids: Ids<'_>,
-    id_space: &crate::ids::IdSpace,
+    numbering: &crate::ids::Numbering,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
@@ -2934,7 +2751,7 @@ fn write_scoped_columns(
         TextIndexPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
     let keyword_plan =
         KeywordDictPlan::for_budget(args.memory_budget.unwrap_or_else(detect_memory_budget));
-    for family in &args.scoped_attributes {
+    for (family_index, family) in args.scoped_attributes.iter().enumerate() {
         let attribute = &family.attribute;
         // **What `render` buys, and the one place it still does not reach.** The build's own
         // views of the group get the column in their row tails below, and a view created while
@@ -2959,13 +2776,21 @@ fn write_scoped_columns(
         }
         for &index in &family.views {
             let view = &args.views[index];
+            let rows = match &family.source {
+                Some(_) => numbering
+                    .of(crate::ids::ReadKind::Scoped {
+                        family: family_index,
+                        view: index,
+                    })
+                    .expect("a scoped attribute's own file is numbered for each view"),
+                None => numbering.points(index),
+            };
             let column = read_scoped_column(
                 args,
                 family,
                 view,
+                rows,
                 n,
-                ids,
-                id_space,
                 entity_of_ordinal,
                 minters,
                 scratch,
@@ -3229,53 +3054,24 @@ struct ScopedColumn {
 /// roster and a scoped layer are read through, so a value naming a key the roster does not carry
 /// is the refusal that names both, and a view with no rows in the file simply has no values.
 ///
-/// The same resolution every other attribute pass makes — `source_ids` → ordinal →
+/// The same resolution every other attribute pass makes — a row's number → ordinal →
 /// `entity_of_ordinal` — because entity ids are assigned in signature-sorted order (§11.1) and a
-/// source id is not its own entity id. A row naming an entity this build did not load is counted
-/// nowhere and refused nowhere: it is the join's ordinary case, exactly as it is for an
-/// entity-scoped source.
+/// number is not its own entity id. `rows` are the file's numbers under this view's selection.
 #[allow(clippy::too_many_arguments)]
 fn read_scoped_column(
     args: &BuildArgs,
     family: &crate::ScopedColumnFamily,
     view: &crate::ViewArgs,
+    rows: &crate::ids::ReadRows,
     n: u64,
-    ids: Ids<'_>,
-    id_space: &crate::ids::IdSpace,
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
 ) -> Result<ScopedColumn> {
     let attribute = &family.attribute;
-    // Which file, and which of its rows. The keys a stray discriminator is refused against are the
-    // family's own views' — the group's roster, by construction — derived here rather than carried
-    // beside the source, so the two cannot come to disagree.
-    let own_source = family.source.as_ref().map(|source| {
-        let mut keys: Vec<String> = family
-            .views
-            .iter()
-            .map(|&index| key_of(&args.views[index].view_id).to_string())
-            .collect();
-        keys.sort();
-        keys.dedup();
-        let select = crate::config::ViewSelector {
-            column: source.view_field.clone(),
-            value: key_of(&view.view_id).to_string(),
-            keys,
-            view_id: view.view_id.clone(),
-        };
-        let fields = crate::config::Fields::moved(
-            format!("attribute '{}'", attribute.name),
-            [(
-                crate::config::JOIN_COLUMN.to_string(),
-                source.join_column.clone(),
-            )],
-        );
-        (source.path.clone(), fields, select)
-    });
-    let (points, point_fields, select) = match &own_source {
-        Some((path, fields, select)) => (path, fields, Some(select)),
-        None => (&view.points, &view.point_fields, view.select.as_ref()),
+    let (path, fields) = match &family.source {
+        Some(source) => (&source.path, &source.fields),
+        None => (&view.points, &view.point_fields),
     };
     let mut values = EntityColumn::filled(scratch, attribute.ty, n as usize)?;
     let columns = [attribute];
@@ -3283,15 +3079,14 @@ fn read_scoped_column(
     let mut staged = EntityColumn::filled(scratch, attribute.ty, staged_rows)?;
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
     let mut present = 0u64;
-    // The merge sweep the entity-scoped pass uses, over one column: both sides ascend, so the
-    // join is sequential rather than a probe into `source_ids` per row.
+    // The sweep the entity-scoped pass uses, over one column.
     let flush = |chunk: &mut Vec<(u64, u32)>,
                  staged: &mut EntityColumn,
                  values: &mut EntityColumn,
                  present: &mut u64|
      -> Result<()> {
         let mut moved: Vec<(u32, u32)> = Vec::with_capacity(chunk.len());
-        join_chunk(chunk, ids, |ordinal, _source_id, pos| {
+        join_chunk(chunk, n, |ordinal, _number, pos| {
             if let Some(ordinal) = ordinal {
                 moved.push((entity_of_ordinal[ordinal as usize], pos));
             }
@@ -3307,9 +3102,7 @@ fn read_scoped_column(
         Ok(())
     };
     input::scan_attributes(
-        input::Source::new(points, point_fields, id_space)
-            .limited(args.limit)
-            .selecting(select),
+        input::Source::new(path, fields, rows),
         &columns,
         minters,
         |batch| {
@@ -5671,190 +5464,6 @@ pub(crate) fn render_presence_of(
     any_absent.then_some(present)
 }
 
-/// How many source ids one view selects.
-///
-/// No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and the
-/// counting decode is a whole pass over the file for nothing. A form B source's rows are several
-/// views', so the count there is data-dependent like a limit's.
-fn count_source_ids(
-    args: &BuildArgs,
-    view: &crate::ViewArgs,
-    id_space: &crate::ids::IdSpace,
-) -> Result<usize> {
-    match args.limit {
-        None if view.select.is_none() => Ok(input::count_point_rows(&view.points)? as usize),
-        _ => {
-            let mut count = 0usize;
-            input::scan_points(
-                crate::view_source(view, args, id_space),
-                view.projection,
-                &view.extent,
-                |_| {
-                    count += 1;
-                    ControlFlow::Continue(())
-                },
-            )?;
-            Ok(count)
-        }
-    }
-}
-
-/// The refusal a view earns when its points file yields a different number of rows than the count
-/// pass read from it.
-///
-/// A points file rewritten between the two passes, which is [`input_changed`] rather than a short
-/// read or a reallocated array: the count decides where the *next* view's ids start, and a wrong
-/// one would give every item after it another item's ordinal.
-fn view_row_count_changed(
-    view: &crate::ViewArgs,
-    counted: usize,
-    written: usize,
-    overran: bool,
-) -> BuildError {
-    let then = if overran {
-        format!("more than {written}")
-    } else {
-        written.to_string()
-    };
-    input_changed(&format!(
-        "view '{}': {} selected {counted} rows when it was counted and {then} when it was read",
-        view.view_id,
-        view.points.display(),
-    ))
-}
-
-/// One view's selected source ids, written into `slot` in scan order (which is **no particular
-/// order** — the decode is parallel; the caller sorts), and the view's own anchor.
-///
-/// `slot` is exactly what [`count_source_ids`] said this view holds, so the ids go straight into
-/// the union's array and nothing here ever allocates.
-fn read_source_ids_into(
-    args: &BuildArgs,
-    view: &crate::ViewArgs,
-    slot: &mut [u64],
-    id_space: &crate::ids::IdSpace,
-) -> Result<ViewIdAnchor> {
-    let mut written = 0usize;
-    let mut mixed = 0u64;
-    let mut overran = false;
-    input::scan_points(
-        crate::view_source(view, args, id_space),
-        view.projection,
-        &view.extent,
-        |point| {
-            let Some(cell) = slot.get_mut(written) else {
-                // Past the end of the slot: stop the scan rather than decode the rest of a file
-                // whose answer is already a refusal.
-                overran = true;
-                return ControlFlow::Break(());
-            };
-            *cell = point.source_id;
-            mixed = mixed.wrapping_add(mix64(point.source_id));
-            written += 1;
-            ControlFlow::Continue(())
-        },
-    )?;
-    if overran || written != slot.len() {
-        return Err(view_row_count_changed(view, slot.len(), written, overran));
-    }
-    Ok(ViewIdAnchor {
-        rows: written as u64,
-        mixed,
-    })
-}
-
-/// **The build's ordinal space**: the sorted, duplicate-free source ids, as a range where pass one
-/// proved the union is one, and as a file under `.build-tmp/` where it is not.
-///
-/// **8 bytes an item is the largest single structure the build would hold** — 26.0 GiB at the GBIF
-/// rung's 3.50×10⁹ items — so the range arm is worth proving. Where it holds, no array is
-/// allocated, none is sorted and none is written: an ordinal is `id - first` at every consumer
-/// ([`Ids`]), and pass one's whole cost is a bit per id in the union's span.
-///
-/// Where it does not hold, the array is what every consumer reads, and it is read sequentially by
-/// every pass but one: the join's merge sweep ([`join_chunk`]) and the ordinal walks. The one random reader is `layers::publish`'s binary search, which is the case
-/// [`spill::MappedArray`] was written for. Mapped, those bytes are page cache the kernel may evict
-/// rather than memory the machine must have, which is what `entity_of_ordinal`, the declared
-/// columns, the member table and the text index's runs each became before it.
-pub(crate) enum SourceIds {
-    /// The union is `first..first + len`. No file was written.
-    Contiguous { first: u64, len: usize },
-    /// The union in a file, with the count that survived the deduplication.
-    ///
-    /// The array is allocated at the *pre-deduplication* length where the ids were read into it
-    /// unsorted, because that is all that is known before they are read, and at the deduplicated
-    /// length where the presence bitmap produced them already sorted. The slice is what survived
-    /// either way, and the file keeps whatever slack the duplicates left until it is unlinked.
-    Sparse {
-        ids: spill::MappedArray<u64>,
-        len: usize,
-    },
-}
-
-impl SourceIds {
-    fn ids(&self) -> Ids<'_> {
-        match self {
-            SourceIds::Contiguous { first, len } => Ids::Contiguous {
-                first: *first,
-                len: *len,
-            },
-            SourceIds::Sparse { ids, len } => Ids::Sparse(&ids.as_slice()[..*len]),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            SourceIds::Contiguous { len, .. } => *len,
-            SourceIds::Sparse { len, .. } => *len,
-        }
-    }
-
-    /// The union's lowest and highest id, or `None` over no items.
-    fn extrema(&self) -> Option<(u64, u64)> {
-        match self {
-            SourceIds::Contiguous { first, len } => {
-                (*len > 0).then(|| (*first, first + *len as u64 - 1))
-            }
-            SourceIds::Sparse { ids, len } => {
-                let slice = &ids.as_slice()[..*len];
-                Some((*slice.first()?, *slice.last()?))
-            }
-        }
-    }
-
-    /// **What the file cost the disk**, and **zero where there is no file**: the range arm writes
-    /// nothing. Where the ids were read into the array unsorted it is every view's rows and not
-    /// the union's, the array being allocated at their sum and the dedup moving values inside it
-    /// rather than shortening it. The disk pre-flight is charged over this and `n` is what
-    /// survives ([`crate::residency::IdShape`]).
-    pub(crate) fn slots(&self) -> usize {
-        match self {
-            SourceIds::Contiguous { .. } => 0,
-            SourceIds::Sparse { ids, .. } => ids.as_slice().len(),
-        }
-    }
-}
-
-/// Collapse runs of equal values in a sorted slice, returning how many survived — [`Vec::dedup`]
-/// over a slice whose length cannot change.
-///
-/// A value is written only where it moves. A sorted array with no duplicates — every corpus on
-/// the ladder — is therefore read and not written, which for a mapped array is the difference
-/// between dirtying every page of it and dirtying none.
-fn dedup_sorted(values: &mut [u64]) -> usize {
-    let mut written = 0usize;
-    for read in 0..values.len() {
-        if written > 0 && values[written - 1] == values[read] {
-            continue;
-        }
-        if written != read {
-            values[written] = values[read];
-        }
-        written += 1;
-    }
-    written
-}
-
 /// One view's geometry in **ordinal** space, read once in pass one and permuted into entity
 /// space in pass two (`views.md` §7).
 struct ViewGeometry {
@@ -5864,334 +5473,6 @@ struct ViewGeometry {
     /// permutation sentinel wherever it does not.
     present: Vec<u64>,
     rows: u64,
-}
-
-/// What one view's points file said about itself, for the later passes over it to be checked
-/// against ([`read_source_ids_union`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ViewIdAnchor {
-    rows: u64,
-    /// An order-independent mixed sum of the ids, so a file swapped mid-build is loud rather
-    /// than silently repairing its own row count.
-    mixed: u64,
-}
-
-/// A bit per id over `[base, base + span)` — pass one's decision procedure, and on the range route
-/// the only structure it builds.
-///
-/// It answers, exactly and at `span / 8` bytes: whether one view names an id twice, how many
-/// distinct ids the union holds, what its lowest and highest are, and therefore whether the union
-/// is one unbroken range. It does **not** answer `id → ordinal` for an arbitrary id, which is
-/// `rank`, nor `ordinal → id`, which is `select`; a union that turns out not to be a range
-/// therefore still needs the array, and the walk below writes it already sorted.
-///
-/// It cannot be allocated without a bound on the span, and the span is `max - min + 1` rather than
-/// the item count. [`union_id_span`] is that bound and is also the gate: no bound, no bitmap.
-struct IdPresence {
-    base: u64,
-    span: u64,
-    words: Vec<u64>,
-}
-
-impl IdPresence {
-    fn zeroed(base: u64, span: u64) -> IdPresence {
-        IdPresence {
-            base,
-            span,
-            // `alloc_zeroed`: for a span worth gating on, the allocator maps fresh zero pages
-            // rather than clearing a block, so a per-view bitmap costs only the pages it touches.
-            words: vec![0u64; (span as usize).div_ceil(64)],
-        }
-    }
-
-    /// Mark an id present. `None` where the id is outside the span the statistics bounded, which
-    /// abandons the route rather than indexing somewhere else; `Some(true)` where the bit was
-    /// already set.
-    fn set(&mut self, id: u64) -> Option<bool> {
-        let offset = id.checked_sub(self.base).filter(|o| *o < self.span)?;
-        let (word, bit) = ((offset / 64) as usize, offset % 64);
-        let already = self.words[word] >> bit & 1 == 1;
-        self.words[word] |= 1 << bit;
-        Some(already)
-    }
-
-    fn union_with(&mut self, other: &IdPresence) {
-        for (into, from) in self.words.iter_mut().zip(&other.words) {
-            *into |= *from;
-        }
-    }
-
-    fn count(&self) -> u64 {
-        self.words.iter().map(|w| w.count_ones() as u64).sum()
-    }
-
-    /// The lowest and highest id present, or `None` where none is.
-    ///
-    /// Each is `base` plus the offset of a **set** bit, which is inside the span by construction,
-    /// so neither sum can pass the end of the type. The offset is formed first for that reason: a
-    /// span ending at `u64::MAX` has padding bits in its last word, and `base + word * 64 + 63`
-    /// would name one of them before the subtraction brought it back.
-    fn extrema(&self) -> Option<(u64, u64)> {
-        let low = self
-            .words
-            .iter()
-            .position(|w| *w != 0)
-            .map(|w| self.base + (w as u64 * 64 + self.words[w].trailing_zeros() as u64))?;
-        let high = self
-            .words
-            .iter()
-            .rposition(|w| *w != 0)
-            .map(|w| self.base + (w as u64 * 64 + 63 - self.words[w].leading_zeros() as u64))?;
-        Some((low, high))
-    }
-
-    /// Every id present, ascending — the sorted, deduplicated union, produced by one sequential
-    /// walk rather than by a sort.
-    fn ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.words.iter().enumerate().flat_map(|(index, &word)| {
-            let base = self.base + index as u64 * 64;
-            std::iter::successors((word != 0).then_some(word), |w| {
-                let rest = *w & (*w - 1);
-                (rest != 0).then_some(rest)
-            })
-            .map(move |w| base + w.trailing_zeros() as u64)
-        })
-    }
-}
-
-/// The widest span, in ids a row, whose two presence bitmaps are no larger than the source-ids
-/// array ([`union_id_span`]).
-const SPAN_BITS_PER_ROW: u64 = 32;
-
-/// The range the union's ids are known to lie in, where a bitmap over it is worth building.
-///
-/// Every points file states the lowest and highest `entity_id` it holds in its own parquet
-/// statistics ([`input::id_bounds`]), and a `limit` selects `entity_id < limit`, so it bounds the
-/// selection above. The union lies inside the fold of those bounds.
-///
-/// **The gate is a span of at most [`SPAN_BITS_PER_ROW`] ids a row**, over the rows every view
-/// declares. A bitmap over the span is `span / 8` bytes, and pass one holds at most two at once,
-/// the union and the view being read, so the gate keeps them within the `8 * total` bytes of the
-/// array the route stands in for. The route saves the array's sort in every case and the array itself
-/// where the union is a range, so a union of sparse ids, such as GBIF's `gbifid` at 1.8 ids a row,
-/// takes it. It rejects a corpus whose ids are spread rather than numbered: the `multiview`
-/// fixture's ten views hold 21,300 items over a span of 13,463,247, 632 ids a row.
-///
-/// `None` where any view cannot be bounded — no statistics, or an id the statistics cannot state
-/// as a `u64` — which leaves the array as the only route. A view selecting no rows contributes
-/// nothing to the fold.
-fn union_id_span(
-    args: &BuildArgs,
-    counts: &[usize],
-    id_space: &crate::ids::IdSpace,
-) -> Result<Option<(u64, u64)>> {
-    let total: u64 = counts.iter().map(|&count| count as u64).sum();
-    if total == 0 {
-        return Ok(None);
-    }
-    // **The supplied route's span is exact and needs no statistics.** A key's source id is its
-    // rank among the keys this build interned, so the union is `0..n` (`crate::ids`). A
-    // positional route's ids are the row numbers of the one file, which is the same span, read
-    // from the count rather than from a footer that says nothing about a column that is not there.
-    if let Some((low, high)) = id_space.rank_bounds() {
-        return Ok(Some((low, high - low + 1)));
-    }
-    if id_space.positional() {
-        return Ok(Some((0, total)));
-    }
-    let mut low = u64::MAX;
-    let mut high = 0u64;
-    for (view, &count) in args.views.iter().zip(counts) {
-        if count == 0 {
-            continue;
-        }
-        let Some((view_low, view_high)) = input::id_bounds(&view.points, &view.point_fields)?
-        else {
-            return Ok(None);
-        };
-        let view_high = match args.limit {
-            Some(limit) => view_high.min(limit.saturating_sub(1)),
-            None => view_high,
-        };
-        if view_high < view_low {
-            // The limit excludes every id the file states while the count says rows were
-            // selected: the two disagree, so take neither.
-            return Ok(None);
-        }
-        low = low.min(view_low);
-        high = high.max(view_high);
-    }
-    let Some(span) = high.checked_sub(low).and_then(|d| d.checked_add(1)) else {
-        return Ok(None);
-    };
-    Ok((span <= total.saturating_mul(SPAN_BITS_PER_ROW)).then_some((low, span)))
-}
-
-/// Every view's ids as one presence bitmap over `[base, base + span)`, with each view's own anchor.
-///
-/// A bitmap per view, folded into the union as each is read: a bit already set **within one view**
-/// is the duplicate refusal, and a bit already set by an earlier view is the ordinary case. That
-/// is what the per-view sort and `windows(2)` decide on the array route, decided here without an
-/// order.
-///
-/// `None` where a file holds an id outside the span its own statistics stated. The route is
-/// abandoned and the array route reads the files again, which is a points file disagreeing with
-/// its own footer rather than anything this build can repair.
-fn read_source_ids_present(
-    args: &BuildArgs,
-    counts: &[usize],
-    base: u64,
-    span: u64,
-    id_space: &crate::ids::IdSpace,
-) -> Result<Option<(IdPresence, Vec<ViewIdAnchor>)>> {
-    let mut union: Option<IdPresence> = None;
-    let mut anchors = Vec::with_capacity(args.views.len());
-    for (view, &count) in args.views.iter().zip(counts) {
-        // A view selecting nothing gets no bitmap: any row the scan yields is past its count and
-        // is the refusal below, and a span-sized allocation for it would be the whole cost of the
-        // route paid for no ids.
-        let mut bits = (count > 0).then(|| IdPresence::zeroed(base, span));
-        let mut written = 0usize;
-        let mut mixed = 0u64;
-        let mut overran = false;
-        let mut outside = false;
-        let mut duplicate = false;
-        input::scan_points(
-            crate::view_source(view, args, id_space),
-            view.projection,
-            &view.extent,
-            |point| {
-                let Some(bits) = bits.as_mut().filter(|_| written < count) else {
-                    overran = true;
-                    return ControlFlow::Break(());
-                };
-                match bits.set(point.source_id) {
-                    None => {
-                        outside = true;
-                        return ControlFlow::Break(());
-                    }
-                    Some(true) => {
-                        duplicate = true;
-                        return ControlFlow::Break(());
-                    }
-                    Some(false) => {}
-                }
-                mixed = mixed.wrapping_add(mix64(point.source_id));
-                written += 1;
-                ControlFlow::Continue(())
-            },
-        )?;
-        // A duplicate is counted and listed by the array route, which sorts.
-        if outside || duplicate {
-            return Ok(None);
-        }
-        if overran || written != count {
-            return Err(view_row_count_changed(view, count, written, overran));
-        }
-        anchors.push(ViewIdAnchor {
-            rows: written as u64,
-            mixed,
-        });
-        if let Some(bits) = bits {
-            union = Some(match union {
-                None => bits,
-                Some(mut union) => {
-                    union.union_with(&bits);
-                    union
-                }
-            });
-        }
-    }
-    Ok(union.map(|union| (union, anchors)))
-}
-
-/// The ordinal space the presence bitmap decided: a range where the union is one, and the array
-/// walked out of the bitmap where it is not.
-///
-/// The walk emits set bits ascending, so the array it writes is already sorted and already
-/// deduplicated — no `par_sort_unstable` over the corpus, and it is allocated at the distinct
-/// count rather than at the views' pre-deduplication sum.
-fn source_ids_of_presence(present: &IdPresence, tmp: &Path) -> Result<SourceIds> {
-    let n = present.count();
-    // `first` and `last` both lie in the span, so the width cannot overflow. An empty union has no
-    // extrema and takes the array arm, which answers nothing rather than subtracting from a first
-    // id that does not exist.
-    if let Some((first, last)) = present.extrema() {
-        if last - first + 1 == n {
-            return Ok(SourceIds::Contiguous {
-                first,
-                len: n as usize,
-            });
-        }
-    }
-    let mut ids = spill::MappedArray::<u64>::zeroed(tmp, "source-ids.u64", n as usize)?;
-    let slots = ids.as_mut_slice();
-    let mut written = 0usize;
-    for id in present.ids() {
-        slots[written] = id;
-        written += 1;
-    }
-    // An `assert` rather than a `debug_assert`: a short walk would leave trailing zeros in the
-    // array, which resolve as ordinals and move every entity id the build assigns (I9). It is one
-    // comparison after a walk over the whole bitmap.
-    assert_eq!(written as u64, n, "the walk writes one id per set bit");
-    Ok(SourceIds::Sparse {
-        ids,
-        len: n as usize,
-    })
-}
-
-/// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by join
-/// value.
-///
-/// A row is unique per `(join value, view)` — a value repeated *within* one view's file is the
-/// duplicate refusal, while the same id in two views is the ordinary case and is what makes an
-/// entity's identity, label and attributes shared across the row spaces.
-///
-/// **Two routes to the same union.** Where every view's points file bounds its own ids and the
-/// union's span is at most [`SPAN_BITS_PER_ROW`] ids a row ([`union_id_span`]), the ids go into a
-/// presence bitmap no larger than the array, and a union that turns out to be one
-/// unbroken range needs no array at all: an ordinal is a subtraction and pass one writes nothing.
-/// Over 3.5×10⁹ numbered rows that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s not made. A
-/// union that is not a range, such as GBIF's `gbifid`, is walked out of the bitmap into an array
-/// that is already sorted and already deduplicated, so only the sort is not made.
-///
-/// Otherwise the ids go into the array directly, each view's segment sorted and duplicate-checked
-/// in place and the whole sorted and deduplicated after. **Every view is counted before any is
-/// read**, so the union is one array of the final length rather than a concatenation holding both
-/// copies while it ran — 16 bytes an item where the thing it produces is 8, which is 52.1 GiB at
-/// the GBIF rung against a 47 GiB machine (`probes/2026-09-10-source-ids-memory/`).
-fn read_source_ids_union(
-    args: &BuildArgs,
-    tmp: &Path,
-    id_space: &crate::ids::IdSpace,
-) -> Result<(SourceIds, Vec<ViewIdAnchor>)> {
-    let mut counts = Vec::with_capacity(args.views.len());
-    for view in &args.views {
-        counts.push(count_source_ids(args, view, id_space)?);
-    }
-    if let Some((base, span)) = union_id_span(args, &counts, id_space)? {
-        if let Some((present, anchors)) =
-            read_source_ids_present(args, &counts, base, span, id_space)?
-        {
-            return Ok((source_ids_of_presence(&present, tmp)?, anchors));
-        }
-    }
-    let total: usize = counts.iter().sum();
-    let mut ids = spill::MappedArray::<u64>::zeroed(tmp, "source-ids.u64", total)?;
-    let mut anchors = Vec::with_capacity(args.views.len());
-    let mut offset = 0usize;
-    for (view, &count) in args.views.iter().zip(&counts) {
-        let segment = &mut ids.as_mut_slice()[offset..offset + count];
-        anchors.push(read_source_ids_into(args, view, segment, id_space)?);
-        segment.par_sort_unstable();
-        crate::ids::refuse_duplicates(view, id_space, segment.iter().copied())?;
-        offset += count;
-    }
-    let all = ids.as_mut_slice();
-    all.par_sort_unstable();
-    let len = dedup_sorted(all);
-    Ok((SourceIds::Sparse { ids, len }, anchors))
 }
 
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
@@ -6272,16 +5553,16 @@ struct Dictionary {
 fn build_dictionary(
     args: &BuildArgs,
     access: &crate::AccessPlan,
-    ids: Ids<'_>,
+    n: u64,
     dict_dir: &std::path::Path,
-    id_space: &crate::ids::IdSpace,
+    numbering: &crate::ids::Numbering,
 ) -> Result<Dictionary> {
     // Chunk-order insensitivity ([`join_chunk`]): per-term min-ordinal and row counts, and the
     // per-range histogram, are commutative aggregations — no arrival order is observable.
     let mut first_ordinal: FxHashMap<u64, (u64, u64)> = FxHashMap::default();
     // Ordinal-range histogram for batch sizing: 2^16 ranges regardless of n.
-    let histogram_shift = (64 - (ids.len().max(1) as u64).leading_zeros()).saturating_sub(16);
-    let mut histogram = vec![0u64; (ids.len() >> histogram_shift) + 1];
+    let histogram_shift = (64 - n.max(1).leading_zeros()).saturating_sub(16);
+    let mut histogram = vec![0u64; (n as usize >> histogram_shift) + 1];
     // Absent ids are reported by count and minimum, never collected: a mispaired input naming
     // billions of missing ids would otherwise accumulate a multi-gigabyte set — the exact
     // transient class this module exists to avoid — before producing its typed error.
@@ -6292,7 +5573,7 @@ fn build_dictionary(
     // has no row count in hand yet.
     let mut chunk: Vec<(u64, u64)> = Vec::new();
     let mut resolve = |chunk: &mut Vec<(u64, u64)>| {
-        join_chunk(chunk, ids, |ordinal, source_id, source_term| {
+        join_chunk(chunk, n, |ordinal, source_id, source_term| {
             match ordinal {
                 Some(ordinal) => {
                     let slot = first_ordinal.entry(source_term).or_insert((u64::MAX, 0));
@@ -6309,7 +5590,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    let fill = crate::scan_access(args, access, id_space, |_view, source_id, source_term| {
+    let fill = crate::scan_access(args, access, numbering, |_view, source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -7720,72 +7001,26 @@ mod tests {
         }
     }
 
-    /// [`dedup_sorted`] must answer what `Vec::dedup` answers, and must leave the array alone
-    /// wherever nothing moves: the ids it runs over are a mapped file, so a write it does not need
-    /// is a page dirtied for nothing. The second assertion is what checks that.
+    /// `join_chunk` hands every row on in number order, rows of one number in the order they
+    /// came, reports a number past the build's items as `None`, and drains the chunk.
     #[test]
-    fn dedup_sorted_answers_vec_dedup_and_writes_only_what_moves() {
-        for case in [
-            vec![],
-            vec![7u64],
-            vec![7, 7],
-            vec![1, 2, 3, 4],
-            vec![1, 1, 2, 3, 3, 3, 9],
-            vec![5, 5, 5, 5],
-            vec![0, u64::MAX],
-        ] {
-            let mut expected = case.clone();
-            expected.dedup();
-            let mut values = case.clone();
-            let len = dedup_sorted(&mut values);
-            assert_eq!(&values[..len], &expected[..], "over {case:?}");
-        }
-
-        // Nothing moves in a run with no duplicates, so nothing past the last survivor is written
-        // either — and every survivor is written where it already was.
-        let mut values: Vec<u64> = (0..64).collect();
-        let before = values.clone();
-        assert_eq!(dedup_sorted(&mut values), 64);
-        assert_eq!(values, before);
-    }
-
-    /// `join_chunk` must resolve every id that is present (including runs of duplicates, which
-    /// all map to the same ordinal), report every id that is absent as `None`, and drain the
-    /// chunk. The source ids are deliberately arbitrary — nothing about their shape may matter.
-    #[test]
-    fn join_chunk_resolves_duplicates_and_reports_misses() {
-        let source_ids: Vec<u64> = vec![5, 90, 1_000_003, u64::MAX - 1];
-        let mut chunk: Vec<(u64, u32)> = vec![
-            (1_000_003, 10),
-            (5, 11),
-            (90, 12),
-            (5, 13), // duplicate id, distinct payload
-            (7, 14), // absent
-            (u64::MAX - 1, 15),
-            (u64::MAX, 16), // absent, past the last source id
-        ];
+    fn join_chunk_orders_by_number_and_reports_numbers_past_the_items() {
+        let mut chunk: Vec<(u64, u32)> = vec![(3, 10), (0, 11), (3, 12), (9, 13), (1, 14)];
         let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
-        join_chunk(
-            &mut chunk,
-            Ids::Sparse(&source_ids),
-            |ordinal, id, payload| {
-                seen.push((ordinal, id, payload));
-                Ok(())
-            },
-        )
+        join_chunk(&mut chunk, 4, |ordinal, number, payload| {
+            seen.push((ordinal, number, payload));
+            Ok(())
+        })
         .unwrap();
         assert!(chunk.is_empty(), "the chunk must be drained");
-        seen.sort_unstable_by_key(|&(_, _, p)| p);
         assert_eq!(
             seen,
             vec![
-                (Some(2), 1_000_003, 10),
-                (Some(0), 5, 11),
-                (Some(1), 90, 12),
-                (Some(0), 5, 13),
-                (None, 7, 14),
-                (Some(3), u64::MAX - 1, 15),
-                (None, u64::MAX, 16),
+                (Some(0), 0, 11),
+                (Some(1), 1, 14),
+                (Some(3), 3, 10),
+                (Some(3), 3, 12),
+                (None, 9, 13),
             ]
         );
     }
@@ -7793,145 +7028,11 @@ mod tests {
     /// The first `Err` from `on_row` aborts the join and propagates.
     #[test]
     fn join_chunk_propagates_the_callbacks_error() {
-        let source_ids: Vec<u64> = vec![1, 2];
         let mut chunk: Vec<(u64, ())> = vec![(1, ()), (3, ())];
-        let result =
-            join_chunk(
-                &mut chunk,
-                Ids::Sparse(&source_ids),
-                |ordinal, id, ()| match ordinal {
-                    Some(_) => Ok(()),
-                    None => Err(input_changed(&format!("entity {id} missing"))),
-                },
-            );
+        let result = join_chunk(&mut chunk, 2, |ordinal, number, ()| match ordinal {
+            Some(_) => Ok(()),
+            None => Err(input_changed(&format!("item {number} missing"))),
+        });
         assert!(result.is_err());
-    }
-
-    /// **The two arms of [`Ids`] are one function.** Over a union that is one unbroken range, the
-    /// subtraction and the merge sweep must hand `on_row` the same sequence — same ordinals, same
-    /// misses, same order — because the ordinal is what the entity-id assignment breaks its last
-    /// tie on (I9) and the two arms are chosen by a property of the corpus rather than by the
-    /// caller.
-    #[test]
-    fn both_id_space_arms_resolve_a_chunk_identically() {
-        for (first, len) in [(0u64, 6usize), (17, 6), (u64::MAX - 5, 6), (0, 1)] {
-            let array: Vec<u64> = (0..len as u64).map(|i| first + i).collect();
-            let mut probes: Vec<(u64, u32)> = Vec::new();
-            for (payload, id) in [
-                first.wrapping_sub(1),
-                first,
-                first + (len as u64 / 2),
-                first + (len as u64 - 1),
-                first.wrapping_add(len as u64),
-                0,
-                u64::MAX,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                probes.push((id, payload as u32));
-            }
-
-            let run = |ids: Ids<'_>| {
-                let mut chunk = probes.clone();
-                let mut seen: Vec<(Option<u32>, u64, u32)> = Vec::new();
-                join_chunk(&mut chunk, ids, |ordinal, id, payload| {
-                    seen.push((ordinal, id, payload));
-                    Ok(())
-                })
-                .unwrap();
-                seen
-            };
-            assert_eq!(
-                run(Ids::Sparse(&array)),
-                run(Ids::Contiguous { first, len }),
-                "over {len} ids from {first}"
-            );
-        }
-    }
-
-    /// The range test is a property of the values, not of which arm holds them: an array that
-    /// happens to be a range answers with its first id, and one that does not answers `None`. A
-    /// union holding both 0 and `u64::MAX` spans one more than a `u64` holds, which is not a range
-    /// and must not wrap into one.
-    #[test]
-    fn the_range_test_refuses_a_gap_and_an_overflowing_span() {
-        assert_eq!(Ids::Sparse(&[4, 5, 6]).contiguous_from(), Some(4));
-        assert_eq!(Ids::Sparse(&[4, 6]).contiguous_from(), None);
-        assert_eq!(Ids::Sparse(&[0, u64::MAX]).contiguous_from(), None);
-        assert_eq!(Ids::Sparse(&[u64::MAX]).contiguous_from(), Some(u64::MAX));
-        assert_eq!(Ids::Sparse(&[]).contiguous_from(), None);
-        assert_eq!(
-            Ids::Contiguous { first: 9, len: 3 }.contiguous_from(),
-            Some(9)
-        );
-        // An empty union takes the route that answers nothing, on both arms.
-        assert_eq!(Ids::Contiguous { first: 0, len: 0 }.contiguous_from(), None);
-    }
-
-    /// The presence bitmap is the decision procedure: it counts the distinct ids, names the
-    /// extrema, and walks out the sorted deduplicated union without a sort.
-    #[test]
-    fn the_presence_bitmap_counts_names_and_walks_the_union() {
-        let mut bits = IdPresence::zeroed(100, 200);
-        assert_eq!(bits.count(), 0);
-        assert_eq!(bits.extrema(), None);
-        assert_eq!(bits.ids().collect::<Vec<_>>(), Vec::<u64>::new());
-
-        assert_eq!(bits.set(100), Some(false));
-        assert_eq!(bits.set(100), Some(true), "a set bit is a duplicate");
-        assert_eq!(bits.set(163), Some(false));
-        assert_eq!(bits.set(164), Some(false));
-        assert_eq!(bits.set(299), Some(false));
-        assert_eq!(bits.set(99), None, "below the base is outside the span");
-        assert_eq!(bits.set(300), None, "past the span is outside it");
-
-        assert_eq!(bits.count(), 4);
-        assert_eq!(bits.extrema(), Some((100, 299)));
-        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![100, 163, 164, 299]);
-
-        let mut other = IdPresence::zeroed(100, 200);
-        assert_eq!(other.set(101), Some(false));
-        assert_eq!(other.set(163), Some(false));
-        bits.union_with(&other);
-        assert_eq!(bits.count(), 5);
-        assert_eq!(
-            bits.ids().collect::<Vec<_>>(),
-            vec![100, 101, 163, 164, 299]
-        );
-    }
-
-    /// **A span ending at `u64::MAX` has padding bits in its last word**, and naming one of them
-    /// on the way to an answer would pass the end of the type. Every offset here is a set bit's,
-    /// which is inside the span.
-    #[test]
-    fn the_presence_bitmap_spans_the_top_of_the_id_space() {
-        let base = u64::MAX - 70;
-        let mut bits = IdPresence::zeroed(base, 71);
-        assert_eq!(bits.set(base), Some(false));
-        assert_eq!(bits.set(base + 70), Some(false));
-        assert_eq!(bits.set(u64::MAX), Some(true), "base + 70 is u64::MAX");
-        assert_eq!(bits.extrema(), Some((base, u64::MAX)));
-        assert_eq!(bits.count(), 2);
-        assert_eq!(bits.ids().collect::<Vec<_>>(), vec![base, u64::MAX]);
-    }
-
-    /// A range is exactly `extrema` spanning `count`, which is what pass one tests before it
-    /// declares the union needs no array.
-    #[test]
-    fn the_presence_bitmap_decides_a_range_exactly() {
-        let range = |ids: &[u64]| {
-            let mut bits = IdPresence::zeroed(0, 64);
-            for &id in ids {
-                bits.set(id).unwrap();
-            }
-            let (first, last) = bits.extrema().unwrap();
-            last - first + 1 == bits.count()
-        };
-        assert!(range(&[0, 1, 2, 3]));
-        assert!(range(&[61, 62, 63]));
-        assert!(range(&[7]));
-        assert!(!range(&[0, 2]));
-        assert!(!range(&[0, 1, 2, 63]));
     }
 }

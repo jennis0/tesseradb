@@ -2,12 +2,13 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {ClauseVerb, Store} from '@tesseradb/client';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import {activeCount, browsableLayers, emptyDraft} from '@tesseradb/client';
-import {artifactBudgetFor, hasOneLayout, levelForBudget} from '@tesseradb/client/internal';
+import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import './hierarchy.js';
-import {TesseraElement, emit} from './base.js';
+import {TesseraElement, columnCaption, emit} from './base.js';
+import {sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -50,6 +51,17 @@ const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 's
 const COMPACT_BETWEEN = [720, 1000] as const;
 type Panel = (typeof ALL_PANELS)[number];
 type Sheet = 'filters' | 'layers' | 'artifacts' | 'detail';
+/** The Scale choices under Size by, in order. */
+const SIZE_SCALES: readonly {scale: SizeScale; label: string}[] = [
+  {scale: 'linear', label: 'Linear'},
+  {scale: 'log', label: 'Log'},
+  {scale: 'rank', label: 'Rank'}
+];
+/** The range of the size sliders, radii in pixels. */
+const SIZE_RANGE = {min: 1, max: 12, step: 0.5} as const;
+/** A radius as the popover shows it. */
+const px = (n: number) => n.toLocaleString('en-GB', {maximumFractionDigits: 1});
+
 /** The Density choices in the Layers popover, in order. */
 const DENSITY_MODES: readonly {mode: DensityMode; label: string; icon: IconName}[] = [
   {mode: 'none', label: 'None', icon: 'density-none'},
@@ -85,10 +97,14 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * map's tools sit at the top-left of the map (beside the card in the overlay layout) with a Layers
  * button beneath them. The map's top-right corner holds the selection while a region is selected
  * and, under it, the detail card; the status strip sits in its bottom-right. The Layers button
- * opens a popover with a Display section (whether the points are drawn, their size and opacity,
- * and how density is drawn, in which colours and how strongly) over the layer picker. The display
- * settings are the explorer's properties of the same names, passed to its map. `pinned-filters`
- * names the columns whose controls are listed before they hold a clause.
+ * opens a popover with a Display section (whether the points are drawn, what sizes them, their
+ * opacity, and how density is drawn, in which colours and how strongly) over the layer picker.
+ * Size by lists None and the number columns the points arrive with. Under None one Size slider
+ * sets every point's radius, which `hide-size` leaves out; under a column two sliders set the
+ * radii of its smallest and largest value, and a Linear, Log or Rank choice places values between
+ * them. The legend then gains a Size section. The display settings are the explorer's properties
+ * of the same names, passed to its map. `pinned-filters` names the columns whose controls are
+ * listed before they hold a clause.
  *
  * In a container narrower than 1000 px, either layout folds into the card, 300 px wide, whose
  * legend names four values and offers the rest under "N more"; the tools move to the bottom-left,
@@ -124,6 +140,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-colourchange']>} tessera-colourchange - The Colour by choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-levelchange']>} tessera-levelchange - The Level choice changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-displaychange']>} tessera-displaychange - A setting in the Display section changed.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-sizechange']>} tessera-sizechange - Size by, the size range or the scale changed in the Display section.
  * @fires {CustomEvent<TesseraEventDetails['tessera-valuecolour']>} tessera-valuecolour - A colour was chosen or reset for one value in the legend.
  * @fires {CustomEvent<TesseraEventDetails['tessera-palettechange']>} tessera-palettechange - The palette or ramp was chosen in the legend.
  * @fires {CustomEvent<TesseraEventDetails['tessera-statechange']>} tessera-statechange - The status strip's panel state changed.
@@ -156,7 +173,17 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  *   is open.
  * @csspart display - The Display section at the top of the Layers popover.
  * @csspart points-toggle - The Points switch, with `aria-checked`.
- * @csspart point-size - The Size slider: the points' radius in pixels.
+ * @csspart size-by - The Size by button, naming the column the points are sized by or None, with
+ *   `aria-expanded` while its menu is open.
+ * @csspart size-menu - The Size by menu, while it is open.
+ * @csspart size-option - An entry in the Size by menu, with `data-value` (empty for None) and
+ *   `aria-checked`.
+ * @csspart point-size - The Size slider: every point's radius in pixels, under Size by None unless
+ *   `hide-size` is set.
+ * @csspart size-min - The slider for the radius of the smallest value, under Size by a column.
+ * @csspart size-max - The slider for the radius of the largest value, under Size by a column.
+ * @csspart size-range - The two radii as text, such as "2 – 9 px".
+ * @csspart size-scale - The Linear, Log and Rank choice, each with `data-scale` and `aria-checked`.
  * @csspart point-opacity - The Opacity slider.
  * @csspart density-mode - The Density choice: None, Smooth, Hex, Grid and Lines, each with
  *   `data-mode` and `aria-checked`.
@@ -700,6 +727,16 @@ export class TesseraExplorer extends TesseraElement {
   @property({type: Boolean, attribute: 'no-points'}) accessor noPoints = false;
   /** Passed to the map's `radius`; the Size slider in the Layers popover changes it. */
   @property({type: Number}) accessor radius: number | null = null;
+  /** Passed to the map's `size-by`; the Size by choice in the Layers popover changes it. */
+  @property({attribute: 'size-by'}) accessor sizeBy = '';
+  /** Passed to the map's `size-min`; the smallest-size slider in the Layers popover changes it. */
+  @property({type: Number, attribute: 'size-min'}) accessor sizeMin: number | null = null;
+  /** Passed to the map's `size-max`; the largest-size slider in the Layers popover changes it. */
+  @property({type: Number, attribute: 'size-max'}) accessor sizeMax: number | null = null;
+  /** Passed to the map's `size-scale`; the Scale choice in the Layers popover changes it. */
+  @property({attribute: 'size-scale'}) accessor sizeScale: SizeScale | '' = '';
+  /** Leaves the Size slider out of the Layers popover, for a host that sets `radius` itself. */
+  @property({type: Boolean, attribute: 'hide-size'}) accessor hideSize = false;
   /** Passed to the map's `point-opacity`; the Opacity slider in the Layers popover changes it. */
   @property({type: Number, attribute: 'point-opacity'}) accessor pointOpacity: number | null = null;
   /** Passed to the map's `density`; the Density choice in the Layers popover changes it. */
@@ -724,6 +761,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'pinned-filters'}) accessor pinnedFilters = '';
   /** Passed to the legend's `hide-palettes`: the palette and ramp choices are left out of Colour by. */
   @property({type: Boolean, attribute: 'hide-palettes'}) accessor hidePalettes = false;
+  /** Whether the Size by menu in the Layers popover is open. @internal */
+  @state() accessor sizeMenuOpen = false;
   /** Whether the list of density colours in the Layers popover is open. @internal */
   @state() accessor densityColoursOpen = false;
   /** @internal */
@@ -764,8 +803,13 @@ export class TesseraExplorer extends TesseraElement {
   private seenArtifact: object | null = null;
   private resize: ResizeObserver | null = null;
 
+  /** Stops following the size choices of the store adopted last, which the Display section shows. */
+  private unwatchChoices: (() => void) | null = null;
+
   protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
+    this.unwatchChoices?.();
+    this.unwatchChoices = store ? watchChoices(store, () => this.requestUpdate()) : null;
   }
 
   protected override onStoreChange(): void {
@@ -830,6 +874,7 @@ export class TesseraExplorer extends TesseraElement {
 
   private closeLayers(): void {
     this.layersOpen = false;
+    this.sizeMenuOpen = false;
     document.removeEventListener('pointerdown', this.onOutside, true);
   }
 
@@ -915,7 +960,9 @@ export class TesseraExplorer extends TesseraElement {
       ? html`<div class="layers" slot=${compact ? 'bottom-left' : 'top-left'} @keydown=${this.onLayersKey}>
           <div class="group"><button part="layers-toggle" type="button" aria-label=${`Layers and display, ${layersOn} layers on`} aria-expanded=${this.layersOpen ? 'true' : 'false'}
             aria-controls="layers-popover" ?data-on=${layersOn > 0} @click=${() => (this.layersOpen ? this.closeLayers() : this.openLayers())}>${icon('layers', 16, 1.2)}${layersOn > 0 ? html`<span class="on"></span>` : nothing}</button></div>
-          ${this.layersOpen ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers and display">${this.displaySection()}${layersPanel}</div>` : nothing}
+          ${this.layersOpen
+            ? html`<div part="layers-popover" id="layers-popover" class="card" role="dialog" aria-label="Layers and display" @pointerdown=${this.onPopoverPress}>${this.displaySection()}${layersPanel}</div>${this.sizeMenu()}`
+            : nothing}
         </div>`
       : nothing;
 
@@ -971,6 +1018,10 @@ export class TesseraExplorer extends TesseraElement {
           .clusterLevel=${level}
           .noPoints=${this.noPoints}
           .radius=${this.radius}
+          size-by=${this.sizeBy || nothing}
+          .sizeMin=${this.sizeMin}
+          .sizeMax=${this.sizeMax}
+          .sizeScale=${this.sizeScale}
           .pointOpacity=${this.pointOpacity}
           .density=${this.density}
           .densityColours=${this.densityColours}
@@ -1058,8 +1109,7 @@ export class TesseraExplorer extends TesseraElement {
           @click=${() => change({points: !s.points})}><span class="knob"></span></button>
       </div>
       <div class="sliders">
-        <label for="point-size">Size</label><input id="point-size" part="point-size" type="range" min="0.5" max="8" step="0.5" .value=${String(radius)} ?disabled=${!s.points}
-          @input=${(e: Event) => change({radius: number(e)})} />
+        ${this.sizeControls(radius, !s.points)}
         <label for="point-opacity">Opacity</label><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
           @input=${(e: Event) => change({pointOpacity: number(e)})} />
       </div>
@@ -1074,6 +1124,141 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       ${densityControls}
     </div>`;
+  }
+
+  /**
+   * The number column the points are sized by, or null for one size, as the store draws them. The
+   * explorer's own properties only send changes on, through its map.
+   */
+  private get sizedBy(): string | null {
+    return this.resolvedStore?.get('legend').sizeBy ?? null;
+  }
+
+  /** The size range and scale the map draws with: the choices every element over the store shares. */
+  private get sizing(): Sizing {
+    return sizingOf(this.resolvedStore);
+  }
+
+  /** The columns Size by offers: the rendered number columns, in declaration order. */
+  private get sizeColumns(): string[] {
+    return (this.resolvedStore?.get('meta')?.declaredScalars ?? []).filter(sizesPoints).map((c) => c.name);
+  }
+
+  /**
+   * Size by, then under None the Size slider (unless `hide-size`), or under a column the range of
+   * radii and the scale. Rendered into the Display section's grid of labels and controls.
+   */
+  private sizeControls(radius: number, disabled: boolean): TemplateResult {
+    const sizeBy = this.sizedBy;
+    const sizing = this.sizing;
+    const number = (e: Event) => Number((e.target as HTMLInputElement).value);
+    const {min, max, step} = SIZE_RANGE;
+    const choice = html`<span id="size-by-label">Size by</span>
+      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`} ?disabled=${disabled}
+        @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)} @keydown=${this.onSizeByKey}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
+    if (sizeBy === null) {
+      if (this.hideSize) return choice;
+      return html`${choice}<label for="point-size">Size</label>
+        <div class="with-readout"><input id="point-size" part="point-size" type="range" min=${min} max=${max} step=${step} .value=${String(radius)} ?disabled=${disabled}
+          @input=${(e: Event) => this.changeDisplay({radius: number(e)})} /><span class="readout">${px(radius)} px</span></div>`;
+    }
+    const at = SIZE_SCALES.findIndex((x) => x.scale === sizing.scale);
+    // Moving one end past the other takes the other with it.
+    return html`${choice}<span id="size-range-label">Range</span>
+      <div class="range" role="group" aria-labelledby="size-range-label">
+        <input part="size-min" type="range" min=${min} max=${max} step=${step} aria-label="Smallest size" .value=${String(sizing.min)} ?disabled=${disabled}
+          @input=${(e: Event) => this.changeSize({min: number(e), max: Math.max(number(e), sizing.max)})} />
+        <span part="size-range" class="readout">${px(sizing.min)} – ${px(sizing.max)} px</span>
+        <input part="size-max" type="range" min=${min} max=${max} step=${step} aria-label="Largest size" .value=${String(sizing.max)} ?disabled=${disabled}
+          @input=${(e: Event) => this.changeSize({max: number(e), min: Math.min(number(e), sizing.min)})} />
+      </div>
+      <span id="size-scale-label">Scale</span>
+      <div part="size-scale" class="seg" role="radiogroup" aria-labelledby="size-scale-label">
+        ${SIZE_SCALES.map(
+          (x, i) => html`<button type="button" role="radio" data-scale=${x.scale} aria-checked=${x.scale === sizing.scale ? 'true' : 'false'} tabindex=${i === at ? '0' : '-1'} ?disabled=${disabled}
+            @click=${() => this.changeSize({scale: x.scale})}
+            @keydown=${(e: KeyboardEvent) => radioKeys(e, SIZE_SCALES.length, i, (j) => this.changeSize({scale: SIZE_SCALES[j]!.scale}))}>${x.label}</button>`
+        )}
+      </div>`;
+  }
+
+  /** The Size by menu, beside the Layers popover while it is open: None and the number columns. */
+  private sizeMenu(): TemplateResult | typeof nothing {
+    if (!this.sizeMenuOpen) return nothing;
+    const sizeBy = this.sizedBy;
+    const options = [{value: '', title: 'None', kind: ''}, ...this.sizeColumns.map((c) => ({value: c, title: columnCaption(c), kind: 'Number'}))];
+    const choose = (value: string) => {
+      this.sizeMenuOpen = false;
+      this.changeSize({sizeBy: value === '' ? null : value});
+      void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+    };
+    // One entry is in the tab order, the one focused last, as in a radio group.
+    const keys = (e: KeyboardEvent, i: number) => {
+      const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="size-option"]'));
+      const next = {ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1}[e.key];
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        this.closeSizeMenu(true);
+        return;
+      }
+      if (next === undefined) return;
+      e.preventDefault();
+      items.forEach((item, j) => (item.tabIndex = j === next ? 0 : -1));
+      items[next]?.focus();
+    };
+    const checked = Math.max(0, options.findIndex((o) => (o.value || null) === sizeBy));
+    return html`<div part="size-menu" class="size-menu" popover="manual" role="menu" aria-labelledby="size-menu-label" @focusout=${this.onSizeMenuFocusOut}>
+      <div class="hd" id="size-menu-label">Size by</div>
+      ${options.map(
+        (o, i) => html`<button part="size-option" type="button" role="menuitemradio" data-value=${o.value} aria-checked=${(o.value || null) === sizeBy ? 'true' : 'false'}
+          tabindex=${i === checked ? '0' : '-1'} @click=${() => choose(o.value)} @keydown=${(e: KeyboardEvent) => keys(e, i)}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
+      )}
+    </div>`;
+  }
+
+  /** Close the Size by menu, putting focus back on its button with `refocus`. */
+  private closeSizeMenu(refocus: boolean): void {
+    this.sizeMenuOpen = false;
+    if (refocus) void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
+  }
+
+  /** The arrow keys on the Size by button open its menu, as a menu button's do. */
+  private onSizeByKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    this.sizeMenuOpen = true;
+  };
+
+  /** Focus leaving the Size by menu, by Tab or otherwise, closes it; Tab goes on from where focus went. */
+  private onSizeMenuFocusOut = (e: FocusEvent): void => {
+    const to = e.relatedTarget as Node | null;
+    if (to && (e.currentTarget as HTMLElement).contains(to)) return;
+    this.closeSizeMenu(false);
+  };
+
+  /** A press in the Layers popover outside the Size by button closes the Size by menu. */
+  private onPopoverPress = (e: PointerEvent): void => {
+    if (!this.sizeMenuOpen) return;
+    const button = this.renderRoot.querySelector('[part="size-by"]');
+    if (button && !e.composedPath().includes(button)) this.sizeMenuOpen = false;
+  };
+
+  /**
+   * Send a change to Size by, the size range or the scale through the explorer's properties to its
+   * map, and report all four as they will stand.
+   */
+  private changeSize(patch: {sizeBy?: string | null; min?: number; max?: number; scale?: SizeScale}): void {
+    const now = this.sizing;
+    if (patch.sizeBy !== undefined) this.sizeBy = patch.sizeBy ?? 'none';
+    if (patch.min !== undefined) this.sizeMin = patch.min;
+    if (patch.max !== undefined) this.sizeMax = patch.max;
+    if (patch.scale !== undefined) this.sizeScale = patch.scale;
+    emit(this, 'tessera-sizechange', {
+      sizeBy: patch.sizeBy !== undefined ? patch.sizeBy : this.sizedBy,
+      min: patch.min ?? now.min,
+      max: patch.max ?? now.max,
+      scale: patch.scale ?? now.scale
+    });
   }
 
   /** Apply a change made in the Display section, and report every setting as it now stands. */
@@ -1140,6 +1325,7 @@ export class TesseraExplorer extends TesseraElement {
   /** Focus goes into a sheet as it opens, and back to its tab as it closes. */
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
+    this.placeSizeMenu(changed.has('sizeMenuOpen'));
     if (this.showing) {
       const showing = this.showing;
       this.showing = null;
@@ -1151,6 +1337,35 @@ export class TesseraExplorer extends TesseraElement {
     const before = changed.get('sheet');
     if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();
     else if (before) this.renderRoot.querySelector<HTMLElement>(`[role="tab"][data-sheet="${before}"]`)?.focus();
+  }
+
+  /**
+   * Show the Size by menu in the top layer, so the popover's scrolling does not clip it, beside the
+   * popover and level with its button; focus goes to the entry chosen as it opens.
+   */
+  private placeSizeMenu(opened: boolean): void {
+    const menu = this.renderRoot.querySelector<HTMLElement>('[part="size-menu"]');
+    const button = this.renderRoot.querySelector<HTMLElement>('[part="size-by"]');
+    const popover = this.renderRoot.querySelector<HTMLElement>('[part="layers-popover"]');
+    if (!menu || !button || !popover) return;
+    if (typeof menu.showPopover === 'function' && !menu.matches(':popover-open')) {
+      try {
+        menu.showPopover();
+      } catch {
+        // Shown already; the menu is in the page either way.
+      }
+    }
+    const b = button.getBoundingClientRect();
+    const p = popover.getBoundingClientRect();
+    const width = menu.offsetWidth || 220;
+    const height = menu.offsetHeight || 0;
+    const vw = typeof innerWidth === 'number' ? innerWidth : 1024;
+    const vh = typeof innerHeight === 'number' ? innerHeight : 768;
+    const right = p.right + 16;
+    const left = right + width <= vw - 8 ? right : Math.max(8, p.left - width - 16);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(Math.max(8, Math.min(b.top - 32, vh - height - 8)))}px`;
+    if (opened) (menu.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.querySelector<HTMLElement>('button'))?.focus();
   }
 
   /** The level a levelled layer draws at when none was chosen; see `render`. */

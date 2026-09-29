@@ -11,7 +11,9 @@ import {
   type Store,
   type TokenSupplier
 } from '@tesseradb/client';
+import type {Sizing} from '@tesseradb/deck';
 import {idString} from './base.js';
+import {setSizing, sizingOf} from './colouring.js';
 import type {TesseraExplorer} from './explorer.js';
 import './explorer.js';
 
@@ -26,7 +28,8 @@ import './explorer.js';
  * A page reload makes a new model, which sends `ready` again.
  *
  * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height` and
- * `title_field` come down; `view`, `bbox`, `layers`, `colour_by` and `filters` go both ways;
+ * `title_field` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `size_max`, `size_scale` and `filters` go both ways;
  * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
  * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
  * `tessera_id` is a `u64`.
@@ -297,6 +300,24 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     report('colour_by', new Error(`${layer} is not a layer this view can colour by; ${instead}`));
   };
 
+  /** The size range and scale the kernel holds, shared with every element over `store`; `null` leaves the choice standing. */
+  const applySizing = (store: Store) => {
+    const patch: Partial<Sizing> = {};
+    const min = model.get('size_min');
+    const max = model.get('size_max');
+    const scale = model.get('size_scale');
+    if (typeof min === 'number') patch.min = min;
+    if (typeof max === 'number') patch.max = max;
+    if (typeof scale === 'string') patch.scale = scale as Sizing['scale'];
+    setSizing(store, patch);
+  };
+
+  /** The column the kernel sizes by, `null` for one size, with a sample kept under rank. */
+  const applySizeBy = (store: Store) => {
+    const sizeBy = model.get('size_by');
+    store.setSizeBy(typeof sizeBy === 'string' && sizeBy ? sizeBy : null, {rank: sizingOf(store).scale === 'rank'});
+  };
+
   // Down-sync: what the kernel holds, applied to one store (a new one, or one whose meta arrived).
   const applyControls = (store: Store) => {
     // `null` leaves the explorer's default; `[]` is none.
@@ -304,6 +325,9 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     if (Array.isArray(layers)) store.setLayers(layers.map(String));
     const colourBy = model.get('colour_by');
     if (typeof colourBy === 'string' && colourBy) store.setColourBy(colourBy);
+    applySizing(store);
+    const sizeBy = model.get('size_by');
+    if (typeof sizeBy === 'string' && sizeBy) applySizeBy(store);
     const filters = model.get('filters');
     if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
   };
@@ -341,6 +365,11 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
         patch.view = view.id;
         patch.layers = store.get('artifacts').layers;
         patch.colour_by = store.get('legend').colourBy;
+        const sizing = sizingOf(store);
+        patch.size_by = store.get('legend').sizeBy;
+        patch.size_min = sizing.min;
+        patch.size_max = sizing.max;
+        patch.size_scale = sizing.scale;
         patch.filters = store.get('filters').expr;
       }
       const region = store.get('region');
@@ -416,6 +445,16 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       checkColour(v.store, c);
     }
   });
+  model.on('change:size_by', () => {
+    if (state.syncingUp) return;
+    for (const v of state.views.values()) if (v.store) applySizeBy(v.store);
+  });
+  for (const key of ['size_min', 'size_max', 'size_scale']) {
+    model.on(`change:${key}`, () => {
+      if (state.syncingUp) return;
+      for (const v of state.views.values()) if (v.store) applySizing(v.store);
+    });
+  }
   model.on('change:filters', () => {
     if (state.syncingUp) return;
     const expr = (model.get('filters') as FilterExpr | null) ?? null;

@@ -47,6 +47,12 @@ type       = "category"
 render     = true
 index      = true
 vocabulary = "kind"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+field  = "entity_id"
+unique = true
 "#;
 
 const KINDS: [Option<&str>; 5] = [Some("a"), Some("b"), Some("c"), Some("d"), None];
@@ -104,6 +110,7 @@ fn build_bundle(dir: &Path) -> std::path::PathBuf {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

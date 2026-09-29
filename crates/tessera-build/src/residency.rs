@@ -16,9 +16,9 @@
 //! # What is resident there
 //!
 //! From the attribute pass to the segment write the build holds the **published memberships** in
-//! the store, as Roaring, and nothing else this model charges. The two structures that resolve a
-//! source id — the **sorted source ids** at 8 bytes an item and the **ordinal→entity map** at 4 —
-//! are both files under `.build-tmp/` and are charged to the disk below rather than to memory.
+//! the store, as Roaring, and nothing else this model charges. Each file's **row numbers**, 4 bytes
+//! a row, and the **ordinal→entity map**, 4 bytes an item, are files under `.build-tmp/` and are
+//! charged to the disk below rather than to memory.
 //!
 //! **The publication is not a batch.** The loop's residency shrinks when the stride does; this
 //! does not shrink at all, because a member table is its own size. So for that one term the
@@ -32,18 +32,6 @@
 //! to the last level published. They are sorted runs and a merged table under `.build-tmp/` now
 //! (`layers.rs`), read back one artifact at a time, so what the plan holds is a spill budget and
 //! what the disk holds is the corpus.
-//!
-//! The **sorted source ids** were the largest item on it until 2026-09-10: 8 bytes an item of
-//! anonymous memory, 26.0 GiB at the GBIF rung's 3.50×10⁹ items, and 52.1 GiB while pass one built
-//! them, because each view's ids were read into a vector of their own and then concatenated into a
-//! second. Both are gone — the union is one array of the final length, filled segment by segment,
-//! and the array is a file under `.build-tmp/` ([`crate::pipeline::SourceIds`]). Measured at
-//! 10⁹ items: a 14.96 GiB peak became 7.55 GiB of page cache over a flat 228 MiB of anonymous
-//! memory (`probes/2026-09-10-source-ids-memory/`).
-//!
-//! On a corpus that numbers its rows the array is not written at all. Pass one proves the union is
-//! one unbroken range from a presence bitmap a sixty-fourth of its size, and an ordinal is then a
-//! subtraction — so this term is zero, and [`IdShape::slots`] is what says which build is which.
 //!
 //! Every **declared column in entity order** was the other half of this list and the larger half of
 //! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
@@ -169,8 +157,8 @@ fn arena_offset(ty: ScalarType) -> u64 {
 /// says which of them it is on the disk for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
-    /// Pass one to the pairs pack: the sorted source ids, the pair buckets, and each view's
-    /// geometry as it is read.
+    /// The identity pass to the pairs pack: each file's row numbers, the pair buckets, and each
+    /// view's geometry as it is read.
     Spill,
     /// The batch loop and the postings write: the term bands, the anchor geometry, the
     /// ordinal→entity map, and the first of the bundle's own files.
@@ -646,12 +634,6 @@ fn term_postings_bytes(rows: u64, n: u64) -> u64 {
     payload.saturating_add(ROARING_CONTAINER_HEADER.saturating_mul(containers))
 }
 
-/// How many bytes a LEB128 varint of `value` occupies: seven bits a byte, one byte for zero.
-fn varint_len(value: u64) -> u64 {
-    let bits = 64 - u64::from(value.leading_zeros());
-    bits.div_ceil(7).max(1)
-}
-
 /// **What the plan learned about this corpus** that the declaration does not carry: the item
 /// count, the access relation's shape and the batching the memory budget derived. Every field is
 /// known once pass one and the dictionary have run, which is where the pre-flight sits.
@@ -669,37 +651,12 @@ pub(crate) struct Corpus<'a> {
     pub bucket_in_ram: bool,
 }
 
-/// The corpus's **source ids**, as the two terms that are functions of them need them.
-///
-/// Both are known before the plan: pass one has read every view's ids into one array and sorted
-/// it (`crate::pipeline::read_source_ids_union`).
+/// The files the identity pass numbered rows in, where a row's number is not its position
+/// ([`crate::ids::Numbers`]): 4 bytes a row, under `.build-tmp/`, until the layer publication has
+/// read the last of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct IdShape {
-    /// **The length the ids file is allocated at, and zero where there is no file.**
-    ///
-    /// Pass one writes no array where it can prove the union is one unbroken range before reading
-    /// the ids, which is every corpus that numbers its rows ([`crate::pipeline::SourceIds`]).
-    /// Where it does write one and read the ids into it unsorted, the length is the rows every
-    /// view declares before the union dedups them — `n` is what survives, and the two differ by
-    /// however much the views overlap: 1.76× on `treeoflife-1m`, 4.29× on `multiview`.
-    pub slots: u64,
-    /// **The largest source id**, which is what sets the varint width the member spill's runs are
-    /// charged at. Not the distance between the lowest and the highest: an artifact's first source
-    /// is written absolutely and only the rest as deltas (`crate::spill`'s member runs), so a
-    /// corpus whose ids are large and narrowly spread pays the full width on every artifact's
-    /// first entry. Every value a run encodes is at most this one.
-    pub max_id: u64,
-}
-
-impl IdShape {
-    /// The shape of a corpus whose ids are exactly `0..n` — one view, no duplicates, dense ids.
-    #[cfg(test)]
-    fn dense(n: u64) -> IdShape {
-        IdShape {
-            slots: n,
-            max_id: n.saturating_sub(1),
-        }
-    }
+pub(crate) struct NumberFiles {
+    pub bytes: u64,
 }
 
 /// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
@@ -792,7 +749,8 @@ const MAPPED_BYTES_PER_MEMBER_ENTRY: u64 = 3;
 /// table's deltas are over entities, which live in `0..n`; the runs' are over **source ids**
 /// (`crate::spill`'s member runs), which are whatever the corpus's publisher issued. A corpus
 /// whose ids are the row number spends one or two bytes on a delta; one whose ids are hashes over
-/// the `u64` space spends nine or ten. [`member_spill_bytes`] is where that difference is charged.
+/// the `u64` space would spend nine or ten. A number is below the item count, so the two are one
+/// width.
 ///
 /// ⊘ **Four is an estimate for a corpus whose ids are dense, not a ceiling over every id space.**
 /// GBIF's taxonomy spills at most 1,084.6 MB of runs and table together over 377,367,273 declared
@@ -802,17 +760,9 @@ const MAPPED_BYTES_PER_MEMBER_ENTRY: u64 = 3;
 /// 68 MiB table — 2.2 B an entry.
 const SPILLED_BYTES_PER_MEMBER_ENTRY: u64 = 4;
 
-/// What the member spill's runs and merged table come to for `entries` pairs over an id space
-/// topping out at [`IdShape::max_id`] and an entity space of `n`.
-///
-/// [`SPILLED_BYTES_PER_MEMBER_ENTRY`] for the pair of files, plus **whatever wider a source-id
-/// entry is than an entity one**: the runs encode source ids and the table entities, so a corpus
-/// whose ids are hashes pays the extra varint bytes on the runs alone. The difference is zero for
-/// every corpus whose ids are its row numbers, which is every corpus on the ladder, and six bytes
-/// an entry for ids spread over the whole `u64` space.
-fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
-    let sparse = varint_len(ids.max_id).saturating_sub(varint_len(n));
-    entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY + sparse)
+/// What the member spill's runs and merged table come to for `entries` pairs.
+fn member_spill_bytes(entries: u64) -> u64 {
+    entries.saturating_mul(SPILLED_BYTES_PER_MEMBER_ENTRY)
 }
 
 /// The residency of everything the batch loop's model does not cover.
@@ -821,7 +771,7 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
 /// `level_entries` a ceiling on any one level's, those being the two windows a member entry is held
 /// in: the spill holds every pair at once, the publication one level's. `layer_entries` is the
 /// largest single layer's declared pairs, which is what the artifact pass partitions a level at a
-/// time. `n` is the item count, and `ids` the source ids' own shape ([`IdShape`]).
+/// time. `n` is the item count, and `numbers` the identity pass's files ([`NumberFiles`]).
 ///
 /// `scoped_render` is the group-scoped render columns of the view that carries the most of them
 /// ([`scoped_render_types`]). They are not in `columns`, which is the declaration's entity-scoped
@@ -829,35 +779,23 @@ fn member_spill_bytes(entries: u64, ids: IdShape, n: u64) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn entity_order_residency(
     n: u64,
-    ids: IdShape,
+    numbers: NumberFiles,
     columns: &[ColumnCost],
     scoped_render: &[ScalarType],
     member_entries: u64,
     level_entries: u64,
     layer_entries: u64,
     memory_budget: u64,
-    supplied: Option<&Term>,
 ) -> Residency {
     let mut terms = vec![
-        // **A file under `.build-tmp/` where there is one at all**, and so charged to the disk
-        // rather than to memory. The ids are read sequentially by every pass but one — the join's
-        // merge sweep, the ordinal walks — and the exception is
-        // `layers::publish`'s binary search, which is the random-access case `MappedArray` was
-        // written for. They are released at the layer publication, so they are on the disk for
-        // every phase of the pre-flight but the assembly.
-        //
-        // **Charged over the slots the file is allocated at and not over `n`**, and at nothing
-        // where pass one proved the union is one unbroken range and wrote no array
-        // ([`IdShape::slots`]). Where it did write one, a corpus whose views overlap holds a file
-        // larger than the entity space it produces: the union is allocated at the sum of the
-        // views' row counts and the dedup moves values inside it.
+        // **Files under `.build-tmp/`**, and so charged to the disk rather than to memory. Each is
+        // read sequentially by the passes over its file, and the member rows are the last of them,
+        // read at the layer publication.
         Term {
-            what: format!(
-                "the sorted source ids, 8 B over {} slot(s), in .build-tmp/ (released at the \
-                 layer publication)",
-                ids.slots
-            ),
-            bytes: 8u64.saturating_mul(ids.slots),
+            what: "every file's row numbers, 4 B a row, in .build-tmp/ (released at the layer \
+                   publication)"
+                .to_string(),
+            bytes: numbers.bytes,
             mapped: true,
             phases: Phases::SPILL.and(Phases::BANDS).and(Phases::JOIN),
             constant: false,
@@ -1058,9 +996,9 @@ pub(crate) fn entity_order_residency(
             what: format!(
                 "the member spill's runs and the table they merge into, at an estimate of \
                  {} B a member entry, in .build-tmp/",
-                member_spill_bytes(1, ids, n)
+                member_spill_bytes(1)
             ),
-            bytes: member_spill_bytes(member_entries, ids, n),
+            bytes: member_spill_bytes(member_entries),
             mapped: true,
             phases: Phases::JOIN,
             constant: false,
@@ -1244,8 +1182,6 @@ pub(crate) fn entity_order_residency(
         phases: Phases::SPILL.onwards(),
         constant: true,
     });
-    // **The supplied keys' arena**, charged before the stages are sized so they leave room for it.
-    terms.extend(supplied.cloned());
     fit(
         Residency {
             terms,
@@ -1488,7 +1424,7 @@ const ROUTE_HEADROOM: u64 = 2;
 /// measured — and space is what the 3.50×10⁹-row rung ran out of.
 ///
 /// What is compared is not the arena on its own: it stands beside every other declared column, the
-/// sorted source ids, the ordinal→entity map and the member spill, all of which are files in the
+/// row numbers, the ordinal→entity map and the member spill, all of which are files in the
 /// same window. So the test is the **largest phase of the entity-order stages' own scratch**
 /// against the free space with [`ROUTE_HEADROOM`] left over. ⊘ That window is not the whole build's
 /// disk: the bundle's own bytes and the postings are [`disk`]'s and no route moves them. The
@@ -1505,10 +1441,9 @@ const ROUTE_HEADROOM: u64 = 2;
 pub(crate) fn plan_routes(
     args: &crate::BuildArgs,
     n: u64,
-    ids: IdShape,
+    numbers: NumberFiles,
     payloads: &[f64],
     free: Option<u64>,
-    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let spilled = crate::pipeline::ColumnRoutes::every_available(&args.schema);
     let (columns, entries, level_entries, layer_entries) =
@@ -1516,7 +1451,7 @@ pub(crate) fn plan_routes(
     choose_routes(
         &args.schema,
         n,
-        ids,
+        numbers,
         columns,
         &scoped_render_types(args),
         entries,
@@ -1525,7 +1460,6 @@ pub(crate) fn plan_routes(
         free,
         args.memory_budget
             .unwrap_or_else(crate::pipeline::detect_memory_budget),
-        supplied_key_arena(id_space).as_ref(),
     )
 }
 
@@ -1535,14 +1469,16 @@ pub(crate) fn plan_routes(
 pub(crate) fn routes_for(
     args: &crate::BuildArgs,
     n: u64,
-    ids: IdShape,
+    numbers_bytes: u64,
     payloads: &[f64],
     free: Option<u64>,
     route: crate::ExtentRoute,
-    id_space: &crate::ids::IdSpace,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
+    let numbers = NumberFiles {
+        bytes: numbers_bytes,
+    };
     let forced = match route {
-        crate::ExtentRoute::Derived => return plan_routes(args, n, ids, payloads, free, id_space),
+        crate::ExtentRoute::Derived => return plan_routes(args, n, numbers, payloads, free),
         crate::ExtentRoute::Arena => crate::pipeline::ColumnRoutes::forced_only(&args.schema),
         crate::ExtentRoute::Extents => crate::pipeline::ColumnRoutes::every_available(&args.schema),
     };
@@ -1552,14 +1488,13 @@ pub(crate) fn routes_for(
         .unwrap_or_else(crate::pipeline::detect_memory_budget);
     let tail = entity_order_residency(
         n,
-        ids,
+        numbers,
         &columns,
         &scoped_render_types(args),
         entries,
         level_entries,
         layer_entries,
         budget,
-        supplied_key_arena(id_space).as_ref(),
     );
     (forced, tail)
 }
@@ -1608,7 +1543,7 @@ fn scoped_render_types(args: &crate::BuildArgs) -> Vec<ScalarType> {
 fn choose_routes(
     schema: &crate::config::Schema,
     n: u64,
-    ids: IdShape,
+    numbers: NumberFiles,
     mut columns: Vec<ColumnCost>,
     scoped_render: &[ScalarType],
     entries: u64,
@@ -1616,7 +1551,6 @@ fn choose_routes(
     layer_entries: u64,
     free: Option<u64>,
     memory_budget: u64,
-    supplied: Option<&Term>,
 ) -> (crate::pipeline::ColumnRoutes, Residency) {
     let mut routes = crate::pipeline::ColumnRoutes::every_available(schema);
     let ceiling = free.unwrap_or(0) / ROUTE_HEADROOM;
@@ -1628,14 +1562,13 @@ fn choose_routes(
         columns[index].framing_bytes = 0;
         let candidate = entity_order_residency(
             n,
-            ids,
+            numbers,
             &columns,
             scoped_render,
             entries,
             level_entries,
             layer_entries,
             memory_budget,
-            supplied,
         );
         // **The arena route carries its offset lane's 12 B an item** — the `(entity, at)` records
         // of the value partition the join replays the `at` words from (`crate::pipeline`'s
@@ -1651,14 +1584,13 @@ fn choose_routes(
     }
     let tail = entity_order_residency(
         n,
-        ids,
+        numbers,
         &columns,
         scoped_render,
         entries,
         level_entries,
         layer_entries,
         memory_budget,
-        supplied,
     );
     (routes, tail)
 }
@@ -1669,31 +1601,6 @@ fn choose_routes(
 /// neither of which a route moves, and they are memory rather than space.
 pub(crate) fn stage_scratch(residency: &Residency) -> u64 {
     residency.peak().1
-}
-
-/// The supplied keys' arena, as a term of the entity-order residency (`crate::ids`).
-///
-/// **Anonymous memory with no spill route**, so it is charged rather than reported: the keys are
-/// interned before pass one and read by every pass after it. A key costs its `Box<[u8]>` in the
-/// interned vector, 16 bytes, plus its own heap allocation, which glibc rounds to a 16-byte chunk
-/// with an 8-byte header and a 32-byte floor. Modelled from the mean key length, so a corpus of
-/// widely varying key lengths is charged its mean rather than its distribution.
-pub(crate) fn supplied_key_arena(id_space: &crate::ids::IdSpace) -> Option<Term> {
-    let keys = id_space.supplied()?;
-    let mean = keys.mean_key_len();
-    let chunk = (mean + 8).next_multiple_of(16).max(32);
-    Some(Term {
-        what: format!(
-            "the supplied identity keys, at {} B/item: a 16 B boxed slice and a {chunk} B \
-             allocator chunk over a {mean} B mean key. Interned before pass one and read by every \
-             pass after it, with no spill route",
-            16 + chunk
-        ),
-        bytes: (16 + chunk) * keys.len() as u64,
-        mapped: false,
-        phases: Phases::SPILL.onwards(),
-        constant: false,
-    })
 }
 
 /// **What the whole build asks the disk for**, phase by phase, so the pre-flight warns on the
@@ -2158,6 +2065,134 @@ pub(crate) fn forecast_warning(disk: &Residency, corpus: Corpus<'_>, free: u64) 
     ))
 }
 
+/// **What the identity pass asks the disk for** ([`crate::ids`]), printed before it runs, with a
+/// warning where the free space is short of it.
+///
+/// It warns and the build goes on, as the build's own disk pre-flight does
+/// (`crate::pipeline::plan_build` carries why).
+pub(crate) fn report_identity_disk(
+    args: &crate::BuildArgs,
+    free: Option<u64>,
+) -> crate::error::Result<()> {
+    let (peak, numbers) = identity_disk(args)?;
+    eprintln!(
+        "identity: at most ~{} MiB of scratch at peak, up to {} MiB of it the row numbers the \
+         later passes read",
+        peak >> 20,
+        numbers >> 20
+    );
+    if let Some(free) = free.filter(|&free| free < peak) {
+        eprintln!(
+            "warning: the identity pass is forecast to need ~{peak} bytes of scratch at peak \
+             against {free} available at the output path. The forecast is a model, so the build \
+             goes on; if it runs out, the error names the file it could not write"
+        );
+    }
+    Ok(())
+}
+
+/// The identity pass's scratch at its peak, and the part of it that is the files' numbers the later
+/// passes read. Modelled from each file's footer, not measured, and an upper bound on both.
+///
+/// The pass reads one file at a time, so the peak is one file's scratch beside the holdings and
+/// numbers the files before it left. A row costs a field's entry (a key and a row's four bytes:
+/// 12 bytes for an integer, 20 for a keyword) in each sort and run, and a file's scratch is the
+/// largest of three phases:
+///
+/// - **The merge.** Each field's sort, which becomes the field's unset keys as it is drained; the
+///   decisions routed by row, 8 bytes a row and field; and, in a file carrying several fields and
+///   setting values, the candidates' sort at 12 bytes a row and field.
+/// - **The rows decided against each other**, in a file carrying several fields, beside its unset
+///   keys: the decisions as they are read and deleted with the sort of the items rows name, 8
+///   bytes a row; that sort with the sort of the rows it refuses; or the candidates' sort with a
+///   bit a row and field.
+/// - **The values set**, one field at a time: every field's unset keys or the runs made from them,
+///   beside one field's copy of its own, or of its holdings as a changed value is removed from
+///   them.
+///
+/// A sort holds two copies of its largest bucket while it routes that bucket again, and keys that
+/// arrive nearly sorted put most of a sort in one bucket. So the merge and each sort are charged a
+/// second copy of their largest part.
+///
+/// Every file's numbers are charged at 4 bytes a row. A view's points read whole write none where
+/// every row creates an item and none is refused, which the footer cannot tell. The holdings a
+/// file leaves are its unset keys.
+pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u64, u64)> {
+    use tessera_lifecycle::resolve::Batch;
+    let mut held: std::collections::BTreeMap<u16, u64> = Default::default();
+    let mut numbers = 0u64;
+    let mut peak = 0u64;
+    for read in crate::ids::reads(args)? {
+        let crate::ids::ReadInput::File { path, fields, .. } = &read.input else {
+            continue;
+        };
+        let groups = crate::row_groups::FileGroups::open(path)?;
+        let rows = groups.rows();
+        let carried =
+            crate::ids::carried_unique(groups.schema(), fields, &args.schema).unwrap_or_default();
+        let entries: Vec<(u16, u64)> = carried
+            .iter()
+            .map(|field| {
+                let entry = match field.ty {
+                    ScalarType::Keyword => 20,
+                    _ => 12,
+                };
+                (field.position, rows.saturating_mul(entry))
+            })
+            .collect();
+        let entry: u64 = entries.iter().map(|&(_, bytes)| bytes).sum();
+        let largest = entries.iter().map(|&(_, bytes)| bytes).max().unwrap_or(0);
+        let fields = carried.len().max(1) as u64;
+        let own_numbers = 4 * rows;
+        let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
+        let several = carried.len() > 1;
+        let one_row_per_item = read.batch != Batch::Names;
+        let keeps_unset = sets_values && (read.batch == Batch::Creates || several);
+        let candidates = match sets_values && several {
+            true => rows.saturating_mul(12 * fields),
+            false => 0,
+        };
+        let decisions = rows.saturating_mul(8 * fields);
+        let merge = entry
+            .saturating_add(largest)
+            .saturating_add(decisions)
+            .saturating_add(candidates);
+        let against = match several && (one_row_per_item || sets_values) {
+            true => {
+                let named = match one_row_per_item {
+                    true => rows.saturating_mul(8),
+                    false => 0,
+                };
+                let walk = decisions.saturating_add(named);
+                let refused = named.saturating_mul(3);
+                let claimed = candidates.saturating_mul(2).saturating_add(rows * fields / 8);
+                entry.saturating_add(walk.max(refused).max(claimed))
+            }
+            false => 0,
+        };
+        let set = match keeps_unset {
+            true => {
+                let one = entries
+                    .iter()
+                    .map(|&(position, bytes)| bytes.max(held.get(&position).copied().unwrap_or(0)))
+                    .max()
+                    .unwrap_or(0);
+                entry.saturating_add(one)
+            }
+            false => 0,
+        };
+        let before: u64 = held.values().sum();
+        peak = peak.max(before + numbers + own_numbers + merge.max(against).max(set));
+        numbers += own_numbers;
+        if keeps_unset {
+            for (position, bytes) in entries {
+                *held.entry(position).or_default() += bytes;
+            }
+        }
+    }
+    Ok((peak, numbers))
+}
+
 /// What the artifact pass's row-column lanes cost **one** view.
 ///
 /// **The lane's size depends on which of two forms a level takes, and a flat `4 × n` a level is
@@ -2454,7 +2489,7 @@ mod tests {
     fn choose_routes(
         schema: &crate::config::Schema,
         n: u64,
-        ids: IdShape,
+        numbers: NumberFiles,
         columns: Vec<ColumnCost>,
         entries: u64,
         level_entries: u64,
@@ -2463,7 +2498,7 @@ mod tests {
         super::choose_routes(
             schema,
             n,
-            ids,
+            numbers,
             columns,
             // No group-scoped family: the fixtures here are a schema, and a scoped column's lanes
             // are `plan_routes`' own input from the view declarations.
@@ -2475,20 +2510,19 @@ mod tests {
             entries,
             free,
             u64::MAX,
-            None,
         )
     }
 
     fn entity_order_residency(
         n: u64,
-        ids: IdShape,
+        numbers: NumberFiles,
         columns: &[ColumnCost],
         member_entries: u64,
         level_entries: u64,
     ) -> Residency {
         super::entity_order_residency(
             n,
-            ids,
+            numbers,
             columns,
             // As above: the fixtures declare no group-scoped render family.
             &[],
@@ -2497,7 +2531,6 @@ mod tests {
             // As above: one layer, so the largest layer's entries are all of them.
             member_entries,
             u64::MAX,
-            None,
         )
     }
 
@@ -2541,7 +2574,7 @@ mod tests {
             column(ScalarType::U32, 0),
         ];
         let entries = (2 * n) + (34 * n / 10) + n;
-        entity_order_residency(n, IdShape::dense(n), &columns, entries, entries)
+        entity_order_residency(n, NumberFiles::default(), &columns, entries, entries)
     }
 
     /// Every anonymous term that is a **rate** over the corpus.
@@ -2568,16 +2601,15 @@ mod tests {
         );
     }
 
-    /// **The sorted source ids are reported and not charged.** They are a file under
-    /// `.build-tmp/`, so they appear in the breakdown at their full size — 8 B an item, 26.0 GiB
-    /// at the GBIF rung — and add nothing to the figure `--memory-budget` is compared against.
-    /// Charged, they were almost the whole of that figure at rung 6: 26,670 MiB of the 26,734 the
-    /// model asked a 47 GiB machine for. It asks 13,399 now, and the ids are on the disk.
+    /// **The row numbers are reported and not charged.** They are files under `.build-tmp/`, so
+    /// they appear in the breakdown at their full size and add nothing to the figure
+    /// `--memory-budget` is compared against.
     #[test]
-    fn the_source_ids_are_reported_as_mapped_and_charged_at_nothing() {
+    fn the_row_numbers_are_reported_as_mapped_and_charged_at_nothing() {
         let n = 1_000_000_u64;
-        let with_layer = entity_order_residency(n, IdShape::dense(n), &[], n, n);
-        let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let numbers = NumberFiles { bytes: 4 * n };
+        let with_layer = entity_order_residency(n, numbers, &[], n, n);
+        let without = entity_order_residency(n, numbers, &[], 0, 0);
 
         // The publication is the only charged term either way; the ids move the mapped figure and
         // not the charged one.
@@ -2589,105 +2621,19 @@ mod tests {
         let ids = with_layer
             .terms
             .iter()
-            .find(|t| t.what.contains("the sorted source ids"))
-            .expect("the ids are a term of their own");
-        assert_eq!(ids.bytes, 8 * n);
+            .find(|t| t.what.contains("every file's row numbers"))
+            .expect("the numbers are a term of their own");
+        assert_eq!(ids.bytes, 4 * n);
         assert!(
             ids.mapped,
-            "the ids are a file, not memory the machine must have"
+            "the numbers are files, not memory the machine must have"
         );
         assert!(
             with_layer
                 .describe()
-                .contains("MiB (mapped)  the sorted source ids"),
+                .contains("MiB (mapped)  every file's row numbers"),
             "a refusal has to show the disk the build wants: {}",
             with_layer.describe()
-        );
-    }
-
-    /// **The ids file is charged over the rows every view declares, not over the entity space.**
-    /// Pass one allocates the union at the sum of the views' row counts and dedups inside it, so a
-    /// corpus whose views overlap holds a file larger than the `n` it produces —
-    /// 1.76× on `treeoflife-1m` and 4.29× on `multiview`.
-    #[test]
-    fn the_source_ids_are_charged_over_the_slots_the_file_is_allocated_at() {
-        let n = 1_000_000;
-        let dense = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
-        let overlapping = entity_order_residency(
-            n,
-            IdShape {
-                slots: 4 * n,
-                max_id: n - 1,
-            },
-            &[],
-            0,
-            0,
-        );
-        assert_eq!(
-            overlapping.at(Phase::Spill) - dense.at(Phase::Spill),
-            8 * 3 * n,
-            "four views over one entity space cost four ids files, not one"
-        );
-    }
-
-    /// **A build that wrote no ids array is charged nothing for one**, and the term disappears from
-    /// what a refusal prints rather than standing at zero. Pass one proves the union is one
-    /// unbroken range from a presence bitmap and writes no array
-    /// ([`crate::pipeline::SourceIds`]), which is every corpus on the ladder but `multiview`.
-    #[test]
-    fn a_proved_range_is_charged_no_ids_file_at_all() {
-        let n = 1_000_000;
-        let held = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
-        let ranged = entity_order_residency(
-            n,
-            IdShape {
-                slots: 0,
-                max_id: n - 1,
-            },
-            &[],
-            0,
-            0,
-        );
-        assert_eq!(
-            held.at(Phase::Spill) - ranged.at(Phase::Spill),
-            8 * n,
-            "the array is the whole difference between the two routes"
-        );
-        assert!(
-            !ranged.describe().contains("the sorted source ids"),
-            "a term at zero bytes is not a term: {}",
-            ranged.describe()
-        );
-    }
-
-    /// **The member spill's runs widen with the largest source id.** The runs encode source ids
-    /// and the merged table entities, so a corpus whose ids are hashes over the `u64` space spends
-    /// the extra varint bytes on the runs alone.
-    #[test]
-    fn the_member_spill_widens_with_a_sparse_id_space() {
-        let n = 1_000_000;
-        let entries = 4_000_000;
-        let dense = entity_order_residency(n, IdShape::dense(n), &[], entries, entries);
-        let hashed = entity_order_residency(
-            n,
-            IdShape {
-                slots: n,
-                max_id: u64::MAX,
-            },
-            &[],
-            entries,
-            entries,
-        );
-        // varint_len(u64::MAX) = 10 against varint_len(10^6) = 3.
-        assert_eq!(
-            hashed.at(Phase::Join) - dense.at(Phase::Join),
-            entries * 7,
-            "a delta over the whole u64 space is ten bytes where one over 10^6 entities is three"
-        );
-        assert_eq!(
-            hashed.total(),
-            dense.total(),
-            "the spill is a file either way"
         );
     }
 
@@ -2698,10 +2644,10 @@ mod tests {
     #[test]
     fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
+        let bare = entity_order_residency(n, NumberFiles::default(), &[], 0, 0);
         let with_keyword = entity_order_residency(
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             &[column(ScalarType::Keyword, 400 * n)],
             0,
             0,
@@ -2745,7 +2691,7 @@ mod tests {
         let n = 10_000_000;
         let payload = 400 * n;
         for ty in [ScalarType::Text, ScalarType::Keyword, ScalarType::Utf8] {
-            let route = entity_order_residency(n, IdShape::dense(n), &[spilled(ty, payload)], 0, 0);
+            let route = entity_order_residency(n, NumberFiles::default(), &[spilled(ty, payload)], 0, 0);
             let term = route
                 .terms
                 .iter()
@@ -2758,7 +2704,7 @@ mod tests {
                 term.what
             );
             // The arena route on the same column, for the difference the routing is worth.
-            let arena = entity_order_residency(n, IdShape::dense(n), &[column(ty, payload)], 0, 0);
+            let arena = entity_order_residency(n, NumberFiles::default(), &[column(ty, payload)], 0, 0);
             let held = arena
                 .terms
                 .iter()
@@ -2772,7 +2718,7 @@ mod tests {
             // characters do ([`extent_framing_bytes`]).
             let framed = entity_order_residency(
                 n,
-                IdShape::dense(n),
+                NumberFiles::default(),
                 &[ColumnCost {
                     framing_bytes: extent_framing_bytes(n),
                     ..spilled(ty, payload)
@@ -2881,7 +2827,7 @@ mod tests {
         let schema = route_schema(&[(ScalarType::Keyword, false)]);
         let scratch_with_arena = stage_scratch(&entity_order_residency(
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             &[column(ScalarType::Keyword, payload)],
             0,
             0,
@@ -2890,7 +2836,7 @@ mod tests {
         let fits = choose_routes(
             &schema,
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             vec![spilled(ScalarType::Keyword, payload)],
             0,
             0,
@@ -2904,7 +2850,7 @@ mod tests {
         let does_not = choose_routes(
             &schema,
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             vec![spilled(ScalarType::Keyword, payload)],
             0,
             0,
@@ -2930,7 +2876,7 @@ mod tests {
             spilled(ScalarType::Keyword, 400 * n),
             spilled(ScalarType::Utf8, 400 * n),
         ];
-        let (routes, _) = choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, None);
+        let (routes, _) = choose_routes(&schema, n, NumberFiles::default(), columns, 0, 0, None);
         assert!(routes.takes_extents(0) && routes.takes_extents(1));
     }
 
@@ -2950,7 +2896,7 @@ mod tests {
                 spilled(ScalarType::Keyword, payload),
             ];
             let (routes, _) =
-                choose_routes(&schema, n, IdShape::dense(n), columns, 0, 0, Some(free));
+                choose_routes(&schema, n, NumberFiles::default(), columns, 0, 0, Some(free));
             assert!(
                 routes.takes_extents(0),
                 "text spills with {free} bytes free"
@@ -2974,7 +2920,7 @@ mod tests {
         let schema = route_schema(&[(ScalarType::Keyword, false), (ScalarType::Utf8, false)]);
         let one = stage_scratch(&entity_order_residency(
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             &[
                 column(ScalarType::Keyword, payload),
                 spilled(ScalarType::Utf8, payload),
@@ -2984,7 +2930,7 @@ mod tests {
         ));
         let both = stage_scratch(&entity_order_residency(
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             &[
                 column(ScalarType::Keyword, payload),
                 column(ScalarType::Utf8, payload),
@@ -3000,7 +2946,7 @@ mod tests {
         let (routes, _) = choose_routes(
             &schema,
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             columns,
             0,
             0,
@@ -3045,7 +2991,7 @@ mod tests {
         let (_routes, residency) = super::choose_routes(
             &schema,
             N,
-            IdShape::dense(N),
+            NumberFiles::default(),
             columns,
             &[],
             3 * N,
@@ -3053,7 +2999,6 @@ mod tests {
             3 * N,
             Some(459_000_000_000),
             BUDGET,
-            None,
         );
         let (phase, peak) = residency.memory_peak();
         assert!(
@@ -3117,7 +3062,7 @@ mod tests {
         // 459 GB of disk, which is what the box the rung was attempted on has.
         let free = Some(459_000_000_000);
         for (n, spills) in [(125_789_091u64, false), (3_495_729_729u64, true)] {
-            let (routes, _) = choose_routes(&schema, n, IdShape::dense(n), gbif(n), 3 * n, n, free);
+            let (routes, _) = choose_routes(&schema, n, NumberFiles::default(), gbif(n), 3 * n, n, free);
             assert_eq!(
                 routes.takes_extents(3),
                 spills,
@@ -3140,14 +3085,14 @@ mod tests {
         let extent_bytes = 200 * n;
         // The source ids and the ordinal→entity map are files whatever the schema declares, so
         // each figure below is stated against a build declaring no column at all.
-        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0).at(Phase::Index);
+        let bare = entity_order_residency(n, NumberFiles::default(), &[], 0, 0).at(Phase::Index);
 
-        let without = entity_order_residency(n, IdShape::dense(n), &[plain], 0, 0);
+        let without = entity_order_residency(n, NumberFiles::default(), &[plain], 0, 0);
         assert_eq!(without.at(Phase::Index) - bare, extent_bytes);
 
         // The runs are charged the source's characters, being uncompressed where the extents that
         // hold the same prose are not.
-        let with = entity_order_residency(n, IdShape::dense(n), &[indexed], 0, 0);
+        let with = entity_order_residency(n, NumberFiles::default(), &[indexed], 0, 0);
         assert_eq!(with.at(Phase::Index) - bare, extent_bytes + 400 * n);
         assert_eq!(
             with.total(),
@@ -3171,8 +3116,8 @@ mod tests {
     fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
         let n = 10_000_000;
         let rows = 64_000_000;
-        let without = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
-        let with = entity_order_residency(n, IdShape::dense(n), &[], rows, rows);
+        let without = entity_order_residency(n, NumberFiles::default(), &[], 0, 0);
+        let with = entity_order_residency(n, NumberFiles::default(), &[], rows, rows);
         // The Roaring copies, and the artifact pass's bucket, which holds one record per member
         // entry in its row range and so rises with the layer's entries where the rest of the
         // model's partitions rise with the rows alone: 16 B a record over 128 buckets, net of the
@@ -3204,16 +3149,17 @@ mod tests {
     }
 
     /// **A phase is charged what stands through it and not what the build ever writes.** The
-    /// sorted source ids go back at the layer publication, so they are the join phase's and no
-    /// later phase's; the packed member extents are written there and never released, so they are
-    /// that phase's and every one after it.
+    /// row numbers go back at the layer publication, so they are the join phase's and no later
+    /// phase's; the packed member extents are written there and never released, so they are that
+    /// phase's and every one after it.
     #[test]
     fn a_term_is_charged_to_the_phases_it_stands_through() {
         let n = 10_000_000;
         let entries = 64_000_000;
-        let residency = entity_order_residency(n, IdShape::dense(n), &[], entries, entries);
+        let ids = 4 * n;
+        let residency =
+            entity_order_residency(n, NumberFiles { bytes: ids }, &[], entries, entries);
 
-        let ids = 8 * n;
         assert_eq!(
             residency.at(Phase::Join) - residency.at(Phase::Index),
             ids + entries * SPILLED_BYTES_PER_MEMBER_ENTRY,
@@ -3241,9 +3187,9 @@ mod tests {
             unique: true,
             ..plain
         };
-        let none = entity_order_residency(n, IdShape::dense(n), &[plain, plain], 0, 0);
-        let one = entity_order_residency(n, IdShape::dense(n), &[unique, plain], 0, 0);
-        let two = entity_order_residency(n, IdShape::dense(n), &[unique, unique], 0, 0);
+        let none = entity_order_residency(n, NumberFiles::default(), &[plain, plain], 0, 0);
+        let one = entity_order_residency(n, NumberFiles::default(), &[unique, plain], 0, 0);
+        let two = entity_order_residency(n, NumberFiles::default(), &[unique, unique], 0, 0);
         assert!(one.total() > none.total());
         assert_eq!(one.total(), two.total());
         assert_eq!(one.at(Phase::Index), none.at(Phase::Index), "memory, not disk");
@@ -3263,8 +3209,8 @@ mod tests {
             phases: Phases::JOIN.onwards(),
             ..column(ScalarType::U32, 0)
         };
-        let bare = entity_order_residency(n, IdShape::dense(n), &[], 0, 0);
-        let with = entity_order_residency(n, IdShape::dense(n), &[indexed, rendered], 0, 0);
+        let bare = entity_order_residency(n, NumberFiles::default(), &[], 0, 0);
+        let with = entity_order_residency(n, NumberFiles::default(), &[indexed, rendered], 0, 0);
 
         let index_only = 8 * n + n.div_ceil(8) + arena_capacity(40 * n);
         let render = 4 * n + n.div_ceil(8);
@@ -3291,11 +3237,10 @@ mod tests {
         let (_routes, tail) = plan_routes(
             args,
             n,
-            IdShape::dense(n),
+            NumberFiles::default(),
             &payloads,
             free,
-            &crate::ids::IdSpace::Integer { signed: false },
-        );
+                    );
         disk(
             args,
             Corpus {
@@ -3670,7 +3615,6 @@ members = "{members}"
 
 [defaults]
 source = "points"
-join_field = "id"
 
 [[view]]
 name = "s0"
@@ -3711,6 +3655,7 @@ require_member_visibility = "none"
 
   [layer.members]
   source = "members"
+  fields = {{ id = "entity" }}
 "#,
             points = "points.parquet",
             pairs = "pairs.parquet",
@@ -3742,6 +3687,7 @@ require_member_visibility = "none"
             attribute_sources: parsed.attribute_sources.clone(),
             out: dir.join("bundle"),
             limit: None,
+            strict: false,
             identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),
             shard_id: 0,
@@ -3838,11 +3784,10 @@ require_member_visibility = "none"
         plan_routes(
             &args,
             20_000,
-            IdShape::dense(20_000),
+            NumberFiles::default(),
             &payloads_per_item(&args),
             None,
-            &crate::ids::IdSpace::Integer { signed: false },
-        )
+                    )
         .1
     }
 
@@ -4012,11 +3957,10 @@ require_member_visibility = "none"
             plan_routes(
                 &args,
                 N,
-                IdShape::dense(N),
+                NumberFiles::default(),
                 &payloads_per_item(&args),
                 free,
-                &crate::ids::IdSpace::Integer { signed: false },
-            );
+                            );
         println!("model: {} MiB{}", model.total() >> 20, model.describe());
         crate::build_observed(&args, &Trace).unwrap();
         println!(
@@ -4057,7 +4001,7 @@ require_member_visibility = "none"
             ];
             super::entity_order_residency(
                 n,
-                IdShape::dense(n),
+                NumberFiles::default(),
                 &columns,
                 &[],
                 3 * n,
@@ -4067,7 +4011,6 @@ require_member_visibility = "none"
                 3 * n,
                 // A budget no stage is sized down by, so every worker runs at every row count.
                 u64::MAX,
-                None,
             )
         };
         // **The one spilled column's duplicate map**: two whole-column Roaring bitmaps at n/8

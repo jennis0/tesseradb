@@ -4,9 +4,8 @@ Each `declare_*` verb builds one block of the declaration and appends it here.
 The SDK writes the TOML and `tessera check` reads that file, so the mapping from verb to block is
 checked by the binary rather than mirrored in Python.
 
-What the TOML always says: every source name on every block, the allocation view, the join
-field where one is declared, the value
-set on every layer, and the disclosure controls on every layer and vocabulary, whether the user
+What the TOML always says: every source name on every block, the allocation view, the value set
+on every layer, and the disclosure controls on every layer and vocabulary, whether the user
 said them or a default did. A reader of `schema.toml` sees the whole declaration without knowing
 the SDK's defaults.
 """
@@ -29,10 +28,6 @@ VIEWS_ALL = "__views_all__"
 #: `anchor=True` on a view, kept beside the block and never written: the TOML says
 #: `allocation_view` instead.
 ANCHOR = "__anchor__"
-
-#: `declare_join_field` on an attribute, kept beside the block and never written: the TOML says
-#: `[defaults].join_field` instead.
-JOIN = "__join_field__"
 
 #: An attribute declared at a running service, kept beside the block and never written. Such a
 #: column has no acquisition half: its values arrive on rows of `POST /control/ingest` rather than
@@ -131,9 +126,10 @@ class Declaration:
         names = self.view_names()
         return names[0] if names else None
 
-    def join_field(self) -> str | None:
-        """The attribute `declare_join_field` named, or `None`."""
-        return next((b["name"] for b in self.blocks["attribute"] if b.get(JOIN)), None)
+    def unique_names(self) -> list[str]:
+        """The attributes declared `unique`, in the order they were declared: the columns a
+        table names its items by."""
+        return [block["name"] for block in self.blocks["attribute"] if block.get("unique")]
 
     def document(self, sources: dict[str, str]) -> dict[str, Any]:
         """The declaration as TOML's own shape.
@@ -150,9 +146,6 @@ class Declaration:
         allocation_view = self.allocation_view()
         if allocation_view is not None:
             defaults["allocation_view"] = allocation_view
-        join_field = self.join_field()
-        if join_field is not None:
-            defaults["join_field"] = join_field
         if defaults:
             document["defaults"] = defaults
 
@@ -172,7 +165,7 @@ class Declaration:
             # never written: such a block names no source, its values arriving on ingested rows
             # rather than from a file.
             document["attribute"] = [
-                {k: v for k, v in block.items() if k not in (FILLED, JOIN)}
+                {k: v for k, v in block.items() if k != FILLED}
                 for block in self.blocks["attribute"]
             ]
         layers = []
@@ -203,8 +196,8 @@ def view_block(
 ) -> dict:
     """One `[[view]]`: a frame, a projection and a gate, and no data.
 
-    Where its points are and which columns carry them come from `insert(view, table, id=, x=,
-    y=, access=)`, which writes `source`, `fields` and `point_visibility.field` onto this block.
+    Where its points are and which columns carry them come from `insert(view, table, x=, y=,
+    access=)`, which writes `source`, `fields` and `point_visibility.field` onto this block.
     """
     block: dict[str, Any] = {"name": name}
     if title is not None:
@@ -234,7 +227,7 @@ def view_group_block(
     """One `[[view_group]]`: a set of views sharing every setting, differing by a key.
 
     The group's views and their metadata come from `insert(group, roster=table, key=, …)`, and
-    its rows from `insert(group, table, id=, x=, y=, access=, view=)` with `view=` naming the
+    its rows from `insert(group, table, x=, y=, access=, view=)` with `view=` naming the
     column that says which view each row belongs to. `members` names another group whose views
     this group shares, and such a group declares no roster and no metadata of its own.
     """
@@ -349,7 +342,7 @@ def attribute_block(
 ) -> dict:
     """One `[[attribute]]`: a type, its flags, and nothing else.
 
-    It is filled by an `insert(name, table, id=, value=)`, or by name from a frame inserted into
+    It is filled by an `insert(name, table, value=)`, or by name from a frame inserted into
     the allocation view.
     """
     group = _scope(scope)
@@ -398,7 +391,7 @@ def layer_block(
     """One `[[layer]]`, with no data of its own.
 
     Its artifacts and its memberships come from its inserts: a key column
-    (`insert(layer, table, id=, key=)`), or an artifacts table and a members table. `artifacts=`
+    (`insert(layer, table, key=)`), or an artifacts table and a members table. `artifacts=`
     is the one exception and is a declaration rather than data: an authored roster written in
     the declaration itself, as its inline `artifacts` array.
     """
@@ -568,11 +561,31 @@ def _artifact_row(layer: str, row: Any) -> dict:
         row["attached_key"] = attached["key"]
         if attached.get("level") is not None:
             row["attached_level"] = int(attached["level"])
+    for name in ("members", "excluding"):
+        if name in row:
+            row[name] = member_table(row[name])
     # The declaration's own key order, with anything else after it, so a key the artifact table
     # does not carry reaches the check rather than being dropped here.
     ordered = {name: row[name] for name in ARTIFACT_KEYS if name in row}
     ordered.update({name: value for name, value in row.items() if name not in ordered})
     return ordered
+
+
+def member_table(members: Any) -> Any:
+    """A membership as the declaration writes it: `{attribute: [values]}`, one list per unique
+    attribute and the entries at one position naming one member.
+
+    A list of structs, as a frame's `list<struct>` column reads, becomes that table. Anything else
+    is written as it was given, for the declaration check to judge.
+    """
+    if isinstance(members, dict):
+        return Inline({name: list(values) for name, values in members.items()})
+    if isinstance(members, (list, tuple)) and members and all(
+        isinstance(one, dict) for one in members
+    ):
+        names = list(dict.fromkeys(name for one in members for name in one))
+        return Inline({name: [one.get(name) for one in members] for name in names})
+    return members
 
 
 def labels_block(
@@ -677,10 +690,6 @@ def _level(entry: Any) -> dict:
 # ------------------------------------------------------------------ what the inserts wrote
 
 
-#: What a members file calls the column naming each member when its `fields` say nothing.
-CANONICAL_MEMBER_ENTITY = "entity"
-
-
 def bind(document: dict, inserts: Sequence[Any]) -> None:
     """Write onto every block the source and the column names its inserts gave it.
 
@@ -701,34 +710,33 @@ def bind(document: dict, inserts: Sequence[Any]) -> None:
         getattr(_Bind, f"{insert.kind}_{insert.role}")(block, insert)
         for name, column in insert.named_attributes.items():
             _attribute_of_a_view(document, name, column, insert)
-    _bind_join(document, inserts)
-
-
-def _bind_join(document: dict, inserts: Sequence[Any]) -> None:
-    """Where each file keeps the join field, on every block whose insert named `id=`.
-
-    A file carries the join field in the join attribute's own column unless its block's `fields`
-    say otherwise, so an `id=` naming another column is written under the join field's name. A
-    members file names its members under `entity` instead, which `layer_members` writes.
-    """
-    join = document.get("defaults", {}).get("join_field")
-    if join is None:
-        return
-    attribute = next((b for b in document.get("attribute", []) if b.get("name") == join), {})
-    column = attribute.get("field", join)
     for insert in inserts:
-        identity = insert.columns.get("id")
-        if identity is None or identity == column or insert.role not in ("rows", "values"):
+        _bind_items(document, insert)
+
+
+def _bind_items(document: dict, insert: Any) -> None:
+    """Where an insert's file keeps the unique attributes that name its items.
+
+    The build reads a unique attribute in every file from the attribute's own column, its `field`
+    or else its name, unless the block's `fields` move it. So a table carrying one under another
+    column says so in `fields`, on the block that reads the file: the members table of a layer,
+    the attribute's own block, or the view. An artifacts table names its members inside its
+    member structs, and an insert into a unique attribute carries it as its values.
+    """
+    if insert.role in ("artifacts", "text", "roster"):
+        return
+    attributes = {b.get("name"): b for b in document.get("attribute", [])}
+    block = _block_for(document, insert)
+    if block is None:
+        return
+    if insert.role in ("key", "members"):
+        block = block["members"]
+    for name, column in insert.items.items():
+        if insert.kind == "attribute" and name == insert.target:
             continue
-        block = _block_for(document, insert)
-        if block is not None and block is not attribute:
-            _fields(block, {join: identity})
-        for name in insert.named_attributes:
-            if name == join:
-                continue
-            filled = next((b for b in document.get("attribute", []) if b.get("name") == name), None)
-            if filled is not None:
-                _fields(filled, {join: identity})
+        held = attributes.get(name, {})
+        if column != held.get("field", name):
+            block["fields"] = Inline({**dict(block.get("fields") or {}), name: column})
 
 
 def bind_value_sets(document: dict, inserts: Sequence[Any]) -> None:
@@ -857,12 +865,10 @@ class _Bind:
 
     @staticmethod
     def layer_key(block: dict, insert: Any) -> None:
-        """A key column: `[layer.members]` over the points, the column as `key`."""
+        """A key column: `[layer.members]` over the insert's own table, the column as `key`."""
         block["members"] = {
             "source": insert.source,
-            "fields": Inline(
-                {"key": insert.columns["key"], "entity": insert.columns["id"]}
-            ),
+            "fields": Inline({"key": insert.columns["key"]}),
         }
 
     @staticmethod
@@ -876,8 +882,6 @@ class _Bind:
     def layer_members(block: dict, insert: Any) -> None:
         members: dict[str, Any] = {"source": insert.source}
         named = _renamed(insert, MEMBER_FIELDS)
-        if insert.columns["id"] != CANONICAL_MEMBER_ENTITY:
-            named["entity"] = insert.columns["id"]
         if named:
             members["fields"] = Inline(named)
         block["members"] = members

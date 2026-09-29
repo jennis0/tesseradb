@@ -52,7 +52,6 @@ control = "127.0.0.1:45721"
     std::fs::write(
         dir.join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
-         [defaults]\njoin_field = \"id\"\n\
          [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
          source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points\"\n\
@@ -284,7 +283,6 @@ fn a_margin_is_a_fraction_of_the_data_span_on_each_side() {
     std::fs::write(
         tmp.path().join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
-         [defaults]\njoin_field = \"id\"\n\
          [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
          source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = { auto = true, margin = 0.25 }\n\
@@ -309,7 +307,6 @@ fn a_stated_extent_is_used_verbatim() {
     std::fs::write(
         tmp.path().join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
-         [defaults]\njoin_field = \"id\"\n\
          [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
          source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = { min = -5.0, max = 2000.0 }\n\
@@ -328,14 +325,10 @@ fn two_views(dir: &Path, defaults: &str) {
     let schema = std::fs::read_to_string(dir.join("schema.toml")).unwrap();
     // `[sources]` is written once; the second view is the view block alone under another name.
     let (sources, view) = schema.split_once("[[view]]").unwrap();
-    // `defaults` lines join the `[defaults]` block the project already declares.
-    let defaults = defaults.trim_start_matches("[defaults]\n");
-    let joined = format!("join_field = \"id\"\n{defaults}");
-    let sources = sources.replace("join_field = \"id\"\n", &joined);
     std::fs::write(
         dir.join("schema.toml"),
         format!(
-            "{sources}[[view]]{view}[[view]]{}",
+            "{sources}{defaults}[[view]]{view}[[view]]{}",
             view.replace("\"s0\"", "\"s1\"")
         ),
     )
@@ -418,7 +411,6 @@ fn declare_extent(dir: &Path, extent: &str) {
         dir.join("schema.toml"),
         format!(
             "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
-             [defaults]\njoin_field = \"id\"\n\
              [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
              source = \"points\"\n\
              [[view]]\nname = \"s0\"\nextent = {extent}\nsource = \"points\"\n\

@@ -46,12 +46,11 @@ FRAME_RECORDS, FRAME_TRAILER, FRAME_PAGE_END = 7, 4, 8
 
 
 def papers(db) -> None:
-    """Twenty papers in a line, named by the join field `paper`, five to a venue, with a
+    """Twenty papers in a line, named by the unique attribute `paper`, five to a venue, with a
     rendered number, a keyword held only in the records, and five clusters of four."""
     ids = list(PAPERS)
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     db.declare_attribute("paper", type="keyword", unique=True)
-    db.declare_join_field("paper")
     db.declare_vocabulary("venue")
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     db.declare_attribute("n", type="u32", render=True)
@@ -70,7 +69,6 @@ def papers(db) -> None:
                 "title": pa.array([f"title {i}" for i in range(20)]),
             }
         ),
-        id="paper",
         x="x",
         y="y",
         access="labels",
@@ -95,7 +93,6 @@ def papers(db) -> None:
                 "paper": pa.array(ids),
             }
         ),
-        id="paper",
         key="key",
         level="level",
     )
@@ -560,10 +557,9 @@ def test_a_read_that_returns_no_row_has_the_columns_asked_for(db):
 
 
 def numbered(db) -> None:
-    """Four papers named by a signed integer join field."""
+    """Four papers named by a signed integer unique attribute."""
     db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
     db.declare_attribute("paper", type="i64", unique=True)
-    db.declare_join_field("paper")
     db.insert(
         "map",
         pa.table(
@@ -574,7 +570,6 @@ def numbered(db) -> None:
                 "labels": pa.array([["public"]] * 4, pa.list_(pa.string())),
             }
         ),
-        id="paper",
         x="x",
         y="y",
         access="labels",

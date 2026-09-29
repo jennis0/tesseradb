@@ -49,7 +49,7 @@ fn fixture(dir: &Path) -> std::path::PathBuf {
     );
     write_pairs_n(&pairs, N);
     let out = dir.join("bundle");
-    build_declared(&out, &points, &pairs, SCHEMA_TOML);
+    build_declared(&out, &points, &pairs, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"));
     out
 }
 

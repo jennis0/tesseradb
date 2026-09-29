@@ -28,13 +28,13 @@ export type {
   ViewInput,
   ViewProjection
 } from './store.js';
-export type {SuggestState} from './suggestions.js';
+export type {SuggestionPage, SuggestState} from './suggestions.js';
 export type {Band, BandMembership} from './bands.js';
 export type {ComposedTile, Composition, StandInPiece} from './compose.js';
 export type {PresentedStatus, Refusal} from './presented.js';
 export {subtreeOf, type ServedLineage} from './artifactChannel.js';
 export {NO_ORDINAL, type ArtifactEntry, type ArtifactTable, type ArtifactTableChange} from './artifactTable.js';
-export type {Domain, Ranks} from './encoding.js';
+export type {Domain, Ranks, ValueSample} from './encoding.js';
 export type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 
 export {formatCount, formatMasked, NO_COUNT, NO_MASKED, type Count, type FormatOptions, type Masked} from './counts.js';

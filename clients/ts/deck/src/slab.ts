@@ -25,11 +25,15 @@
  * Each mark also carries its membership ordinal for one layer (`membershipLayer`) as `float32`,
  * alongside the column colour. A uniform on the layer chooses which the shader reads. Changing
  * the carried layer rewrites every resident band's ordinals once.
+ *
+ * Each mark carries its size fraction as `float32` too ({@link writeSizes}), which a change of the
+ * size encoding rewrites for every resident band, as a change of colouring rewrites the colours.
  */
 import {Buffer as GpuBuffer} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
 import type {Band, ScalarColumn} from '@tesseradb/client';
 import {encodingSignature, writeColours, type Encoding} from './colour.js';
+import {NO_SIZE, sizeSignature, writeSizes, type SizeEncoding} from './size.js';
 
 /** Enough for a first view at the default budget without a growth step on the way. */
 const MIN_CAPACITY = 1 << 16;
@@ -67,6 +71,8 @@ export type SlabDraw = {
    * arrive with the points, so they change only when a band is written.
    */
   highlights: Float32Array;
+  /** The size fraction per mark, from 0 to 1, or -1 for a mark with no value; see {@link writeSizes}. */
+  sizes: Float32Array;
   length: number;
   /**
    * The partition's GPU buffers when a device is attached: capacity-sized, current to `length`.
@@ -76,7 +82,7 @@ export type SlabDraw = {
   gpu: GpuSlab | null;
 };
 
-export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer; ordinals: GpuBuffer; highlights: GpuBuffer};
+export type GpuSlab = {positions: GpuBuffer; colours: GpuBuffer; picking: GpuBuffer; ordinals: GpuBuffer; highlights: GpuBuffer; sizes: GpuBuffer};
 
 /**
  * deck's picking colour for instance `i` is `i + 1` in three little-endian bytes. deck re-uploads
@@ -109,6 +115,7 @@ function emptyDraw(): SlabDraw {
     colours: new Uint8Array(0),
     ordinals: new Float32Array(0),
     highlights: new Float32Array(0),
+    sizes: new Float32Array(0),
     length: 0,
     gpu: null
   };
@@ -129,11 +136,13 @@ class Partition {
   private dirtyCol: {from: number; to: number} | null = null;
   private dirtyOrd: {from: number; to: number} | null = null;
   private dirtyHigh: {from: number; to: number} | null = null;
+  private dirtySize: {from: number; to: number} | null = null;
   private ids = new BigUint64Array(0);
   private positions = new Float32Array(0);
   private colours = new Uint8Array(0);
   private ordinals = new Float32Array(0);
   private highlights = new Float32Array(0);
+  private sizes = new Float32Array(0);
   /** The layer whose ordinals the partition carries; `''` for none (every ordinal 0). */
   private membershipLayer = '';
   private capacity = 0;
@@ -145,12 +154,18 @@ class Partition {
    */
   slots = new Map<bigint, Slot>();
   private encodingKey = '';
+  private sizeKey = 'none';
+  private size: SizeEncoding = NO_SIZE;
   draw: SlabDraw = emptyDraw();
 
-  sync(bands: readonly Band[], encoding: Encoding, encodingKey: string, colourBy: string | null, membershipLayer: string): SlabDraw {
+  sync(bands: readonly Band[], encoding: Encoding, encodingKey: string, colourBy: string | null, membershipLayer: string, size: SizeEncoding): SlabDraw {
     // A partition reactivated under a changed encoding recolours everything it holds.
     const recolour = encodingKey !== this.encodingKey;
     this.encodingKey = encodingKey;
+    const sizeKey = sizeSignature(size);
+    const resize = sizeKey !== this.sizeKey;
+    this.sizeKey = sizeKey;
+    this.size = size;
     const reordinal = membershipLayer !== this.membershipLayer;
     this.membershipLayer = membershipLayer;
 
@@ -182,9 +197,9 @@ class Partition {
     if (compact) {
       this.rebuild(bands, encoding, colourBy);
       this.flushGpu();
-      return this.publish(true, true, true, true);
+      return this.publish(true, true, true, true, true);
     }
-    if (appending === 0 && rewrite.length === 0 && !recolour && !reordinal) return this.draw;
+    if (appending === 0 && rewrite.length === 0 && !recolour && !reordinal && !resize) return this.draw;
 
     if (recolour) {
       // Every resident band, since a band outside the frame is still drawn.
@@ -195,6 +210,9 @@ class Partition {
     }
     if (reordinal) {
       for (const slot of this.slots.values()) this.writeOrdinals(slot.band, slot.from);
+    }
+    if (resize) {
+      for (const slot of this.slots.values()) this.writeSizes(slot.band, slot.from);
     }
     // A refetch of the same size reuses its slot.
     for (const band of rewrite) {
@@ -211,7 +229,7 @@ class Partition {
     }
     this.flushGpu();
     const moved = appending > 0 || rewrite.length > 0;
-    return this.publish(moved, moved, true, moved || reordinal);
+    return this.publish(moved, moved, true, moved || reordinal, moved || resize);
   }
 
   private rebuild(bands: readonly Band[], encoding: Encoding, colourBy: string | null): void {
@@ -238,16 +256,19 @@ class Partition {
     const colours = new Uint8Array(capacity * 4);
     const ordinals = new Float32Array(capacity);
     const highlights = new Float32Array(capacity);
+    const sizes = new Float32Array(capacity);
     ids.set(this.ids.subarray(0, this.live));
     positions.set(this.positions.subarray(0, this.live * 2));
     colours.set(this.colours.subarray(0, this.live * 4));
     ordinals.set(this.ordinals.subarray(0, this.live));
     highlights.set(this.highlights.subarray(0, this.live));
+    sizes.set(this.sizes.subarray(0, this.live));
     this.ids = ids;
     this.positions = positions;
     this.colours = colours;
     this.ordinals = ordinals;
     this.highlights = highlights;
+    this.sizes = sizes;
     this.capacity = capacity;
     this.reserveGpu();
   }
@@ -265,7 +286,8 @@ class Partition {
       colours: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
       picking: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
       ordinals: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
-      highlights: this.device.createBuffer({byteLength: this.capacity * 4, usage})
+      highlights: this.device.createBuffer({byteLength: this.capacity * 4, usage}),
+      sizes: this.device.createBuffer({byteLength: this.capacity * 4, usage})
     };
     this.gpu.picking.write(pickingColours(this.capacity), 0);
     if (this.live > 0) {
@@ -273,6 +295,7 @@ class Partition {
       this.dirtyCol = {from: 0, to: this.live};
       this.dirtyOrd = {from: 0, to: this.live};
       this.dirtyHigh = {from: 0, to: this.live};
+      this.dirtySize = {from: 0, to: this.live};
     }
   }
 
@@ -281,7 +304,7 @@ class Partition {
     this.device = device;
     if (this.capacity > 0) this.reserveGpu();
     this.flushGpu();
-    if (this.draw.length > 0 || this.gpu) this.publish(true, true, true, true);
+    if (this.draw.length > 0 || this.gpu) this.publish(true, true, true, true, true);
   }
 
   destroy(): void {
@@ -290,6 +313,7 @@ class Partition {
     this.gpu?.picking.destroy();
     this.gpu?.ordinals.destroy();
     this.gpu?.highlights.destroy();
+    this.gpu?.sizes.destroy();
     this.gpu = null;
   }
 
@@ -324,6 +348,19 @@ class Partition {
       this.gpu.highlights.write(this.highlights.subarray(from, to), from * 4);
       this.dirtyHigh = null;
     }
+    if (this.dirtySize) {
+      const {from, to} = this.dirtySize;
+      this.gpu.sizes.write(this.sizes.subarray(from, to), from * 4);
+      this.dirtySize = null;
+    }
+  }
+
+  /** A band's size fractions under the partition's size encoding into the slot at `at`. */
+  private writeSizes(band: Band, at: number): void {
+    const n = band.ids.length;
+    const size = this.size;
+    writeSizes(this.sizes, at, n, size.kind === 'none' ? undefined : band.scalars[size.column], size);
+    if (this.gpu) this.dirtySize = Partition.widen(this.dirtySize, at, at + n);
   }
 
   /** A band's highlight bits into the slot at `at`, ones where the band was fetched with no highlight. */
@@ -352,6 +389,7 @@ class Partition {
     writeColours(this.colours, at, band.ids.length, columnOf(band, colourBy), encoding);
     this.writeOrdinals(band, at);
     this.writeHighlights(band, at);
+    this.writeSizes(band, at);
     if (this.gpu) this.dirtyPos = Partition.widen(this.dirtyPos, at, at + band.ids.length);
     this.uploadColours(at, band.ids.length);
   }
@@ -361,10 +399,10 @@ class Partition {
    * reference, which is how deck.gl learns the contents changed, so each array is republished only
    * when its contents did.
    */
-  private publish(ids: boolean, positions: boolean, colours: boolean, ordinals = false): SlabDraw {
+  private publish(ids: boolean, positions: boolean, colours: boolean, ordinals = false, sizes = false): SlabDraw {
     // The highlight bits are written when a band is, so they republish with the positions.
     const highlights = positions;
-    const changed = ids || positions || colours || ordinals || highlights || this.draw.length !== this.live;
+    const changed = ids || positions || colours || ordinals || highlights || sizes || this.draw.length !== this.live;
     if (!changed) return this.draw;
     this.draw = {
       ids: ids || this.draw.ids.length !== this.live ? this.ids.subarray(0, this.live) : this.draw.ids,
@@ -382,6 +420,7 @@ class Partition {
         highlights || this.draw.highlights.length !== this.live
           ? this.highlights.subarray(0, this.live)
           : this.draw.highlights,
+      sizes: sizes || this.draw.sizes.length !== this.live ? this.sizes.subarray(0, this.live) : this.draw.sizes,
       length: this.live,
       gpu: this.gpu
     };
@@ -438,9 +477,10 @@ export class MarkSlab {
    * Bring the partition for `depth` up to date and return what to draw: the same object as last
    * time when nothing changed. `encoding` is the column colouring the colour attribute holds;
    * cluster colour comes from the layer's lookup texture, and reaches here only as
-   * `membershipLayer`, the layer whose ordinals every mark carries (`''` for none).
+   * `membershipLayer`, the layer whose ordinals every mark carries (`''` for none). `size` is the
+   * size encoding the size attribute holds.
    */
-  sync(bands: readonly Band[], depth: number, encoding: Encoding, colourBy: string | null, membershipLayer = ''): SlabDraw {
+  sync(bands: readonly Band[], depth: number, encoding: Encoding, colourBy: string | null, membershipLayer = '', size: SizeEncoding = NO_SIZE): SlabDraw {
     // An empty frame changes nothing resident. A principal change reaches here through clear().
     if (bands.length === 0) {
       const p = this.active;
@@ -475,7 +515,7 @@ export class MarkSlab {
     this.activeSlot = slot;
     const partition = this.parts[slot]!;
     partition.lastUsed = ++this.clock;
-    const draw = partition.sync(bands, encoding, encodingSignature(encoding), colourBy, membershipLayer);
+    const draw = partition.sync(bands, encoding, encodingSignature(encoding), colourBy, membershipLayer, size);
     this.enforceBudget();
     return draw;
   }

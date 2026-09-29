@@ -88,7 +88,7 @@ fn build_bundle(dir: &Path, n: u64, note_bytes: usize) {
         ],
     );
     write_pairs_n(&pairs, n);
-    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+    build_declared(&dir.join("bundle"), &points, &pairs, &format!("{SCHEMA_TOML}{ID_ATTRIBUTE}"));
 }
 
 /// A copy in `tmp` of [`build_bundle`]'s fixture, each `(n, note_bytes)` built once for this

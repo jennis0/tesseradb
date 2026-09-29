@@ -1,0 +1,41 @@
+16381 samples over 30 s, 1 threads
+ 27.89%     4568  /usr/lib/x86_64-linux-gnu/libc.so.6
+ 10.31%     1689  <tessera_store::partition::Partition>::push_to
+  7.66%     1255  core::slice::sort::unstable::quicksort::quicksort::<(u64, u32), <(u64, u32) as core::cmp::PartialOrd>::lt>
+  6.07%      995  _RNCNvMs0_NtNtCs2k9Catw5501_13tessera_build3ids6streamNtB7_4Pass11number_rowss1_0Bb_.llvm.8135976340602865602
+  5.85%      959  _HUF_decompress4X1_usingDTable_internal_fast_asm_loop
+  5.73%      939  <tessera_store::key_index::spill::Visit<u64, tessera_build::ids::stream::merge_field<u64>::{closure#2}> as tessera_store::key_index::spill::Out<u64>>::push
+  5.60%      917  <tessera_store::partition::SpillWriter>::push_bytes
+  5.46%      894  <tessera_store::partition::PartitionStore>::load
+  4.78%      783  core::slice::sort::shared::smallsort::small_sort_general::<(u64, u32), <(u64, u32) as core::cmp::PartialOrd>::lt>
+  3.40%      557  <tessera_store::key_index::spill::Level<u64>>::push
+  2.50%      410  <tessera_store::key_index::spill::KeySpill<u64>>::push
+  2.46%      403  <tessera_build::row_groups::FileGroups>::each_batch::<tessera_build::input::survey_points::{closure#3}>
+  1.89%      310  <alloc::vec::into_iter::IntoIter<f64> as core::iter::traits::iterator::Iterator>::fold::<(), <core::iter::adapters::enumerate::Enumerate<_> as core::iter::traits::iterator::Iterator>::fold::enumerate<
+  1.69%      277  tessera_store::coordinates::place
+  0.92%      150  core::slice::sort::shared::smallsort::sort8_stable::<(u64, u32), <(u64, u32) as core::cmp::PartialOrd>::lt>
+  0.86%      141  <alloc::vec::Vec<(u64, u32)> as alloc::vec::spec_from_iter::SpecFromIter<(u64, u32), core::iter::adapters::map::Map<core::slice::iter::ChunksExact<u8>, tessera_store::key_index::spill::decode<u64>>>>:
+  0.79%      130  _RNvMs4_NtCscdodAO9FK5_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs8gzqkRW5V4s_8croaring.llvm.9897309967524921236
+  0.76%      124  core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<alloc::vec::into_iter::IntoIter<core::option::Option<f64>>>, tessera_store::coordinates::r
+  0.73%      119  <tessera_build::ids::stream::HeldCursor<u64>>::holder
+  0.73%      119  <alloc::raw_vec::RawVec<u32>>::grow_one
+  0.52%       85  core::slice::sort::shared::pivot::median3_rec::<(u64, u32), <(u64, u32) as core::cmp::PartialOrd>::lt>
+  0.49%       81  __rustc::__rust_no_alloc_shim_is_unstable_v2
+  0.41%       67  <tessera_store::key_index::spill::KeySpill<u64>>::drain_level::<tessera_store::key_index::spill::Visit<u64, tessera_build::ids::stream::merge_field<u64>::{closure#2}>>
+  0.40%       66  __rustc::__rdl_alloc_zeroed
+  0.37%       60  <tessera_spatial::projection::Projection>::forward
+  0.26%       42  __rustc::__rust_dealloc
+  0.21%       34  <arrow_array::array::primitive_array::PrimitiveArray<arrow_array::types::UInt8Type> as arrow_array::array::Array>::is_null
+  0.20%       33  __rustc::__rdl_dealloc
+  0.18%       29  __rustc::__rdl_alloc
+  0.12%       20  __rustc::__rust_alloc
+  0.10%       17  __rustc::__rust_alloc_zeroed
+  0.09%       15  <parquet::encodings::rle::RleDecoder>::get_batch_with_dict::<f64>
+  0.05%        9  HUF_readDTableX1_wksp
+  0.05%        8  FSE_decompress_wksp_body_bmi2
+  0.02%        4  HUF_decompress4X1_usingDTable_internal_fast
+  0.02%        3  ZSTD_decompressMultiFrame
+  0.02%        3  ZSTD_decodeLiteralsBlock
+  0.02%        3  <std::fs::File as std::io::Read>::read_buf
+  0.02%        3  parquet::util::bit_pack::unpack32
+  0.02%        3  HUF_readStats_body_bmi2

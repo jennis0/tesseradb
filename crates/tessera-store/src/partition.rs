@@ -140,7 +140,9 @@ impl SpillWriter {
         Ok(())
     }
 
-    /// Flush, fsync, and hand back the receipt the eventual [`read_bucket`] must be given.
+    /// Flush and hand back the receipt the eventual [`read_bucket`] must be given. Not synced: a
+    /// spill file is scratch the build reads back through the page cache and removes, and the
+    /// receipt is what vouches for its bytes.
     pub fn finish(self) -> Result<SpillReceipt> {
         let SpillWriter {
             path,
@@ -148,8 +150,7 @@ impl SpillWriter {
             count,
             anchor,
         } = self;
-        let file = writer.into_inner().map_err(|e| io(&path, e.into_error()))?;
-        file.sync_all().map_err(|e| io(&path, e))?;
+        writer.into_inner().map_err(|e| io(&path, e.into_error()))?;
         Ok(SpillReceipt {
             path,
             count,
@@ -198,6 +199,73 @@ pub fn read_bucket(receipt: &SpillReceipt) -> Result<Vec<u64>> {
         )));
     }
     Ok(values)
+}
+
+/// A file of fixed-width records, read back one record at a time in the order they were pushed
+/// ([`SpillWriter::push_bytes`]), for a caller that merges it against another stream and so cannot
+/// hold it whole.
+///
+/// The file's length is checked against the receipt at open and its content anchor after the last
+/// record, so whatever a caller derives from the records is provisional until [`Self::next`] has
+/// returned `None` without an error.
+pub struct RecordReader {
+    receipt: SpillReceipt,
+    reader: std::io::BufReader<File>,
+    record: Vec<u8>,
+    left: u64,
+    anchor: u64,
+}
+
+impl RecordReader {
+    pub fn open(receipt: &SpillReceipt, width: usize) -> Result<RecordReader> {
+        let expected = receipt.count.checked_mul(width as u64).ok_or_else(|| {
+            torn(format!(
+                "record file {}: receipt count {} overflows the byte-length computation",
+                receipt.path.display(),
+                receipt.count
+            ))
+        })?;
+        let file = File::open(&receipt.path).map_err(|e| io(&receipt.path, e))?;
+        let len = file.metadata().map_err(|e| io(&receipt.path, e))?.len();
+        if len != expected {
+            return Err(torn(format!(
+                "record file {}: length mismatch: file is {len} bytes but the receipt's count {} \
+                 requires exactly {expected}",
+                receipt.path.display(),
+                receipt.count
+            )));
+        }
+        Ok(RecordReader {
+            receipt: receipt.clone(),
+            reader: std::io::BufReader::with_capacity(SPILL_BUF_BYTES, file),
+            record: vec![0u8; width],
+            left: receipt.count,
+            anchor: 0,
+        })
+    }
+
+    /// The next record, or `None` past the last, which is where the anchor is checked.
+    pub fn next_record(&mut self) -> Result<Option<&[u8]>> {
+        use std::io::Read;
+        if self.left == 0 {
+            if self.anchor != self.receipt.anchor {
+                return Err(torn(format!(
+                    "record file {}: content anchor mismatch: recomputed {:#018x} and the receipt \
+                     says {:#018x}, so the file's bytes are not the bytes that were written",
+                    self.receipt.path.display(),
+                    self.anchor,
+                    self.receipt.anchor
+                )));
+            }
+            return Ok(None);
+        }
+        self.reader
+            .read_exact(&mut self.record)
+            .map_err(|e| io(&self.receipt.path, e))?;
+        self.left -= 1;
+        self.anchor = self.anchor.wrapping_add(mix64_bytes(&self.record));
+        Ok(Some(&self.record))
+    }
 }
 
 // --------------------------------------------------------------------------------------------

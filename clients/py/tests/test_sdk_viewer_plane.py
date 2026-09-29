@@ -64,13 +64,12 @@ def test_a_sample_serves_a_null_where_an_item_has_no_rendered_value(served, corp
     def declare(db):
         db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
         db.declare_attribute("paper", type="keyword", unique=True)
-        db.declare_join_field("paper")
         db.declare_attribute("heat", type="f64", render=True)
         db.declare_attribute("n", type="u32", render=True)
         table = papers([f"p{i}" for i in range(20)])
         table = table.append_column("heat", pa.array(heat, pa.float64()))
         table = table.append_column("n", pa.array(range(20), pa.uint32()))
-        db.insert("map", table, id="paper", x="x", y="y", access="labels")
+        db.insert("map", table, x="x", y="y", access="labels")
 
     points = served(declare).view("map").sample(k=100)
     served_heat = points.column("heat").to_pylist()

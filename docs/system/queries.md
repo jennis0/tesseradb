@@ -241,7 +241,12 @@ start of each word within either, so typing part of a later word in a multi-word
 it. Matching is a fixed rule rather than a ranked one: there is no fuzzy matching and no ordering by
 popularity or recency, only the order the matched text itself falls in. A count of how many visible
 items carry a suggested value can be requested alongside it, computed for that viewer alone, and
-never used to decide which suggestions are shown or in what order.
+never used to decide which suggestions are shown or in what order. A request can carry the filter
+the viewer has applied to the map, and each count is then of the visible items in the view that pass
+it. The filter changes the counts and nothing else: a value it excludes is still offered, with a
+count of zero, because what is offered is decided over everything the viewer may see. A page with
+counts also carries the number of items they are taken over, so a client can draw each value's
+exact share.
 
 A value the viewer cannot see behaves exactly as one that does not exist, in every suggestion as in
 every filter, but how long a request over a gated category takes reflects how many values, visible

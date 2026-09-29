@@ -358,8 +358,16 @@ paths:
         builds for a principal whose visible set holds at most
         `selection.max_suggest_set_entities` items, `more` means only that the page filled.
 
-        Not subject to compute admission. One suggest runs per session at a time: a second while
-        one is running is `429 backpressure`, refused before any work, with `Retry-After`.
+        **Counts under a filter.** `POST` to this path takes the same fields as a JSON body, with a
+        filter. This form carries none.
+
+        A request with `view` and `counts=true` opens that view as `/v1/viewport` does, which may
+        build this session's view of the map, so it is subject to compute admission. Any other
+        request is not. One suggest runs per session at a time: a second while one is running is
+        `429 backpressure`, refused before any work, with `Retry-After`. A request with `view` and
+        `counts=true` is also `429 backpressure` when the compute queue is full, when no permit
+        frees within `admission_timeout_ms`, and when another request is building this session's
+        view of the map and does not finish within `single_flight_wait_ms`.
       security:
         - sessionToken: []
       parameters:
@@ -387,7 +395,7 @@ paths:
         - name: counts
           in: query
           required: false
-          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only items holding a row in that view count, and an item ingested and not yet flushed holds no row in any view until its flush, so it does not count; a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
+          description: "`true` serves `count` beside each value: how many items carrying it this principal may see, exact, computed per request. Without `view`, an item ingested and not yet flushed counts. With `view`, only the items `/v1/viewport` would show this session in that view count: an item holds a row there once it is flushed and the refresh after the flush reaches this session (`x-tessera-pin` describes that window), and a value this principal can see only in other views counts `0`. Without `counts`, `count` is absent. It does not affect the order."
           schema:
             type: boolean
         - name: view
@@ -415,6 +423,87 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+    post:
+      tags: [viewer]
+      operationId: suggestCategoryValuesFiltered
+      summary: Typeahead over a category vocabulary, with counts taken under a filter.
+      description: |
+        The `GET` form's page, with its fields in a JSON body and one more, `filters`: the filter
+        expression `/v1/viewport` and `/v1/items` take, `region` and `member_of` leaves included,
+        evaluated in `view`. A filter needs `view`; `filters` without it is `422`. The body is JSON
+        because a `region` leaf may hold up to `selection.max_region_vertices` vertices, too many
+        for a query string, and because every other route taking a filter reads it from a body.
+
+        **The filter changes the counts and nothing else.** Which values are offered, and their
+        order, are decided as on the `GET` form: by the vocabulary's `visibility`, over every item
+        this principal may see. With `counts=true`, a value's `count` is the number of items in
+        `view` that carry it, that this principal may see, and that pass the filter. A value the
+        filter excludes, including one excluded by a filter on this same column, is offered with
+        `count` `0`. Without `counts=true` the filter is parsed and refused as on `/v1/viewport`
+        and changes nothing.
+
+        Matching, order, visibility, `view` and `more` are as on the `GET` form.
+
+        A request with `view` and `counts=true`, and so every request counting under `filters`, is
+        subject to compute admission, as on the `GET` form. Any other request is not. Every request
+        is the session's one running suggest.
+
+        **`429 backpressure`** has these causes, each with `Retry-After` and told apart by `detail`:
+        another suggest for this session is running, refused before any work; the compute queue is
+        full, or no permit freed within `admission_timeout_ms`; another request is building this
+        session's view of the map and did not finish within `single_flight_wait_ms`. The last two
+        arise only for a request with `view` and `counts=true`.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: column
+          in: path
+          required: true
+          description: As on the `GET` form.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]+(@[A-Za-z0-9_.:-]+)?$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuggestRequest"
+      responses:
+        "200":
+          description: At most `limit` values this principal may be told about, in matched-entry order.
+          headers:
+            x-tessera-region:
+              description: "Present where counts were taken and `filters` carries a `region` leaf, as on `/v1/viewport`: `exact`, or `cover; depth=<d>` where a shape's edge crossed more than `max_region_cells` cells and the counts are exact for a larger shape covering it."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: As on the `GET` form.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`422 contract`: as on the `GET` form, and a malformed `filters`, or `filters` without `view`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/Backpressure"
         "500":
@@ -2932,6 +3021,29 @@ components:
           type: [string, "null"]
           description: The last key returned, to pass as `?after=`; `null` when the list is complete, and always `null` for `?codes=`.
 
+    SuggestRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        q:
+          type: string
+          maxLength: 256
+          description: As the `GET` form's `q`. Absent is empty, which matches every value.
+        limit:
+          type: integer
+          minimum: 1
+          description: As the `GET` form's `limit`.
+        counts:
+          type: boolean
+          description: As the `GET` form's `counts`.
+        view:
+          type: string
+          description: As the `GET` form's `view`. Required with `filters`.
+        filters:
+          description: The viewport's filter, evaluated in `view`. It narrows each `count` to the items passing it and changes nothing else.
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
+
     SuggestResponse:
       type: object
       additionalProperties: false
@@ -2982,6 +3094,10 @@ components:
         more:
           type: boolean
           description: "`true` where the walk stopped before its range was exhausted: the page filled, or `selection.max_suggestion_walk` values were examined. Answered from the session's set of visible values, it means only that the page filled. There is no cursor; a client asks for more by extending `q`."
+        total:
+          type: integer
+          minimum: 0
+          description: Present only with `counts=true`. The number of items in the set each `count` is taken over. That set is the items this principal may see, within `view` where the request names one, passing `filters` where the request has them. A value's share of that set is `count / total`.
 
     Pin:
       type: object
@@ -4976,7 +5092,7 @@ components:
           type: object
           additionalProperties: false
           required: [admission, queue, in_flight, waiting, streaming, shed_total]
-          description: The compute admission limit the viewport, item and session routes share.
+          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, `/v1/aggregate`, a suggest counting within a view, and `/session/authorise` share.
           properties:
             admission:
               type: integer

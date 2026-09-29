@@ -188,14 +188,14 @@ def read_source_geometry(
     3. `morton` — 16 bits per axis, widened with a zero residual, because that is genuinely all
        the file says about the point.
 
-    Each row is keyed by its value of `field`, the unique attribute the build joins on, read from
+    Each row is keyed by its value of `field`, the unique attribute its rows name items by, read from
     `column` (the attribute's `field` in the declaration; its name where that is not set).
 
     Both Morton branches require the identity extent `[0, 65536)`, where `cell(v) = v`; under any
     other extent the cell indices would be re-quantised as though they were coordinates in that
     extent's units. The importer errors there and so does this.
 
-    `limit` mirrors `tessera build --limit`: keep source rows whose join value is below it.
+    `limit` mirrors `tessera build --limit`: keep source rows whose value of `field` is below it.
     **Passing it is not an optimisation** — see [`_row_groups_worth_reading`].
 
     The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this

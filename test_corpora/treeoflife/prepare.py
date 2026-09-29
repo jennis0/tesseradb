@@ -484,6 +484,7 @@ require_member_visibility = { count = 50 }
 
   [layer.members]
   source = "kmeans_members"
+  fields = { id = "entity" }
 
   [layer.content]
   computed = ["centroid", "box", "hull"]

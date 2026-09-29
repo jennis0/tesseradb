@@ -41,9 +41,8 @@ def db(tmp_path):
 
 
 def joined(db) -> None:
-    """The frames' `id` column, declared the join field."""
+    """The frames' `id` column, declared unique."""
     db.declare_attribute("id", type="keyword", unique=True)
-    db.declare_join_field("id")
 
 
 def test_the_toml_writer_spells_each_shape_once():
@@ -72,13 +71,12 @@ def test_every_block_names_the_source_and_the_columns_its_inserts_gave_it(db, ch
     db.declare_view("s0", default_label="public")
     joined(db)
     db.declare_attribute("cluster", type="keyword", index=True)
-    db.insert("s0", points(), id="id", x="x", y="y")
+    db.insert("s0", points(), x="x", y="y")
     assert checked(db).ok
     text = db.declaration
     assert "\nsource = " not in text.split("[[view]]")[0]
-    # The view and the two attributes its frame fills, the join field among them.
+    # The view and the two attributes its frame fills, the unique one among them.
     assert text.count('source = "s0"') == 3
-    assert 'join_field = "id"' in text
 
 
 def test_a_declared_thing_with_no_insert_is_declared_and_empty(db, checked):
@@ -92,7 +90,7 @@ def test_the_anchor_view_is_the_allocation_view(db, checked):
     db.declare_view("s0")
     joined(db)
     db.declare_view("s1", anchor=True)
-    db.insert("s1", points(), id="id", x="x", y="y")
+    db.insert("s1", points(), x="x", y="y")
     assert checked(db).ok
     assert 'allocation_view = "s1"' in db.declaration
 
@@ -101,7 +99,7 @@ def test_a_view_names_a_label_for_every_point(db, checked):
     """A view declaring no default reads every point's labels from the column the insert named."""
     db.declare_view("s0", default_label=None)
     joined(db)
-    db.insert("s0", points(), id="id", x="x", y="y", access="cluster")
+    db.insert("s0", points(), x="x", y="y", access="cluster")
     assert checked(db).ok
     assert 'point_visibility = { field = "cluster" }' in db.declaration
 
@@ -112,14 +110,15 @@ def test_a_layer_with_an_artifacts_table_is_closed_and_one_with_a_key_column_is_
     joined(db)
     db.declare_layer("from_tables", kind="flat")
     db.declare_layer("from_a_column", kind="flat")
-    db.insert("s0", points(), id="id", x="x", y="y")
+    db.insert("s0", points(), x="x", y="y")
     db.insert("from_tables", artifacts=artifacts(), key="key", level="level")
-    db.insert("from_tables", members=members(), id="entity", key="key")
-    db.insert("from_a_column", points(), id="id", key="cluster")
+    db.insert("from_tables", members=members(), columns={"id": "entity"}, key="key")
+    db.insert("from_a_column", points(), key="cluster")
     assert checked(db).ok
     text = db.declaration
     assert 'value_set = "closed"' in text and 'value_set = "open"' in text
-    assert 'fields = { key = "cluster", entity = "id" }' in text
+    # The key column's table carries `id` under its own name, and the members table as `entity`.
+    assert 'fields = { key = "cluster" }' in text and 'fields = { id = "entity" }' in text
 
 
 def test_supplied_content_and_prune_and_depends_on_reach_the_declaration(db, checked):
@@ -134,9 +133,9 @@ def test_supplied_content_and_prune_and_depends_on_reach_the_declaration(db, che
         supplied=[("name", "text", "inherited")],
         computed=("centroid",),
     )
-    db.insert("s0", points(), id="id", x="x", y="y")
-    db.insert("clusters", members=members(), id="entity", key="key")
-    db.insert("regions", members=members(), id="entity", key="key")
+    db.insert("s0", points(), x="x", y="y")
+    db.insert("clusters", members=members(), columns={"id": "entity"}, key="key")
+    db.insert("regions", members=members(), columns={"id": "entity"}, key="key")
     assert checked(db).ok
 
 
@@ -147,13 +146,13 @@ def test_a_label_sets_gate_is_one_of_two_words_and_its_tables_come_from_its_inse
     with pytest.raises(Refusal):
         db.declare_labels("t", of="clusters", content_requires="none")
     db.declare_labels("topics/a", of="clusters", content_requires="all")
-    db.insert("s0", points(), id="id", x="x", y="y")
-    db.insert("clusters", members=members(), id="entity", key="key")
+    db.insert("s0", points(), x="x", y="y")
+    db.insert("clusters", members=members(), columns={"id": "entity"}, key="key")
     db.insert("topics/a", {"a": "Diffusion models"})
     db.insert(
         "topics/a",
         members=pd.DataFrame({"key": ["a"], "entity": ["p0"], "rank": [0]}),
-        id="entity",
+        columns={"id": "entity"},
         key="key",
         rank="rank",
     )
@@ -235,9 +234,7 @@ def test_a_group_takes_its_roster_and_its_rows_from_two_inserts(db, checked):
     )
     rows = points()
     rows["quarter"] = ["q1"] * len(rows)
-    db.insert("quarter", rows, id="id", x="x", y="y", view="quarter")
-    # A group's rows fill no attribute at the first commit, the join field included.
-    db.insert("id", points()[["id"]], id="id", value="id")
+    db.insert("quarter", rows, x="x", y="y", view="quarter")
     assert checked(db).ok
     text = db.declaration
     assert '[view_group.views]\nsource = "quarter_roster"' in text
@@ -268,29 +265,33 @@ def test_a_text_table_refuses_a_column_the_written_one_would_not_carry(db):
         )
 
 
-def test_the_join_field_is_the_attribute_the_user_names_and_id_needs_one(db, checked):
-    """No join field is chosen for the user: `id=` without one is refused, and naming an attribute
-    that is not declared is refused."""
+def test_a_table_names_its_items_by_every_unique_column_it_carries(db, checked):
+    """No column is chosen for the user: a table names its items by the columns it carries of the
+    attributes declared unique, and `columns=` names only those on a table that is no view's."""
     db.declare_view("s0", default_label="public")
-    with pytest.raises(Refusal):
-        db.insert("s0", points(), id="id", x="x", y="y")
-    with pytest.raises(Refusal):
-        db.declare_join_field("id")
     db.declare_attribute("id", type="keyword", unique=True)
     db.declare_attribute("paper", type="keyword", unique=True)
-    db.declare_join_field("paper")
-    db.declare_join_field("id")
-    db.insert("s0", points(), id="id", x="x", y="y")
+    db.declare_attribute("cluster", type="keyword")
+    db.declare_layer("clusters", kind="flat")
+    rows = points()
+    rows["paper"] = [f"q{i}" for i in range(len(rows))]
+    insert = db.insert("s0", rows, x="x", y="y")
+    assert insert.items == {"id": "id", "paper": "paper"}
+    with pytest.raises(Refusal):
+        db.insert("clusters", members=members(), key="key", columns={"cluster": "entity"})
+    db.insert("clusters", members=members(), key="key", columns={"id": "entity"})
     assert checked(db).ok
     text = db.declaration
-    assert text.count("join_field") == 1 and 'join_field = "id"' in text
+    assert 'fields = { id = "entity" }' in text
 
 
-def test_a_file_naming_the_join_field_otherwise_says_so_under_its_name(db, checked):
+def test_a_file_carrying_a_unique_attribute_under_another_name_says_so_in_fields(db, checked):
     db.declare_view("s0", default_label="public")
     db.declare_view("s1", default_label="public")
     joined(db)
-    db.insert("s0", points(), id="id", x="x", y="y")
-    db.insert("s1", points().rename(columns={"id": "paper"}), id="paper", x="x", y="y")
+    db.insert("s0", points(), x="x", y="y")
+    db.insert(
+        "s1", points().rename(columns={"id": "paper"}), x="x", y="y", columns={"id": "paper"}
+    )
     assert checked(db).ok
     assert 'fields = { id = "paper" }' in db.declaration

@@ -148,6 +148,7 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -166,7 +167,7 @@ fn build_fixture_with_schema(out: &Path, tmp: &Path, schema_toml: &str, column: 
     let pairs = tmp.join("pairs.parquet");
     write_points_with_absent_category(&points, n, column);
     write_pairs_n(&pairs, n);
-    let schema = parse_schema(tmp, schema_toml);
+    let schema = with_id(parse_schema(tmp, schema_toml));
     build(&build_args(&points, &pairs, out, schema))
         .expect("a discovered-vocabulary build should succeed");
 }

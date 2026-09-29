@@ -17,7 +17,7 @@ from .split import (
     declared_layers,
     declared_views,
     in_sorted,
-    join_field,
+    unique_field,
     member_table_columns,
     read_view_rows,
     source_path,
@@ -34,22 +34,22 @@ def wire_columns(
     """`(access column, attribute columns, joined files)` for one view's batches,
     the anchor's by default, read off the rung's own declaration: the view's
     `point_visibility.field`, and every `[[attribute]]` that travels with a point there bar the
-    join field, which [`encode_batch`] writes from the entity id. One read from a file of its own
-    is joined on the join field, as the build reads it beside the points: each joined file is
+    unique field, which [`encode_batch`] writes from the entity id. One read from a file of its own
+    is joined on the unique field, as the build reads it beside the points: each joined file is
     `(file, columns, select, fields)`. A group-scoped attribute travels only on a
     view of its group or of one sharing its keys, its rows picked by its file's discriminator,
     `view` unless `fields.view` renames it. A declared column the view's points file does not hold
     is left out of the batch, which keeps what the item already stores."""
     declared = tomllib.loads((rung / "corpus.toml").read_text())
     named = declared.get("sources", {})
-    join = join_field(rung)
+    naming = unique_field(rung)
     view = view or declared_views(rung)[0]
     access = view["point_visibility"].get("field")
     held = set(pq.ParquetFile(view["points"]).schema_arrow.names)
     attributes: list[str] = []
     joined: dict = {}
     for attribute in declared.get("attribute", []):
-        if attribute["name"] == join["name"]:
+        if attribute["name"] == naming["name"]:
             continue
         group = scope_group(attribute)
         if group not in (None, view["owner"]):
@@ -68,7 +68,7 @@ def wire_columns(
                 "columns": [],
                 "select": select,
                 "fields": {
-                    "entity_id": (attribute.get("fields") or {}).get(join["name"], join["column"])
+                    "entity_id": (attribute.get("fields") or {}).get(naming["name"], naming["column"])
                 },
             },
         )
@@ -85,7 +85,7 @@ def scope_group(attribute: dict) -> str | None:
 
 def encode_batch(
     table: pa.Table,
-    join: dict,
+    naming: dict,
     coordinates: Sequence[str],
     access: str | None,
     attributes: list[str],
@@ -94,7 +94,7 @@ def encode_batch(
     """One Arrow IPC stream for a slice of the hold-out. `coordinates` is the view's pair,
     `lon`/`lat` for a projected view and `x`/`y` for one with none, which the table and the wire
     both spell so. `access` is the wire's list of labels, a null becoming the empty list for the
-    view's declaration to interpret. The join field, `join` from [`join_field`], carries each row's
+    view's declaration to interpret. The unique field, `naming` from [`unique_field`], carries each row's
     entity id at the declared type, which names the item the build or an earlier batch gave that
     value. `columns` names the column-route layers, already named for the layer they belong to."""
     names = list(coordinates)
@@ -115,8 +115,8 @@ def encode_batch(
             column = pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), values.drop_null())
         arrays.append(column)
         names.append("access")
-    arrays.append(table.column("entity_id").combine_chunks().cast(join["type"]))
-    names.append(join["name"])
+    arrays.append(table.column("entity_id").combine_chunks().cast(naming["type"]))
+    names.append(naming["name"])
     # A column that is also the compartment attribute is sent twice on purpose: once as `access`,
     # once as itself.
     for name in attributes:
@@ -228,7 +228,7 @@ class HoldOut:
         }
         self.batch_rows = batch_rows
         self.held = np.sort(held)
-        self.join = join_field(rung)
+        self.naming = unique_field(rung)
         self.access, self.attributes, joined = wire_columns(rung, view)
         #: Each joined file's rows for the hold-out, read once: small beside the points.
         self.joined = [
@@ -366,6 +366,6 @@ class HoldOut:
     def encode(self, table: pa.Table) -> bytes:
         """[`encode_batch`] over a slice of this hold-out, member columns included."""
         return encode_batch(
-            table, self.join, self.coordinates, self.access, self.attributes, self.columns
+            table, self.naming, self.coordinates, self.access, self.attributes, self.columns
         )
 

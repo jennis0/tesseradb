@@ -241,6 +241,7 @@ def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, point
     found = db.categories("archive", prefix="ma")
     assert found.column_names == ["key", "code", "title", "count"]
     assert found.schema.metadata[b"tessera.more"] == b"false"
+    assert found.schema.metadata[b"tessera.total"] == str(len(points)).encode()
     found = found.to_pandas()
     assert "math" in set(found["key"])
     carried = points["archive"].value_counts()
@@ -256,16 +257,39 @@ def test_categories_with_a_prefix_counts_what_the_reader_may_see(db, points):
     }
 
 
+def test_categories_under_a_filter_count_the_rows_it_passes(db, points):
+    box = box_of(points, 0.2, 0.7)
+    expression = {"all_of": [
+        {"primary_category": {"in": ["cs.LG", "stat.ML"]}},
+        {"region": {"bbox": list(box)}},
+    ]}
+    passing = inside(points, box)
+    passing = passing[passing["primary_category"].isin(["cs.LG", "stat.ML"])]
+    unfiltered = db.categories("archive", prefix="", view="s0")
+    found = db.categories("archive", prefix="", view="s0", filters=expression)
+    assert found.column("key").to_pylist() == unfiltered.column("key").to_pylist()
+    carried = passing["archive"].value_counts()
+    counts = dict(zip(found.column("key").to_pylist(), found.column("count").to_pylist()))
+    assert counts == {key: carried.get(key, 0) for key in counts}
+    assert 0 in counts.values() and any(counts.values())
+    assert found.schema.metadata[b"tessera.total"] == str(len(passing)).encode()
+    with pytest.raises(Refusal):
+        db.categories("archive", view="s0", filters=expression)
+    with pytest.raises(Refusal):
+        db.categories("archive", view="s0", codes=[1], filters=expression)
+
+
 def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bundle):
     box = box_of(points, 0.2, 0.8)
     expression = {"archive": {"eq": "cs"}}
     m = db.view("s0").filter(expression).within(box).map(
-        colour_by="primary_category", layers=[], height=320
+        colour_by="primary_category", layers=[], height=320, size_by="citations"
     )
     assert m.view == "s0"
     assert m.filters == expression
     assert m.bbox == list(box)
     assert m.colour_by == "primary_category" and m.layers == [] and m.height == 320
+    assert m.size_by == "citations"
 
 
 def test_a_box_counted_over_a_cover_counts_at_least_the_items_inside(served, corpus, points):

@@ -56,16 +56,16 @@ def database(tmp_path: Path):
     db = create(tmp_path / "db")
     db.files = tmp_path / "files"
     db.declare_attribute("entity_id", type="i64", unique=True)
-    db.declare_join_field("entity_id")
     return db
 
 
 def points(db, view: str, columns, file: str | None = None) -> None:
-    """One view's own insert: its geometry, its labels, its id, and every column it fills."""
+    """One view's own insert: its geometry, its labels, its unique `entity_id`, and every column
+    it fills."""
     attributes = [
         block["name"] for block in db.blocks.blocks["attribute"] if not block.get("scope")
     ]
-    named = {"id": "entity_id"}
+    named = {}
     named["lon" if "lon" in columns else "x"] = "lon" if "lon" in columns else "x"
     named["lat" if "lat" in columns else "y"] = "lat" if "lat" in columns else "y"
     access = [one for one in columns if one not in ("entity_id", "x", "y", "lon", "lat")]
@@ -95,7 +95,7 @@ def members(db, layer: str) -> None:
     db.insert(
         layer,
         members=parquet(db, f"{layer}_members".replace("/", "_"), ("key", "entity")),
-        id="entity",
+        columns={"entity_id": "entity"},
         key="key",
     )
 
@@ -277,7 +277,6 @@ def test_multiview(tmp_path):
         db.insert(
             "quarter",
             parquet(db, f"quarter_2026_q{at + 1}", ("entity_id", "x", "y", "access", *scoped)),
-            id="entity_id",
             x="x",
             y="y",
             access="access",
@@ -286,7 +285,6 @@ def test_multiview(tmp_path):
     db.insert(
         "quarter_alt",
         parquet(db, "quarter_alt_pts", ("entity_id", "lon", "lat", "access", "quarter", *scoped)),
-        id="entity_id",
         lon="lon",
         lat="lat",
         access="access",
@@ -296,13 +294,12 @@ def test_multiview(tmp_path):
     values(db, "kind")
     constants = parquet(db, "attrs_constant", ("entity_id", "importance", "kind"))
     for name in ("importance", "kind"):
-        db.insert(name, constants, id="entity_id", value=name)
+        db.insert(name, constants, value=name)
     # `coverage` is the one scoped column with a source of its own; the other three are read
     # from each view's own points file, so they are declared and take no insert.
     db.insert(
         "coverage",
         parquet(db, "attrs_scoped", ("entity_id", "quarter", "coverage")),
-        id="entity_id",
         value="coverage",
         view="quarter",
     )

@@ -124,7 +124,7 @@ it was not.
 | `abstract` | text | index | as above |
 | `authors` | text | index | the surnames `corpus.parquet` carries, joined |
 | `arxiv_id` | keyword | index | arXiv's own identifier |
-| `id` | `u64` | unique | the join field: the row number `prepare.py` gives each paper |
+| `id` | `u64` | unique | names a paper in every file: the row number `prepare.py` gives each paper |
 
 Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
 refused, the hot column being a fixed-width slot per row.

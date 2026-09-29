@@ -45,15 +45,11 @@ const PLACES: &[(f64, f64)] = &[
 /// the triangle's WKT — the shape a caller's own file has, and the only route by which a table's
 /// `default_space` governs an authored shape.
 fn write_drawings(path: &Path) {
-    use arrow::array::{ListBuilder, StringBuilder, UInt64Builder};
+    use arrow::array::{ListBuilder, StringBuilder};
 
     let mut keys = StringBuilder::new();
     keys.append_value("uk");
-    let mut members = ListBuilder::new(UInt64Builder::new());
-    for id in 0..PLACES.len() as u64 {
-        members.values().append_value(id);
-    }
-    members.append(true);
+    let members = id_member_lists([(0..PLACES.len() as u64).collect::<Vec<_>>()]);
     let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
     contents.values().values().append_value(UK);
     contents.values().append(true);
@@ -63,7 +59,7 @@ fn write_drawings(path: &Path) {
         path,
         vec![
             column("key", false, keys.finish()),
-            column("members", true, members.finish()),
+            column("members", true, members),
             column("contents", true, contents.finish()),
         ],
     );

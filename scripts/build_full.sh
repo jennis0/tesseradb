@@ -37,9 +37,9 @@ fi
 
 # The declaration this build compiles: one view over the scaled geometry, its points' labels in the
 # exploded relation beside it, and the identity extent the Morton branch requires. One attribute,
-# the join field the relation names each point by; the geometry file carries no other. Written into
-# `data/scaled/` rather than checked in because the paths `[sources]` writes sit there, and a path
-# there is relative to the document declaring it (configuration.md §3).
+# the unique `id` the geometry and the relation name each point by; the geometry file carries no
+# other. Written into `data/scaled/` rather than checked in because the paths `[sources]` writes
+# sit there, and a path there is relative to the document declaring it (configuration.md §3).
 CONFIG="$ROOT/data/scaled/build-full.config.toml"
 cat > "$CONFIG" <<'TOML'
 [sources]
@@ -48,9 +48,8 @@ labels   = "pairs/categories-subclass.pairs.parquet"
 
 [defaults]
 source     = "geometry"
-join_field = "id"
 
-# The join field: the dense `entity_id` the geometry and every label relation carry.
+# The dense `entity_id` the geometry and every label relation name each point by.
 [[attribute]]
 name   = "id"
 type   = "u32"

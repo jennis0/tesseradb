@@ -107,7 +107,6 @@ quarter = "quarter.parquet"
 
 [defaults]
 allocation_view = "world"
-join_field      = "id"
 
 # The points file's `entity_id`, which every file names its item by.
 [[attribute]]

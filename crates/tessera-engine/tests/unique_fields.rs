@@ -170,6 +170,7 @@ fn fixture_of(unique: bool, views: &[&str]) -> Fixture {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

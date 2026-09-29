@@ -1,11 +1,12 @@
 import type {Store} from '@tesseradb/client';
-import {DEFAULT_COLOURING, type Colouring} from '@tesseradb/deck';
+import {DEFAULT_COLOURING, DEFAULT_SIZING, type Colouring, type Sizing} from '@tesseradb/deck';
 
 /**
- * The colour choices of every element reading one store: the palette, the ramp and the colours
- * chosen for single values. The map draws with them and the legend shows and changes them, and the
- * two may be siblings that share nothing but the store, so the choices are kept per store here.
- * They are presentation only: nothing here changes what is fetched, counted or drawn.
+ * The colour and size choices of every element reading one store: the palette, the ramp, the
+ * colours chosen for single values, and the sizes and scale a number column sizes points on. The
+ * map draws with them and the legend shows and changes them, and the two may be siblings that share
+ * nothing but the store, so the choices are kept per store here. They are presentation only:
+ * nothing here changes what is fetched, counted or drawn.
  *
  * A value colour names a category key the server answered for one viewer. When the store forgets
  * what the server answered (its `meta` goes to `null`, on `clear()` or an answer under another
@@ -13,14 +14,14 @@ import {DEFAULT_COLOURING, type Colouring} from '@tesseradb/deck';
  * the ramp, its scale and its direction are the user's and stay.
  */
 
-type Entry = {colouring: Colouring; listeners: Set<() => void>; metaHeld: boolean};
+type Entry = {colouring: Colouring; sizing: Sizing; listeners: Set<() => void>; metaHeld: boolean};
 
 const entries = new WeakMap<Store, Entry>();
 
 function entry(store: Store): Entry {
   let held = entries.get(store);
   if (!held) {
-    const entry: Entry = {colouring: DEFAULT_COLOURING, listeners: new Set(), metaHeld: store.get('meta') !== null};
+    const entry: Entry = {colouring: DEFAULT_COLOURING, sizing: DEFAULT_SIZING, listeners: new Set(), metaHeld: store.get('meta') !== null};
     store.subscribe(() => {
       const meta = store.get('meta') !== null;
       const forgot = entry.metaHeld && !meta;
@@ -48,8 +49,27 @@ export function setColouring(store: Store, patch: Partial<Colouring>): void {
   for (const fn of [...held.listeners]) fn();
 }
 
-/** Call `fn` whenever the colour choices for `store` change. Returns the function that stops it. */
-export function watchColouring(store: Store, fn: () => void): () => void {
+/** The size choices for `store`, the defaults where none were made or there is no store. */
+export function sizingOf(store: Store | null): Sizing {
+  return store ? entry(store).sizing : DEFAULT_SIZING;
+}
+
+/**
+ * Change the size choices for `store` and tell every element watching them. A radius that is not a
+ * finite number above zero is ignored, as a budget that is not is, and so is a scale it does not
+ * name.
+ */
+export function setSizing(store: Store, patch: Partial<Sizing>): void {
+  const held = entry(store);
+  const radius = (r: number | undefined): r is number => typeof r === 'number' && Number.isFinite(r) && r > 0;
+  const next = {...held.sizing, ...(radius(patch.min) ? {min: patch.min} : {}), ...(radius(patch.max) ? {max: patch.max} : {}), ...(patch.scale === 'linear' || patch.scale === 'log' || patch.scale === 'rank' ? {scale: patch.scale} : {})};
+  if (next.min === held.sizing.min && next.max === held.sizing.max && next.scale === held.sizing.scale) return;
+  held.sizing = next;
+  for (const fn of [...held.listeners]) fn();
+}
+
+/** Call `fn` whenever the colour or size choices for `store` change. Returns the function that stops it. */
+export function watchChoices(store: Store, fn: () => void): () => void {
   const held = entry(store);
   held.listeners.add(fn);
   return () => held.listeners.delete(fn);

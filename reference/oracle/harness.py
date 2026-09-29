@@ -40,8 +40,8 @@ DEFAULT_PAIRS = "data/scaled/pairs/categories-subclass.pairs.parquet"
 DEFAULT_LIMIT = 250_000
 DEFAULT_EXTENT = "0,65536,0,65536"
 DEFAULT_VIEW = "s0"
-#: The unique attribute the default fixture joins its two files on, and the column both carry it
-#: in. Its value is the corpus's own item number.
+#: The unique attribute both files of the default fixture name their items by, and the column both
+#: carry it in. Its value is the corpus's own item number.
 JOIN_FIELD = "source_id"
 JOIN_COLUMN = "entity_id"
 
@@ -353,7 +353,7 @@ def _extent_toml(extent: str) -> str:
 
 def _fixture_config_text(view_id: str, extent: str) -> str:
     """One view, its frame, its geometry, and the relation its points' labels are in. The one
-    attribute is the item number both files carry, which the build joins them on.
+    attribute is the item number both files carry, which names each row's item.
 
     The two sources are named relatively **and overridden on the command line**: the files live
     under `data/scaled/`, which is a path this document may not carry (§3), and an override is
@@ -369,24 +369,18 @@ def _fixture_config_text(view_id: str, extent: str) -> str:
         f'[[view]]\nname = "{view_id}"\n{_extent_toml(extent)}\n'
         'source = "points"\n'
         'point_visibility = { source = "pairs", default = "public" }\n\n'
-        + join_toml("points")
+        + join_attribute_toml("points")
     )
 
 
 def join_attribute_toml(source: str) -> str:
     """The `[[attribute]]` block declaring [`JOIN_FIELD`] unique, read from each file's
-    [`JOIN_COLUMN`] and from `source` for its values. A declaration naming it in
-    `[defaults].join_field` joins its files on it."""
+    [`JOIN_COLUMN`] and from `source` for its values. Every file carrying that column names its
+    rows' items by it."""
     return (
         f'[[attribute]]\nname = "{JOIN_FIELD}"\ntype = "u64"\nunique = true\n'
         f'field = "{JOIN_COLUMN}"\nsource = "{source}"\n'
     )
-
-
-def join_toml(source: str) -> str:
-    """[`join_attribute_toml`] with the `[defaults]` table naming it the join field, for a
-    declaration with no `[defaults]` of its own."""
-    return f'[defaults]\njoin_field = "{JOIN_FIELD}"\n\n' + join_attribute_toml(source)
 
 
 def _write_fixture_config(bundle_root: Path, view_id: str, extent: str) -> Path:

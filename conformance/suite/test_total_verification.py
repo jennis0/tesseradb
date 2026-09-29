@@ -148,7 +148,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
             raise TimeoutError("the background refresh never replaced the resident projection")
 
         # The denies: suppress, delete, and suppress/unsuppress (module doc). Targets are battery
-        # items, addressed by the join field `id`, which is the item's `e` both in the built
+        # items, addressed by the unique field `id`, which is the item's `e` both in the built
         # files and in the ingest batch.
         battery_fx = [fx_of_tessera[t] for t in item_ids]
         battery_expected = expected_items(SEED, battery_fx)

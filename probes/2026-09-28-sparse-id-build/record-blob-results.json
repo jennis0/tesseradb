@@ -1,0 +1,74 @@
+{
+ "base-spill-1": {
+  "wall_s": 332.3,
+  "stages": {
+   "source_ids": 6.3,
+   "attribute_tail": 54.8,
+   "layers": 92.8,
+   "record_blob": 37.5
+  }
+ },
+ "head-spill-1": {
+  "wall_s": 242.2,
+  "stages": {
+   "source_ids": 12.1,
+   "attribute_tail": 49.1,
+   "layers": 16.1,
+   "record_blob": 40.7
+  }
+ },
+ "base-spill-2": {
+  "wall_s": 354.3,
+  "stages": {
+   "source_ids": 16.9,
+   "attribute_tail": 63.0,
+   "layers": 79.1,
+   "record_blob": 41.4
+  }
+ },
+ "head-spill-2": {
+  "wall_s": 247.6,
+  "stages": {
+   "source_ids": 13.0,
+   "attribute_tail": 51.0,
+   "layers": 18.2,
+   "record_blob": 38.8
+  }
+ },
+ "base-spill-6b-1": {
+  "wall_s": 446.5,
+  "stages": {
+   "source_ids": 26.2,
+   "attribute_tail": 74.9,
+   "layers": 123.8,
+   "record_blob": 32.9
+  }
+ },
+ "head-spill-6b-1": {
+  "wall_s": 220.2,
+  "stages": {
+   "source_ids": 11.6,
+   "attribute_tail": 49.6,
+   "layers": 17.0,
+   "record_blob": 37.4
+  }
+ },
+ "base-spill-6b-2": {
+  "wall_s": 293.8,
+  "stages": {
+   "source_ids": 6.3,
+   "attribute_tail": 48.6,
+   "layers": 77.4,
+   "record_blob": 38.0
+  }
+ },
+ "head-spill-6b-2": {
+  "wall_s": 237.6,
+  "stages": {
+   "source_ids": 16.7,
+   "attribute_tail": 49.8,
+   "layers": 14.8,
+   "record_blob": 40.1
+  }
+ }
+}

@@ -267,6 +267,7 @@ fn build_fixture(tmp: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).expect("key"),
         shard_id: 0,
         layers: Vec::new(),

@@ -242,7 +242,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 source: None,
             },
         ],
-        ..build_args(&out, views)
+        ..with_id(build_args(&out, views), &world_points)
     })
     .expect("a nine-view build with one scoped family succeeds");
     out

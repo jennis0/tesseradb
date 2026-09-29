@@ -3,17 +3,14 @@
 //!
 //! Each column's values are pushed through a bucketed spill sort under a share of the build's
 //! memory budget ([`tessera_store::unique::UniqueSpill`]), which reports every key more than one
-//! entity holds as it writes. A duplicate refuses the build, naming how many values are held twice
-//! and up to ten of them. A keyword's key is a hash, so its text is found by walking the column's
-//! values a second time, which happens only on the way to a refusal.
+//! entity holds as it writes. The identity rule has refused every row that would give an item a
+//! value another holds ([`crate::ids`]), so a key held twice here is a fault in the build and
+//! refuses it.
 
 use std::path::{Path, PathBuf};
 
 use tessera_spatial::ScalarValue;
-use tessera_store::unique::{
-    duplicates_message, index_dir_rel, key_of, key_text, value_text, KeyKind, UniqueKey,
-    UniqueSpill, WrittenUniqueRun,
-};
+use tessera_store::unique::{index_dir_rel, key_of, KeyKind, UniqueKey, UniqueSpill, WrittenUniqueRun};
 
 use crate::column::EntityColumn;
 use crate::config::{Attribute, Schema};
@@ -95,7 +92,7 @@ pub(crate) fn spill_budget(budget: u64, room: u64) -> usize {
 }
 
 /// Write the index of every unique column in `schema`, reading each through `source_of` and sorting
-/// it in `spill_bytes` of memory, and refuse a column holding one value for two entities. Returns
+/// it in `spill_bytes` of memory, and fail on a column holding one value for two entities. Returns
 /// each column's runs, in key order with disjoint ranges; a column with no values has none. The
 /// runs are fsynced.
 pub(crate) fn write_unique_indexes<'a>(
@@ -124,24 +121,18 @@ pub(crate) fn write_unique_indexes<'a>(
         let dir = prefix_dir.join(index_dir_rel(partition, &attribute.name));
         std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
         let mut duplicates = 0u64;
-        let mut named: Vec<UniqueKey> = Vec::new();
         let runs = spill
-            .finish(&dir, "base", |d| {
-                duplicates += 1;
-                if named.len() < tessera_store::unique::DUPLICATE_EXAMPLES {
-                    named.push(d.key);
-                }
-            })
+            .finish(&dir, "base", |_| duplicates += 1)
             .map_err(store)?;
         if duplicates > 0 {
             for run in &runs {
                 let _ = std::fs::remove_file(&run.path);
             }
-            let examples = describe(&source, attribute, kind, &named)?;
-            return Err(BuildError::Invalid(duplicates_message(
-                &attribute.name,
-                duplicates,
-                &examples,
+            return Err(BuildError::Invalid(format!(
+                "attribute '{}': {duplicates} value(s) are held by more than one item, and the \
+                 identity rule refuses every row that would give an item a value another holds. \
+                 The build is at fault; report it with the declaration",
+                attribute.name
             )));
         }
         let paths: Vec<PathBuf> = runs.iter().map(|run| run.path.clone()).collect();
@@ -149,30 +140,4 @@ pub(crate) fn write_unique_indexes<'a>(
         out.push((attribute.name.clone(), runs));
     }
     Ok(out)
-}
-
-/// The values of `keys`, as a refusal names them.
-fn describe(
-    source: &UniqueSource<'_>,
-    attribute: &Attribute,
-    kind: KeyKind,
-    keys: &[UniqueKey],
-) -> Result<Vec<String>> {
-    let mut texts: std::collections::HashMap<UniqueKey, String> = std::collections::HashMap::new();
-    if kind == KeyKind::Keyword {
-        source.walk(attribute, &mut |_, key, text| {
-            if let Some(text) = text {
-                if keys.contains(&key) && !texts.contains_key(&key) {
-                    texts.insert(key, value_text(&ScalarValue::Utf8(text.to_string())));
-                }
-            }
-            Ok(())
-        })?;
-    }
-    Ok(keys
-        .iter()
-        .map(|key| {
-            key_text(*key, kind).unwrap_or_else(|| texts.get(key).cloned().unwrap_or_default())
-        })
-        .collect())
 }
