@@ -1,4 +1,4 @@
-import {GRID32, WORLD_SIZE, composeFilters, type Artifact, type ArtifactsProjection, type Band, type BrowseRow, type CategoryValue, type ColumnDraft, type FilterDraft, type FiltersProjection, type ItemDetail, type Layer, type LegendProjection, type MarksProjection, type Meta, type PaletteScheme, type Rgba, type SuggestValue, type TilesProjection, type ViewInfo, type ViewProjection} from '@tesseradb/client';
+import {GRID32, WORLD_SIZE, composeFilters, type Artifact, type ArtifactsProjection, type Band, type BrowseRow, type CategoryValue, type ClauseVerb, type ColumnDraft, type FilterDraft, type FiltersProjection, type ItemDetail, type Layer, type LegendProjection, type MarksProjection, type Meta, type PaletteScheme, type Rgba, type SuggestValue, type SuggestionPage, type TilesProjection, type ViewInfo, type ViewProjection} from '@tesseradb/client';
 import {SessionArtifactTable, artifactColours, attachedTextOf, compose, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {meta as baseMeta, scalar} from '../../components/test/fake-store.js';
 
@@ -387,6 +387,14 @@ export function suggestion(v: CategoryValue, q = ''): SuggestValue {
   const at = q ? title.toLowerCase().indexOf(q.toLowerCase()) : -1;
   // Counts falling with the code, as a corpus's commonest values come first.
   return {code: v.code, key: v.key, title: v.title, match: at >= 0 ? {field: 'title', start: at, len: q.length} : {field: 'key', start: 0, len: 0}, count: Math.round(4_812_300 / v.code)};
+}
+
+/**
+ * A landed typeahead page for `q` from position `verb`, each value counted by `count` (the corpus's
+ * own count where it gives none), out of `total`.
+ */
+export function suggestionPage(q: string, verb: ClauseVerb, values: CategoryValue[], total: number, count?: (v: CategoryValue) => number): SuggestionPage {
+  return {q, verb, values: values.map((v) => ({...suggestion(v, q), ...(count ? {count: count(v)} : {})})), more: false, total};
 }
 
 /** A filters projection over `draft`, with its expressions composed as the store would. */

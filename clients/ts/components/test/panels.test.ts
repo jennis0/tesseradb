@@ -142,7 +142,7 @@ describe('<tessera-filter> on a category', () => {
     expect(store.calls.filter((c) => c.name === 'suggest')).toHaveLength(0);
     expect(deep(host, '[part="values"]')).toBeNull();
     await type(host, 'ma');
-    expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([['archive', 'ma']]);
+    expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([['archive', 'ma', 'filter']]);
   });
 
   it('chooses the suggestion the arrow keys reach with Enter, the first by default, and nothing for text that suggests nothing', async () => {
@@ -155,7 +155,7 @@ describe('<tessera-filter> on a category', () => {
     await key('Enter');
     expect(drafts(store)).toHaveLength(0);
     await type(host, 'c');
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', values: [value(1, 'cs', 'CS'), value(2, 'cond', null), value(3, 'chem', null)], more: false}}});
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS'), value(2, 'cond', null), value(3, 'chem', null)], more: false, total: null}}});
     await settle(host);
     await key('Enter');
     expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['cs']});
@@ -173,14 +173,14 @@ describe('<tessera-filter> on a category', () => {
   it('renders only the page that answers the box in front of it, and chooses a suggestion', async () => {
     const {host, store} = await mountFilter('archive', empty());
     await type(host, 'mach');
-    expect(store.calls.filter((c) => c.name === 'suggest').at(-1)!.args).toEqual(['archive', 'mach']);
+    expect(store.calls.filter((c) => c.name === 'suggest').at(-1)!.args).toEqual(['archive', 'mach', 'filter']);
     // A page for a different `q` (an earlier keystroke, landed late) is not shown for the box.
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'mac', values: [value(9, 'stat.ML', 'Machine Learning (Statistics)')], more: false}}});
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'mac', verb: 'filter', values: [value(9, 'stat.ML', 'Machine Learning (Statistics)')], more: false, total: null}}});
     await settle(host);
     expect(deepAll(host, '[part~="tick"]')).toHaveLength(0);
     store.set('filters', {
       ...store.get('filters'),
-      suggestions: {archive: {q: 'mach', values: [{code: 41207, key: 'cs.LG', title: 'Machine Learning', match: {field: 'title', start: 0, len: 4}}], more: true}}
+      suggestions: {archive: {q: 'mach', verb: 'filter', values: [{code: 41207, key: 'cs.LG', title: 'Machine Learning', match: {field: 'title', start: 0, len: 4}}], more: true, total: null}}
     });
     await settle(host);
     const ticks = deepAll(host, '[part~="tick"]');
@@ -191,26 +191,59 @@ describe('<tessera-filter> on a category', () => {
     expect((drafts(store)[0]!.filter['archive'] as {keys: string[]}).keys).toEqual(['cs.LG']);
   });
 
-  it('shows each value’s count and its share of the items the counts are counted over', async () => {
+  it('shows each value’s count and its share of the total the server counted over', async () => {
     const {host, store} = await mountFilter('archive', empty());
-    // The counts are over every item visible in the view, not over what the filter matches.
+    // The view's own totals are not what the counts are over.
     store.set('view', {...store.get('view'), visible: {value: 1000, exact: true}, matched: {value: 400, exact: true}});
     await type(host, 'c');
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 0)], more: false}}});
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 0)], more: false, total: 500}}});
     await settle(host);
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0']);
-    // The bar is the value's share of the visible total, not of the matched total or the commonest value.
-    expect(deepAll(host, '[part="bar"]').map((b) => (b as HTMLElement).style.width)).toEqual(['25.0%', '0.0%']);
+    expect(deepAll(host, '[part="bar"]').map((b) => (b as HTMLElement).style.width)).toEqual(['50.0%', '0.0%']);
+    // In the filter position a value counted 0 can still be chosen.
+    expect(deepAll(host, '[part~="tick"]').map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'false']);
   });
 
-  it('in the highlight, greys a value the filter leaves out, counts it 0 and does not choose it', async () => {
-    const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}), 'verb="highlight"');
+  it('draws no bar where the page carries no total', async () => {
+    const {host, store} = await mountFilter('archive', empty());
     await type(host, 'c');
-    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 90)], more: false}}});
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS', 250)], more: false, total: null}}});
+    await settle(host);
+    expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250']);
+    expect(deepAll(host, '[part="bar"]')).toHaveLength(0);
+  });
+
+  it('asks from its own position, asks again when the position changes, and shows only its own position’s page', async () => {
+    const {host, store, el} = await mountFilter('archive', empty());
+    await type(host, 'c');
+    el.verb = 'highlight';
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([
+      ['archive', 'c', 'filter'],
+      ['archive', 'c', 'highlight']
+    ]);
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'filter', values: [value(1, 'cs', 'CS', 250)], more: false, total: 500}}});
+    await settle(host);
+    expect(deepAll(host, '[part~="tick"]')).toHaveLength(0);
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(1, 'cs', 'CS', 250)], more: false, total: 500}}});
+    await settle(host);
+    expect(deepAll(host, '[part~="tick"]')).toHaveLength(1);
+  });
+
+  it('in the highlight, greys a value the server counts 0 under the filter and does not choose it', async () => {
+    const filtered = filtersOf({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}, {expr: {archive: {in: ['cs']}}});
+    const {host, store} = await mountFilter('archive', filtered, 'verb="highlight"');
+    await type(host, 'c');
+    // `chem` is outside the filter's keys, and the server's count is what decides.
+    store.set('filters', {
+      ...store.get('filters'),
+      suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(1, 'cs', 'CS', 250), value(2, 'cond', null, 0), value(3, 'chem', null, 5)], more: false, total: 255}}
+    });
     await settle(host);
     const ticks = deepAll(host, '[part~="tick"]') as HTMLElement[];
-    expect(ticks.map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'true']);
-    expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0']);
+    expect(ticks.map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'true', 'false']);
+    expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0', '5']);
+    expect(deep(host, '[part~="tick"][aria-disabled="true"] .out')?.textContent).toBe('filtered out');
     ticks[1]!.click();
     expect(drafts(store)).toHaveLength(0);
     ticks[0]!.click();
@@ -239,8 +272,8 @@ describe('<tessera-filter> on a category', () => {
     store.set('filters', {...store.get('filters'), suggestions: {}, suggestErrors: {}, suggestEpoch: 1});
     await settle(host);
     expect(store.calls.filter((c) => c.name === 'suggest').map((c) => c.args)).toEqual([
-      ['archive', 'ma'],
-      ['archive', 'ma']
+      ['archive', 'ma', 'filter'],
+      ['archive', 'ma', 'filter']
     ]);
   });
 });

@@ -4,7 +4,7 @@ import type {TesseraMap} from '@tesseradb/components';
 import type {Colouring} from '@tesseradb/deck';
 import {setColouring} from '../../components/src/colouring.js';
 import {fakeStore, meta as baseMeta, settle, status, type FakeStore} from '../../components/test/fake-store.js';
-import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestion, topicArtifacts, withDraft} from './corpus.js';
+import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestionPage, topicArtifacts, withDraft} from './corpus.js';
 
 /**
  * Every element in every state its source handles, each built from its own fake store. A specimen
@@ -310,7 +310,7 @@ export const SECTIONS: Section[] = [
     specimens: [
       {state: 'category, nothing typed', build: () => make('tessera-filter', {store: store({view: SHOWN_VIEW})}, {column: 'field'})},
       {
-        state: 'category, typed, with counts and shares, two chosen',
+        state: 'category, typed, two chosen, another column filtered; counts and shares under that filter',
         build: () =>
           make(
             'tessera-filter',
@@ -318,8 +318,8 @@ export const SECTIONS: Section[] = [
               store: store({
                 view: SHOWN_VIEW,
                 legend: legendOf('field'),
-                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}}), {
-                  suggestions: {field: {q: 'learn', values: [FIELDS[0]!, FIELDS[3]!].map((v) => suggestion(v, 'learn')), more: false}}
+                filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'stat.ML']}, citations: {family: 'numeric', gte: 100, lte: null}}), {
+                  suggestions: {field: suggestionPage('learn', 'filter', [FIELDS[0]!, FIELDS[3]!], 1_904_000, (v) => (v.code === 1 ? 611_020 : 158_400))}
                 })
               })
             },
@@ -328,7 +328,7 @@ export const SECTIONS: Section[] = [
         ready: typeInto('learn')
       },
       {
-        state: 'category in the highlight, typed; a value the filter leaves out is greyed',
+        state: 'category in the highlight, typed; a value the server counts 0 under the filter is greyed',
         build: () =>
           make(
             'tessera-filter',
@@ -336,7 +336,7 @@ export const SECTIONS: Section[] = [
               store: store({
                 view: SHOWN_VIEW,
                 filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
-                  suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
+                  suggestions: {field: suggestionPage('c', 'highlight', [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!], 7_218_450, (v) => (v.code === 2 ? 2_406_150 : 0))}
                 })
               })
             },
@@ -626,7 +626,7 @@ function explorerSpecimens(): Specimen[] {
   const full = (ctx: Context, over: Partial<Projections> = {}) =>
     mapStore(ctx, 'field', {}, {
       view: {...mapState().view},
-      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}, citations: {family: 'numeric', gte: 100, lte: null}}), {suggestions: {field: {q: '', values: FIELDS.map((v) => suggestion(v)), more: false}}}),
+      filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV']}, citations: {family: 'numeric', gte: 100, lte: null}}), {suggestions: {field: suggestionPage('', 'filter', FIELDS, 16_431_000)}}),
       ...over
     });
   const item = {selection: {item: paper(), itemRefusal: null, artifact: null, artifactRefusal: null}};
@@ -663,7 +663,7 @@ function explorerSpecimens(): Specimen[] {
         explorer(
           mapStore(ctx, 'field', {highlight: (m) => m.field === 2}, {
             filters: filtersOf(withDraft({field: {family: 'category', keys: ['cs.LG', 'cs.CV', 'stat.ML']}}, {field: {family: 'category', keys: ['cs.CV']}}), {
-              suggestions: {field: {q: 'c', values: [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!].map((v) => suggestion(v, 'c')), more: false}}
+              suggestions: {field: suggestionPage('c', 'highlight', [FIELDS[1]!, FIELDS[2]!, FIELDS[7]!], 9_624_600, (v) => (v.code === 2 ? 2_406_150 : 0))}
             })
           }),
           {layout: 'overlay', ...named},
