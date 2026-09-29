@@ -366,6 +366,7 @@ fn build_scan_fixture(dir: &Path, rows: u64) -> PathBuf {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: bundle.clone(),
         limit: None,
+        strict: false,
         identity_key: tessera_types::IdentityKey::from_hex(
             "07070707070707070707070707070707",
         )

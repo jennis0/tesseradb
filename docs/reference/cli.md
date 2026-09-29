@@ -24,7 +24,8 @@ The other flags override `tessera.toml` or tune the build.
 | --- | --- | --- | --- |
 | `--deployment` | `PATH` |  | Read this `tessera.toml` instead of searching for one upward from the working directory. |
 | `--out` | `PATH` |  | Write the bundle to this directory instead of `[bundle] path` in `tessera.toml`. `tessera serve` opens `[bundle] path`, so it does not serve a bundle written elsewhere. |
-| `--limit` | `ID` |  | Build only the rows whose join field's value is an integer below this value. A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops it. Refused when the join field holds strings, and when the declaration names no join field. Layer member files are read whole: a member row naming a row the limit dropped is refused, so limit the member file to the same values. |
+| `--limit` | `VALUE` |  | Build only the rows whose value of the declaration's one unique integer attribute is below this value, in every file that carries its column. A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops it, and so does a null in a view's points. Refused when the declaration has no unique integer attribute, or more than one. In any other file a row whose value is at or above the limit is left out and reported as outside it. A row of a file without the column is read, and one that names an item the limit left out names no item and is refused. |
+| `--strict` |  |  | Refuse the build at the first file with a row the identity rule refuses. Without it, a row naming two items, naming an item or a unique value an earlier row of its file names, or, outside a view's points, naming no item, is left out and the build goes on. The refused rows are printed, and written to `reports/refused.json` in the bundle where there are any. |
 | `--config` | `PATH` |  | Read this corpus declaration instead of `[build] schema` in `tessera.toml`. The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads it from there. |
 | `--file` | `NAME=PATH` |  | Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable. A relative PATH is read from the working directory, not from the declaration's directory. Every block that reads the source reads PATH. Refused when `[sources]` has no source called NAME (the message lists the names it has), and when NAME is given twice. The flag replaces a source's path and cannot add a source. |
 | `--no-oracle-pairs` |  |  | Do not write `pairs.parquet`. The server does not read the file. The conformance suite and `tessera verify --deep` do, and `verify --deep` passes a bundle without one. |
@@ -43,9 +44,9 @@ Check the declaration against the column schemas of the files it names, without 
 
 `tessera check` finds `tessera.toml`, the declaration and the `--file` overrides as `tessera build` does, and stops at the first error in `tessera.toml` or the declaration, such as a missing key or a TOML syntax error. Once both parse, it reads the footer of each source Parquet file and reports every column that is missing or has the wrong type, not only the first. It reads no rows except the geometry of shape layers, which it reads to size them.
 
-The report goes to stderr: the files read, the findings, warnings, the frames the views will have, the view groups, the shape layers' sizes, and on a clean check the disclosure table. The exit status is non-zero when there is a finding; a warning does not change it.
+The report goes to stderr: the files read, the findings, warnings, the columns each file names items by, the frames the views will have, the view groups, the shape layers' sizes, and on a clean check the disclosure table. The exit status is non-zero when there is a finding, such as a file other than a view's points with no column to name items by; a warning does not change it.
 
-It cannot check anything that needs a row: whether a closed vocabulary covers the values in the data, whether a member id resolves, or where the data lies in its view's extent. `tessera build` reports those.
+It cannot check anything that needs a row: whether a closed vocabulary covers the values in the data, which rows the identity rule refuses, or where the data lies in its view's extent. `tessera build` reports those.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |

@@ -10,6 +10,8 @@
 //! is the structural check under test, never the digest sweep in front of it (§18 obligation 9:
 //! a checker nobody has seen fail is a checker nobody knows works).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -100,6 +102,7 @@ fn flushed_bundle(root: &Path) {
     let out = root.join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -114,9 +117,10 @@ fn flushed_bundle(root: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -126,7 +130,7 @@ fn flushed_bundle(root: &Path) {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the batch build succeeds");
 
@@ -737,6 +741,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
     };
     let out = dir.join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![view("2026-Q1"), view("2026-Q2")],
         anchor: 0,
@@ -781,9 +786,10 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
             views: vec![0, 1],
             source: None,
         }],
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -793,7 +799,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a rendered scoped family builds");
 

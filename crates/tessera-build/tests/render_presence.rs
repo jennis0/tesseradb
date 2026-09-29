@@ -13,6 +13,8 @@
 //! wrote a different bitmap — or none — fails there, on the comparison that exists for exactly
 //! that class of divergence.
 
+mod common;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -166,7 +168,7 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
-    let schema = schema();
+    let schema = common::with_id(schema());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -192,6 +194,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

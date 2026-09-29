@@ -9,6 +9,8 @@
 //! from `test_corpora/common/projection-vectors.json`, which is the contract this transform and
 //! the Python module that placed the built geographic corpora are both held to.
 
+mod common;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,12 +27,10 @@ use tessera_spatial::{fixed32, AlignedSquare, Bounds, Projection};
 use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 /// That fixture's points file, as a reader of it needs it.
 fn source<'a>(path: &'a std::path::Path, fields: &'a Fields) -> tessera_build::input::Source<'a> {
-    tessera_build::input::Source::new(path, fields, &INTEGER_IDS)
+    tessera_build::input::Source::every_row(path, fields)
 }
 
 /// A points file with the coordinate columns under the names a projected view reads.
@@ -292,7 +292,7 @@ fn a_coordinate_outside_the_wgs84_range_is_refused() {
     let message = refused(&[0.0, 20_037_508.0], &[0.0, 6_710_219.0]);
     assert!(message.contains("is not a place"), "{message}");
     assert!(message.contains("WGS84"), "{message}");
-    assert!(message.contains("entity_id 1"), "{message}");
+    assert!(message.contains("row 1"), "{message}");
 
     let message = refused(&[0.0, 10.0, 20.0], &[0.0, 95.0, 0.0]);
     assert!(message.contains("lat 95"), "{message}");
@@ -406,6 +406,7 @@ fn build_bundle(
     let pairs = tmp.join("pairs.parquet");
     write_pairs(&pairs, rows);
     let out = tmp.join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -420,9 +421,10 @@ fn build_bundle(
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -432,7 +434,7 @@ fn build_bundle(
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the build succeeds");
     out

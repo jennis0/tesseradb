@@ -164,10 +164,10 @@ fn blob_schema() -> Schema {
     }
 }
 
-/// The same fixture with every column rendered or filtered: no blob-resident column, so the
-/// stage must write nothing and the open must demand nothing.
+/// The same fixture with every column rendered or filtered, the unique `id` among them: no
+/// blob-resident column, so the stage must write nothing and the open must demand nothing.
 fn no_blob_schema() -> Schema {
-    let mut schema = blob_schema();
+    let mut schema = common::with_id(blob_schema());
     for attribute in &mut schema.attributes {
         match attribute.ty {
             // A string may be filter-only, never rendered.
@@ -179,6 +179,7 @@ fn no_blob_schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
+    let schema = common::with_id(schema);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -204,6 +205,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

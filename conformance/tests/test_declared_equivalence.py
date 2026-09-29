@@ -258,8 +258,8 @@ def _extent_body(extent) -> dict:
 
 
 class PlainView(Case):
-    """A plain view created live over items the corpus already holds, which join it by their
-    `fx`."""
+    """A plain view created live over items the corpus already holds, whose rows name them by
+    their `fx`."""
 
     name = "plain-view"
     plan = Plan(
@@ -483,8 +483,8 @@ def _layer_body(name: str, title: str, hierarchy: str, criterion, content: dict)
 
 def _members_table(members: dict[str, list[int]]) -> pa.Table:
     keys = [k for k, ids in members.items() for _ in ids]
-    entities = [i for ids in members.values() for i in ids]
-    return pa.table({"key": pa.array(keys, pa.string()), "entity": pa.array(entities, pa.uint64())})
+    named = [i for ids in members.values() for i in ids]
+    return pa.table({"key": pa.array(keys, pa.string()), "fx": pa.array(named, pa.uint64())})
 
 
 def _halves(ids: list[int]) -> tuple[list[str], list[str]]:

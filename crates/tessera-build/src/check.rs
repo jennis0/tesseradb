@@ -19,10 +19,11 @@
 //! ## What it cannot answer
 //!
 //! Everything that needs a row, which is worth naming because a green check is not a green build:
-//! whether a closed vocabulary's keys cover the values in the data, whether a member id resolves
-//! to an entity this build would assign, whether two artifact rows share a key, whether the
-//! hierarchy's edges contain each other, and — the one that shipped a degenerate map — where the
-//! data actually sits inside its view's extent. The last is the build's clamp report
+//! whether a closed vocabulary's keys cover the values in the data, which rows the identity rule
+//! refuses (a value twice in one file, a row naming two items, a member or attribute row naming
+//! none), whether two artifact rows share a key, whether the hierarchy's edges contain each other,
+//! and — the one that shipped a degenerate map — where the data actually sits inside its view's
+//! extent. The last is the build's clamp report
 //! (`crate::config::Frame`), and it needs the coordinate column read end to end.
 
 use std::path::{Path, PathBuf};
@@ -32,10 +33,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::scalar_column;
 
-use crate::config::{
-    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, JOIN_COLUMN,
-};
-use crate::ids::Addressing;
+use crate::config::{ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup};
 use crate::input::TERM_ID;
 
 /// The declaration a finding or a source is about, in its parts.
@@ -176,6 +174,8 @@ pub struct CheckReport {
     /// Things worth an operator's eye that refuse nothing and leave the check clean: an indexed
     /// keyword whose source footer says it is unique per row (`crate::unique_key`).
     pub warnings: Vec<Finding>,
+    /// Per file read, the unique fields its rows name their items by ([`crate::ids`]).
+    pub identities: Vec<Finding>,
 }
 
 impl CheckReport {
@@ -235,19 +235,14 @@ fn require(
     fields: &Fields,
     canonical: &str,
 ) -> bool {
-    let join = canonical == JOIN_COLUMN;
-    if (join && !fields.joins()) || column_type(schema, fields, canonical).is_some() {
+    if column_type(schema, fields, canonical).is_some() {
         return true;
     }
-    let field = match join {
-        true => "the join field".to_string(),
-        false => format!("field `{canonical}`"),
-    };
     report.note(
         object,
         format!(
-            "{field} is read from a column named '{}', which the source does not carry. Its \
-             columns are: {}",
+            "field `{canonical}` is read from a column named '{}', which the source does not \
+             carry. Its columns are: {}",
             fields.of(canonical),
             columns(schema)
         ),
@@ -293,8 +288,7 @@ fn open(report: &mut CheckReport, object: &Object, path: &Path) -> Option<ArrowS
 /// document alone.
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
-    let positional = positional_points(config);
-    check_attribute_sources(config, &positional, &mut report);
+    check_attribute_sources(config, &mut report);
     check_scoped_attribute_sources(config, &mut report);
     for view in &config.views {
         check_view(config, view, &mut report);
@@ -319,7 +313,7 @@ pub fn check(config: &Config) -> CheckReport {
 /// takes `[defaults]`'s, so the columns a file must carry are the columns of the attributes that
 /// named it — and a column reported missing is reported against the file that was supposed to hold
 /// it rather than against a single corpus that no longer exists.
-fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut CheckReport) {
+fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
     // A column with no file to read it from. Legal to declare (`configuration.md` §2), and the
     // normal state for a deployment that writes its values through the service. It is one of the
     // sources this check looked at and found nothing to open, beside a group that names no points
@@ -346,12 +340,10 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
         let Some(schema) = open(report, &object, &group.path) else {
             continue;
         };
-        // **A file whose rows are named by their position needs no identity column for its own
-        // attributes.** The group is the view's own points file, and the build joins the columns
-        // of that file by position (`ids::Addressing`).
-        if !positional.contains(&group.path) {
-            require(report, &object, &schema, &group.fields, JOIN_COLUMN);
-        }
+        // **A file other than a view's points names the item each row belongs to**, as an
+        // attribute-only ingest does; a view's points file's own columns travel on its rows.
+        let points = view_points(config);
+        identify(config, report, &object, &schema, &group.fields, !points.contains(&group.path));
         // **Every declared attribute against the field that must carry it.** Presence and family,
         // not fit: a `u8` column whose data carries 300 is a per-row refusal no schema can
         // anticipate.
@@ -441,8 +433,8 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
         let Some(schema) = open(report, &object, &source.path) else {
             continue;
         };
+        identify(config, report, &object, &schema, &source.fields, true);
         for (what, column) in [
-            ("the join field", source.join_column.as_str()),
             ("the value", attribute.column()),
             ("the view discriminator", source.view_field.as_str()),
         ] {
@@ -480,72 +472,58 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
-/// The plain views whose rows join on nothing, by path.
-///
-/// A row of one of those files is an item of its own, and so is that file's own attribute
-/// column, so [`check_attribute_sources`] does not require a join column of it either. Whether
-/// the positional route is admissible at all is [`check_identity`]'s question, asked per view.
-fn positional_points(config: &Config) -> Vec<PathBuf> {
-    config
-        .views
-        .iter()
-        .filter(|view| !view.fields.joins())
-        .filter_map(|view| view.source.clone())
-        .collect()
+/// Every points file a view or a group's view reads, by path.
+fn view_points(config: &Config) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = config.views.iter().filter_map(|v| v.source.clone()).collect();
+    for group in &config.view_groups {
+        paths.extend(group.source.clone());
+        if let Roster::Inline(views) = &group.roster {
+            paths.extend(views.iter().filter_map(|v| v.source.clone()));
+        }
+    }
+    paths
 }
 
-/// A view's join column, or, where the declaration names no join field, whether anything else in
-/// the declaration names a row by one.
-///
-/// **The list is the build's own** (`ids::Addressing`), so a declaration this leaves clean is one
-/// the build accepts. A declaration with no join field and nothing that needs one is a warning
-/// saying how its rows are addressed, and the check stays clean.
-fn check_identity(
+/// The unique fields a file's rows name their items by, as the build reads them
+/// ([`crate::ids::carried_unique`]): a line saying which, and a finding where a file whose rows
+/// address items carries none, in the sentence the build refuses it with.
+fn identify(
     config: &Config,
-    view: &crate::config::View,
-    schema: &ArrowSchema,
-    object: &Object,
     report: &mut CheckReport,
+    object: &Object,
+    schema: &ArrowSchema,
+    fields: &Fields,
+    addresses: bool,
 ) {
-    if view.fields.joins() {
-        require(report, object, schema, &view.fields, JOIN_COLUMN);
-        return;
+    let carried = match crate::ids::carried_unique(schema, fields, &config.schema) {
+        Ok(carried) => carried,
+        Err(detail) => {
+            report.note(object, detail);
+            return;
+        }
+    };
+    let tessera = schema
+        .column_with_name(crate::ids::TESSERA_ID_COLUMN)
+        .is_some();
+    if addresses {
+        if let Err(missing) = tessera_lifecycle::resolve::require_identifier(tessera, carried.len())
+        {
+            report.note(object, format!("its rows address items, and {missing}"));
+            return;
+        }
     }
-    let Some(points) = &view.source else {
-        return;
+    let named = match carried.is_empty() {
+        true => "nothing: each row is an item of its own".to_string(),
+        false => carried
+            .iter()
+            .map(|field| field.attribute.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
     };
-    let addressing = Addressing {
-        points,
-        several_views: config.views.len() > 1 || !config.view_groups.is_empty(),
-        // A plain view's rows are its file's, whole. A selection belongs to a group's view, which
-        // requires a join field here whatever else the declaration says.
-        selection: false,
-        // `tessera check` takes no `--limit`. The build refuses one against this route.
-        limit: false,
-        visibility_source: view.point_visibility.source.as_deref(),
-        attribute_sources: &config.attribute_sources,
-        layers: &config.layers,
-        layer_inputs: &config.layer_sources,
-    };
-    // A source that could not be read is reported where it is opened. Here it leaves the question
-    // unanswered, which is a finding against the view like any other.
-    let needed = match addressing.needs_identity() {
-        Ok(needed) => needed,
-        Err(error) => Some(error.to_string()),
-    };
-    match needed {
-        None => report.warn(
-            object,
-            "no join field: each row is an item of its own, addressable by tessera_id",
-        ),
-        Some(detail) => report.note(
-            object,
-            format!(
-                "the declaration names no join field, so each row would be an item of its own. \
-                 {detail}"
-            ),
-        ),
-    }
+    report.identities.push(Finding {
+        object: object.clone(),
+        detail: format!("names items by {named}"),
+    });
 }
 
 fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckReport) {
@@ -569,13 +547,13 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
             object: object.clone(),
             path: None,
         });
-        check_point_visibility(view, None, report);
+        check_point_visibility(config, view, None, report);
         return;
     };
     let Some(schema) = open(report, &object, path) else {
         return;
     };
-    check_identity(config, view, &schema, &object, report);
+    identify(config, report, &object, &schema, &view.fields, false);
 
     // Which geometry shape this file offers, on `crate::input::geometry_kind`'s rule: a `fields`
     // map naming one is the caller deciding, and presence decides only where the map is silent.
@@ -600,7 +578,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
         require(report, &object, &schema, &view.fields, "x");
         require(report, &object, &schema, &view.fields, "y");
     }
-    check_point_visibility(view, Some(&schema), report);
+    check_point_visibility(config, view, Some(&schema), report);
 }
 
 /// A view group's files: each view's points under form A, the group's own under form B, and the
@@ -654,7 +632,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
                 let Some(schema) = open(report, &object, path) else {
                     continue;
                 };
-                check_points(&object, &schema, &group.fields, false, report);
+                check_points(config, &object, &schema, &group.fields, false, report);
                 check_group_labels(&object, &group.point_visibility, &schema, report);
                 for column in &scoped {
                     if schema.column_with_name(column).is_none() {
@@ -680,7 +658,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
             let Some(schema) = open(report, &object, path) else {
                 return;
             };
-            check_points(&object, &schema, &group.fields, true, report);
+            check_points(config, &object, &schema, &group.fields, true, report);
             check_group_labels(&object, &group.point_visibility, &schema, report);
             for column in &scoped {
                 if schema.column_with_name(column).is_none() {
@@ -716,13 +694,14 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
 
 /// One points file's identity and geometry, and — where the group carries one — its discriminator.
 fn check_points(
+    config: &Config,
     object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     discriminator: bool,
     report: &mut CheckReport,
 ) {
-    require(report, object, schema, fields, JOIN_COLUMN);
+    identify(config, report, object, schema, fields, false);
     let names_morton = fields.names("morton") || fields.names("residual");
     let names_xy = fields.names("x") || fields.names("y");
     let has_morton = column_type(schema, fields, "morton").is_some();
@@ -787,6 +766,7 @@ pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option
 /// relation of its own. Neither is required — `default` alone is the corpus with no permission
 /// model — but a declared one that cannot be read puts every point in no principal's mask.
 fn check_point_visibility(
+    config: &Config,
     view: &crate::config::View,
     view_schema: Option<&ArrowSchema>,
     report: &mut CheckReport,
@@ -799,11 +779,8 @@ fn check_point_visibility(
         let Some(schema) = open(report, &object, path) else {
             return;
         };
-        let fields = Fields::moved(
-            object.to_string(),
-            [(JOIN_COLUMN, view.fields.of(JOIN_COLUMN))],
-        );
-        require(report, &object, &schema, &fields, JOIN_COLUMN);
+        let fields = Fields::canonical(object.to_string());
+        identify(config, report, &object, &schema, &fields, true);
         require(report, &object, &schema, &fields, TERM_ID);
     }
 }
@@ -880,7 +857,7 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
             let object = object.part("`[layer.members]`");
             if let Some(schema) = open(report, &object, &members.path) {
                 require(report, &object, &schema, &members.fields, "key");
-                require(report, &object, &schema, &members.fields, "entity");
+                identify(config, report, &object, &schema, &members.fields, true);
                 require_named(report, &object, &schema, &members.fields, &["rank"]);
             }
         }
@@ -918,6 +895,9 @@ pub fn page(config: &Config, report: &CheckReport) -> String {
     // source's footer says is unique per row is a cost to know about, not a mistake.
     for warning in &report.warnings {
         let _ = writeln!(out, "  WARNING      {}: {}", warning.object, warning.detail);
+    }
+    for identity in &report.identities {
+        let _ = writeln!(out, "  identity     {}: {}", identity.object, identity.detail);
     }
     if !report.frames.is_empty() {
         let _ = writeln!(out, "projected views, from the declaration alone:");

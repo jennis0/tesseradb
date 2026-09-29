@@ -8,8 +8,9 @@
 //! ## Entity-ID assignment is permanent
 //!
 //! Items are ordered by their **signature** — the sorted list of their term IDs — and the new
-//! entity ID is simply the position in that order (§11.1). Ties break on the join value, so the
-//! assignment is total and deterministic.
+//! entity ID is simply the position in that order (§11.1). Ties break on the item's Morton code and
+//! then on its number, which is the order the build created it in ([`ids`]), so the assignment is
+//! total and deterministic.
 //!
 //! This is not an optimisation that can be retrofitted. Entity IDs are append-only and never
 //! reused (I9), so the ordering chosen at the first build is the ordering the corpus keeps
@@ -34,6 +35,7 @@ pub mod layers;
 pub mod observer;
 mod pipeline;
 mod residency;
+mod row_groups;
 pub mod shapes;
 pub(crate) mod spill;
 pub mod term_images_pass;
@@ -82,6 +84,7 @@ use tessera_types::{
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
+pub use ids::RefusedRows;
 pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
 // [`BuildArgs::groups`]' own types. A caller assembling build arguments has to name them, and a
@@ -163,8 +166,8 @@ pub struct ViewArgs {
     /// (`views.md` §3.1's form B). `None` where the file *is* the view — every plain view, and
     /// every view of a form A group.
     ///
-    /// **Every pass over the file applies it**: the id union, the label vocabulary and its scan,
-    /// the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
+    /// **Every pass over the file applies it**: the identity pass, the label vocabulary and its
+    /// scan, the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
     /// forgot it would read another view's rows into this view's row space.
     pub select: Option<crate::config::ViewSelector>,
     /// Where each of this view's points gets its access terms, and what a point carrying none
@@ -247,8 +250,8 @@ pub struct BuildArgs {
     /// roster entry's `visibility` is a record of the declaration rather than a means of
     /// restricting reachability.
     pub groups: Vec<tessera_store::manifest::GroupDescriptor>,
-    /// The declared attributes **grouped by the file each is read from**, and the identity column
-    /// each group joins on (`configuration.md` §1's `[sources]` and `[defaults]`).
+    /// The declared attributes **grouped by the file each is read from**, with where that file
+    /// keeps the unique fields its rows name items by.
     ///
     /// **A group is a pass.** Each one is a merge sweep over its own file against this build's
     /// assigned ordinals, so a declaration whose columns sit in three files pays three passes and
@@ -284,8 +287,12 @@ pub struct BuildArgs {
     pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,
-    /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
+    /// Keep the rows whose value of the declaration's one unique integer attribute is below this,
+    /// in every file that carries it ([`ids::Limit`]).
     pub limit: Option<u64>,
+    /// Refuse the build at the first file with a row the identity rule refuses, rather than
+    /// refusing those rows and reporting them ([`ids`]).
+    pub strict: bool,
     /// The key of the `tessera_id` permutation, recorded in the manifest. The CLI generates one
     /// for every bundle it creates; a caller that needs two builds to agree byte for byte passes
     /// the same key to both.
@@ -332,8 +339,8 @@ pub struct BuildArgs {
     pub batch_items: Option<u64>,
     /// Peak-RSS budget in bytes for the build's own structures. `None` = detect from the
     /// machine (MemAvailable, damped). Drives batch and band sizing and the fail-closed
-    /// pre-flight; it cannot buy off the irreducible floors (the sorted source ids, the
-    /// entity-of-ordinal map, the per-term offsets), which the pre-flight states when refusing.
+    /// pre-flight; it cannot buy off the irreducible floors (the entity-of-ordinal map, the
+    /// per-term offsets), which the pre-flight states when refusing.
     pub memory_budget: Option<u64>,
     /// Override the derived postings band size, in pre-dedup rows. A tuning and **test** seam
     /// (a corpus small enough for a test cannot force multiple bands through the budget
@@ -362,6 +369,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("attribute_sources", &self.attribute_sources)
             .field("out", &self.out)
             .field("limit", &self.limit)
+            .field("strict", &self.strict)
             .field("identity_key", &self.identity_key)
             .field("shard_id", &self.shard_id)
             .field("emit_oracle_pairs", &self.emit_oracle_pairs)
@@ -436,6 +444,9 @@ pub struct BuildReport {
     /// bytes its index cost (`unique_key`). Printed at every build; a key unique per row earns a
     /// warning and never a refusal.
     pub keyword_cardinalities: Vec<KeywordCardinality>,
+    /// The rows each file's identity rule refused, by file and reason ([`ids`]). A build refuses
+    /// a row and carries on, as an ingest refusing rows one at a time would.
+    pub refused: Vec<RefusedRows>,
     /// The declared columns whose characters the join spilled as record-blob extents rather than
     /// filling an entity-ordered arena with them, by name, in declaration order
     /// (`build-column-extents.md` §2).
@@ -446,20 +457,6 @@ pub struct BuildReport {
     /// stages, which is a property of the machine and not of the corpus. Two builds of one corpus
     /// whose wall clocks differ have this list as the first thing to compare.
     pub spilled_columns: Vec<String>,
-    /// **The slots the source-ids array was allocated at, and zero where the build wrote none.**
-    ///
-    /// An item's ordinal is its index in the sorted, deduplicated union of every view's source
-    /// ids. Where that union is one unbroken range the ordinal is a subtraction and pass one
-    /// writes no array: at the GBIF rung that is 28 GB of writes and one sort of 3.5×10⁹ `u64`s
-    /// not made. Proving the range needs a bound on the union's span before the ids are read, and
-    /// the bound comes from each points file's own parquet statistics — so a file that states
-    /// nothing about its id column is built down the array route instead.
-    ///
-    /// **Returned because the route is derived from the input's statistics and changes no byte of
-    /// the bundle** (`tests/id_space_routes.rs`), and because this is the only place an operator
-    /// can see which one a build took. The linear build reports zero: it holds its points in
-    /// memory and has never had an array here.
-    pub source_id_slots: u64,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -593,7 +590,7 @@ impl Occupancy {
 
 /// The signature-sorted assignment key (§11.1): an item's **sorted term-ID list**.
 ///
-/// Items are ordered by this key lexicographically, ties broken by join value, and each item's
+/// Items are ordered by this key lexicographically, ties broken by Morton code and number, and each item's
 /// new entity ID is its position in that order. Items with identical term sets therefore occupy
 /// a contiguous entity-ID range, which is what turns their postings into runs — the measured
 /// 8.9–36.7x compression. **Permanent under I9:** entity IDs are never reused, so this ordering
@@ -680,17 +677,59 @@ fn access_route(args: &BuildArgs) -> Result<AccessRoute<'_>> {
 
 /// One view's points file, as a reader of it needs it (`input::Source`).
 pub(crate) fn view_source<'a>(
-    view: &'a ViewArgs,
-    args: &BuildArgs,
-    ids: &'a crate::ids::IdSpace,
+    args: &'a BuildArgs,
+    view: usize,
+    numbering: &'a ids::Numbering,
 ) -> input::Source<'a> {
-    input::Source::new(&view.points, &view.point_fields, ids)
-        .limited(args.limit)
-        .selecting(view.select.as_ref())
+    let args_view = &args.views[view];
+    input::Source::new(
+        &args_view.points,
+        &args_view.point_fields,
+        numbering.points(view),
+    )
+}
+
+/// The access relation every view reads its labels from, where they read them from one.
+pub(crate) fn shared_relation(args: &BuildArgs) -> Result<Option<&Path>> {
+    Ok(match access_route(args)? {
+        AccessRoute::SharedRelation(path) => Some(path),
+        AccessRoute::PerView => None,
+    })
+}
+
+/// Which rows of a group-scoped attribute's own file are one view's: those whose discriminator is
+/// the view's key, refused against the group's keys (`views.md` §5).
+pub(crate) fn scoped_selector(
+    args: &BuildArgs,
+    family: &ScopedColumnFamily,
+    view: usize,
+) -> config::ViewSelector {
+    let key_of = |view_id: &str| {
+        view_id
+            .split_once(tessera_store::GROUP_SEPARATOR)
+            .map_or(view_id, |(_, key)| key)
+            .to_string()
+    };
+    let mut keys: Vec<String> = family
+        .views
+        .iter()
+        .map(|&index| key_of(&args.views[index].view_id))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    config::ViewSelector {
+        column: family
+            .source
+            .as_ref()
+            .map_or_else(|| "view".to_string(), |source| source.view_field.clone()),
+        value: key_of(&args.views[view].view_id),
+        keys,
+        view_id: args.views[view].view_id.clone(),
+    }
 }
 
 /// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
-pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result<AccessPlan> {
+pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Result<AccessPlan> {
     use crate::config::AccessSource;
     if let AccessRoute::SharedRelation(_) = access_route(args)? {
         // The relation supplies its own integer term ids and needs no vocabulary pass.
@@ -703,13 +742,13 @@ pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result
     // this is that view's own sorted vocabulary, unchanged, which is what keeps a single-view
     // bundle byte-identical across this change.
     let mut vocabulary: Vec<String> = Vec::new();
-    for view in &args.views {
+    for (index, view) in args.views.iter().enumerate() {
         let field = match &view.access.source {
             AccessSource::Field(field) => Some(field.as_str()),
             _ => None,
         };
         let (terms, unlabelled) = input::read_access_vocabulary(
-            view_source(view, args, ids),
+            view_source(args, index, numbering),
             field,
             view.access.default.as_deref(),
         )?;
@@ -756,16 +795,20 @@ pub(crate) fn plan_access(args: &BuildArgs, ids: &crate::ids::IdSpace) -> Result
 pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>>(
     args: &BuildArgs,
     plan: &AccessPlan,
-    ids: &crate::ids::IdSpace,
+    numbering: &ids::Numbering,
     mut visit: F,
 ) -> Result<input::AccessFill> {
     use crate::config::AccessSource;
     if let AccessRoute::SharedRelation(path) = access_route(args)? {
         // Scanned **once**, not once per view: its rows are entity space, and a second pass over
         // them would double every posting.
-        let fields = access_fields(args);
-        let relation = input::Source::new(path, &fields, ids).limited(args.limit);
-        input::scan_pairs(relation, |id, term| visit(0, id, term))?;
+        let fields = config::Fields::canonical("point_visibility");
+        let rows = numbering
+            .of(ids::ReadKind::Access)
+            .expect("the access relation is numbered");
+        input::scan_pairs(input::Source::new(path, &fields, rows), |id, term| {
+            visit(0, id, term)
+        })?;
         return Ok(input::AccessFill::default());
     }
     let input::TermDescriptors::Vocabulary(vocabulary) = &plan.descriptors else {
@@ -774,7 +817,7 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
     let mut fill = input::AccessFill::default();
     for (index, view) in args.views.iter().enumerate() {
         let one = input::scan_access_field(
-            view_source(view, args, ids),
+            view_source(args, index, numbering),
             match &view.access.source {
                 AccessSource::Field(field) => Some(field.as_str()),
                 _ => None,
@@ -810,27 +853,17 @@ pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
     );
 }
 
-/// What one attribute source's join actually met: how many of this build's entities came away with
-/// a value, and how many of the source's rows named an entity the build never loaded.
-///
-/// **Entities covered is the denominator, and rows dropped is not.** A legitimate superset and a
-/// broken join both drop an overwhelming fraction of their rows — a sentiment table covering every
-/// paper arXiv ever published against a 50,000-paper build drops 97% of itself and is perfectly
-/// correct — so the number that separates the two is how much of *this* corpus came away with a
-/// value. Both are printed, and only the first is the measure.
+/// What one attribute source met: how many of this build's entities came away with a value in each
+/// column. The rows of the source that named no item are the identity rule's to report
+/// ([`BuildReport::refused`]).
 #[derive(Debug, Clone)]
 pub struct AttributeCoverage {
     /// The caller's own name for the source, from `[sources]`.
     pub source: String,
     /// Entities in this build — the denominator.
     pub entities: u64,
-    /// Rows of this source that resolved to one of them.
+    /// Rows of this source that named one of them.
     pub matched_rows: u64,
-    /// Rows that named an entity this build did not load. **Ignored, never refused**: that is
-    /// what a join does, and it is fail-closed in both directions that matter — an absent
-    /// attribute matches fewer points in a filter, and an absent access label leaves a point
-    /// visible to nobody.
-    pub unknown_rows: u64,
     /// Each declared column this source carries, and how many entities came away with a value in
     /// it. Fewer than [`AttributeCoverage::matched_rows`] where the source itself holds nulls.
     pub columns: Vec<(String, u64)>,
@@ -872,32 +905,132 @@ pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
                 );
             }
         }
-        // **Over the rows this build read, not over the source.** A `--limit` build prunes whole
-        // row groups on their statistics before a value is decoded, so a row in a pruned group is
-        // not counted here as unknown — it is not counted at all. Said rather than left to be
-        // inferred: the figure is a floor on a limited build and the exact count on a whole one,
-        // and a floor read as a count is an operator concluding their join is cleaner than it is.
-        eprintln!(
-            "        {} source row(s) named entities this build did not load, over the rows this \
-             build read (a --limit build prunes row groups before decoding them)",
-            thousands(source.unknown_rows)
-        );
     }
 }
 
-/// The access relation's field names, and the view a refusal quotes.
+/// One sweep of the attribute join: a file's rows under the rule's numbers, the declared columns
+/// read from them, and the source their coverage counts toward.
+pub(crate) struct AttributeScan<'a> {
+    pub path: &'a Path,
+    pub fields: &'a config::Fields,
+    pub rows: &'a ids::ReadRows,
+    /// Indices into [`config::Schema::attributes`], ascending.
+    pub attributes: Vec<usize>,
+    /// The source these are its columns of, by index into [`BuildArgs::attribute_sources`], or
+    /// `None` for a sweep reading only the unique fields a file carries beside its own columns.
+    pub group: Option<usize>,
+}
+
+/// Every sweep of the attribute join, in the order the rule read the files: each view's points,
+/// each attribute file of its own, then each view's rows of a group-scoped attribute's file.
 ///
-/// `point_visibility` takes no `fields` map of its own (`configuration.md` §1): the exploded
-/// relation carries the join field in the anchor view's join column, and `term_id`.
-fn access_fields(args: &BuildArgs) -> crate::config::Fields {
-    let anchor = &args.views[args.anchor];
-    crate::config::Fields::moved(
-        format!("view '{}' point_visibility", anchor.view_id),
-        [(
-            crate::config::JOIN_COLUMN,
-            anchor.point_fields.of(crate::config::JOIN_COLUMN),
-        )],
-    )
+/// **A unique field is read from every file that carries it**, and not only from its own source:
+/// the rule took each such file's values as the item's, a later file's over an earlier's, so the
+/// column the index is written from holds what the rule decided. A source that is a view's points
+/// file is read once for each view reading it, with that view's rows.
+pub(crate) fn attribute_scans<'a>(
+    args: &'a BuildArgs,
+    numbering: &'a ids::Numbering,
+) -> Result<Vec<AttributeScan<'a>>> {
+    let carried = |path: &Path, fields: &config::Fields| -> Result<Vec<usize>> {
+        let groups = row_groups::FileGroups::open(path)?;
+        Ok(ids::carried_unique(groups.schema(), fields, &args.schema)
+            .map_err(|detail| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail,
+            })?
+            .into_iter()
+            .map(|field| usize::from(field.position))
+            .collect())
+    };
+    let mut scans = Vec::new();
+    let extra = |scans: &mut Vec<AttributeScan<'a>>,
+                     path: &'a Path,
+                     fields: &'a config::Fields,
+                     rows: &'a ids::ReadRows,
+                     own: &[usize]|
+     -> Result<()> {
+        let unique: Vec<usize> = carried(path, fields)?
+            .into_iter()
+            .filter(|index| !own.contains(index))
+            .collect();
+        if !unique.is_empty() {
+            scans.push(AttributeScan {
+                path,
+                fields,
+                rows,
+                attributes: unique,
+                group: None,
+            });
+        }
+        Ok(())
+    };
+    for (index, view) in args.views.iter().enumerate() {
+        let rows = numbering.points(index);
+        let mut own: Vec<usize> = Vec::new();
+        for (group_index, group) in args.attribute_sources.iter().enumerate() {
+            if group.path != view.points {
+                continue;
+            }
+            own.extend(&group.attributes);
+            scans.push(AttributeScan {
+                path: &group.path,
+                fields: &group.fields,
+                rows,
+                attributes: group.attributes.clone(),
+                group: Some(group_index),
+            });
+        }
+        extra(&mut scans, &view.points, &view.point_fields, rows, &own)?;
+    }
+    for (group_index, group) in args.attribute_sources.iter().enumerate() {
+        let Some(rows) = numbering.of(ids::ReadKind::Attributes(group_index)) else {
+            continue;
+        };
+        scans.push(AttributeScan {
+            path: &group.path,
+            fields: &group.fields,
+            rows,
+            attributes: group.attributes.clone(),
+            group: Some(group_index),
+        });
+        extra(&mut scans, &group.path, &group.fields, rows, &group.attributes)?;
+    }
+    for (family_index, family) in args.scoped_attributes.iter().enumerate() {
+        let Some(source) = &family.source else {
+            continue;
+        };
+        for &view in &family.views {
+            let kind = ids::ReadKind::Scoped {
+                family: family_index,
+                view,
+            };
+            if let Some(rows) = numbering.of(kind) {
+                extra(&mut scans, &source.path, &source.fields, rows, &[])?;
+            }
+        }
+    }
+    Ok(scans)
+}
+
+/// Write the rows the identity rule refused to `reports/refused.json` under the bundle, beside
+/// `disclosure.json`. A build that refused none removes the file an earlier build left there.
+pub fn write_refused_report(out: &Path, refused: &[RefusedRows]) -> Result<()> {
+    let path = out.join("reports").join("refused.json");
+    if refused.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(BuildError::io(&path, e)),
+            _ => Ok(()),
+        };
+    }
+    let dir = out.join("reports");
+    fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    write_json(&dir.join("refused.json"), &refused)
+}
+
+/// The refused rows as `tessera build` prints them, one line per file and reason.
+pub fn describe_refused(refused: &[RefusedRows]) -> Vec<String> {
+    ids::describe_refused(refused)
 }
 
 /// Argument and destination checks shared by both build implementations.
@@ -945,33 +1078,8 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
                 .into(),
         ));
     }
-    // Every declared attribute must be read from somewhere, and the declaration refuses one that
-    // is not, naming the columns (`config::Config::acquire`, `configuration.md` §1's
-    // `[defaults]`); this is the same rule for the callers that build these arguments directly.
-    // A column no group carries would be written as the absent sentinel for every row — a column
-    // that cost its width to say nothing.
-    if !args.schema.is_empty() {
-        let mut carried: Vec<usize> = args
-            .attribute_sources
-            .iter()
-            .flat_map(|s| s.attributes.iter().copied())
-            .collect();
-        carried.sort_unstable();
-        let missing: Vec<&str> = (0..args.schema.attributes.len())
-            .filter(|i| carried.binary_search(i).is_err())
-            .map(|i| args.schema.attributes[i].name.as_str())
-            .collect();
-        if !missing.is_empty() {
-            return Err(BuildError::Invalid(format!(
-                "the schema declares {} attribute(s) and no source is bound to read {} of them \
-                 from: {}. Every column names a `[sources]` key or takes `[defaults].source` \
-                 (configuration.md §1)",
-                args.schema.attributes.len(),
-                missing.len(),
-                missing.join(", ")
-            )));
-        }
-    }
+    // The declaration's rule, for the callers that build these arguments directly.
+    config::require_sources(&args.schema, &args.attribute_sources)?;
     // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
     // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
     // each component [`tessera_store::view_path`] derives, not the joined form.
@@ -1080,10 +1188,6 @@ pub fn build_observed(
 /// is permanent (I9) and every digest in the bundle depends on it.
 pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
-    // **How this declaration names a row, decided before the first pass** (`crate::ids`): the
-    // identity column's type says whether a source id is the integer the file holds or the rank
-    // of a supplied key, and the supplied keys are interned here.
-    let id_space = crate::ids::IdSpace::prepare(args)?;
     // **The oracle materialises one view.** It exists to be the byte-equality reference for the
     // streaming pipeline's entity-id assignment, and a second implementation of pass one's union
     // would be a second thing to keep in step rather than a check on the first. A multi-view
@@ -1116,25 +1220,26 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 1. read inputs --------------------------------------------------------------
+    // **Which item each row of each file names, by the rule an ingest applies** (`crate::ids`),
+    // decided here by the rule itself over maps, file by file.
+    let numbering = ids::number_linear(args)?;
     let mut points = input::read_points(
-        view_source(view, args, &id_space),
+        view_source(args, 0, &numbering),
         view.projection,
         &view.extent,
     )?;
     // **No refusal for an empty points file** (decision 0091): the oracle writes the same
     // zero-item bundle the streaming pipeline does, which is what keeps `build_equivalence`'s
     // byte-identity claim true for `n = 0` as for any other n.
-    // Sort by source ID before anything else: term IDs are assigned in first-appearance order,
-    // so a stable, file-order-independent iteration is what makes the dictionary (and hence the
-    // signature ordering, and hence the permanent entity IDs) reproducible from the same input
-    // regardless of how the source file happens to be laid out.
+    // Sort by number before anything else: term IDs are assigned in first-appearance order, so an
+    // iteration in number order is what makes the dictionary (and hence the signature ordering, and
+    // hence the permanent entity IDs) the streaming build's.
     points.sort_unstable_by_key(|p| p.source_id);
-    crate::ids::refuse_duplicates(view, &id_space, points.iter().map(|p| p.source_id))?;
     // What every source term will be called, before any term id exists — a field-sourced view's
     // sorted vocabulary, or the relation's own integers (`AccessPlan`).
-    let access = plan_access(args, &id_space)?;
+    let access = plan_access(args, &numbering)?;
     let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
-    let fill = scan_access(args, &access, &id_space, |_view, source_id, source_term| {
+    let fill = scan_access(args, &access, &numbering, |_view, source_id, source_term| {
         pairs_by_source
             .entry(source_id)
             .or_default()
@@ -1358,49 +1463,60 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         for item in tiler_items.iter_mut() {
             item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
         }
-        attribute_coverage.reserve(args.attribute_sources.len());
-        for group in &args.attribute_sources {
-            let columns: Vec<&crate::config::Attribute> = group
+        // Which items each source's rows met, and what they carried, per source.
+        let mut met: Vec<Vec<bool>> = vec![Vec::new(); args.attribute_sources.len()];
+        let mut matched: Vec<u64> = vec![0; args.attribute_sources.len()];
+        let mut present: Vec<Vec<u64>> = args
+            .attribute_sources
+            .iter()
+            .map(|group| vec![0; group.attributes.len()])
+            .collect();
+        for scan in attribute_scans(args, &numbering)? {
+            let columns: Vec<&crate::config::Attribute> = scan
                 .attributes
                 .iter()
                 .map(|&i| &args.schema.attributes[i])
                 .collect();
-            let mut matched_rows = 0u64;
-            let mut unknown_rows = 0u64;
-            let mut met = vec![false; staged.len()];
-            let mut present = vec![0u64; group.attributes.len()];
-            // An attribute source is entity space and has no view to select (`views.md` §5).
             input::scan_attributes(
-                input::Source::new(&group.path, &group.fields, &id_space).limited(args.limit),
+                input::Source::new(scan.path, scan.fields, scan.rows),
                 &columns,
                 &mut minters,
                 |batch| {
                     // **Serial, row by row, on purpose.** This is the reference build: the
                     // streaming pipeline splits a batch across its columns for the speed
-                    // (`pipeline::read_one_attribute_source`), and a second implementation that
+                    // (`pipeline::read_one_attribute_scan`), and a second implementation that
                     // did the same thing the same way would stop being an independent reading of
                     // the same input.
                     for &row in batch.rows {
-                        let source_id = batch.ids[row as usize];
-                        let Some(&position) = position_of_source.get(&source_id) else {
-                            unknown_rows += 1;
-                            continue;
+                        let number = batch.ids[row as usize];
+                        let Some(&position) = position_of_source.get(&number) else {
+                            return Err(BuildError::Invalid(format!(
+                                "{} changed while the build read it: a row names an item no \
+                                 view holds. Build again from files that do not change",
+                                scan.path.display()
+                            )));
                         };
-                        matched_rows += 1;
-                        met[position] = true;
-                        for ((&column, decoded), count) in group
-                            .attributes
-                            .iter()
-                            .zip(batch.decoded)
-                            .zip(present.iter_mut())
+                        if let Some(group) = scan.group {
+                            matched[group] += 1;
+                            let met = &mut met[group];
+                            if met.is_empty() {
+                                met.resize(staged.len(), false);
+                            }
+                            met[position] = true;
+                        }
+                        for (at, (&column, decoded)) in
+                            scan.attributes.iter().zip(batch.decoded).enumerate()
                         {
                             let value = decoded.value(
                                 row as usize,
                                 &args.schema.attributes[column],
                                 &args.schema,
                             )?;
-                            if !matches!(value, ScalarValue::Null) {
-                                *count += 1;
+                            if matches!(value, ScalarValue::Null) {
+                                continue;
+                            }
+                            if let Some(group) = scan.group {
+                                present[group][at] += 1;
                             }
                             tiler_items[position].scalars[column] = value;
                         }
@@ -1408,22 +1524,29 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                     Ok(())
                 },
             )?;
-            if let Some(position) = met.iter().position(|met| !met) {
-                return Err(input::item_without_a_row(
-                    &group.path,
-                    &columns,
-                    &id_space,
-                    staged[position].source_id,
-                ));
+        }
+        attribute_coverage.reserve(args.attribute_sources.len());
+        for (index, group) in args.attribute_sources.iter().enumerate() {
+            let columns: Vec<&crate::config::Attribute> = group
+                .attributes
+                .iter()
+                .map(|&i| &args.schema.attributes[i])
+                .collect();
+            let unmet = match met[index].is_empty() {
+                true => staged.len(),
+                false => met[index].iter().filter(|met| !**met).count(),
+            };
+            if let Some(refusal) = input::items_without_a_row(&group.path, &columns, unmet as u64)
+            {
+                return Err(refusal);
             }
             attribute_coverage.push(AttributeCoverage {
                 source: group.name.clone(),
                 entities: staged.len() as u64,
-                matched_rows,
-                unknown_rows,
+                matched_rows: matched[index],
                 columns: columns
                     .iter()
-                    .zip(&present)
+                    .zip(&present[index])
                     .map(|(a, &n)| (a.name.clone(), n))
                     .collect(),
             });
@@ -1437,30 +1560,17 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // other placed at an entity would put its values in the blob under two tags, which is a byte
     // difference for a reason that is not the entity assignment this build exists to check.
     //
-    // The id shape the routing reads. This build takes one view and refuses a repeated source id,
-    // so the union it would have read has one slot a point and its last id is the largest. The
-    // pipeline can charge fewer slots than this over the same corpus — it writes no ids file where
-    // it proves the union is one unbroken range before reading it — and the two can therefore
-    // choose different routes for the same column. That is not a byte difference: the route a
-    // string column's characters take is not recorded in the bundle
-    // (`build-column-extents.md` §2, `tests/extent_route.rs`). Charging the slots keeps the
-    // oracle's own model of the disk conservative rather than tying it to a points file's parquet
-    // statistics.
-    let ids = residency::IdShape {
-        slots: n,
-        max_id: points.last().map_or(0, |p| p.source_id),
-    };
-    //
     // The model's sizes for the stages that take what their phase leaves are the streaming
-    // build's too, so both builds cut the same batches.
+    // build's too, so both builds cut the same batches. This build holds its numbers in memory, so
+    // it charges them nothing; the route a string column's characters take is not recorded in the
+    // bundle (`tests/extent_route.rs`), so a different route is not a byte difference.
     let (routes, model) = residency::routes_for(
         args,
         n,
-        ids,
+        numbering.disk_bytes(),
         &residency::payloads_per_item(args),
         pipeline::available_disk(&args.out),
         ExtentRoute::Derived,
-        &id_space,
     );
 
     // ---- 6b′. the unique indexes ------------------------------------------------------
@@ -1669,7 +1779,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
-                &id_space,
+                &numbering,
                 &args.scoped_layers,
                 // The oracle build materialises exactly one view, so its one frame is the whole
                 // of decision 0111's per-view slice.
@@ -1837,6 +1947,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &term_images,
     )?;
     report.attribute_coverage = attribute_coverage;
+    report.refused = numbering.refused;
     report.hierarchy_shapes = published_layers.hierarchy_shapes.clone();
     report.spilled_columns = spilled_column_names(&args.schema, &routes);
     Ok(report)
@@ -2190,7 +2301,7 @@ fn write_manifests(
         hierarchy_shapes: Vec::new(),
         attribute_coverage: Vec::new(),
         spilled_columns: Vec::new(),
-        source_id_slots: 0,
+        refused: Vec::new(),
         keyword_cardinalities,
     })
 }

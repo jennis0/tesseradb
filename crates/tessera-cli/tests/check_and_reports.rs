@@ -10,7 +10,8 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Array, ListArray, StringArray, StringBuilder, UInt32Array, UInt64Array,
+    Array, ArrayRef, Float64Array, ListArray, StringArray, StringBuilder, StructArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -146,22 +147,24 @@ control = "127.0.0.1:45731"
 }
 
 /// One layer's artifacts, with the membership column under `column` — so a test can misspell it.
+/// Each member is a struct naming its item by the unique `id`'s column, `entity_id`.
 fn write_clusters(path: &Path, column: &str) {
-    let members = ListArray::new(
-        Arc::new(Field::new("item", DataType::UInt64, true)),
-        OffsetBuffer::from_lengths([2usize, 2]),
+    let entries = StructArray::from(vec![(
+        Arc::new(Field::new("entity_id", DataType::UInt64, false)),
         Arc::new(UInt64Array::from(vec![0u64, 1, 2, 3])) as ArrayRef,
+    )]);
+    let item = Arc::new(Field::new("item", entries.data_type().clone(), true));
+    let members = ListArray::new(
+        item.clone(),
+        OffsetBuffer::from_lengths([2usize, 2]),
+        Arc::new(entries) as ArrayRef,
         None,
     );
     write(
         path,
         Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
-            Field::new(
-                column,
-                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-                true,
-            ),
+            Field::new(column, DataType::List(item), true),
         ])),
         vec![
             Arc::new(StringArray::from(vec!["c0", "c1"])),
@@ -178,8 +181,7 @@ topics        = "topics.parquet"
 topic_members = "topic_members.parquet"
 
 [defaults]
-source     = "points"
-join_field = "id"
+source = "points"
 
 [[view]]
 name             = "s0"
@@ -228,6 +230,7 @@ content                   = { computed = ["centroid", "box"] }
 
     [layer.labels.members]
     source = "topic_members"
+    fields = { id = "entity" }
 
 # The points file's `entity_id`, which every file names its item by.
 [[attribute]]
@@ -626,11 +629,11 @@ fn a_declaration_that_decides_nothing_writes_no_report() {
 }
 
 // -------------------------------------------------------------------------------------------
-// A declaration with no join field
+// A declaration with no unique attribute
 // -------------------------------------------------------------------------------------------
 
-/// The project's points, minus the join column: geometry, access terms and one attribute.
-fn write_points_without_join(dir: &Path) {
+/// The project's points, minus `entity_id`: geometry, access terms and one attribute.
+fn write_points_without_ids(dir: &Path) {
     let rows = N as usize;
     let ids: Vec<u64> = (0..N).collect();
     write(
@@ -668,8 +671,8 @@ fn write_keys(dir: &Path) {
 }
 
 /// The whole declaration over that file. The attribute is read from the points file itself, which
-/// is the one place a build with no join field can read one from.
-const NO_JOIN: &str = r#"
+/// is the one place a build with no unique attribute can read one from.
+const NO_UNIQUE: &str = r#"
 [sources]
 points = "points.parquet"
 
@@ -696,21 +699,20 @@ vocabulary = "severity"
 render     = true
 "#;
 
-/// **A declaration may name no join field**, and the check accepts exactly what the build does:
-/// each row is an item of its own, the note says how items are addressed instead, and the check
-/// stays clean.
+/// **A declaration may declare no unique attribute**, and the check accepts exactly what the build
+/// does: each points row is an item of its own, the check says so, and it stays clean.
 #[test]
-fn a_declaration_with_no_join_field_checks_clean_and_builds() {
+fn a_declaration_with_no_unique_attribute_checks_clean_and_builds() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_join(tmp.path());
-    std::fs::write(tmp.path().join("schema.toml"), NO_JOIN).unwrap();
+    write_points_without_ids(tmp.path());
+    std::fs::write(tmp.path().join("schema.toml"), NO_UNIQUE).unwrap();
 
     let output = run(tmp.path(), &["check"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let said = stderr(&output);
     assert!(
-        said.contains("no join field"),
+        said.contains("view 's0': names items by nothing"),
         "{said}"
     );
     assert!(said.contains("check OK"), "{said}");
@@ -718,14 +720,14 @@ fn a_declaration_with_no_join_field_checks_clean_and_builds() {
     build(tmp.path());
 }
 
-/// A `[layer.members]` table names one item per row by its join value, and a declaration with no
-/// join field gives items none. The finding names the table, so the author reads what needs the
-/// join field rather than that one is missing.
+/// A `[layer.members]` table names one item per row by a unique value, and a declaration with no
+/// unique attribute gives items none. The finding names the table, so the author reads which file
+/// needs a column to name items by.
 #[test]
-fn a_members_table_under_no_join_field_is_a_finding_naming_it() {
+fn a_members_table_with_no_unique_attribute_is_a_finding_naming_it() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_join(tmp.path());
+    write_points_without_ids(tmp.path());
     write_keys(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
@@ -761,7 +763,7 @@ require_member_visibility = "all"
     let output = run(tmp.path(), &["check"]);
     assert!(!output.status.success(), "{}", stderr(&output));
     let said = stderr(&output);
-    assert!(said.contains("view 's0'"), "{said}");
+    assert!(said.contains("layer 'topics/a' `[layer.members]`: "), "{said}");
     assert!(said.contains("topic_members.parquet"), "{said}");
-    assert!(said.contains("join_field"), "{said}");
+    assert!(said.contains("1 finding(s)"), "{said}");
 }

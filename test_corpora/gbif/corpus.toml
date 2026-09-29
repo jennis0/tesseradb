@@ -20,7 +20,6 @@ taxonomy = "members-taxonomy.parquet"
 
 [defaults]
 source     = "points"
-join_field = "gbifid"
 
 # ---------------------------------------------------------------------------------------------
 # **One view, and every entity is in it.** A record GBIF publishes without `decimallatitude` and
@@ -124,9 +123,9 @@ name  = "scientificname"
 title = "Scientific name"
 type  = "keyword"
 
-# `gbifid` is GBIF's key for a record, one a row, and it is declared `unique`: the build refuses a
-# corpus in which two items hold one value, and an ingest a row setting a value another item
-# holds. It is `[defaults].join_field`, so the member file names each occurrence by it too.
+# `gbifid` is GBIF's key for a record, one a row, and it is declared `unique`, so every file names
+# an occurrence by it: the points file as `gbifid`, the member file as `entity`. A points row
+# repeating a value an earlier row holds is refused and counted in the build's report.
 # Neither rendered nor indexed, so its unique index is its only filter structure and it answers
 # `eq` and `in` alone; the value itself is read from the record store.
 
@@ -192,3 +191,4 @@ computed = ["centroid", "box"]
 
 [layer.members]
 source = "taxonomy"
+fields = { gbifid = "entity" }

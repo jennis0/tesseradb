@@ -34,12 +34,12 @@ kmeans_members  = "clusters-kmeans-members.parquet"
 
 [defaults]
 source          = "points"
-join_field      = "id"
 
 # **Required, this declaration carrying more than one view** (decision 0112): within a signature
-# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by join
-# value. `bioclip` is the anchor because it is the layout the clustering is computed over and the
-# only view every entity appears in; what matters is that it is named rather than inferred.
+# group, entity ids are ordered by the item's Morton code in the *anchor* view, then by the order
+# the points files create items in. `bioclip` is the anchor because it is the layout the clustering
+# is computed over and the only view every entity appears in; what matters is that it is named
+# rather than inferred.
 allocation_view = "bioclip"
 
 # ---------------------------------------------------------------------------------------------
@@ -134,7 +134,8 @@ point_visibility = { field = "publisher", default = "unpublished" }
 # an indexed keyword puts the string in entity space at no cost to it.
 # ---------------------------------------------------------------------------------------------
 
-# The join field: the row number `prepare.py` gives each image (`entity` in the member files).
+# The row number `prepare.py` gives each image. Every file names an image by it: both points
+# files as `entity_id`, the member files as `entity`.
 [[attribute]]
 name   = "id"
 type   = "u64"
@@ -322,6 +323,7 @@ computed = ["centroid", "box"]
 
 [layer.members]
 source = "taxonomy"
+fields = { id = "entity" }
 
 # The tagged-programme case, and here it is the compartment itself: an attribute predicate whose
 # artifacts are the distinct values of the indexed `publisher` column and whose membership is

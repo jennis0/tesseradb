@@ -47,7 +47,14 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, join_toml, write_deployment
+from .harness import (
+    CLI_BIN,
+    JOIN_FIELD,
+    REPO_ROOT,
+    ensure_cli_built,
+    join_attribute_toml,
+    write_deployment,
+)
 
 N_ITEMS = 200
 VIEW_ID = "s0"
@@ -195,20 +202,21 @@ artifacts = [
 
   [layer.members]
   source = "members"
+  fields = {{ {JOIN_FIELD} = "entity" }}
 
   [[layer.content.supplied]]
   name = "topic"
   type = "text"
   require_member_visibility = "all"
 
-""" + join_toml("points")
+""" + join_attribute_toml("points")
 
 
 def build_label_bundle(work_dir: Path) -> Path:
     """Write the corpus and its declaration under `work_dir` and build the bundle; return its root.
 
-    Every file names its items by source id, which the declaration makes the unique field the
-    build joins on, so a test can address one item by it over `/control/changes`.
+    Every file names its items by source id, which the declaration makes unique, so a test can
+    address one item by it over `/control/changes`.
     """
     ensure_cli_built()
     work_dir.mkdir(parents=True, exist_ok=True)

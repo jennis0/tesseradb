@@ -132,6 +132,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

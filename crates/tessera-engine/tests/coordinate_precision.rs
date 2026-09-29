@@ -126,6 +126,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
         attribute_sources: tessera_build::config::AttributeSource::over(points_path.to_path_buf(), &id_schema()),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

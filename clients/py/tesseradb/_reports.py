@@ -135,7 +135,12 @@ class CommitReport(Report):
     - `seconds`: how long the check, the build and the server's start took.
     - `viewer`, `session`, `control`: the addresses of the viewer plane, where readers read, the
       session plane, where tokens are made, and the control plane, where the operator writes.
-    - `identity`: how the rows are named, by their id column or by `tessera_id`.
+    - `identity`: how the rows name their items: by the unique attributes' columns, or each row
+      of the points an item of its own.
+    - `refused`: the rows the build left out, one entry per file and reason: `source`, the file;
+      `object`, the block that read it; `reason`, one of `names_no_item`, `names_two_items`,
+      `one_item_twice`, `one_value_twice` and `unknown_tessera_id`; `rows`, how many; and
+      `values`, up to ten of them as the file wrote them. Each is in the summary.
     """
 
     views: dict = field(default_factory=dict)
@@ -148,6 +153,7 @@ class CommitReport(Report):
     session: str | None = None
     control: str | None = None
     identity: str = ""
+    refused: list = field(default_factory=list)
 
     def summary(self) -> list[str]:
         """The lines `print()` shows: the items built, the views and layers, the address served
@@ -165,6 +171,12 @@ class CommitReport(Report):
             out.append(f"  {_count(self.minted, 'annotation')} made from key columns")
         if self.unclustered:
             out.append(f"  {_count(self.unclustered, 'member row')} in no annotation")
+        for one in self.refused:
+            sample = f": {', '.join(one['values'])}" if one.get("values") else ""
+            out.append(
+                f"  {_count(int(one['rows']), 'row')} of {one['source']} left out "
+                f"({one['object']}, {one['reason'].replace('_', ' ')}){sample}"
+            )
         if views:
             out.append(f"  {_count(len(views), 'view')}: {', '.join(views)}")
         if self.layers:

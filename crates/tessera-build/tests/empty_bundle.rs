@@ -152,6 +152,12 @@ render = true
 name = "title"
 type = "text"
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name = "clusters/a"
 title = "clusters"
@@ -166,6 +172,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 "#;
 
 struct Inputs {
@@ -211,6 +218,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -263,7 +271,7 @@ fn a_build_with_no_points_writes_a_bundle() {
         .iter()
         .map(|s| s.name.as_str())
         .collect();
-    assert_eq!(declared, vec!["published", "title"]);
+    assert_eq!(declared, vec!["published", "title", "id"]);
 
     // `public` is term 0 in every bundle whether or not a point carries it, so a dictionary over
     // no points is not an empty file (`tessera_authz::PUBLIC_TERM`).

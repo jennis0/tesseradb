@@ -1879,22 +1879,19 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
 }
 
-/// `ACQUIRED` joining its files on a declared unique attribute, `doc`.
-fn joined() -> String {
-    ACQUIRED.replace(
-        "[defaults]\nsource = \"corpus\"",
-        "[defaults]\nsource = \"corpus\"\njoin_field = \"doc\"",
-    ) + "\n[[attribute]]\nname = \"doc\"\ntype = \"u64\"\nunique = true\n"
+/// `ACQUIRED` with a declared unique attribute, `doc`, which every file names its rows by.
+fn identified() -> String {
+    ACQUIRED.to_string() + "\n[[attribute]]\nname = \"doc\"\ntype = \"u64\"\nunique = true\n"
 }
 
-/// **A column may name its own source, and its `fields` may move the join column there.**
+/// **A column may name its own source, and its `fields` may move a unique column there.**
 #[test]
-fn an_attribute_may_name_its_own_source_and_join_column() {
+fn an_attribute_may_name_its_own_source_and_move_a_unique_column() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!(
         "{}\n[[attribute]]\nname   = \"sentiment\"\nfield  = \"score\"\ntype   = \"f32\"\n\
          source = \"other\"\nfields = {{ doc = \"doc_id\" }}\n",
-        joined()
+        identified()
     );
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
     assert_eq!(config.attribute_sources.len(), 2, "two files, two passes");
@@ -1906,8 +1903,11 @@ fn an_attribute_may_name_its_own_source_and_join_column() {
         config.attribute_sources[1].path,
         dir.path().join("other.parquet")
     );
-    assert_eq!(config.attribute_sources[1].fields.of(JOIN_COLUMN), "doc_id");
-    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "doc");
+    assert_eq!(
+        config.attribute_sources[1].fields.unique_column("doc"),
+        Some("doc_id")
+    );
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), None);
 }
 
 /// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
@@ -1930,94 +1930,33 @@ fn columns_sharing_a_source_share_one_pass() {
     assert_eq!(config.attribute_sources[1].attributes, vec![2]);
 }
 
-/// **The join column is the join field's own column in every file**, and every block that reads
-/// a file may move it under the join field's name.
+/// **A unique field's column is its own everywhere a block does not move it**, and each block that
+/// reads a file may move it for that file alone.
 #[test]
-fn the_join_column_defaults_once_and_each_reader_may_move_it() {
-    let text = joined().replace("unique = true\n", "unique = true\nfield = \"id\"\n");
+fn each_reader_may_move_a_unique_column_for_its_own_file() {
+    let text = identified();
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "id");
-    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
+    assert_eq!(config.views[0].fields.unique_column("doc"), None);
 
-    // The view says otherwise through its own map…
     let moved = text.replace(
         "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { doc = \"gid\" }",
     );
     let config = bound_ok(&moved, &[]);
-    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "gid");
-    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
-
-    // …and a column through its own.
-    let moved = text.replace(
-        "vocabulary = \"severity\"\n",
-        "vocabulary = \"severity\"\nfields = { doc = \"doc_id\" }\n",
-    );
-    let config = bound_ok(&moved, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "doc_id");
-    assert_eq!(config.views[0].fields.of(JOIN_COLUMN), "id");
+    assert_eq!(config.views[0].fields.unique_column("doc"), Some("gid"));
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), None);
 }
 
-/// **The join field is a declared unique attribute whose values an identity column holds.**
+/// **There is no join field**: `[defaults]` refuses the key, and a map may not move a column that
+/// is no field of the object and no unique attribute.
 #[test]
-fn a_join_field_must_be_a_declared_unique_keyword_or_integer() {
-    let undeclared = joined().replace("name = \"doc\"", "name = \"other_doc\"");
-    assert!(
-        bound_err(&undeclared, &[]).contains("names no `[[attribute]]`"),
-        "{}",
-        bound_err(&undeclared, &[])
+fn a_join_field_is_not_a_key_and_a_map_moves_only_fields_it_knows() {
+    let joined = identified().replace(
+        "[defaults]\nsource = \"corpus\"",
+        "[defaults]\nsource = \"corpus\"\njoin_field = \"doc\"",
     );
-    let not_unique = joined().replace("unique = true\n", "");
-    assert!(
-        bound_err(&not_unique, &[]).contains("is not declared `unique`"),
-        "{}",
-        bound_err(&not_unique, &[])
-    );
-    let timestamp = joined().replace("type = \"u64\"", "type = \"timestamp_us\"");
-    assert!(
-        bound_err(&timestamp, &[]).contains("is a `keyword` or an integer"),
-        "{}",
-        bound_err(&timestamp, &[])
-    );
-    let keyword = joined().replace("type = \"u64\"", "type = \"keyword\"");
-    assert!(bound_ok(&keyword, &[]).views[0].fields.joins());
-}
-
-/// **A join attribute with no file is refused wherever a view reads one**, by the parse `tessera
-/// check` runs as much as the build's, and accepted where no view reads a file.
-#[test]
-fn a_join_attribute_with_no_source_is_refused_where_a_view_reads_points() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("config.toml");
-    let parse = |text: &str, strictness| {
-        std::fs::write(&path, text).expect("write config");
-        Config::parse_with(&path, &HashMap::new(), strictness)
-    };
-    // No default source: the severity column names its own, and the join attribute none.
-    let unsourced = joined()
-        .replace("[defaults]\nsource = \"corpus\"\n", "[defaults]\n")
-        .replace(
-            "vocabulary = \"severity\"\n",
-            "vocabulary = \"severity\"\nsource     = \"corpus\"\n",
-        );
-    assert!(parse(&unsourced, Strictness::Build).is_err(), "the build refuses it");
-    assert!(parse(&unsourced, Strictness::Declared).is_err(), "and so does the check");
-    let sourced = unsourced.replace("unique = true\n", "unique = true\nsource = \"corpus\"\n");
-    assert!(parse(&sourced, Strictness::Declared).is_ok(), "{sourced}");
-    let unread = unsourced.replace("source           = \"geometry\"\n", "");
-    assert!(
-        parse(&unread, Strictness::Declared).is_ok(),
-        "a view reading no file is declared and empty"
-    );
-}
-
-/// **Without a join field no file joins**: each points row is an item of its own, and a map may
-/// not move a join column there is none of.
-#[test]
-fn without_a_join_field_no_file_joins() {
-    let config = bound_ok(ACQUIRED, &[]);
-    assert!(!config.views[0].fields.joins());
-    assert!(!config.attribute_sources[0].fields.joins());
+    let message = bound_err(&joined, &[]);
+    assert!(message.contains("join_field"), "{message}");
     let moved = ACQUIRED.replace(
         "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { entity_id = \"gid\" }",
@@ -2118,12 +2057,12 @@ fn a_field_map_without_a_source_is_refused() {
 /// A map *moves* a field, and the reader takes the name it moved it to.
 #[test]
 fn a_renamed_field_reaches_the_reader() {
-    let text = joined().replace(
+    let text = identified().replace(
         "vocabulary = \"severity\"\n",
         "vocabulary = \"severity\"\nfields = { doc = \"id\" }\n",
     );
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of(JOIN_COLUMN), "id");
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), Some("id"));
 
     // An attribute's own one-field map is the same rule, spelled for one field.
     let text = with_line(SEVERITY, "field = \"sev\"");
@@ -2142,7 +2081,7 @@ fn a_renamed_field_reaches_the_reader() {
 /// A field map entry naming no column at all is refused rather than read as *the canonical name*.
 #[test]
 fn an_empty_field_name_is_refused() {
-    let text = joined().replace(
+    let text = identified().replace(
         "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { doc = \"\" }",
     );
@@ -2216,7 +2155,7 @@ fn a_field_map_beside_inline_artifacts_is_refused() {
 fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = [1], excluding = [2] }]",
+        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = { id = [1] }, excluding = { id = [2] } }]",
     );
     let message = bound_err(&text, &[]);
     assert!(
@@ -3281,22 +3220,19 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
 /// view's values as every view's.
 #[test]
 fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
-    let text = format!(
-        "[defaults]\njoin_field = \"id\"\n{}",
-        with_group(
-            "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
-             source = \"other\"\n\
-             \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
-             scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-             fields = { view = \"quarter\", id = \"doc\" }\n",
-        )
+    let text = with_group(
+        "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
+         source = \"other\"\n\
+         \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+         scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
+         fields = { view = \"quarter\", id = \"doc\" }\n",
     );
     let config = ok(&text);
     let scoped = &config.scoped_attributes[0];
     assert_eq!(scoped.group, "quarter");
     let source = scoped.source.as_ref().expect("its own source is recorded");
     assert_eq!(source.view_field, "quarter");
-    assert_eq!(source.join_column, "doc");
+    assert_eq!(source.fields.unique_column("id"), Some("doc"));
     assert!(source.path.ends_with("other.parquet"));
     assert!(
         !config

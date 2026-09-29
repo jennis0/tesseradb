@@ -15,7 +15,7 @@
 //! including every digest `MANIFEST.json` records for every other file, is compared verbatim —
 //! so a single differing byte anywhere in the bundle still fails here.
 //!
-//! **Where byte equality stops, and why.** Most fixtures here declare no attributes, and the
+//! **Where byte equality stops, and why.** Most fixtures here declare only the unique `id` their rows name items by, and the
 //! attributed pair (`attributed_*`) exists because a bundle carrying a scalar tail is a different
 //! object to compare: `columns.arrow`, its `MANIFEST.declared_scalars` and its
 //! `MANIFEST.vocabularies` are all derived files the two implementations could disagree on and
@@ -27,6 +27,8 @@
 //! the same key per row — is asserted in `discovered_vocabulary.rs`'s
 //! `both_implementations_agree_on_keys_though_fresh_codes_differ`. Threading a seeded RNG in to
 //! close that gap is the thing that module's header exists to refuse.
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -358,7 +360,10 @@ fn write_attributed_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// A build of one view over `points` whose access terms are in `pairs`, both naming their items by
+/// the unique `id` [`common::with_id`] declares.
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    let schema = common::with_id(Default::default());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -373,9 +378,13 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         out,
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),
@@ -385,7 +394,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     }
 }
 
@@ -600,7 +609,7 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
 
     let make_args = |out: PathBuf, batch: Option<u64>| {
         let mut args = args_for(&points, &pairs, out);
-        args.schema = attributed_schema(temp.path());
+        args.schema = common::with_id(attributed_schema(temp.path()));
         args.attribute_sources =
             tessera_build::config::AttributeSource::over(points.clone(), &args.schema);
         args.batch_items = batch;
@@ -632,8 +641,8 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
     let declared = manifest["declared_scalars"].as_array().unwrap();
     assert_eq!(
         declared.len(),
-        6,
-        "all six declared columns must reach the manifest, got {declared:?}"
+        7,
+        "all seven declared columns must reach the manifest, got {declared:?}"
     );
     let vocabularies = manifest["vocabularies"].as_array().unwrap();
     assert_eq!(vocabularies.len(), 2, "both vocabularies must be recorded");
@@ -648,7 +657,7 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
         files.keys().collect::<Vec<_>>()
     );
     // Non-trivial: an empty column file would compare equal between the two builds while carrying
-    // none of the six declarations.
+    // none of the seven declarations.
     assert!(
         columns.iter().all(|(_, bytes)| bytes.len() > 1_024),
         "each columns.arrow must carry the tail, not just an Arrow IPC header"
@@ -1033,6 +1042,7 @@ fn reference_build_at_scale() {
         attribute_sources: Vec::new(),
         out,
         limit: Some(limit),
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

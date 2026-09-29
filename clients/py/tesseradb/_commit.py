@@ -10,11 +10,11 @@ order matters for existence and for nothing else.
 two therefore cannot disagree about what would be sent.
 
 **The plan is built from what was inserted and what the database says it holds.** The SDK keeps no
-record of what it sent: a table goes as it was inserted. A row naming by its id an item the
-database holds, and carrying what the item stores, changes nothing and is counted unchanged; one
-that differs edits the item. What
-the database has already been told is read from `/v1/meta` rather than from a log: its views,
-its groups and its layers. A re-run of a cell is a re-run.
+record of what it sent: a table goes as it was inserted. A row naming an item the database holds
+by its unique values, and carrying what the item stores, changes nothing and is counted
+unchanged; one that differs edits the item. What the database has already been told is read from
+`/v1/meta` rather than from a log: its views, its groups and its layers. A re-run of a cell is a
+re-run.
 
 **The target decides the route.** An insert into a view is a page of points, one into an attribute
 or a layer by key fills cells on entities the database holds, and a layer's two tables are
@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from ._control import Answer, Control, arrow_body, batch_id
 from . import _declaration as _D
@@ -144,31 +145,6 @@ def _placed(rows: Sequence[dict], key_of, needs) -> list[dict]:
 # ---------------------------------------------------------------------------- the pre-flight
 
 
-def rows_with_no_id(inserts: Sequence[Any], findings: list[Finding]) -> None:
-    """Rows with no id where the insert names an id column.
-
-    A row whose id is null is a row no member table and no value can reach, and the SDK mints
-    nothing in its place. The finding lists them; the remedy is the data's.
-    """
-    for insert in inserts:
-        column = insert.columns.get("id")
-        if column is None or not insert.rows:
-            continue
-        values = insert.table()[column]
-        empty = values.null_count
-        if empty:
-            findings.append(
-                Finding(
-                    "rows with no id",
-                    f"the insert into {insert.kind} '{insert.target}' names id='{column}', and "
-                    f"{empty} of its {insert.rows} row(s) carry no value there. A row's id is its "
-                    f"value of the join field, which names its item, and the SDK makes none up. "
-                    f"Fill the column, or insert the rows with no id= at all, each of which is "
-                    f"then an item of its own",
-                )
-            )
-
-
 def keys_into_supplied_content(
     document: dict, inserts: Sequence[Any], findings: list[Finding]
 ) -> None:
@@ -188,7 +164,7 @@ def keys_into_supplied_content(
                 f"without content its layer declares cannot be told from one whose content was "
                 f"withheld. Such a layer takes an artifacts table: "
                 f"insert('{insert.target}', artifacts=…, key=…, contents=…) beside "
-                f"insert('{insert.target}', members=…, id=…, key=…)",
+                f"insert('{insert.target}', members=…, key=…)",
             )
         )
 
@@ -246,7 +222,6 @@ class Planner:
 
     def plan(self) -> tuple[list[Page], list[Finding]]:
         document = self.db._document()
-        rows_with_no_id(self.inserts, self.findings)
         keys_into_supplied_content(document, self.inserts, self.findings)
         self._declarations(document)
         rows = self._phase(self._rows, document)
@@ -532,8 +507,8 @@ class Planner:
         )
 
     def _point_columns(self, insert, block: dict, table: pa.Table) -> list[tuple[str, Any]]:
-        """The wire's columns for one points page: geometry, labels, and the values, the join
-        field's among them where the insert named `id=`.
+        """The wire's columns for one points page: geometry, labels, the values, and the unique
+        attributes that name each row's item.
 
         A column no target reads is not here: what travels is what the insert named, which is
         what the declaration says this view reads.
@@ -547,7 +522,7 @@ class Planner:
         access = insert.columns.get("access")
         if access:
             columns.append(("access", _label_lists(table[access])))
-        for name, column in insert.named_attributes.items():
+        for name, column in {**insert.items, **insert.named_attributes}.items():
             columns.append((name, table[column]))
         return columns
 
@@ -601,10 +576,10 @@ class Planner:
         """One page sequence of rows without coordinates, over the rows this insert named."""
         if not rows:
             return
-        columns = [(insert.target, table[column])]
-        join = self.db.blocks.join_field()
-        if join != insert.target:
-            columns.insert(0, (join, table[insert.columns["id"]]))
+        columns = [
+            (name, table[named]) for name, named in insert.items.items() if name != insert.target
+        ]
+        columns.append((insert.target, table[column]))
         where = "" if view is None else f" of view '{view}'"
         self._page_rows(
             kind="values",
@@ -684,7 +659,11 @@ class Planner:
                 )
             )
             return
-        rows = _artifact_rows(artifacts, members, inline)
+        field = self._member_field(layer, artifacts, members, inline)
+        if field is False:
+            return
+        column = None if field is None else self.db._unique_column(field)
+        rows = _artifact_rows(artifacts, members, inline, field, column)
         if not rows:
             return
         self._published.add(layer)
@@ -704,7 +683,48 @@ class Planner:
                 )
             )
             return
-        self._publish(block, rows)
+        self._publish(block, rows, field)
+
+    def _member_field(self, layer: str, artifacts, members, inline) -> str | None | bool:
+        """The one unique attribute a layer's memberships name their members by, which a
+        publication or growth names for the whole request: `None` where they name no member, and
+        `False` after a finding where they name members by several or by none."""
+        struct_columns = {self.db._unique_column(one): one for one in self.db.blocks.unique_names()}
+        named: set[str] = set()
+        listed = False
+        for insert in members:
+            named |= set(insert.items)
+            listed = listed or bool(insert.rows)
+        for insert in artifacts:
+            schema = pq.read_schema(insert.path)
+            for role in ("members", "excluding"):
+                column = insert.columns.get(role)
+                if column is None or column not in schema.names:
+                    continue
+                listed = True
+                value = schema.field(column).type
+                value = value.value_type if pa.types.is_list(value) else value
+                if pa.types.is_struct(value):
+                    named |= {struct_columns[one.name] for one in value if one.name in struct_columns}
+        for record in inline:
+            for role in ("members", "excluding"):
+                table = record.get(role)
+                if table:
+                    listed = True
+                if isinstance(table, dict):
+                    named |= set(table) & set(self.db.blocks.unique_names())
+        if len(named) > 1 or (listed and not named):
+            self.findings.append(
+                Finding(
+                    "a membership naming its members by several unique attributes, or by none",
+                    f"layer '{layer}' names its members by "
+                    f"{', '.join(sorted(named)) or 'no unique attribute'}, and a publication "
+                    f"names every member of a request by one. Name them all by one unique "
+                    f"attribute: a column of a members table, or a field of a member struct",
+                )
+            )
+            return False
+        return next(iter(named), None)
 
     def _planned(self, layer: str) -> bool:
         """Whether this plan publishes a key into a layer.
@@ -721,7 +741,7 @@ class Planner:
             return True
         return any(page.name == layer and page.kind == "publish" for page in self.pages)
 
-    def _publish(self, block: dict, rows: list[dict]) -> None:
+    def _publish(self, block: dict, rows: list[dict], field: str | None) -> None:
         """One layer's artifact rows, as publications.
 
         Within a layer the levels go coarse first, a nested batch resolves parents that are its own
@@ -765,7 +785,7 @@ class Planner:
             )
             for batch in _batched(ordered, cap, most):
                 blocks, artifacts, members = batch
-                body = _publish_body(level, blocks, self.db.blocks.join_field())
+                body = _publish_body(level, blocks, field)
                 self._artifact_page(
                     "publish",
                     layer,
@@ -780,7 +800,8 @@ class Planner:
                     # as growths, in the artifact's own view.
                     for rank, remainder in row.get("remainders", []):
                         self._grow_pages(
-                            layer, level, row["key"], rank, remainder, grow_limits, row.get("view")
+                            layer, level, row["key"], rank, remainder, grow_limits,
+                            row.get("view"), field,
                         )
 
     def _artifact_page(
@@ -815,6 +836,7 @@ class Planner:
         members: Sequence[Any],
         grow_limits: dict,
         view: str | None = None,
+        field: str | None = None,
     ) -> None:
         """The pages that join one set, in order."""
         if not members:
@@ -824,9 +846,7 @@ class Planner:
         per_page = max(1, min((cap - 512) // 16, most))
         for start in range(0, len(members), per_page):
             slice_ = list(members[start : start + per_page])
-            body = patch_body(
-                level, key, joining=slice_, rank=rank, view=view, field=self.db.blocks.join_field()
-            )
+            body = patch_body(level, key, joining=slice_, rank=rank, view=view, field=field)
             what = "members" if rank is None else f"the generating set at rank {rank}"
             self._artifact_page(
                 "grow",
@@ -1054,11 +1074,16 @@ def _blank(key: str, level: int, view: str | None = None) -> dict:
             "parent": [], "attached": None, "excluding": None, "space": None, "access": None}
 
 
-def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
+def _artifact_rows(
+    artifacts, members, inline=None, field: str | None = None, column: str | None = None
+) -> list[dict]:
     """One layer's inserted tables as artifact records: the key, its parts and its sets.
 
-    A member table's grain is `(key, entity, rank)`: a null rank is the membership and rank *k* is
-    content *k*'s generating set. An artifacts table's `contents` is
+    Every member is written as its value of `field`, the unique attribute the layer's
+    memberships name members by: a members table's column of it, a member struct's field
+    `column`, and the declaration's own membership table's list under its name. A member table's
+    grain is `(key, member, rank)`: a null rank is the membership and rank *k* is content *k*'s
+    generating set. An artifacts table's `contents` is
     one value list per rank, positional over the kinds the layer declares. A shape column, `space`
     and `excluding` are columns of the artifact row, and the publication record carries each as
     the row wrote it. Every column is the one the insert named, or the artifact
@@ -1083,10 +1108,16 @@ def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
         key = str(record["key"])
         row = rows.setdefault((level, key, None), _blank(key, level, None))
         _artifact_parts(row, record)
+    for row in rows.values():
+        for part in ("members", "excluding"):
+            if row.get(part) is not None:
+                row[part] = _member_values(row[part], field, column)
     for insert in members or []:
         table = insert.table()
         columns = insert.columns
-        entity_column = columns["id"]
+        entity_column = insert.items.get(field)
+        if entity_column is None:
+            continue
         key_column = columns["key"]
         level_column = columns.get("level")
         rank_column = columns.get("rank")
@@ -1107,6 +1138,15 @@ def _artifact_rows(artifacts, members, inline=None) -> list[dict]:
                     record["sets"].append([])
                 record["sets"][rank].append(entity)
     return list(rows.values())
+
+
+def _member_values(members: Any, field: str | None, column: str | None) -> list:
+    """A membership as values of the one unique attribute a request names members by: the
+    declaration's table `{attribute: [values]}` by its list, and a list of structs by each
+    struct's field."""
+    if isinstance(members, dict):
+        return list(members.get(field) or [])
+    return [one.get(column) if isinstance(one, dict) else one for one in members]
 
 
 def _shape_of(row: dict, record: dict) -> None:

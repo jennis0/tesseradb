@@ -446,6 +446,12 @@ name  = "partition"
 type  = "u32"
 index = true
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name                      = "{BANDS}"
 views                     = ["s0"]
@@ -465,7 +471,7 @@ artifact_visibility       = {{ default = "inherited" }}
 require_member_visibility = "none"
 depends_on                = ["{BANDS}"]
 artifacts = [
-  {{ key = "l0", members = [{}], attached_layer = "{BANDS}", attached_key = "{}" }},
+  {{ key = "l0", members = {{ id = [{}] }}, attached_layer = "{BANDS}", attached_key = "{}" }},
 ]
 "#,
         members.join(", "),

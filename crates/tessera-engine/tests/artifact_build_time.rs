@@ -35,6 +35,12 @@ clusters_members = "clusters_members.parquet"
 topics           = "topics.parquet"
 topics_members   = "topics_members.parquet"
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
@@ -54,6 +60,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "topics/x"
@@ -69,6 +76,7 @@ depends_on = ["clusters/a"]
 
   [layer.members]
   source = "topics_members"
+  fields = { id = "entity" }
 
   [[layer.content.supplied]]
   name = "topic"
@@ -212,9 +220,10 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &config.schema),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: config.layers,
@@ -224,7 +233,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: id_schema(),
+        schema: config.schema,
     };
     tessera_build::build(&args)?;
     Ok(Fixture {

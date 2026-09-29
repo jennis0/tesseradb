@@ -7,6 +7,8 @@
 //! sentinel in its permutation and present in the other's, and a view's row count is its own
 //! population rather than the entity total.
 
+mod common;
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,8 +23,6 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, IdentityKey};
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer { signed: false };
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -131,6 +131,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
     write_points(&quarter_points, "quarter:2026-Q2", QUARTER);
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&world_points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -157,9 +158,10 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
             }],
         }],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -169,7 +171,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a two-view build succeeds");
 
@@ -241,8 +243,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
     assert_eq!(quarter_only, QUARTER.end - WORLD.end);
 }
 
-/// **The label is the entity's, not the row's** (`views.md` §7): a per-view label column that
-/// disagrees between two views is a refusal naming the entity, not a union.
+/// **The label is the item's, not the row's** (`views.md` §7): a per-view label column that
+/// disagrees between two views about one item, named in both by its `id`, refuses the build
+/// rather than taking the union.
 #[test]
 fn a_label_that_disagrees_between_views_refuses() {
     use arrow::array::StringArray;
@@ -292,14 +295,16 @@ fn a_label_that_disagrees_between_views_refuses() {
             default: Some("public".to_string()),
         },
     };
-    let error = build(&BuildArgs {
+    let (schema, attribute_sources) = common::id_attributes(&a);
+    build(&BuildArgs {
         views: vec![field_view("a", &a), field_view("b", &b)],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -309,12 +314,13 @@ fn a_label_that_disagrees_between_views_refuses() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect_err("a disagreeing label refuses");
-    let message = format!("{error}");
-    assert!(message.contains("entity_id 5"), "{message}");
-    assert!(message.contains("different access labels"), "{message}");
+    assert!(
+        !dir.path().join("bundle").join("CURRENT").exists(),
+        "a refused build publishes no bundle"
+    );
 }
 
 /// **Form B: one file, a discriminator column** (`views.md` §3.1). Each view's rows are picked
@@ -333,6 +339,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
     let pairs = dir.path().join("pairs.parquet");
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -342,9 +349,10 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -354,7 +362,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a form B build succeeds");
 
@@ -405,6 +413,7 @@ fn a_discriminator_value_outside_the_roster_refuses() {
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -536,7 +545,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
     // The group's box holds both views' data; the single view's does not hold the other's.
     for path in [q2, q3] {
         let rows = tessera_build::input::read_points(
-            tessera_build::input::Source::new(path, &fields, &INTEGER_IDS),
+            tessera_build::input::Source::every_row(path, &fields),
             tessera_spatial::Projection::None,
             &group.extent,
         )
@@ -908,6 +917,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
     let pairs = dir.path().join("pairs.parquet");
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -917,9 +927,10 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -929,7 +940,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("an empty view builds");
 
@@ -1009,6 +1020,7 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         render: false,
         unique: false,
     };
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
@@ -1022,9 +1034,10 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             views: vec![0, 1],
             source: None,
         }],
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -1034,12 +1047,18 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a scoped family builds");
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    assert!(bundle.manifest.declared_scalars.is_empty());
+    let declared: Vec<&str> = bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(declared, ["id"], "a scoped family is no declared scalar");
     let attrs = out
         .join("v00000")
         .join("partitions/default/attrs/sentiment/quarter_alt");
@@ -1154,6 +1173,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
     }
 
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&world_points);
     build(&BuildArgs {
         views: vec![
             view_args("world", &world_points, &pairs),
@@ -1177,9 +1197,10 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             }],
         }],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),
@@ -1189,7 +1210,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a wide two-view build succeeds");
 

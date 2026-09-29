@@ -52,6 +52,12 @@ spread_members  = "spread_members.parquet"
 clumped         = "clumped.parquet"
 clumped_members = "clumped_members.parquet"
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 1000.0 }
@@ -69,6 +75,7 @@ hierarchy = { kind = "flat" }
 
   [layer.members]
   source = "spread_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "clusters/clumped"
@@ -82,6 +89,7 @@ hierarchy = { kind = "flat" }
 
   [layer.members]
   source = "clumped_members"
+  fields = { id = "entity" }
 "#;
 
 fn write(path: &Path, schema: Arc<Schema>, batch: RecordBatch) {
@@ -188,9 +196,10 @@ fn fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: config.layers,
@@ -200,7 +209,7 @@ fn fixture() -> Fixture {
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema,
     };
     tessera_build::build(&args).expect("a build carrying two enumerated layers");
     Fixture {

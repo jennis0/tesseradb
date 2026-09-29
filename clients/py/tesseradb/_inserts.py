@@ -6,8 +6,10 @@ rewrites no data: a frame is written to `sources/` as it was given and the decla
 columns; a path is read where it lies. Every insert prints two lists, the columns it read and the
 columns it ignored.
 
-**What is named and what is not.** The id, the coordinates, the access labels, a layer's key and
-a group's view column are named on every call and never matched. An artifacts table, a members
+**What is named and what is not.** The coordinates, the access labels, a layer's key and a
+group's view column are named on every call and never matched. A table names the item each row
+belongs to by the columns it carries of the attributes declared `unique`: each attribute's own
+column, or the one `columns=` names for it. An artifacts table, a members
 table, a roster and a value set are tables in Tessera's own shape, so a column of theirs
 carrying its canonical name is named on the call like any other, and one the call passed over
 is refused rather than read silently: the build and the publication routes read such a column
@@ -70,8 +72,9 @@ SHAPE_RECORD_FIELD = {
 }
 SHAPE_FIELDS = tuple(SHAPE_RECORD_FIELD.values())
 
-#: A members table's columns, likewise: `entity` is what `id=` names, and `level` is canonical.
-MEMBER_FIELDS = ("key", "entity", "rank")
+#: A members table's columns, likewise, `level` being canonical. Each member is named by the
+#: unique attributes' columns the table carries.
+MEMBER_FIELDS = ("key", "rank")
 MEMBER_CANONICAL_ONLY = ("level",)
 
 #: A value set's columns, and a roster's own two beside the metadata names its group declared.
@@ -107,15 +110,15 @@ class Contract:
 
 
 CONTRACTS: dict[tuple[str, str], Contract] = {
-    ("view", "rows"): Contract(required=("x", "y"), optional=("id", "access")),
+    ("view", "rows"): Contract(required=("x", "y"), optional=("access",)),
     ("view_group", "rows"): Contract(
-        required=("x", "y"), optional=("id", "access", "view"), values=("view_key",)
+        required=("x", "y"), optional=("access", "view"), values=("view_key",)
     ),
     ("view_group", "roster"): Contract(
         required=("key",), optional=("visibility",), canonical=ROSTER_FIELDS
     ),
-    ("attribute", "values"): Contract(required=("id", "value"), optional=("view",)),
-    ("layer", "key"): Contract(required=("id", "key"), optional=("view",)),
+    ("attribute", "values"): Contract(required=("value",), optional=("view",)),
+    ("layer", "key"): Contract(required=("key",), optional=("view",)),
     ("layer", "artifacts"): Contract(
         required=("key",),
         optional=(
@@ -127,7 +130,7 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         shaped=True,
     ),
     ("layer", "members"): Contract(
-        required=("id", "key"),
+        required=("key",),
         optional=("level", "rank", "view"),
         canonical=MEMBER_FIELDS + MEMBER_CANONICAL_ONLY,
         canonical_only=MEMBER_CANONICAL_ONLY,
@@ -143,7 +146,7 @@ CONTRACTS: dict[tuple[str, str], Contract] = {
         canonical_only=ARTIFACT_CANONICAL_ONLY,
     ),
     ("labels", "members"): Contract(
-        required=("id", "key"),
+        required=("key",),
         optional=("level", "rank"),
         canonical=MEMBER_FIELDS + MEMBER_CANONICAL_ONLY,
         canonical_only=MEMBER_CANONICAL_ONLY,
@@ -170,9 +173,13 @@ class Insert(Summarised):
     - `role`: which of the target's tables this is: `"rows"`, `"roster"`, `"values"`, `"key"`,
       `"artifacts"`, `"members"` or `"text"`.
     - `columns`: the columns the call named, by what each holds, such as
-      `{"id": "paper_id", "x": "x", "y": "y"}`.
+      `{"x": "x", "y": "y", "access": "labels"}`.
     - `named_attributes`: on the anchor view's rows, the attributes the table fills, as
       `{attribute: column}`.
+    - `items`: the attributes declared `unique` whose columns the table carries, as
+      `{attribute: column}`. A row names the item holding each of its values in them; a view's
+      row naming none is an item of its own, and a row of any other table naming none is
+      refused by the build.
     - `metadata_columns`: on a view group's roster, the column each metadata value is read from.
     - `shape`, `shape_columns`: on an annotations table, the kind of shape its rows carry and
       the columns it is read from.
@@ -192,6 +199,7 @@ class Insert(Summarised):
     role: str
     columns: dict[str, str] = field(default_factory=dict)
     named_attributes: dict[str, str] = field(default_factory=dict)
+    items: dict[str, str] = field(default_factory=dict)
     metadata_columns: dict[str, str] = field(default_factory=dict)
     shape: str | None = None
     shape_columns: list[str] = field(default_factory=list)
@@ -204,11 +212,6 @@ class Insert(Summarised):
     schema: dict[str, Any] = field(default_factory=dict)
     read: list[str] = field(default_factory=list)
     ignored: list[str] = field(default_factory=list)
-
-    @property
-    def id_column(self) -> str | None:
-        """The column the call named with `id=`, or `None`."""
-        return self.columns.get("id")
 
     def table(self) -> pa.Table:
         """The rows, read back from `path`."""
@@ -289,6 +292,7 @@ def build(
     projected: bool = False,
     metadata: tuple[str, ...] = (),
     named_attributes: dict[str, str] | None = None,
+    items: dict[str, str] | None = None,
 ) -> Insert:
     """One insert: the table where it belongs, the columns checked, the two lists computed."""
     contract = CONTRACTS[(kind, role)]
@@ -328,6 +332,7 @@ def build(
         )
     _check(insert, contract, named, projected, metadata)
     insert.named_attributes = dict(named_attributes or {})
+    insert.items = dict(items or {})
     _lists(insert, contract)
     return insert
 
@@ -483,6 +488,7 @@ def _lists(insert: Insert, contract: Contract) -> None:
     read = set(insert.columns.values())
     read |= set(insert.metadata_columns.values())
     read |= set(insert.named_attributes.values())
+    read |= set(insert.items.values())
     read |= set(insert.shape_columns)
     insert.read = [column for column in insert.schema if column in read]
     insert.ignored = [column for column in insert.schema if column not in read]

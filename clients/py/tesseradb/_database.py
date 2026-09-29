@@ -88,7 +88,7 @@ class Database:
 
         db = tesseradb.create()
         db.declare_view("papers")
-        db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
+        db.insert("papers", frame, x="x", y="y", access="labels")
         db.commit()
         db.view("papers").count()
 
@@ -175,7 +175,7 @@ class Database:
 
         A view is one layout of the items: a map with its own x and y coordinates. One set of items
         can have several views, such as two projections of the same embedding. Its rows come from
-        `insert(name, table, id=, x=, y=, access=)`.
+        `insert(name, table, x=, y=, access=)`.
 
         - `name`: the view's name.
         - `extent`: the coordinate range the view covers, as `{"x": [min, max], "y": [min, max]}`,
@@ -309,7 +309,7 @@ class Database:
         """Declare a column the items carry, and return its block.
 
         Its values come from a column of the same name in the table inserted into the anchor view
-        (after the first commit, in any view's table), or from `insert(name, table, id=, value=)`.
+        (after the first commit, in any view's table), or from `insert(name, table, value=)`.
 
         - `name`: the column's name.
         - `type`: `"bool"`, `"u8"`, `"u16"`, `"u32"`, `"u64"`, `"i8"`, `"i16"`, `"i32"`,
@@ -325,10 +325,13 @@ class Database:
         - `scope`: `{"group": name}` gives the column a separate value in each view of that
           view group. The default is one value per item.
         - `title`: a display name.
-        - `unique`: `True` holds each value on one item at most. An insert giving an item a value
-          another item holds is refused, and a filter `{name: {"in": values}}` finds the items
-          holding the values from the column's index, with or without `index`. For `"keyword"`,
-          integer and `"timestamp_us"` columns scoped to the item. The default is `False`.
+        - `unique`: `True` holds each value on one item at most, so a value names one item. Every
+          table carrying the column names its rows' items by it: a view's row naming no item is
+          an item of its own, and a row of any other table must name one. An insert giving an
+          item a value another item holds is refused, and a filter `{name: {"in": values}}`
+          finds the items holding the values from the column's index, with or without `index`.
+          For `"keyword"`, integer and `"timestamp_us"` columns scoped to the item. The default
+          is `False`.
 
         A name already declared for an attribute is refused, and so are `render=True` after the
         first commit and a `scope` naming a view group not yet declared.
@@ -366,30 +369,6 @@ class Database:
                 block["unique"] = bool(unique)
                 return self._declared(block)
         raise Refusal(f"declare_unique: no attribute named {name!r} is declared")
-
-    def declare_join_field(self, name: str) -> dict:
-        """Name the attribute the build joins its files on, and return its block.
-
-        This is `[defaults].join_field`. Every table inserted with `id=` names its items by this
-        attribute's values: a view's points, an attribute's values, a layer's members and key
-        column. The attribute is declared `unique=True`, as a `"keyword"` or an integer; the
-        declaration check refuses any other. The `id=` column of the allocation view's frame fills
-        it. Without a join field, `id=` is refused, and each row of the points is an item of its
-        own, named by the `tessera_id` the server hands back.
-
-            db.declare_attribute("paper", type="keyword", unique=True)
-            db.declare_join_field("paper")
-        """
-        found = next((b for b in self.blocks.blocks["attribute"] if b.get("name") == name), None)
-        if found is None:
-            raise Refusal(
-                f"declare_join_field: no attribute named {name!r} is declared. Declare it with "
-                f"declare_attribute({name!r}, type=..., unique=True) first"
-            )
-        for block in self.blocks.blocks["attribute"]:
-            block.pop(D.JOIN, None)
-        found[D.JOIN] = True
-        return self._declared(found)
 
     def declare_columns(
         self,
@@ -471,7 +450,7 @@ class Database:
 
         A layer is a set of annotations over the items, such as one clustering, a set of regions or
         a taxonomy. Each annotation, or artifact, has a key and a set of member items. Its
-        annotations and members come from `insert(name, table, id=, key=)`, or from
+        annotations and members come from `insert(name, table, key=)`, or from
         `insert(name, artifacts=...)` and `insert(name, members=...)`.
 
         - `name`: the layer's name.
@@ -574,7 +553,7 @@ class Database:
         - `of`: the layer it labels.
         - `content_requires`: `"inherited"` (the default) shows a label wherever its annotation is
           shown. `"all"` shows it only to a reader who may see every item the text was written
-          from; those items come from `insert(name, members=table, id=, key=)`.
+          from; those items come from `insert(name, members=table, key=)`.
         - `require_member_visibility`, `title`: as for `declare_layer`.
         - `artifact_visibility`: the access label of every label in the set. The default,
           `"inherited"`, gives the labels none of their own, so the layer they label and
@@ -664,12 +643,16 @@ class Database:
           which is read where it lies.
         - `roster`, `artifacts`, `members`: tables of a view group's views, a layer's annotations,
           and a layer's memberships. Each is its own insert, since their columns share names.
-        - `columns`: `{attribute: column}` for an attribute filled from a column with another
-          name, on the anchor view's insert, and after the first commit on any view's.
+        - `columns`: `{attribute: column}` for an attribute read from a column with another name:
+          on any insert, a unique attribute whose values name the rows' items; on the anchor
+          view's insert, and after the first commit on any view's, any attribute the rows fill.
         - the other keywords: which column of the table holds each thing the target needs, such as
-          `id=`, `x=`, `y=` and `access=` for a view. `id=` is the column holding each row's value
-          of the join field, which names its item; it is refused where `declare_join_field` has
-          named none.
+          `x=`, `y=` and `access=` for a view.
+
+        A table names the item each row belongs to by the columns it carries of the attributes
+        declared `unique`: the column of the attribute's name, or the one `columns=` names. A
+        view's row naming no item is an item of its own. A row of any other table must name one,
+        and the build leaves out and reports one that names none.
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
@@ -682,17 +665,11 @@ class Database:
         needs and the call does not name, and a name that is not a column of the table are
         refused.
 
-            db.insert("papers", frame, id="paper_id", x="x", y="y", access="labels")
-            db.insert("clusters", frame, id="paper_id", key="cluster")
+            db.insert("papers", frame, x="x", y="y", access="labels")
+            db.insert("clusters", frame, key="cluster", columns={"paper": "paper_id"})
         """
         kind, block = self._target(target, named, roster, artifacts, members)
         role, data = self._role(target, kind, table, roster, artifacts, members, named)
-        if named.get("id") is not None and self.blocks.join_field() is None:
-            raise Refusal(
-                f"insert into {kind} {target!r}: id= names the column holding each row's value of "
-                f"the join field, and no join field is declared. Declare one with "
-                f"declare_join_field(<a unique attribute>), or drop id="
-            )
         if _inserts.is_path(data) and not Path(data).expanduser().exists():
             raise Refusal(f"insert into {target!r}: {Path(data).expanduser()} does not exist")
         if (kind, role) not in _inserts.CONTRACTS:
@@ -705,6 +682,7 @@ class Database:
         metadata = D.metadata_names(block) if role == "roster" else ()
         if kind == "labels" and role == "text":
             data, named = self._label_text(target, block, data, named)
+        items = self._item_columns(target, kind, role, data, columns, named)
         matched = self._attribute_columns(target, kind, role, data, columns, named)
         insert = _inserts.build(
             target=target,
@@ -718,6 +696,7 @@ class Database:
             projected=projected,
             metadata=metadata,
             named_attributes=matched,
+            items=items,
         )
         self._refuse_a_second_view_without_its_labels(kind, role, target, insert)
         self._refuse_keys_that_would_create_unlabelled_artifacts(block, insert)
@@ -732,8 +711,7 @@ class Database:
         """The declared block this name refers to, or a refusal naming how to declare one.
 
         A category column and its vocabulary may share a name. The columns the call names then say
-        which is meant: an attribute reads `id=` and `value=`, a vocabulary `key=`, `title=` and
-        `code=`.
+        which is meant: an attribute reads `value=`, a vocabulary `key=`, `title=` and `code=`.
         """
         found: list[tuple[str, dict]] = []
         for kind in D.KINDS:
@@ -763,7 +741,7 @@ class Database:
         kinds = ", ".join(sorted(kind for kind, _ in found))
         raise Refusal(
             f"insert into {target!r}: {kinds} are declared under that name, and the columns this "
-            f"call names fit {'both' if not fits else 'neither'}. An attribute reads id= and "
+            f"call names fit {'both' if not fits else 'neither'}. An attribute reads "
             f"value=; a vocabulary reads key=, title= and code=; a layer takes artifacts= or "
             f"members="
         )
@@ -906,32 +884,83 @@ class Database:
                     f"own label column with access="
                 )
 
+    def _item_columns(
+        self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
+    ) -> dict:
+        """The unique attributes a table names its items by, as `{attribute: column}`.
+
+        A table carries a unique attribute in the column `columns=` names for it, else in the
+        attribute's own column: the `field` its block declares, or its name. An artifacts table names its members inside its member
+        structs, and a roster, a label set's text and a value set name no item, so they carry none
+        here. An insert into a unique attribute carries it as its values.
+        """
+        schema = _inserts.schema_of(data)
+        for name, column in (columns or {}).items():
+            if column not in schema:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: columns={{{name!r}: {column!r}}} names no "
+                    f"column of this table. Its columns are {', '.join(schema)}"
+                )
+            if name not in self.blocks.attribute_names():
+                raise Refusal(
+                    f"insert into {kind} {target!r}: columns= names attribute {name!r}, which "
+                    f"this declaration does not carry. declare_attribute({name!r}, …) first"
+                )
+        unique = self.blocks.unique_names()
+        rows = kind in ("view", "view_group") and role == "rows"
+        beyond = sorted(set(columns or {}) - set(unique))
+        if beyond and not rows:
+            raise Refusal(
+                f"insert into {kind} {target!r}: columns= names the column each unique attribute "
+                f"is read from, which names the item a row belongs to, and "
+                f"{', '.join(repr(one) for one in beyond)} is not declared unique. Drop it, or "
+                f"insert its values into the attribute itself: insert(<attribute>, table, value=…)"
+            )
+        if role in ("artifacts", "text", "roster") or kind == "vocabulary":
+            if columns:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: this table names no item by its rows, so "
+                    f"columns= has nothing to say; drop it"
+                )
+            return {}
+        items = {}
+        for name in unique:
+            column = (columns or {}).get(name) or self._unique_column(name)
+            if column in schema and column != named.get("view"):
+                items[name] = column
+        if kind == "attribute" and target in unique and named.get("value") is not None:
+            items[target] = named["value"]
+        return items
+
+    def _unique_column(self, name: str) -> str:
+        """The column a table carries a unique attribute in when `columns=` names none: the
+        `field` its block declares, or its name."""
+        block = next(b for b in self.blocks.blocks["attribute"] if b.get("name") == name)
+        return block.get("field") or name
+
     def _attribute_columns(
         self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
     ) -> dict:
-        """The declared attributes a table's rows carry, as `{attribute: column}`.
+        """The declared attributes a view's rows fill, as `{attribute: column}`.
 
-        A column carries the declared attribute of the same name, or the one `columns=` maps it
+        A column fills the declared attribute of the same name, or the one `columns=` maps it
         to. The first commit's build reads an attribute from the anchor view's table alone, so
-        there attribute-named columns in any other view's table are ignored. After it, every
-        view's points carry the declared columns their table holds, those declared since and the
-        scoped columns of the view's group included.
+        there attribute-named columns in any other view's table fill nothing, and its unique
+        columns only name the rows' items. After it, every view's points carry the declared
+        columns their table holds, those declared since and the scoped columns of the view's
+        group included.
         """
         if kind not in ("view", "view_group") or role != "rows":
-            if columns:
-                raise Refusal(
-                    f"insert into {kind} {target!r}: columns= maps an attribute to a column of a "
-                    f"view's rows, which this insert is not; drop it"
-                )
             return {}
         anchor = kind == "view" and target == self.blocks.allocation_view()
         if not anchor and not self.built:
-            if columns:
+            filled = sorted(set(columns or {}) - set(self.blocks.unique_names()))
+            if filled:
                 raise Refusal(
                     f"insert into {kind} {target!r}: the first commit reads an attribute from "
                     f"the allocation view's frame, which is {self.blocks.allocation_view()!r}; "
                     f"map the column there, or insert the values into the attribute itself: "
-                    f"insert(<attribute>, table, id=…, value=…)"
+                    f"insert(<attribute>, table, value=…)"
                 )
             return {}
         # The groups whose scoped columns this table's views take: its own, and the one it shares.
@@ -940,31 +969,15 @@ class Database:
             groups = {target, self.blocks.group(target).get("members")} - {None}
         schema = _inserts.schema_of(data)
         matched = {}
-        join = self.blocks.join_field()
         for block in self.blocks.blocks["attribute"]:
             group = C._scoped_to(block)
             if group is not None and (not self.built or group not in groups):
                 continue
             name = block["name"]
-            if name == join and named.get("id") is not None:
-                matched[name] = named["id"]
-                continue
             column = (columns or {}).get(name, name)
-            # The id column fills the join field alone, and the view column none. A coordinate or
-            # label column can fill one.
-            if column in schema and column not in (named.get("id"), named.get("view")):
+            # The view column fills no attribute. A coordinate or label column can fill one.
+            if column in schema and column != named.get("view"):
                 matched[name] = column
-        for name, column in (columns or {}).items():
-            if column not in schema:
-                raise Refusal(
-                    f"insert into view {target!r}: columns={{{name!r}: {column!r}}} names no "
-                    f"column of this table. Its columns are {', '.join(schema)}"
-                )
-            if name not in self.blocks.attribute_names():
-                raise Refusal(
-                    f"insert into view {target!r}: columns= names attribute {name!r}, which this "
-                    f"declaration does not carry. declare_attribute({name!r}, …) first"
-                )
         return matched
 
     def _source_key(self, target: str, kind: str, role: str, view_key: str | None = None) -> str:
@@ -1006,7 +1019,11 @@ class Database:
         )
         if held is None:
             return insert
-        if held.columns != insert.columns or held.named_attributes != insert.named_attributes:
+        if (
+            held.columns != insert.columns
+            or held.named_attributes != insert.named_attributes
+            or held.items != insert.items
+        ):
             raise Refusal(
                 f"insert into {insert.kind} {insert.target!r}: this table names its columns "
                 f"differently from the one already inserted ({held.columns} against "
@@ -1320,6 +1337,9 @@ class Database:
             report.items = int(built.group("items"))
             report.minted = int(built.group("minted"))
             report.unclustered = int(built.group("unclustered"))
+        refused = self.path / "bundle" / "reports" / "refused.json"
+        if built is not None and int(built.group("refused")) > 0 and refused.exists():
+            report.refused = json.loads(refused.read_text(encoding="utf-8"))
         return report
 
     def _inserted_rows(self) -> dict:
@@ -1333,7 +1353,6 @@ class Database:
     def _preflight(self, document: dict) -> list[C.Finding]:
         """The findings the build's own inserts can raise, before a byte is read."""
         findings: list[C.Finding] = []
-        C.rows_with_no_id(self.inserts, findings)
         C.keys_into_supplied_content(document, self.inserts, findings)
         return findings
 
@@ -1571,13 +1590,16 @@ class Database:
 
     def _identity_in_words(self) -> str:
         """How this database names a row, for the commit report."""
-        join = self.blocks.join_field()
-        if join is None:
+        unique = self.blocks.unique_names()
+        if not unique:
             return (
-                "no join field is declared, so each row of the points is an item of its own, "
-                "named by its tessera_id"
+                "no attribute is declared unique, so each row of the points is an item of its "
+                "own, named by its tessera_id"
             )
-        return f"the files join on '{join}', and a row names its item by that field's value"
+        return (
+            f"a row names its item by its values of {', '.join(repr(one) for one in unique)}, "
+            f"and a row of the points naming none is an item of its own"
+        )
 
     def _record_label_columns(self, layers: Iterable[dict]) -> None:
         """Write onto the SDK's own layer blocks the label column each layer was committed with,
@@ -1835,26 +1857,21 @@ class Database:
         if block.get(D.FILLED):
             return (
                 "it was declared after the first commit, so no frame the build read carries it; "
-                f"insert({name!r}, table, id=…, value=…) fills it at the next commit"
+                f"insert({name!r}, table, value=…) fills it at the next commit"
             )
         if block.get("scope"):
             return (
                 "a group-scoped column belongs to one view, so it is filled by an insert of its "
-                f"own: insert({name!r}, table, id=…, value=…, view=…)"
+                f"own: insert({name!r}, table, value=…, view=…)"
             )
         if rows is None:
             return "no frame has been inserted into the allocation view"
-        if rows.columns.get("id") == name:
-            return (
-                f"the frame inserted into '{rows.target}' carries a column of that name and it is "
-                f"the id column, which fills the join field alone"
-            )
         if name in rows.schema:
             return (
                 f"the frame inserted into '{rows.target}' carries a column of that name, and the "
                 f"attribute was declared after that insert: the match is made where the frame is "
                 f"handed over. Declare it first, or insert the values with "
-                f"insert({name!r}, table, id=…, value=…)"
+                f"insert({name!r}, table, value=…)"
             )
         return (
             f"the frame inserted into '{rows.target}' carries no column of that name, and no "
@@ -1920,10 +1937,10 @@ def _extent_in_words(extent: Any) -> str:
 
 
 #: The build's closing line: `built <bundle> (v…): N items, …, M artifact(s) minted, K
-#: unclustered member row(s)`.
+#: unclustered member row(s), R row(s) refused`.
 _BUILT = re.compile(
     r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
-    r"(?P<unclustered>\d+) unclustered member row\(s\)$",
+    r"(?P<unclustered>\d+) unclustered member row\(s\), (?P<refused>\d+) row\(s\) refused$",
     re.MULTILINE,
 )
 
@@ -2008,6 +2025,7 @@ def _stored(insert: Insert) -> dict:
         "role": insert.role,
         "columns": dict(insert.columns),
         "named_attributes": dict(insert.named_attributes),
+        "items": dict(insert.items),
         "metadata_columns": dict(insert.metadata_columns),
         "source": insert.source,
         "path": str(insert.path),
@@ -2030,6 +2048,7 @@ def _restored(stored: dict) -> Insert:
         role=stored["role"],
         columns=dict(stored["columns"]),
         named_attributes=dict(stored["named_attributes"]),
+        items=dict(stored["items"]),
         metadata_columns=dict(stored["metadata_columns"]),
         source=stored["source"],
         path=Path(stored["path"]),

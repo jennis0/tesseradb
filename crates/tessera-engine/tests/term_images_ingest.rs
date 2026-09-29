@@ -212,6 +212,7 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

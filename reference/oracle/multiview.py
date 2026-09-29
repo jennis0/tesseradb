@@ -414,7 +414,6 @@ source = "{_source_name(key)}"
 
 [defaults]
 source          = "{WORLD_VIEW}"
-join_field      = "{JOIN_FIELD}"
 # The anchor (decision 0112): within a signature group, entity ids order by the item's Morton code
 # in *this* view. Explicit because the declaration carries several views and the ids are permanent
 # (I9) — reordering the blocks below must not silently re-key a rebuild.
@@ -798,7 +797,7 @@ def verify(bundle: Bundle) -> VerificationReport:
 
 
 def entities_by_source(bundle: Bundle) -> dict[int, int]:
-    """`source id -> entity id`, from the bundle's index of the join field."""
+    """`source id -> entity id`, from the bundle's index of the unique source id."""
     return bundle.unique_entities(JOIN_FIELD)
 
 

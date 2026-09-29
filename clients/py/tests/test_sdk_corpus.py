@@ -4,14 +4,16 @@
 discloses. It is run here over both declarations: the committed one and the one the verbs wrote.
 The two name the same files by different paths, one reading `data/notebook/` directly and one
 reading it through a relative path from a temporary directory. **The lines that name a path are
-compared by file name, and the rest of the page whole.** That is the whole normalisation: nothing
-else on the page carries a path.
+compared by file name, and the rest of the page whole, but for the `[sources]` key a line names**:
+the SDK names each file after the target it was inserted into, and the committed declaration
+chose its own names.
 
 Beside it, the first commit through `tessera build`.
 """
 
 import json
 import os
+import re
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -32,9 +34,9 @@ def declare_notebook(db, corpus: Path) -> None:
     db.declare_vocabulary(
         "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
-    # The join field, filled from the points' `entity_id` column by the insert's `id=`.
+    # Unique, so every table names its paper by it: the points carry it as `entity_id` and the
+    # member tables as `entity`, which each insert's `columns=` says.
     db.declare_attribute("id", type="u64", unique=True)
-    db.declare_join_field("id")
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
     )
@@ -99,7 +101,12 @@ def insert_notebook(db, corpus: Path) -> None:
     )
     # The six attribute columns are read by name from the frame inserted into the allocation view.
     db.insert(
-        "s0", str(corpus / "points.parquet"), id="entity_id", x="x", y="y", access="categories"
+        "s0",
+        str(corpus / "points.parquet"),
+        x="x",
+        y="y",
+        access="categories",
+        columns={"id": "entity_id"},
     )
     for layer, name in [
         ("clusters/kmeans", "clusters-kmeans"),
@@ -122,10 +129,10 @@ def insert_notebook(db, corpus: Path) -> None:
         db.insert(
             layer,
             members=str(corpus / f"{name}-members.parquet"),
-            id="entity",
             key="key",
             level="level",
             rank="rank",
+            columns={"id": "entity"},
         )
     for labels, name in [
         ("topics/kmeans", "topics-kmeans"),
@@ -144,17 +151,18 @@ def insert_notebook(db, corpus: Path) -> None:
         db.insert(
             labels,
             members=str(corpus / f"{name}-members.parquet"),
-            id="entity",
             key="key",
             level="level",
             rank="rank",
+            columns={"id": "entity"},
         )
 
 
 def page_without_sources(page: str) -> list[str]:
-    """The check's page but the lines that name a path: what two declarations must agree on."""
+    """The check's page but the lines that name a path, with the `[sources]` key cut from the
+    lines naming one: what two declarations must agree on."""
     return [
-        line
+        re.sub(r"source '[^']*'", "source", line)
         for line in page.splitlines()
         if "read schema" not in line and "no source" not in line
     ]
@@ -283,7 +291,6 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     db.declare_attribute("authors", type="text", index=True, title="Authors")
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
     db.declare_attribute("entity_id", type="u64", unique=True)
-    db.declare_join_field("entity_id")
     for name, kind, requirement in [
         ("clusters/kmeans", "flat", {"count": 50}),
         ("clusters/hdbscan", "nested", {"fraction": 0.05}),
@@ -307,12 +314,11 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         code="code",
     )
     db.insert(
-        "knn", str(corpus / "points.parquet"), id="entity_id", x="x", y="y", access="categories"
+        "knn", str(corpus / "points.parquet"), x="x", y="y", access="categories"
     )
     db.insert(
         "pca64",
         str(corpus / "points-pca64.parquet"),
-        id="entity_id",
         x="x",
         y="y",
         access="categories",
@@ -337,9 +343,9 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
         db.insert(
             layer,
             members=str(corpus / f"{name}-members.parquet"),
-            id="entity",
             key="key",
             level="level",
+            columns={"entity_id": "entity"},
         )
     report = db.check()
     assert report.ok, report.log

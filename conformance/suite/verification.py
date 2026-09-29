@@ -256,8 +256,8 @@ def materialise_corpus(
 def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
     (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output.
-    The declaration joins every file on `id`, the item's number `e`, which is also what the denies
-    address items by.
+    Every file names its items by the unique field `id`, the item's number `e`, which is also what
+    the denies address items by.
 
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
@@ -414,7 +414,7 @@ def expected_items(seed: int, fx_keys: Iterable[int]) -> dict[int, Expected]:
             fx_key=fx,
             x=columns["x"][i],
             y=columns["y"][i],
-            # `id` is the join field, which the materialisers write as `e` itself.
+            # `id` is the unique field, which the materialisers write as `e` itself.
             fields={
                 "fx_key": fx,
                 "id": columns["e"][i],
@@ -610,7 +610,7 @@ def check_item(
     reasons: list[str],
 ) -> int:
     """One drill-down against its item: every declared field from whichever home holds it, the
-    404 exactly at the harness's own denies, and the join field `id`, which is the item's `e`.
+    404 exactly at the harness's own denies, and the unique field `id`, which is the item's `e`.
     Returns rows verified."""
     status = canon.payload["status"]
     if denied:

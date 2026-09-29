@@ -205,6 +205,29 @@ pub fn id_schema() -> tessera_build::config::Schema {
     }
 }
 
+/// An artifacts file's `members` column naming each list's items by [`id_schema`]'s `id`: a list
+/// of structs with one `entity_id` field.
+pub fn id_member_lists<L: IntoIterator<Item = u64>>(
+    lists: impl IntoIterator<Item = L>,
+) -> arrow::array::ListArray {
+    let mut offsets = vec![0i32];
+    let mut ids = Vec::new();
+    for list in lists {
+        ids.extend(list);
+        offsets.push(ids.len() as i32);
+    }
+    let members = arrow::array::StructArray::from(vec![(
+        Arc::new(Field::new("entity_id", DataType::UInt64, false)),
+        Arc::new(UInt64Array::from(ids)) as ArrayRef,
+    )]);
+    arrow::array::ListArray::new(
+        Arc::new(Field::new_list_field(members.data_type().clone(), true)),
+        arrow::buffer::OffsetBuffer::new(offsets.into()),
+        Arc::new(members),
+        None,
+    )
+}
+
 /// [`id_schema`] as a corpus declaration's `[[attribute]]` block, for a schema written in TOML.
 pub const ID_ATTRIBUTE: &str =
     "[[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n";
@@ -357,6 +380,7 @@ pub fn build_args(out: &Path, views: Vec<ViewArgs>) -> BuildArgs {
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
         shard_id: 0,
         layers: Vec::new(),

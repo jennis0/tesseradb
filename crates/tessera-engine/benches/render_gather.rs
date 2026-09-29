@@ -130,6 +130,7 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         attribute_sources: AttributeSource::over(points, &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         shard_id: 0,
         layers: Vec::new(),

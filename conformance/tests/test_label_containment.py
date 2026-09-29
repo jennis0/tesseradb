@@ -271,7 +271,7 @@ def _member(source_id: int) -> str:
 
 
 def _change(server, source_id: int, op: str):
-    """One `/control/changes` item addressing an item by its source id, the fixture's join field."""
+    """One `/control/changes` item addressing an item by its source id, the fixture's unique field."""
     return server.changes([{"field": JOIN_FIELD, "value": str(source_id), "op": op}])
 
 

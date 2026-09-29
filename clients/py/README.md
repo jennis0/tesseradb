@@ -65,11 +65,10 @@ import tesseradb as td
 db = td.create()                                   # a temporary directory, on /dev/shm where there is one
 db.declare_view("map")
 db.declare_columns(df, skip=["paper", "x", "y", "cluster"], index=["title"])
-db.declare_attribute("paper", type="keyword", unique=True)
-db.declare_join_field("paper")                     # the column every table names a row by
+db.declare_attribute("paper", type="keyword", unique=True)  # every table names a row's item by it
 db.declare_layer("clusters", kind="flat")
-db.insert("map", df, id="paper", x="x", y="y")     # title is read by name
-db.insert("clusters", df, id="paper", key="cluster")
+db.insert("map", df, x="x", y="y")                 # paper and title are read by name
+db.insert("clusters", df, key="cluster")
 db.check()                                         # what the declaration reads, and what refuses it
 db.commit()                                        # tessera check, tessera build, tessera serve
 ```
@@ -114,13 +113,13 @@ surprise.
 
 | Target | Columns named on the call |
 |---|---|
-| a view | `id=`; `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column |
+| a view | `x=`, `y=` (or `lon=`, `lat=` under a projection); `access=`, a list-of-strings column |
 | a view group | as a view, plus `view=`, the column saying which view each row belongs to, or `view_key=`, one view for the whole table; its roster is `insert(group, roster=table, key=, **metadata)` |
-| an attribute | `id=`, `value=`; on a group-scoped attribute also `view=` |
-| a layer, by key | `id=`, `key=`: one key per row |
+| an attribute | `value=`; on a group-scoped attribute also `view=` |
+| a layer, by key | `key=`: one key per row |
 | a layer, artifacts | `insert(layer, artifacts=table, key=, parent=, contents=, attached_layer=, attached_key=, members=, excluding=, space=, level=, attached_level=, shape=)` |
-| a layer, members | `insert(layer, members=table, id=, key=, rank=, level=)` |
-| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` or `contents=`, with `attached_layer=`, `attached_key=` and `level=` where it carries them; its members are `insert(labels, members=table, id=, key=, rank=)` |
+| a layer, members | `insert(layer, members=table, key=, rank=, level=)` |
+| a label set | a mapping `{key: text}`, or a table with `key=` and `text=` or `contents=`, with `attached_layer=`, `attached_key=` and `level=` where it carries them; its members are `insert(labels, members=table, key=, rank=)` |
 | a vocabulary | `key=`, `title=`, `code=` |
 
 An artifacts table and a members table are two inserts on the same layer, each with its own column
@@ -171,21 +170,21 @@ insert it as a frame.
 
 An item is named by its `tessera_id`, which the server hands back, or by its value of a unique
 attribute: one declared `unique=True`, a keyword, an integer or a timestamp, each of whose values
-at most one item holds. `declare_join_field(name)` makes a keyword or integer one the **join
-field**, `[defaults].join_field` in the declaration, and every table inserted with `id=` names its
-rows by it: `id=` is the column holding each row's value of the join field. The allocation view's `id=` column fills the join
-attribute itself. A view group's rows fill no attribute at the first commit, so a database whose
-views are all in groups inserts the join field's values as a table of their own,
-`db.insert("paper", ids, id="paper", value="paper")`; the check refuses the declaration until it
-does. A file that calls the column something else says so in its block's `fields`
-under the join field's name, and a members table in its `fields.entity`; the SDK rewrites no
-column to say it. On a later commit the `id=` column travels as the join field's column on
-`/control/ingest`, and a row whose value names an item the database holds edits that item.
+at most one item holds. Every table names each row's item by the columns it carries of the unique
+attributes: the column of the attribute's name, or the one the insert's `columns=` names, as in
+`insert(layer, members=table, key="key", columns={"paper": "paper_id"})`. The allocation view's
+column fills the unique attribute itself, and so does a view group's. A file that calls the
+column something else says so in its block's `fields` under the attribute's name;
+the SDK rewrites no column to say it. On a later commit the column travels under the attribute's
+name on `/control/ingest`, and a row whose value names an item the database holds edits that
+item.
 
-`id=` is refused where no join field is declared. An insert that names no `id=` is the other
-route: each row of the points is an item of its own, addressed by the `tessera_id` a pick or the
-ingest route hands back. Such a database takes one view and no members table, the build having
-nothing to join them on.
+A row of a view's points naming no item, because its table carries no unique column or its values
+are null, is an item of its own, addressed by the `tessera_id` a pick or the ingest route hands
+back. A row of any other table must name an item: the build leaves out and reports each row that
+names none, names two items, or repeats an item or a value an earlier row of its file gave, and
+the first commit's report lists them under `refused`. A later commit's members name their items
+by one unique attribute, which the membership routes take for a whole request.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
 frame is inserted again and sent again, and what happens then is the database's answer: rows
@@ -221,9 +220,10 @@ the control plane of the server the database is already running, and then waits 
 that makes it visible.
 
 ```python
-db.insert("s0", new_papers, id="entity_id", x="x", y="y", access="categories")
+db.insert("s0", new_papers, x="x", y="y", access="categories")
 db.insert("clusters/kmeans", artifacts=new_clusters, key="key", level="level")
-db.insert("clusters/kmeans", members=new_members, id="entity", key="key", level="level")
+db.insert("clusters/kmeans", members=new_members, key="key", level="level",
+          columns={"entity_id": "entity"})
 db.check()                                     # the plan and the pre-flight, with nothing sent
 db.commit()                                    # the report
 ```
@@ -388,8 +388,7 @@ named, as one pyarrow table. The server answers a page at a time, several pages 
 and ends each response with a cursor for the next. `items` asks for responses until no row
 remains and joins their pages. The columns are `tessera_id`, the fields in the order named, then
 the `system_fields` asked for: `position` as `tessera:x` and `tessera:y`, in the view's
-coordinates, and `labels` as `tessera:labels`. A unique attribute, the join field among them, is
-a field like any other. A category column holds each value's key as a
+coordinates, and `labels` as `tessera:labels`. A unique attribute is a field like any other. A category column holds each value's key as a
 dictionary column, and a missing value is null. `filters` narrows the rows as `Selection.filter` does, and `keep_unmatched=True`
 keeps every row and adds a `tessera:matched` column. The table's schema metadata `tessera.head`
 holds the page size and order the server used, and with `count=True` the numbers of items

@@ -49,7 +49,6 @@ import pyarrow.parquet as pq
 
 from oracle.harness import (
     CLI_BIN,
-    JOIN_FIELD,
     REPO_ROOT,
     ensure_cli_built,
     join_attribute_toml,
@@ -393,8 +392,7 @@ topicvalues   = "topicvalues.parquet"
 archivevalues = "archivevalues.parquet"
 
 [defaults]
-source     = "points"
-join_field = "{JOIN_FIELD}"
+source = "points"
 
 {join_attribute_toml("points")}
 [[view]]
