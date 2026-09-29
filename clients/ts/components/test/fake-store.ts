@@ -109,6 +109,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
       return browsePages.get(key) ?? {artifacts: [], parents: [], next: null};
     },
     suggest: spy('suggest'),
+    forgetSuggestions: spy('forgetSuggestions'),
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
     setPalette: spy('setPalette'),

@@ -243,12 +243,35 @@ describe('<tessera-filter> on a category', () => {
     const ticks = deepAll(host, '[part~="tick"]') as HTMLElement[];
     expect(ticks.map((t) => t.getAttribute('aria-disabled'))).toEqual(['false', 'true', 'false']);
     expect(deepAll(host, '[part="value-count"]').map((c) => c.textContent)).toEqual(['250', '0', '5']);
-    expect(deep(host, '[part~="tick"][aria-disabled="true"] .out')?.textContent).toBe('filtered out');
+    expect(deep(host, '[part~="tick"][aria-disabled="true"] .out')?.textContent).toBe('none match');
     ticks[1]!.click();
     expect(drafts(store)).toHaveLength(0);
     ticks[0]!.click();
     expect(drafts(store)[0]!.highlight['archive']).toEqual({family: 'category', keys: ['cs']});
     expect(drafts(store)[0]!.filter['archive']).toEqual({family: 'category', keys: ['cs']});
+  });
+
+  it('in the highlight, lets a chosen value the server now counts 0 be taken out from the list', async () => {
+    const {host, store} = await mountFilter('archive', filtersOf({filter: {}, highlight: {archive: {family: 'category', keys: ['cond']}}}), 'verb="highlight"');
+    await type(host, 'c');
+    store.set('filters', {...store.get('filters'), suggestions: {archive: {q: 'c', verb: 'highlight', values: [value(2, 'cond', null, 0)], more: false, total: 10}}});
+    await settle(host);
+    const tick = deep(host, '[part~="tick"]') as HTMLElement;
+    expect(tick.getAttribute('aria-disabled')).toBe('false');
+    tick.click();
+    expect(drafts(store)[0]!.highlight['archive']).toEqual({family: 'category', keys: []});
+  });
+
+  it('has the store forget the column when the box is emptied and when the control goes away', async () => {
+    const {host, store} = await mountFilter('archive', empty());
+    const forgot = () => store.calls.filter((c) => c.name === 'forgetSuggestions').map((c) => c.args);
+    await type(host, 'c');
+    expect(forgot()).toEqual([]);
+    await type(host, '');
+    expect(forgot()).toEqual([['archive']]);
+    await type(host, 'ma');
+    host.querySelector('tessera-filter')!.remove();
+    expect(forgot()).toEqual([['archive'], ['archive']]);
   });
 
   it('shows the values chosen as chips under the box, each removable', async () => {

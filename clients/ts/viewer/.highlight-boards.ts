@@ -73,6 +73,7 @@ const store = {
   setLayers: () => {},
   openArtifact: async () => {},
   suggest: () => {},
+  forgetSuggestions: () => {},
   requestFilters: () => ({title: {match: 'quantum entanglement'}}),
   dataXY: (x: number, y: number) => [x, y] as [number, number],
   extentOf: () => null,

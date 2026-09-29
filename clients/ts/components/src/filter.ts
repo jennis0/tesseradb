@@ -34,9 +34,10 @@ const BAR_FLOOR = 2;
  * passing the filter, and a bar, its share of the total the server counted over. In the filter
  * position the count leaves out the column's own clause, so a value counts what choosing it as well
  * would add. In the highlight position the count is under the whole filter, and a value counted 0
- * is greyed and cannot be chosen. The arrow keys move through the suggestions, and Enter chooses the one reached, the
- * first by default, or takes it out where it is chosen; text that suggests nothing chooses
- * nothing. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
+ * is greyed, marked "none match" and cannot be chosen, though one already chosen can be taken out.
+ * The arrow keys move through the suggestions, and Enter chooses the one reached, the first by
+ * default, or takes it out where it is chosen; text that suggests nothing chooses nothing. Emptying
+ * the box, or removing the control, has the store stop asking for the column. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
  * column's values, the heading says how many there are.
  *
  * A number is two inputs, and a date two text inputs that read and write dates as day, month and
@@ -62,7 +63,7 @@ const BAR_FLOOR = 2;
  * @csspart mode - The keyword column's operator select.
  * @csspart values - The typeahead's suggestions.
  * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` in the highlight
- *   position where it is counted 0.
+ *   position where it is counted 0 and not chosen.
  * @csspart bar - A suggested value's share of the items its count is taken over.
  * @csspart value-count - A suggested value's count.
  * @csspart chosen - A chosen category value's chip.
@@ -322,12 +323,25 @@ export class TesseraFilter extends TesseraElement {
     return page?.total ? page.total : null;
   }
 
-  /** Ask the store's typeahead for `q`, once per distinct `q`; nothing is asked before anything is typed. */
+  /**
+   * Ask the store's typeahead for `q`, once per distinct `q`. An emptied box asks nothing and has
+   * the store forget the column, so a change of filter does not ask for it.
+   */
   private ask(q: string): void {
     const s = this.resolvedStore;
-    if (!s || q === '' || this.lastAsked === q) return;
+    if (!s || this.lastAsked === q) return;
+    if (q === '') {
+      if (this.lastAsked !== null) s.forgetSuggestions(this.column);
+      this.lastAsked = null;
+      return;
+    }
     this.lastAsked = q;
     s.suggest(this.column, q, this.verb);
+  }
+
+  override disconnectedCallback(): void {
+    this.ask('');
+    super.disconnectedCallback();
   }
 
   protected override onStoreChange(): void {
@@ -499,9 +513,9 @@ export class TesseraFilter extends TesseraElement {
     const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
     const typed = this.search !== '';
     const rows = typed ? (suggestion?.values ?? []) : [];
-    // In the highlight position, a value no item passing the filter carries cannot be lit.
-    const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0;
-    const outWord = s?.requestFilters() ? 'filtered out' : 'none in view';
+    // In the highlight position, a value no item passing the filter carries cannot be lit; one
+    // already lit can still be taken out.
+    const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0 && !chosen.has(v.key);
     // The row the keys act on: the one the arrows reached, else the first that can be chosen.
     const choosable = rows.filter((v) => !out(v));
     const active = choosable.find((v) => v.code === this.activeCode) ?? choosable[0] ?? null;
@@ -527,6 +541,7 @@ export class TesseraFilter extends TesseraElement {
           } else if (e.key === 'Escape' && this.search) {
             e.stopPropagation();
             this.search = '';
+            this.ask('');
           }
         }} /></div>`;
 
@@ -538,7 +553,7 @@ export class TesseraFilter extends TesseraElement {
         aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
         @click=${() => !left && toggle(v.key)}>
         <span class="opt">
-          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">${outWord}</span>` : nothing}</span>
+          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">none match</span>` : nothing}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
         </span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
