@@ -84,7 +84,7 @@ mod ingest_rows {
                 view,
                 rows,
                 artifacts,
-                strict: false,
+                strict: true,
             })?;
             let entities = self
                 .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
