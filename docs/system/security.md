@@ -81,8 +81,9 @@ path to the geometry: the geometry arrays have no other entry point, so no code 
 aggregate over rows the visible set excludes. Nothing checks this at build time; the guarantee
 rests on the code's shape and on review.
 
-A suppression applies to every request from the moment it is accepted, because the overlay is read
-fresh each time the visible set is composed. A deletion's rows leave the corpus only at
+A suppression applies to every request that starts after it is accepted, because the overlay is
+read fresh each time the visible set is composed. A request already running when it is accepted
+may or may not reflect it. A deletion's rows leave the corpus only at
 compaction; until then they are removed from the visible set the same way a suppressed item's are.
 
 An edit moves an item to a new entity and deletes the old one, and none of it can widen what a

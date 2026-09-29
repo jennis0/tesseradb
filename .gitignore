@@ -51,3 +51,6 @@ notebooks/
 /docs/reference/typescript/
 /docs/reference/components/
 clients/ts/components/custom-elements.json
+
+#Ignore env variables
+.env

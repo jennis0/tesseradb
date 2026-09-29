@@ -3,7 +3,7 @@
 Tessera serves interactive, pannable, zoomable maps over a corpus of documents or records, with
 access control at the level of the individual item. Each viewer gets their own map, generated on
 request, from a single machine. New data can be ingested into a running service, and a deletion or
-suppression applies to every request from the moment it is accepted.
+suppression applies to every request that starts after it is accepted.
 
 Existing large-scale map servers bake a dataset into one shared view and serve the same tiles to
 everyone. Tessera computes each viewer's map from exactly the items they are permitted to see.
@@ -30,8 +30,8 @@ the same aggregate.
 - **Item cards** for a selected point.
 - **Bulk reads** of the items and artifacts a viewer may see, page by page as Apache Arrow
   tables, from the HTTP API, both client libraries and the command line.
-- **Live ingest** into a running service, with deletion and suppression enforced from the moment
-  they are accepted.
+- **Live ingest** into a running service, with deletion and suppression enforced on every request
+  that starts after they are accepted.
 - **Embeddable clients**: web components, a deck.gl layer, React bindings, and a Python notebook
   widget, or the HTTP API directly.
 
@@ -65,7 +65,7 @@ a Roaring bitmap, a compressed set of row numbers. A count over a tile is arithm
 range and the visible set, rather than a scan of the tile's contents. Sampling, density and labels
 are computed the same way, from the viewer's rows and nothing else.
 
-A deletion or suppression applies to every request from the moment it is accepted. A newly
+A deletion or suppression applies to every request that starts after it is accepted. A newly
 ingested item becomes visible once it is written into a segment at the next flush, which runs on a
 fixed cadence.
 
