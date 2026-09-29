@@ -301,8 +301,8 @@ def _config(with_layers: bool) -> str:
     text += _layer_toml(
         TITLES, visibility="public", field=None, default="inherited", kind="flat",
         extra=f'depends_on = ["{TEAMS}"]\n' + _inline(
-            {"key": key, "members": members, "attached_layer": TEAMS, "attached_key": team,
-             "contents": [[text]]}
+            {"key": key, "members": {JOIN_FIELD: members}, "attached_layer": TEAMS,
+             "attached_key": team, "contents": [[text]]}
             for key, team, text, members in TITLE_ROWS
         ) + '\n  [[layer.content.supplied]]\n  name = "title"\n  type = "text"\n'
         '  require_member_visibility = "inherited"\n',
