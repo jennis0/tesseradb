@@ -193,7 +193,7 @@ fn declaration(deployment_path: &str) -> Result<(Object, tessera_build::config::
 ///
 /// Nothing is read but the deployment file, the declaration and the Parquet schemas the
 /// declaration names, so a clean check is not a clean build: it cannot see a value against a
-/// closed vocabulary, a member id that resolves to nothing, or where the data sits inside a view's
+/// closed vocabulary, which rows the identity rule refuses, or where the data sits inside a view's
 /// extent.
 ///
 /// Raises `DeclarationError` where the deployment file or the declaration could not be read at

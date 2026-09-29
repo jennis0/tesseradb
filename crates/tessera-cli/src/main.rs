@@ -718,7 +718,7 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
     }
     eprintln!(
         "        every column materialises in EVERY view — including ones whose items carry no \
-         value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration"
+         value for it"
     );
 }
 

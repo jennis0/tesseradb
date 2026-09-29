@@ -141,6 +141,8 @@ class Cycle:
         #: Credentials minted for this run, by variable name.
         self.minted: dict[str, str] = {}
         self.ladder: list[dict] | None = None
+        #: The items the write cycle left moved, which a later re-ingest of the hold-out moves back.
+        self.moved_by_write_cycle = np.empty(0, dtype=np.int64)
         #: The census's boxes per view, chosen once on the all-in deployment, and every layer
         #: `/v1/meta` publishes, which carries each one's declared levels and their zoom ranges.
         self.census_boxes: dict[str, list[tuple[int, list[float]]]] = {}
@@ -1133,6 +1135,7 @@ class Cycle:
         # The third n items, live and neither deleted nor suppressed, restated and then moved in
         # the anchor view. A move a hair's width of the frame edits the item.
         moved = np.sort(entities[2 * n : 3 * n])
+        self.moved_by_write_cycle = moved
         anchor = [view for view in self.views if view["name"] == self.anchor]
         restated, restated_ids = self.ingest_views(
             anchor, moved, hold.max_body_bytes, hold.batch_rows, "restate", lambda view: ()
@@ -1170,11 +1173,14 @@ class Cycle:
     def do_reingest(self, control, hold) -> dict:
         """What a nightly re-ingest of a source sends: the whole hold-out again, in the anchor
         view with its member columns, first as it was ingested and then with one entity in a
-        hundred moved. The first pass changes nothing and takes no entity id; the second edits
-        each moved item and takes one entity id for each. Both answer every item's own
-        tessera_id."""
+        hundred moved. The first pass edits back the items a write cycle left moved, one entity id
+        each, and changes nothing else; the second edits each moved item and takes one entity id
+        for each. Both answer every item's own tessera_id."""
         anchor = [view for view in self.views if view["name"] == self.anchor]
-        out: dict = {"rows": len(self.held)}
+        out: dict = {
+            "rows": len(self.held),
+            "moved_back": int(np.count_nonzero(np.isin(self.held, self.moved_by_write_cycle))),
+        }
         answered: dict = {}
         for label, nudge in (("unchanged", 0.0), ("one_in_a_hundred_moved", 1e-3)):
             before = control.status()["entity_id_high_water"]
@@ -1522,17 +1528,23 @@ class Cycle:
 
 
 def reingest_failures(reingest: dict) -> list[str]:
-    """What a nightly re-ingest owes: the restated hold-out changes nothing and takes no entity id,
-    and the moved one edits exactly the items moved, one entity id each, none changing its
-    tessera_id."""
+    """What a nightly re-ingest owes: the restated hold-out edits back only the items a write cycle
+    left moved, one entity id each, and the moved one edits exactly the items moved, one entity id
+    each, none changing its tessera_id."""
     if not reingest or reingest.get("failed"):
         return [f"the re-ingest failed: {reingest['failed']}"] if reingest.get("failed") else []
     out = []
     same, moved = reingest.get("unchanged") or {}, reingest.get("one_in_a_hundred_moved") or {}
-    if same.get("unchanged") != reingest.get("rows") or same.get("entity_ids_used"):
+    back = reingest.get("moved_back", 0)
+    if (
+        same.get("unchanged") != reingest.get("rows", 0) - back
+        or same.get("edited") != back
+        or same.get("entity_ids_used") != back
+    ):
         out.append(
             f"the restated hold-out answered {same.get('unchanged')} of {reingest.get('rows')} rows "
-            f"unchanged and took {same.get('entity_ids_used')} entity id(s)"
+            f"unchanged and {same.get('edited')} edited, taking {same.get('entity_ids_used')} "
+            f"entity id(s), where {back} item(s) moved by the write cycle should be moved back"
         )
     if moved.get("edited") != moved.get("moved") or moved.get("entity_ids_used") != moved.get("edited"):
         out.append(

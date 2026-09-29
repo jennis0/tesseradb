@@ -89,14 +89,15 @@ hierarchy  = { kind = "nested" }
 
 [layer.members]
 source = "cluster_assignments"
-fields = { key = "cluster_id", entity = "point_id" }
+fields = { key = "cluster_id", doi = "paper_doi" }
 
 [layer.content]
 computed = ["centroid", "hull"]
 ```
 
 *A trimmed layer declaration: an enumerated clustering, drawn on one view, whose artifacts each
-carry a computed centroid and hull.*
+carry a computed centroid and hull. Each row of the members file names its point by `doi`, an
+attribute declared `unique`, kept in the file's `paper_doi` column.*
 
 The three sources age differently. An enumerated membership is fixed at whatever a member table or
 column last said: a newly ingested point sits on the map, visible as a point, until the layer is
@@ -340,7 +341,7 @@ rather than evaluated per request.
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes | Nothing |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
 | Compaction | The deleted member's bit is dropped from the row form. What happens to content generated from it follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
-| A point deleted and re-ingested (the only way to edit one) | The old point's membership and generating-set participation lapse exactly as an ordinary deletion's do. The re-ingested point has a new identity and only rejoins an artifact if the new batch names it as a member | The count falls when the deletion is accepted, and rises again only if the re-ingested point is named as a member and flushed |
+| An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `tessera_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
 

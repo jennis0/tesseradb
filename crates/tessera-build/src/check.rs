@@ -958,7 +958,7 @@ pub fn page(config: &Config, report: &CheckReport) -> String {
             out,
             "check FAILED: {} finding(s) across {} source(s). Nothing was read but Parquet \
              schemas, so a clean check is not a clean build: it cannot see a value against a \
-             closed vocabulary, a member id that resolves to nothing, or where the data sits \
+             closed vocabulary, which rows the identity rule refuses, or where the data sits \
              inside a view's extent",
             report.findings.len(),
             report.sources.len()

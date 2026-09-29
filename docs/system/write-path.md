@@ -172,8 +172,8 @@ row in `refused`, by its position in the batch and its reason (`names_two_items`
 for its `tessera_id`; it names no entity and no value the caller did not send. A caller that asks
 for `strict=true` has the whole batch refused with `409` at its first refused row instead, naming
 rows by position, values as sent and items by `tessera_id`, and nothing is written. A build refuses
-the rows of its files by the same rule, and `tessera build --strict` refuses the build at the
-first.
+the rows of its files by the same rule, and `tessera build --strict` refuses the build at the first
+file with a refused row.
 
 To decide a row naming an item, the handler reads what the item stores, in ascending entity order
 across the batch: the row it holds in the buffer, or the flushed value columns, record store,
