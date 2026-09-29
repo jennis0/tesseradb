@@ -13,7 +13,10 @@ import {fakeClock, fakeScheduler, meta, response, result as viewportResult, view
 
 const META = meta({
   views: [view('s0'), view('s1')],
-  filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
+  filterOperands: [
+    {column: 'archive', family: 'category', operands: ['in']},
+    {column: 'year', family: 'numeric', operands: ['range']}
+  ]
 });
 
 const DRAFT: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}};
@@ -35,7 +38,7 @@ function answer(req: AggregateRequest, total: number, identityKey = 'ik'): Aggre
  */
 async function storeWith(opts: {refuse?: boolean; identityKey?: string} = {}) {
   const clock = fakeClock();
-  const pending: {req: AggregateRequest; signal: AbortSignal; release: (total: number, identityKey?: string) => void}[] = [];
+  const pending: {req: AggregateRequest; signal: AbortSignal; release: (total: number, identityKey?: string) => void; fail: (error: unknown) => void}[] = [];
   const aggregate = vi.fn(
     (_token: string, req: AggregateRequest, signal: AbortSignal) =>
       new Promise<AggregateResult>((resolve, reject) => {
@@ -43,6 +46,7 @@ async function storeWith(opts: {refuse?: boolean; identityKey?: string} = {}) {
         pending.push({
           req,
           signal,
+          fail: reject,
           release: (total, identityKey) => (opts.refuse ? reject(new TesseraError(422, 'contract', 'refused')) : resolve(answer(req, total, identityKey ?? opts.identityKey)))
         });
       })
@@ -178,5 +182,75 @@ describe('the aggregates projection', () => {
     store.setAggregate('b', {groupings: [{}]});
     await flush();
     expect(aggregate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('an aggregate that leaves out one clause', () => {
+  const BOTH: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs']}, year: {family: 'numeric', gte: 2020, lte: null}}, highlight: {}};
+
+  it('sends every clause but the one it names, and asks again when that clause changes', async () => {
+    const {store, pending} = await storeWith();
+    store.setFilters(BOTH);
+    store.setAggregate('archives', {groupings: [{by: {field: 'archive', top: 5}}], without: 'archive'});
+    await flush();
+    // The year clause still narrows the counts; the archive clause does not hide the other archives.
+    expect(pending[0]!.req.filters).toEqual({year: {range: {gte: 2020}}});
+    store.setFilters({...BOTH, filter: {...BOTH.filter, archive: {family: 'category', keys: ['hep']}}});
+    await flush();
+    expect(pending[0]!.signal.aborted).toBe(true);
+    expect(pending[1]!.req.filters).toEqual({year: {range: {gte: 2020}}});
+    // Without `without`, every clause is sent.
+    store.setAggregate('all', {groupings: [{}]});
+    await flush();
+    expect(pending[2]!.req.filters).toEqual(store.requestFilters());
+    expect(JSON.stringify(pending[2]!.req.filters)).toContain('hep');
+  });
+});
+
+describe('an aggregate the server sheds', () => {
+  it('is sent again after the backoff, or the Retry-After where longer, and shows retrying meanwhile', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('a', {groupings: [{}]});
+    await flush();
+    pending[0]!.fail(new TesseraError(429, 'backpressure', 'shed', 3));
+    await flush();
+    expect(store.get('aggregates').get('a')).toMatchObject({status: 'retrying', refusal: {code: 'backpressure'}});
+    await clock.advance(2_999);
+    expect(pending).toHaveLength(1);
+    await clock.advance(1);
+    await flush();
+    expect(pending).toHaveLength(2);
+    pending[1]!.release(4);
+    await flush();
+    expect(store.get('aggregates').get('a')).toMatchObject({status: 'shown', refusal: null});
+  });
+
+  it('is refused after the retries run out', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('a', {groupings: [{}]});
+    for (let i = 0; i < 3; i++) {
+      await flush();
+      pending[i]!.fail(new TesseraError(503, 'not-ready', 'starting'));
+      await flush();
+      await clock.advance(10_000);
+    }
+    await flush();
+    expect(pending).toHaveLength(3);
+    expect(store.get('aggregates').get('a')).toMatchObject({status: 'refused', refusal: {code: 'not-ready'}});
+  });
+
+  it('drops a waiting retry when a newer change asks again', async () => {
+    const {store, pending, clock} = await storeWith();
+    store.setAggregate('a', {groupings: [{}]});
+    await flush();
+    pending[0]!.fail(new TesseraError(429, 'backpressure', 'shed', 1));
+    await flush();
+    store.setFilters(DRAFT);
+    await flush();
+    expect(pending).toHaveLength(2);
+    await clock.advance(5_000);
+    await flush();
+    expect(pending).toHaveLength(2);
+    expect(pending[1]!.req.filters).toEqual(store.requestFilters());
   });
 });

@@ -224,7 +224,9 @@ describe('TesseraClient.aggregate', () => {
     await expect(first).rejects.toBeInstanceOf(TesseraError);
     await expect(first).rejects.toMatchObject({status: 422, code: 'contract'});
     const later = clientFor({'': TWO[''], c1: refusal}).client.aggregate('tok', REQUEST);
-    await expect(later).rejects.toMatchObject({status: 422});
+    await expect(later).rejects.toMatchObject({status: 422, retryAfterS: null});
+    const shed = () => new Response(JSON.stringify({error: 'backpressure', detail: 'shed', retry_after_s: 1}), {status: 429, headers: {'retry-after': '2'}});
+    await expect(clientFor({'': shed}).client.aggregate('tok', REQUEST)).rejects.toMatchObject({status: 429, retryAfterS: 2});
   });
 
   it('stops at an abort of its signal, mid-body', async () => {

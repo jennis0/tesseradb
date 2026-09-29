@@ -108,6 +108,25 @@ describe('aggregates against a live server', () => {
       await landed(await matched());
       store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}});
       await landed(await matched(CS));
+
+      // A filter control's own values: its clause set, the alternatives still show.
+      const listed = () =>
+        new Promise<string[]>((resolve) => {
+          const check = () => {
+            const entry = store.get('aggregates').get('archives');
+            if (entry?.status === 'shown') resolve([...entry.result!.tables[0]!.rows.getChild('key')!].filter((k) => k !== null) as string[]);
+          };
+          store.subscribe('aggregates', check);
+          check();
+        });
+      store.setAggregate('archives', {groupings: [{by: {field: 'archive', top: 5}}], without: 'archive'});
+      expect((await listed()).length).toBeGreaterThan(1);
+      // Another clause still narrows them.
+      const LG: FilterExpr = {primary_category: {in: ['cs.LG']}};
+      store.setFilters({filter: {archive: {family: 'category', keys: ['cs']}, primary_category: {family: 'category', keys: ['cs.LG']}}, highlight: {}});
+      await landed(await matched({all_of: [CS, LG]}));
+      expect(await listed()).toEqual(['cs']);
+      expect(store.get('aggregates').get('archives')!.result!.tables[0]!.total).toBe(await matched(LG));
     } finally {
       store.dispose();
     }

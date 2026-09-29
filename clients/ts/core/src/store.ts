@@ -9,8 +9,8 @@ import {ArtifactColours} from './colours.js';
 import type {Composition} from './compose.js';
 import {dataToWorldXY, gridToWorld, MAX_DEPTH, rectToRequestBbox, WORLD_SIZE} from './coords.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
-import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
-import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
+import {RETRY_DEFAULTS, type Clock, type DriverOptions, type ViewState as DriverViewState} from './driver.js';
+import {composeFilters, emptyDraft, withoutClause, type FilterDraft} from './filters.js';
 import {HeldRecords, HeldShapes} from './held.js';
 import {HeldViews, type ViewMachinery} from './heldViews.js';
 import {colourLayers, isFilterLayer, layerClosure} from './layers.js';
@@ -552,7 +552,11 @@ export interface Store {
    * Keep an aggregate of the current view under `id` (`POST /v1/aggregate`), published in the
    * `aggregates` projection; `null` drops it. The request carries `spec`'s groupings and reference as
    * given, and {@link Store.requestFilters} as its `filters`, so the counts are over what the map
-   * counts. The store asks again, aborting the request it replaces, when `setAggregate` is called
+   * counts. With `spec.without` naming a column, its control in the filter position is left out of
+   * `filters`, as {@link withoutClause} empties it, so a filter control's own counts keep showing
+   * the values its clause would exclude while every other clause still narrows them. A `429` or
+   * `503` is sent again as the map's requests are, with the same backoff, and published as
+   * `retrying` meanwhile. The store asks again, aborting the request it replaces, when `setAggregate` is called
    * for the id again, when the filters, the `member_of` clauses or the selected region change, at a
    * view switch, at {@link Store.refresh}, and once it has read `/v1/meta` again after forgetting
    * what the server answered. Waits for `/v1/meta`. Each call sends a new request, so call it when
@@ -823,7 +827,7 @@ export function createStore(options: StoreOptions): Store {
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
-      const filters = requestFilters();
+      const filters = requestFilters(spec.without);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
       const result = await client.aggregate(
         asked.token,
@@ -834,7 +838,9 @@ export function createStore(options: StoreOptions): Store {
       if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
       return {result, view: asked.view};
     },
-    (entries) => replaceProjection('aggregates', entries)
+    (entries) => replaceProjection('aggregates', entries),
+    clock,
+    {...RETRY_DEFAULTS, ...options.driver}
   );
 
   const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
@@ -1568,15 +1574,22 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  /** The filter-position controls and `member_of` clauses, without the region leaf. */
-  function filtersBesideRegion(): FilterExpr | null {
-    return withMembers(composeFilters(projections.filters.draft, 'filter'), projections.filters.members, 'filter');
+  /**
+   * The filter-position controls and `member_of` clauses, without the region leaf, and without
+   * `column`'s control where one is named.
+   */
+  function filtersBesideRegion(column?: string): FilterExpr | null {
+    const draft = column === undefined ? projections.filters.draft : withoutClause(projections.filters.draft, column, 'filter');
+    return withMembers(composeFilters(draft, 'filter'), projections.filters.members, 'filter');
   }
 
-  /** One composition for the point path, the artifact channel and the region's count. */
-  function requestFilters(): FilterExpr | null {
+  /**
+   * One composition for the point path, the artifact channel and the region's count. An aggregate
+   * registered `without` a column's control composes the same less that control.
+   */
+  function requestFilters(without?: string): FilterExpr | null {
     const selected = region.selected;
-    return withRegion(filtersBesideRegion(), selected ? regionOperand(selected) : null, selected?.outside ?? false);
+    return withRegion(filtersBesideRegion(without), selected ? regionOperand(selected) : null, selected?.outside ?? false);
   }
 
   /**

@@ -113,7 +113,12 @@ export class TesseraError extends Error {
      */
     readonly code: string,
     /** The body's `detail`, saying what was wrong. The HTTP status text where the body has none. */
-    readonly detail: string
+    readonly detail: string,
+    /**
+     * The wait the server asked for before the request is sent again, in seconds: its `Retry-After`
+     * header, else the body's `retry_after_s`; `null` where it named none.
+     */
+    readonly retryAfterS: number | null = null
   ) {
     super(`${status} ${code}: ${detail}`);
     this.name = 'TesseraError';
@@ -123,14 +128,17 @@ export class TesseraError extends Error {
 async function fail(response: Response): Promise<never> {
   let code = 'unknown';
   let detail = response.statusText;
+  let wait = response.headers.get('retry-after');
   try {
-    const body = (await response.json()) as {error?: string; detail?: string};
+    const body = (await response.json()) as {error?: string; detail?: string; retry_after_s?: number};
     code = body.error ?? code;
     detail = body.detail ?? detail;
+    wait ??= body.retry_after_s === undefined ? null : String(body.retry_after_s);
   } catch {
     // A body that is not JSON, such as a proxy's, still gives a TesseraError.
   }
-  throw new TesseraError(response.status, code, detail);
+  const seconds = wait === null ? NaN : Number(wait);
+  throw new TesseraError(response.status, code, detail, Number.isFinite(seconds) && seconds >= 0 ? seconds : null);
 }
 
 /**
