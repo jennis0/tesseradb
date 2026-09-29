@@ -19,6 +19,10 @@ What this module covers:
 - **Artifacts**, over the spatial-layer fixture of `test_member_of.py`: two flat spatial layers,
   by `top` and by a named list holding an id that names
   nothing, under that fixture's three principals and a numeric filter.
+- **Filtered references**: the set without its region, a reference that is not a superset of the
+  set (rows with no item of the set, in listed groups, `rest` and `none`), and a region in the
+  reference alone, which the `x-tessera-region` header reports; each row's lift against the
+  oracle's.
 - **The size of the set** equals the viewport's matched count.
 - **A field that cannot be counted** (a `keyword`) is refused with `422`.
 
@@ -226,6 +230,59 @@ def test_every_value_and_cell_table_is_the_oracles(
     raw = catalogue_server.viewport(token, cat.VIEW_ID, 0, cat.FULL_VIEWPORT, k=0, filters=filters)
     matched = sum(tile[2] for tile in decode_viewport(raw)[0])
     assert heads[0]["total"] == matched == len(items), f"{case_name} / {filter_name}"
+
+
+REFERENCES = {
+    # The usual comparison: the same filters without the region.
+    "usual": (
+        {"all_of": [FILTERS["category"], REGION]},
+        FILTERS["category"],
+    ),
+    # A reference that is not a superset of the set, so rows appear with no item of the set.
+    "disjoint": (
+        {"region": {"bbox": [0.0, 0.0, 20000.0, 65536.0]}},
+        {"all_of": [{"region": {"bbox": [15000.0, 0.0, 65536.0, 65536.0]}}, {"archive": {"in": ["green"]}}]},
+    ),
+    # A region in the reference alone.
+    "region only in the reference": (FILTERS["category"], REGION),
+}
+
+REFERENCE_GROUPINGS = [
+    {},
+    {"by": {"field": "department", "top": 2}},
+    {"by": {"field": "archive", "values": ["red", "void"]}},
+    {"by": {"field": "shelf", "top": 1}, "cells": {"depth": 3}},
+]
+
+
+@pytest.mark.parametrize("name", list(REFERENCES))
+@pytest.mark.parametrize("case_name", ["full_100pct", "crossover_above"])
+def test_a_filtered_reference_is_the_oracles(catalogue_server, catalogue_oracle, case_name, name):
+    """Each row's reference count and lift against the oracle, for a reference that is the set
+    without its region, one that is not a superset of the set, and one that alone carries a
+    region, which the `x-tessera-region` header then reports."""
+    case = next(c for c in cat.catalogue() if c.name == case_name)
+    token = catalogue_server.authorise(list(case.grants))["token"]
+    filters, reference = REFERENCES[name]
+    body = {"view": cat.VIEW_ID, "filters": filters, "reference": reference,
+            "groupings": REFERENCE_GROUPINGS}
+    resp = catalogue_server.aggregate(token, **body)
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("x-tessera-region") == "exact", name
+    heads, tables = read_tables(catalogue_server, token, body)
+    _items, expected = expected_tables(
+        catalogue_oracle, set(case.entities), filters, reference, REFERENCE_GROUPINGS
+    )
+    for index, ((head, rows), (want_head, want_rows)) in enumerate(zip(zip(heads, tables), expected)):
+        what = f"{case_name} / {name} / grouping {index}"
+        served_head = {k: v for k, v in head.items() if k not in ("grouping", "resumed")}
+        assert served_head == want_head, f"{what}: head {head}"
+        assert_rows_equal(rows, want_rows, what)
+    if name == "disjoint":
+        only_in_reference = {
+            row.group for rows in tables for row in rows if row.count == 0 and row.reference_count
+        }
+        assert {"listed", "rest", "none"} <= only_in_reference, only_in_reference
 
 
 def test_a_table_without_a_reference_has_no_reference_columns(catalogue_server, catalogue_oracle):
