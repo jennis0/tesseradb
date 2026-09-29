@@ -85,6 +85,8 @@ const MODES: [ClauseVerb, string][] = [
  * @csspart field - A listed field's section, with `data-column` for a column or `data-layer` for a
  *   layer, and `data-open` while its control shows.
  * @csspart any - A closed column's row, the button that opens its control.
+ * @csspart others - The clauses on layers with no field here, such as a layer that attaches to
+ *   another or one of another view, as chips that take them off.
  * @csspart add - The Add filter button, with `aria-expanded`.
  * @csspart add-list - The list of columns to add, while it is open.
  * @csspart add-search - The search box over that list.
@@ -223,6 +225,16 @@ export class TesseraFilterPanel extends TesseraElement {
       [part='any'] .v {
         font-size: 12px;
         color: var(--_tessera-ink-3);
+      }
+      .others {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px var(--_tessera-panel-inline, 16px) 14px;
+        border-bottom: 1px solid var(--_tessera-line-2);
+      }
+      .others .n {
+        font-weight: 600;
       }
       .adder {
         padding: 10px var(--_tessera-panel-inline, 16px) 12px;
@@ -484,11 +496,7 @@ export class TesseraFilterPanel extends TesseraElement {
                 ><button type="button" aria-label=${`Remove the ${columnCaption(c)} ${verb}`} @click=${() => this.clearColumn(c, verb)}>${icon('close', 12)}</button></span
               >`
             )}
-            ${members.map(
-              (m) => html`<span part="chip" class="chip" data-verb=${m.verb} data-artifact=${String(m.artifact)}
-                >${this.mark(m.verb)}${this.memberText(m)}<button type="button" aria-label=${`Remove ${this.memberText(m)}`} @click=${() => this.clearMember(m)}>${icon('close', 12)}</button></span
-              >`
-            )}
+            ${members.map((m) => this.memberChip(m))}
           </div>`
         : nothing;
     const clear = active > 0 || members.length > 0 ? html`<button part="clear" class="quiet" type="button" @click=${() => this.clearAll()}>Clear all</button>` : nothing;
@@ -575,11 +583,25 @@ export class TesseraFilterPanel extends TesseraElement {
                 </div>`
               : nothing}
           </div>`;
+    // A clause on a layer with no field here (one that attaches to another, or one of another view)
+    // is still applied, so it is shown and can be taken off.
+    const others = members.filter((m) => !layers.some((l) => l.name === m.layer));
+    const otherList =
+      others.length > 0
+        ? html`<div part="others" class="others"><span class="n">Also applied</span><div part="chips">${others.map((m) => this.memberChip(m))}</div></div>`
+        : nothing;
     return html`${heading}${modeSwitch}${repeat(
       listed,
       (f) => f.key,
       (f) => field(f)
-    )}${adder}`;
+    )}${otherList}${adder}`;
+  }
+
+  /** A `member_of` clause as a chip whose × takes it off. */
+  private memberChip(m: MemberClause): TemplateResult {
+    return html`<span part="chip" class="chip" data-verb=${m.verb} data-artifact=${String(m.artifact)}
+      >${this.mark(m.verb)}${this.memberText(m)}<button type="button" aria-label=${`Remove ${this.memberText(m)}`} @click=${() => this.clearMember(m)}>${icon('close', 12)}</button></span
+    >`;
   }
 
   protected override willUpdate(changed: PropertyValues<this>): void {

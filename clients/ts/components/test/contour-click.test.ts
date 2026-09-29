@@ -107,7 +107,7 @@ describe('a click on a contour', () => {
     // Inside the root's box and outside every frontier shape: the root is served, it is nobody's
     // answer, and clicking where only it reaches opens nothing.
     let missed = 0;
-    el.addEventListener('tessera-miss', () => (missed += 1));
+    (el as unknown as HTMLElement).addEventListener('tessera-miss', () => (missed += 1));
     el.onClick({index: -1, x: 2, y: 2});
     expect(opened(store)).toEqual([]);
     expect((el as unknown as {lastPick: {kind: string} | null}).lastPick).toEqual({kind: 'miss'});

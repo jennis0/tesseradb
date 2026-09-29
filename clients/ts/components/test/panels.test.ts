@@ -758,6 +758,16 @@ describe('<tessera-filter-panel> cluster fields', () => {
     expect(chips()).toEqual(['Optics']);
   });
 
+  it('shows a clause on a layer with no field here, in either position, as a chip that takes it off', async () => {
+    const lit = {layer: 'labels', artifact: 3n, outside: false, verb: 'highlight' as const, label: 'diffusion, guidance'};
+    const elsewhere = {layer: 'elsewhere', artifact: 4n, outside: true, verb: 'filter' as const, label: 'North'};
+    const {host, store} = await mountLayered([topic(7n, 'filter', 'Neural networks'), lit as never, elsewhere as never]);
+    const others = () => deepAll(host, '[part="others"] [part="chip"]');
+    expect(others().map((c) => c.textContent!.trim())).toEqual(['diffusion, guidance', 'Outside North']);
+    (others()[0]!.querySelector('button') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0]).toEqual([topic(7n, 'filter', 'Neural networks'), elsewhere]);
+  });
+
   it('takes a layer off with every clause on it, in both positions, when its checked entry is chosen again', async () => {
     const {host, store} = await mountLayered([topic(7n, 'filter'), topic(8n, 'highlight')]);
     (deep(host, '[part="add"]') as HTMLButtonElement).click();
