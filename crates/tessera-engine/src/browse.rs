@@ -149,6 +149,9 @@ pub struct BrowseRow {
     /// This artifact's parents **that this principal is also served**, ascending — C29 per entry,
     /// exactly as the artifacts frame's list is.
     pub parent_ids: Vec<TesseraId>,
+    /// How many artifacts this principal is served that name this one among their parents: the
+    /// size of this artifact's children form, on the same rule as `parent_ids`.
+    pub child_count: u64,
 }
 
 /// One browse page.
@@ -408,6 +411,23 @@ impl crate::Engine {
             .map(|(at, g)| ((g.level, g.ordinal), at))
             .collect();
 
+        // Each served artifact's served children. A child names a parent once however many times
+        // its parent list repeats it, as the children form counts it.
+        let mut child_counts: HashMap<(u32, u32), u64> = HashMap::new();
+        for g in &gated {
+            let mut named: Vec<(u32, u32)> = g
+                .parents
+                .iter()
+                .copied()
+                .filter(|at| served.contains_key(at))
+                .collect();
+            named.sort_unstable();
+            named.dedup();
+            for at in named {
+                *child_counts.entry(at).or_default() += 1;
+            }
+        }
+
         // **The rung.** A levelled layer's is its declared level — a fact about the artifact. A
         // treed layer declares no levels and sits at level 0 (decision 0082), so its rung is the
         // depth of this artifact in the forest the *served* parent links form, which is the
@@ -560,6 +580,10 @@ impl crate::Engine {
                 ids.dedup();
                 ids
             },
+            child_count: child_counts
+                .get(&(g.level, g.ordinal))
+                .copied()
+                .unwrap_or(0),
         };
 
         // The form's own candidate set, taken over the gated artifacts and never over the level's

@@ -543,6 +543,59 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     }
 }
 
+/// **A row's `child_count` is the size of its children form**, counted over the children this
+/// principal is served.
+///
+/// Under a criterion the narrow principal clears only at the roots, the broad principal's roots
+/// count three children each and the narrow principal's count none. A child suppressed after the
+/// build leaves its parent's count at two. A leaf counts none.
+#[test]
+fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
+    let fx = fixture(Some(ExistenceCriterion::Count(50)));
+    let counts = |credential: &[u8]| -> Vec<(String, u64)> {
+        let mut rows: Vec<(String, u64)> =
+            browse(&fx.engine, credential, BrowseForm::Roots, None, 100)
+                .artifacts
+                .into_iter()
+                .map(|row| (row.key.unwrap_or_default(), row.child_count))
+                .collect();
+        rows.sort();
+        rows
+    };
+    let all = |n: u64| {
+        vec![
+            ("alpha".to_string(), n),
+            ("bravo".to_string(), n),
+            ("charlie".to_string(), n),
+        ]
+    };
+    assert_eq!(counts(&full_coverage_credential()), all(3));
+    assert_eq!(counts(&subset_credential()), all(0));
+
+    let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
+    let children = browse(
+        &fx.engine,
+        &full_coverage_credential(),
+        BrowseForm::Children(alpha),
+        None,
+        100,
+    );
+    assert_eq!(children.artifacts.len(), 3);
+    assert!(
+        children.artifacts.iter().all(|row| row.child_count == 0),
+        "a leaf counts no children"
+    );
+
+    let one = id_of(&fx, &full_coverage_credential(), "alpha-one");
+    let entity = fx.engine.resolve_tessera_ids(&[one]).unwrap()[0].unwrap();
+    fx.engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .unwrap();
+    let after = counts(&full_coverage_credential());
+    assert_eq!(after[0], ("alpha".to_string(), 2), "the suppressed child is not counted");
+    assert_eq!(counts(&subset_credential()), all(0));
+}
+
 /// **The order is total and the cursor walks it exactly.**
 ///
 /// Paging one row at a time must reproduce the unpaged answer — over tied counts included, which

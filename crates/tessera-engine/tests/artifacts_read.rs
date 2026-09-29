@@ -1569,6 +1569,54 @@ fn an_authored_shape_names_no_other_view_on_the_drill_down() {
     assert!(out.derived.shape.is_some(), "the view's own shape is drawn");
 }
 
+/// **Browse counts a row's children over the children the viewer is served.** A child nobody is
+/// served is never counted, and a `flat` or `stacked` layer, which has no links, counts none.
+#[test]
+fn browse_counts_only_served_children_and_none_on_a_layer_without_links() {
+    let fx = fixture();
+    let engine = fx.engine();
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).unwrap();
+        let browse = |layer, level| {
+            engine
+                .browse(
+                    &session,
+                    tessera_engine::browse::BrowseRequest {
+                        view: "s0",
+                        layer,
+                        level,
+                        form: tessera_engine::browse::BrowseForm::Roots,
+                        filter: None,
+                        limit: 100,
+                        cursor: None,
+                    },
+                )
+                .unwrap()
+        };
+        // A root this viewer is not served leaves its children as roots, each a leaf.
+        let hidden_parent = root_key(HIDDEN_CHILD.0);
+        for row in &browse(TREE, None).artifacts {
+            let key = row.key.clone().expect("a planted key");
+            let expected = if key.contains("-c") {
+                0
+            } else if key == hidden_parent {
+                2
+            } else {
+                3
+            };
+            assert_eq!(row.child_count, expected, "{key}");
+        }
+        for (layer, level) in [(FLOOR, None), (TIERS, Some(0)), (TIERS, Some(1))] {
+            let rows = browse(layer, level).artifacts;
+            assert!(!rows.is_empty(), "{layer} serves rows");
+            assert!(
+                rows.iter().all(|row| row.child_count == 0),
+                "{layer} level {level:?}"
+            );
+        }
+    }
+}
+
 /// **Browse names the artifact by its blank slot, and its search does not read the slot.**
 #[test]
 fn an_authored_shape_names_no_other_view_on_browse() {

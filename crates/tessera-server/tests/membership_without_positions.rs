@@ -350,6 +350,7 @@ struct BrowseRow {
     key: String,
     masked_count: u64,
     parents: usize,
+    child_count: u64,
 }
 
 /// One page of `POST /v1/artifacts/browse`: the **roots** form where `parent` is absent, and the
@@ -395,6 +396,7 @@ async fn browse_rows(
                 key: row["key"].as_str()?.to_string(),
                 masked_count: row["masked_count"].as_u64().unwrap(),
                 parents: row["parent_ids"].as_array().map_or(0, Vec::len),
+                child_count: row["child_count"].as_u64().expect("every row carries child_count"),
             })
         })
         .collect()
@@ -758,6 +760,7 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
     )
     .await;
     assert_eq!(groups.len(), 3, "the root's three groups");
+    assert_eq!(roots[0].child_count, 3, "the root counts the groups it is served under");
     assert!(
         groups.iter().all(|g| g.parents == 1),
         "each group is served under the root that the chain named"
@@ -765,16 +768,18 @@ async fn a_tiered_list_column_mints_the_chain_it_declares() {
 
     let mut leaves: BTreeMap<String, u64> = BTreeMap::new();
     for group in &groups {
-        for leaf in browse_rows(
+        let under = browse_rows(
             &server,
             &["0", "1"],
             LAYER,
             Some(2),
             Some(&group.tessera_id),
         )
-        .await
-        {
+        .await;
+        assert_eq!(group.child_count, under.len() as u64, "a group counts the leaves it holds");
+        for leaf in under {
             assert_eq!(leaf.parents, 1, "a leaf is served under its own group");
+            assert_eq!(leaf.child_count, 0, "a leaf counts no children");
             leaves.insert(leaf.key, leaf.masked_count);
         }
     }
