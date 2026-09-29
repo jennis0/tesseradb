@@ -33,6 +33,8 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * they differ for an artifact whose members are spread across the map. Fit is absent on a filter
  * layer, which draws nothing. Pressing a parent or child opens it.
  *
+ * A host's buttons in the `actions` slot sit beside the close button.
+ *
  * The count is over the artifact's whole membership as the viewer sees it and does not change with
  * the view. An artifact with no name shows a dash in the headline and its key in its own field.
  * The server gives the same refusal for every artifact it withholds. The artifact is the store's
@@ -41,6 +43,7 @@ const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
  * @summary The opened artifact, with its lineage and its filter buttons.
  * @tagname tessera-artifact-card
  * @category Elements
+ * @slot actions - Buttons beside the close button, such as the explorer's Pin.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit to
  *   cluster was pressed. `<tessera-explorer>` fits its map to the artifact.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A clause
@@ -77,6 +80,10 @@ export class TesseraArtifactCard extends TesseraElement {
     css`
       :host {
         display: block;
+      }
+      [part='title'] .what {
+        flex: 1;
+        min-width: 0;
       }
       [part='headline'] {
         margin-bottom: 6px;
@@ -221,7 +228,9 @@ export class TesseraArtifactCard extends TesseraElement {
     const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || decl?.name || 'Selected';
     // The close button appears only while the card shows something to close.
     const heading = (closable: boolean) =>
-      html`<h2 part="title">${what}${closable ? html`<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button>` : nothing}</h2>`;
+      html`<h2 part="title"><span class="what">${what}</span>${closable
+        ? html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button>`
+        : nothing}</h2>`;
     if (refusal) {
       return html`<div class="panel">${heading(true)}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Not available', refusal.code)}</span></div>`;
     }

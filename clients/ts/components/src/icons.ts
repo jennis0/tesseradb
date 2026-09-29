@@ -15,6 +15,8 @@ const PATHS = {
   /** A frame around a dashed hole, for the complement of a set: everything outside it. */
   outside: {box: 24, body: svg`<rect x="3.5" y="3.5" width="17" height="17" rx="2"/><circle cx="12" cy="12" r="4.5" stroke-dasharray="2.2 2.2"/>`},
   close: {box: 24, body: svg`<path d="M6 6l12 12M18 6L6 18"/>`},
+  /** A push pin, for keeping a card open. */
+  pin: {box: 24, body: svg`<path d="M12 17v5M8 3h8l-1 7 3 3H6l3-3z"/>`},
   plus: {box: 24, body: svg`<path d="M12 5v14M5 12h14"/>`},
   search: {box: 24, body: svg`<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>`},
   chev: {box: 24, body: svg`<path d="M6 9l6 6 6-6"/>`},

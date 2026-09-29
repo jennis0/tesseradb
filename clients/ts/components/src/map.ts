@@ -491,6 +491,13 @@ export class TesseraMap extends TesseraElement {
    * in the layer, with its details. `null` after a hit. `<tessera-item-card>`'s `pick` takes it.
    */
   lastPick: PickOutcome = null;
+  /**
+   * What the last click picked and where: an item or an artifact, by `tesseraId`, and the world
+   * position the card for it points at, the picked point's own or, for an artifact, where the click
+   * landed. `null` before a pick, after a miss and after a switch of view. `<tessera-explorer>`
+   * places its callout from it through {@link TesseraMap.screenOf}.
+   */
+  pickedAt: {kind: 'item' | 'artifact'; id: bigint; world: [number, number]} | null = null;
   /** The map's probe, one object mutated in place, for instruments and tests. @internal */
   readonly probe: MapProbe = {
     paints: 0,
@@ -657,6 +664,7 @@ export class TesseraMap extends TesseraElement {
     this.slab.clear();
     this.metaSeen = false;
     this.selectedWorldXY = null;
+    this.pickedAt = null;
     this.regionWorld = null;
     this.regionPolygon = null;
     if (!store) {
@@ -684,6 +692,7 @@ export class TesseraMap extends TesseraElement {
     const view = s.get('view');
     // Every switch drops the hover: the marks under the cursor are different rows in the new view.
     if (view.id !== this.cameraView) {
+      if (this.cameraView !== '') this.pickedAt = null;
       this.cameraView = view.id;
       this.hover = null;
       this.hoveredArtifact = null;
@@ -1040,29 +1049,37 @@ export class TesseraMap extends TesseraElement {
     const s = this.resolvedStore;
     const picked: Picked = resolvePick(info as never);
     switch (picked.kind) {
-      case 'artifact':
+      case 'artifact': {
         this.lastPick = null;
+        const world = this.worldAt(info.x, info.y);
+        this.pickedAt = world ? {kind: 'artifact', id: picked.id, world} : null;
         // The card's request does not bring the shape into the projection the map reads.
         s?.needShape(picked.id);
         void s?.openArtifact(picked.id);
         return;
-      case 'mark':
+      }
+      case 'mark': {
         this.lastPick = null;
         this.pickedId = picked.id;
         this.selectedWorldXY = picked.worldXY;
+        const world = picked.worldXY ?? this.worldAt(info.x, info.y);
+        this.pickedAt = world ? {kind: 'item', id: picked.id, world} : null;
         emit(this, 'tessera-pick', {id: idString(picked.id)});
         void s?.pick(picked.id);
         this.paint();
         return;
+      }
       case 'miss': {
         // Contours are not in deck's pick pass: resolve the click as the hover, else a miss.
         const world = this.worldAt(info.x, info.y);
         const id = world ? this.artifactAt(world, null) : null;
         if (id === null) {
           this.lastPick = {kind: 'miss'};
+          this.pickedAt = null;
           return;
         }
         this.lastPick = null;
+        this.pickedAt = world ? {kind: 'artifact', id, world} : null;
         s?.needShape(id);
         void s?.openArtifact(id);
         return;
@@ -1199,6 +1216,18 @@ export class TesseraMap extends TesseraElement {
   /** The ground the map draws on now: `ground` where it is set, else the page's colour scheme. */
   get drawnGround(): 'light' | 'dark' {
     return this.scheme();
+  }
+
+  /**
+   * A world position in the map's pixels, from its top-left corner, under the camera as it stands.
+   * A position off the map falls outside `[0, width] × [0, height]`.
+   */
+  screenOf(world: readonly [number, number]): [number, number] {
+    // The orthographic camera, y down: world units scale by 2^zoom about the target at the centre.
+    const {width, height} = this.size;
+    const scale = 2 ** this.viewState.zoom;
+    const [tx, ty] = this.viewState.target;
+    return [(world[0] - tx!) * scale + width / 2, (world[1] - ty!) * scale + height / 2];
   }
 
   /** The camera's zoom: 0 when the 512-unit world fills 512 px, +1 per doubling. */

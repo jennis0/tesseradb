@@ -276,7 +276,7 @@ export class TesseraArtifactList extends TesseraElement {
  * any other, each branch's deepest artifact at or above `level`. With `drawn`, a dependent layer's
  * rows are left out where a served label names its target, since its text is that target's name.
  */
-function listedAt(source: readonly Artifact[], level: number | null, meta: Meta | null, drawn: boolean): Artifact[] {
+export function listedAt(source: readonly Artifact[], level: number | null, meta: Meta | null, drawn: boolean): Artifact[] {
   const declared = (layer: string) => meta?.layers.find((l) => l.name === layer);
   const labelled = drawn && source.some((x) => x.target !== null && x.content.length > 0);
   const rows = source.filter((x) => !labelled || !declared(x.layer)?.depsOn.length);

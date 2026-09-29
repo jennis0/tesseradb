@@ -91,7 +91,7 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
  * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
  * `onDisplayChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
- * `onClauseChange`, `onChipOpen`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
+ * `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
  * of the same name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
@@ -108,7 +108,6 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onOpen: ev('tessera-open'),
   onClose: ev('tessera-close'),
   onClauseChange: ev('tessera-clausechange'),
-  onChipOpen: ev('tessera-chipopen'),
   onViewSwitch: ev('tessera-viewswitch'),
   onViewFollow: ev('tessera-viewfollow')
 }));
