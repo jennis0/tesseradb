@@ -1132,10 +1132,12 @@ export class TesseraExplorer extends TesseraElement {
    */
   private measureCallouts(): void {
     const m = this.map;
-    if (!m) return;
+    const callouts = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'));
+    // Nothing is measured while no card is beside a point, so a camera move reads no layout.
+    if (!m || callouts.length === 0) return;
     const origin = m.getBoundingClientRect();
     let moved = false;
-    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
+    for (const el of callouts) {
       const key = el.dataset.callout!;
       const size = {width: el.offsetWidth, height: el.offsetHeight};
       const held = this.calloutSizes.get(key);
