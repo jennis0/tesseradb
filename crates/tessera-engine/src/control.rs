@@ -59,6 +59,9 @@ pub enum AddressValue {
     /// A keyword, or an integer or a timestamp written in decimal digits.
     Text(String),
     Integer(i128),
+    /// A value no field is named by, such as a fraction or a boolean, as a refusal shows it. It
+    /// names nothing, and is refused only in a unique field's column.
+    Other(String),
 }
 
 /// What [`Engine::name_items`] decided: one verdict per row, and the columns it ignored.
@@ -176,7 +179,22 @@ fn key_of_value(
     let keyword = declared.arrow_type == tessera_spatial::tiler::ScalarType::Keyword;
     let integer = match (value, keyword) {
         (AddressValue::Text(text), true) => return Ok(Some(UniqueKey::keyword(text))),
-        (AddressValue::Integer(n), true) => return Ok(Some(UniqueKey::keyword(&n.to_string()))),
+        (AddressValue::Integer(n), true) => {
+            return Err(crate::EngineError::AddressMalformed(format!(
+                "{n} is not a value of '{}', which holds keywords. Send it as a string",
+                declared.name
+            )))
+        }
+        (AddressValue::Other(shown), _) => {
+            return Err(crate::EngineError::AddressMalformed(format!(
+                "{shown} is not a value of '{}'. Send {}",
+                declared.name,
+                match keyword {
+                    true => "a string",
+                    false => "a whole number",
+                }
+            )))
+        }
         (AddressValue::Integer(n), false) => *n,
         (AddressValue::Text(text), false) => text.parse().map_err(|_| {
             crate::EngineError::AddressMalformed(format!(
