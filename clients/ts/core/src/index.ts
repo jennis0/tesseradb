@@ -41,11 +41,13 @@ export {
   composeFilters,
   emptyDraft,
   isPopulated,
+  textQueryOf,
+  textTerms,
   withoutClause,
   type ClauseVerb,
   type ColumnDraft,
   type FilterDraft,
-  type TextMode
+  type TextTerms
 } from './filters.js';
 export {browsableLayers, colourLayers, drawableLayers, isFilterLayer, layerClosure, layerEntries, type LayerEntry} from './layers.js';
 export {artifactName} from './names.js';

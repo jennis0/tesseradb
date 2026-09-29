@@ -24,7 +24,7 @@ import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
 import {binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
-import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
 import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
@@ -73,7 +73,7 @@ export type TesseraLayerProps = CompositeLayerProps & {
    * the deepest level served.
    */
   clusterLevel?: number;
-  /** Whether the artifacts' names and counts are drawn at their centroids. Defaults to true. */
+  /** Whether the artifacts' names are drawn at their centroids, with the hovered one's count. Defaults to true. */
   labels?: boolean;
   /**
    * The ground under the map, `light` or `dark`. The ink and halo of names, the hovered outline's
@@ -193,7 +193,7 @@ export type LayerTimings = {
   outlines: number;
   /** Artifacts outlined: 0, 1 or 2 (the hovered and the opened). */
   outlinesDrawn: number;
-  /** Labels placed. A name wrapped over several lines counts once. */
+  /** Labels placed. */
   labels: number;
   /** The mark radius drawn, in pixels. */
   markRadius: number;
@@ -423,7 +423,7 @@ type LabelDatum = {
   offset: [number, number];
   colour: Rgba;
   kind: 'name' | 'count' | 'topic';
-  /** Where the offset sits on the run: a wrapped name centres, its last line ends where the count starts. */
+  /** Where the offset sits on the run: a name and a topic centre, and a count starts where the name ends. */
   anchor: 'start' | 'middle' | 'end';
 };
 type LeaderDatum = {from: [number, number]; to: [number, number]};
@@ -571,20 +571,19 @@ export function labelBudget(drawn: number): number {
 
 export type LabelText = {
   artifact: Artifact;
-  /** The name as drawn, in up to three short lines. */
-  lines: string[];
+  /** The name as drawn, on one line. */
+  line: string;
   countText: string;
   size: number;
   topic: string | null;
 };
 
-/** Character widths as a fraction of the font size, for the placement box. */
+/** A name's character width as a fraction of the font size, for the placement box. */
 const NAME_EM = 0.58;
-const COUNT_EM = 0.55;
-/** The count's size relative to the name's, and the gap between the last line and it. */
+/** The count's size relative to the name's, and the gap between the name and it. */
 const COUNT_SCALE = 0.82;
 const COUNT_GAP_EM = 0.35;
-/** The topic line beneath the block, in pixels. */
+/** The topic line beneath the name, in pixels. */
 const TOPIC_SIZE = 12;
 
 /**
@@ -652,17 +651,16 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
     const attached = a.attached.get(artifact.tesseraId) ?? null;
     const topic = attached === name ? null : attached;
     const countText = count.toLocaleString('en-GB');
-    // The placed box is the wrapped block as drawn.
-    const lines = wrapLabel(name);
-    byId.set(artifact.tesseraId, {artifact, lines, countText, size, topic});
-    const widest = lines.reduce((w, line) => Math.max(w, line.length * NAME_EM * size), 0);
-    const lastLine = lines[lines.length - 1]!.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
+    const line = labelLine(name);
+    byId.set(artifact.tesseraId, {artifact, line, countText, size, topic});
+    // The box placed is the name alone, as drawn at rest; the count and topic show on hover.
+    const lineWidth = line.length * NAME_EM * size;
     candidates.push({
       id: artifact.tesseraId,
       x: gridToWorld(artifact.centroid![0]),
       y: gridToWorld(artifact.centroid![1]),
-      width: Math.max(widest, lastLine, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
-      height: lines.length * size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
+      width: lineWidth + 8,
+      height: size * LABEL_LINE_HEIGHT,
       priority: count
     });
   }
@@ -726,8 +724,8 @@ export type TesseraLayerInternalProps = TesseraLayerProps & {
 /**
  * A deck.gl `CompositeLayer` that draws a Tessera store's marks, tiles and artifacts. From bottom
  * to top it draws the hovered and the opened artifact's outline, the density wash from the exact
- * tiles' counts, the marks, the artifacts' names and counts at their centroids, the selected region
- * and the picked mark's ring. The props are {@link TesseraLayerProps}.
+ * tiles' counts, the marks, the artifacts' names at their centroids (with the hovered one's
+ * count), the selected region and the picked mark's ring. The props are {@link TesseraLayerProps}.
  *
  * The layer draws in the 512-unit world square (`WORLD_SIZE`) for an `OrthographicView` with
  * `flipY: true`, and {@link viewInputOf} turns that view's camera into what `store.setView` takes.
@@ -1385,9 +1383,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
   }
 
   /**
-   * Names and counts at each artifact's centroid, placed by priority into a spatial hash, with a
-   * leader line where a label moved. A dependent artifact's text is drawn beneath its target's
-   * name, with no count. Text is deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
+   * Names at each artifact's centroid, placed by priority into a spatial hash, with a leader line
+   * where a label moved. The hovered artifact's name also shows its count after it and, where a
+   * dependent artifact's text is attached, that text beneath. Text is deck's `TextLayer` with
+   * `characterSet: 'auto'` and an SDF halo.
    */
   private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
     const a = this.props.labels ? r.artifacts : null;
@@ -1406,32 +1405,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
       let placed = 0;
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
         placed += 1;
-        const {artifact, lines, countText, size, topic} = byId.get(p.id)!;
+        const {artifact, line, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
         const colour = a.colours.get(ordinal) ?? NEUTRAL;
-        // The name over up to three lines centred on the anchor, the count after the last line,
-        // and the topic beneath. The last line ends where the count starts, so they cannot overlap.
-        const step = size * LABEL_LINE_HEIGHT;
-        const top = p.dy - ((lines.length - 1) * step) / 2;
-        const last = lines[lines.length - 1]!;
-        const lastWidth = last.length * NAME_EM * size;
-        const countWidth = countText.length * COUNT_EM * size * COUNT_SCALE;
-        const seam = p.dx - (lastWidth + countWidth + size * COUNT_GAP_EM) / 2 + lastWidth;
-        lines.forEach((line, i) => {
-          const isLast = i === lines.length - 1;
-          data.push({
-            id: artifact.tesseraId,
-            position,
-            text: line,
-            size,
-            offset: [isLast ? seam : p.dx, top + i * step],
-            colour,
-            kind: 'name',
-            anchor: isLast ? 'end' : 'middle'
-          });
-        });
-        const baseline = top + (lines.length - 1) * step;
+        // The name centred on the anchor; the count starts where the name ends, and the topic
+        // sits beneath, so neither overlaps it.
+        const seam = p.dx + (line.length * NAME_EM * size) / 2;
+        const baseline = p.dy;
+        data.push({id: artifact.tesseraId, position, text: line, size, offset: [p.dx, baseline], colour, kind: 'name', anchor: 'middle'});
         data.push({id: artifact.tesseraId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
         if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
@@ -1442,7 +1424,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const data = held?.data ?? NO_LABELS;
     const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    // Labels placed, not text rows: a wrapped name is several rows of one label.
+    // Labels placed, not text rows: a label is its name, its count and its topic.
     timings.labels = held?.placed ?? 0;
     // Present from the first paint, empty, so their programs link early.
     const layers: Layer[] = [];
@@ -1506,7 +1488,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
       {id: 'label-counts', kind: 'count', style: {fontWeight: 400}},
       {id: 'label-topics', kind: 'topic', style: {fontWeight: 400, fontStyle: 'italic'}}
     ] as const;
-    const rowsOf = (kind: LabelDatum['kind']) => data.filter((d) => d.kind === kind);
+    // A name shows at rest; its count and topic only while its artifact is hovered.
+    const hovered = this.props.hoveredArtifact ?? null;
+    const rowsOf = (kind: LabelDatum['kind']) => data.filter((d) => d.kind === kind && (kind === 'name' || d.id === hovered));
     if (plated) for (const k of kinds) layers.push(text(`${k.id}-plates`, k.kind, rowsOf(k.kind), {...k.style, ...plateProps}));
     for (const k of kinds) layers.push(text(k.id, k.kind, rowsOf(k.kind), {...k.style, ...own}));
     return layers;

@@ -15,7 +15,7 @@ const STATE = ['state', 'refusal', 'refresh', 'retry', 'reauthorise'];
  * rendered.
  */
 export const PARTS = {
-  map: ['canvas', 'controls', 'density-key', 'overlay', 'tooltip', ...STATE],
+  map: ['canvas', 'controls', 'density-key', 'overlay', 'region-tag', 'tooltip', ...STATE],
   status: ['card', 'strip', 'count-shown', 'count-matched', 'count-highlighted', 'count-of', 'count-visible', ...STATE],
   'view-picker': ['field', 'select'],
   'key-picker': ['entry', 'field', 'label', 'select', 'step'],
@@ -52,9 +52,9 @@ export const PARTS = {
     ...STATE
   ],
   'layer-picker': ['entry', 'name', 'note', 'title', ...STATE],
-  filter: ['entry', 'label', 'mode', 'more', 'tick', 'values', 'refusal', 'verb'],
-  'filter-panel': ['chip', 'chips', 'clear', 'edit', 'title', 'verb', ...STATE],
-  hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
+  filter: ['aside', 'bar', 'chosen', 'entry', 'hint', 'label', 'mode', 'more', 'tick', 'value-count', 'values', 'refusal'],
+  'filter-panel': ['add', 'add-list', 'add-option', 'add-search', 'any', 'chip', 'chips', 'clear', 'edit', 'field', 'mode', 'title', 'verb', ...STATE],
+  hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'dismiss', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
   'artifact-list': ['count', 'item', 'items', 'more', 'name', 'title', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],
   'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],

@@ -18,11 +18,11 @@ describe('markStyle', () => {
     expect(markStyle(1_600, 0).radius).toBeGreaterThanOrEqual(ANTIALIAS_ABOVE_PX);
   });
 
-  it('draws about 1,600 marks at 1.5 px and an alpha between 0.6 and 0.78', () => {
-    const s = markStyle(1_600, 0);
-    expect(s.radius).toBeCloseTo(1.5, 1);
-    expect(s.alpha).toBeGreaterThan(0.6);
-    expect(s.alpha).toBeLessThanOrEqual(0.78);
+  it('draws up to ten thousand marks at 2 px and 0.8 alpha, and shrinks them only past that', () => {
+    for (const marks of [100, 1_600, 10_000]) expect(markStyle(marks, 0)).toMatchObject({radius: 2, alpha: 0.8});
+    const dense = markStyle(100_000, 0);
+    expect(dense.radius).toBeLessThan(2);
+    expect(dense.alpha).toBeLessThan(0.8);
   });
 
   it('grows and solidifies as the count falls, and never past the caps', () => {
@@ -33,8 +33,8 @@ describe('markStyle', () => {
       expect(s.alpha).toBeGreaterThanOrEqual(last.alpha);
       last = s;
     }
-    expect(last.radius).toBe(1.7);
-    expect(last.alpha).toBe(0.78);
+    expect(last.radius).toBe(2);
+    expect(last.alpha).toBe(0.8);
     expect(markStyle(0, 10).alpha).toBe(0.9);
   });
 
@@ -45,7 +45,7 @@ describe('markStyle', () => {
     // The zoom term is the same at a sparse count as at a dense one.
     const sparse = markStyle(1_600, 0);
     expect(markStyle(1_600, 6).radius).toBeCloseTo(sparse.radius + 0.3, 1);
-    expect(markStyle(1_600, 6).alpha).toBeCloseTo(sparse.alpha + 0.09, 2);
+    expect(markStyle(1_600, 6).alpha).toBeCloseTo(Math.min(0.9, sparse.alpha + 0.09), 2);
     const fixed = markStyle(1_000_000, 8, 1.6);
     expect(fixed.radius).toBe(1.6);
     expect(fixed.alpha).toBeCloseTo(0.46, 2);
