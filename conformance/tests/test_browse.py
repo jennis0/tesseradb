@@ -12,6 +12,10 @@ What is asserted, and by which second reader:
   how many of the frame's artifacts name the row among their `parent_ids` — the artifacts frame being
   the reader that already exists for those numbers — so a browse that computed its counts a second
   way is caught rather than ratified.
+- **A row's `child_count` is the children the principal is served.** A `nested` layer beside the
+  flat ones has a child only term "2" can see; each row's count is compared with how many of the
+  frame's artifacts name it in `parent_ids`, for every principal, and with the length of its
+  children page.
 - **The gate runs before the page.** The artifact withheld from the narrow principal is absent from
   every form at once, and their page's `next` counts only rows they may see.
 - **The order is total and the cursor walks it exactly**: paging one row at a time reproduces the
@@ -33,7 +37,7 @@ import pytest
 from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
 from oracle.wire import decode_viewport_artifacts
 
-from test_region_leaf import GATED, gated_layer_toml
+from test_region_leaf import GATED, GATED_STRIP, gated_layer_toml
 from test_shape_membership import (
     BOXES,
     PRINCIPALS,
@@ -48,12 +52,44 @@ from test_shape_membership import (
 )
 
 
+TREE = "regions/tree"
+
+
+def tree_layer_toml() -> str:
+    """A `nested` spatial layer: `top` over the map, `left` and `strip` under it, `corner` under
+    `left`. `strip` is the gated strip, whose members only term "2" holds, so a principal holding
+    only "1" is not served it and `top` has one child for them."""
+    top = "POLYGON ((0 0, 65535 0, 65535 65535, 0 65535, 0 0))"
+    left = "POLYGON ((0 0, 32768 0, 32768 65535, 0 65535, 0 0))"
+    corner = "POLYGON ((4096 4096, 8192 4096, 8192 8192, 4096 8192, 4096 4096))"
+    return f"""
+[[layer]]
+name = "{TREE}"
+title = "tree"
+views = ["{VIEW_ID}"]
+membership = "spatial"
+visibility = "public"
+artifact_visibility = {{ default = "inherited" }}
+require_member_visibility = {{ count = 1 }}
+hierarchy = {{ kind = "nested", prune_children = false }}
+artifacts = [
+  {{ key = "top", wkt = "{top}" }},
+  {{ key = "left", wkt = "{left}", parent = "top" }},
+  {{ key = "strip", wkt = "{GATED_STRIP}", parent = "top" }},
+  {{ key = "corner", wkt = "{corner}", parent = "left" }}
+]
+
+  [layer.shape]
+  kind = "polygon"
+"""
+
+
 @pytest.fixture(scope="module")
 def browse_server(tmp_path_factory):
     points = fixture_points()
     work = tmp_path_factory.mktemp("browse-fixture")
     build_bundle(work, points)
-    (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
+    (work / "gated.toml").write_text(config_toml() + gated_layer_toml() + tree_layer_toml())
     bundle = work / "bundle-gated"
     deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
     subprocess.run(
@@ -111,6 +147,29 @@ def test_a_page_is_the_artifacts_frames_own_rows(browse_server):
             # The total order, as a property: count descending, then identifier ascending.
             keyed = [(-row["masked_count"], int(row["tessera_id"])) for row in out["artifacts"]]
             assert keyed == sorted(keyed), f"principal {terms}/{layer}: the order is not total"
+
+
+def test_a_rows_child_count_is_the_children_the_principal_is_served(browse_server):
+    server, _points = browse_server
+    want_top = {("1",): 1, ("2",): 2, ("1", "2"): 2}
+    for terms in PRINCIPALS:
+        token = server.authorise(terms)["token"]
+        frame = served_artifacts(server, token, TREE)
+        children_in_frame = {
+            tid: sum(1 for a in frame.values() if int(tid) in a.parent_ids) for tid in frame
+        }
+        rows, queue = [], page(server, token, layer=TREE, limit=200)["artifacts"]
+        while queue:
+            row = queue.pop()
+            rows.append(row)
+            under = page(server, token, layer=TREE, parent=row["tessera_id"], limit=200)["artifacts"]
+            assert len(under) == row["child_count"], f"{terms}/{row.get('key')}: the children page"
+            queue.extend(under)
+        counts = {row["tessera_id"]: row["child_count"] for row in rows}
+        assert counts == children_in_frame, f"principal {terms}: browse and the frame disagree"
+        by_key = {row.get("key"): row["child_count"] for row in rows}
+        assert by_key["top"] == want_top[tuple(terms)], f"principal {terms}: {by_key}"
+        assert by_key["left"] == 1 and by_key["corner"] == 0
 
 
 def test_the_gate_runs_before_the_page(browse_server):
