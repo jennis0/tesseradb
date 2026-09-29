@@ -31,7 +31,9 @@
 //! # What it costs
 //!
 //! One pass over the layer's artifacts — the gate, and one masked `and_cardinality` each — plus,
-//! under `filters`, one more `and_cardinality` per row against a whole-view verdict. **A filter
+//! under `filters`, one more `and_cardinality` per row against a whole-view verdict. On a linked
+//! layer a second pass over the served artifacts counts the children of the rows returned,
+//! reading each artifact's parent list against the page's handful of rows. **A filter
 //! whose leaves route row space is the one whole-view scan this design adds** (§9 (d), owner
 //! ruling): a leaf over a render-only column is answered by the viewport only inside its tiles,
 //! and browse has none, so the row route's own predicate is run over every row of the view rather
@@ -288,6 +290,10 @@ impl crate::Engine {
             HierarchyKind::Stacked | HierarchyKind::Tiered
         );
         let level = req.level.unwrap_or(0);
+        let linked = !matches!(
+            layer.declaration.hierarchy.kind,
+            HierarchyKind::Flat | HierarchyKind::Stacked
+        );
 
         // `session_geometry` laps into a probe; this verb publishes no per-stage timings, so it
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
@@ -410,23 +416,6 @@ impl crate::Engine {
             .enumerate()
             .map(|(at, g)| ((g.level, g.ordinal), at))
             .collect();
-
-        // Each served artifact's served children. A child names a parent once however many times
-        // its parent list repeats it, as the children form counts it.
-        let mut child_counts: HashMap<(u32, u32), u64> = HashMap::new();
-        for g in &gated {
-            let mut named: Vec<(u32, u32)> = g
-                .parents
-                .iter()
-                .copied()
-                .filter(|at| served.contains_key(at))
-                .collect();
-            named.sort_unstable();
-            named.dedup();
-            for at in named {
-                *child_counts.entry(at).or_default() += 1;
-            }
-        }
 
         // **The rung.** A levelled layer's is its declared level — a fact about the artifact. A
         // treed layer declares no levels and sits at level 0 (decision 0082), so its rung is the
@@ -559,7 +548,7 @@ impl crate::Engine {
             name
         };
 
-        let row_of = |g: &Gated| BrowseRow {
+        let row_of = |g: &Gated, children: &HashMap<(u32, u32), u64>| BrowseRow {
             tessera_id: g.tessera_id,
             key: keys.get(&(g.level, g.ordinal)).cloned().flatten(),
             name: name_of(g),
@@ -580,7 +569,7 @@ impl crate::Engine {
                 ids.dedup();
                 ids
             },
-            child_count: child_counts
+            child_count: children
                 .get(&(g.level, g.ordinal))
                 .copied()
                 .unwrap_or(0),
@@ -692,12 +681,46 @@ impl crate::Engine {
             })
             .flatten();
 
-        let mut parent_rows: Vec<BrowseRow> =
-            parents.iter().map(|&at| row_of(&gated[at])).collect();
+        // The children of each row returned, counted over the gated artifacts, so both ends are
+        // served. A child counts once however many times its parent list repeats the parent, as
+        // the children form lists it once. A `flat` or `stacked` layer has no links to count.
+        let mut returned: Vec<Vec<bool>> = vec![Vec::new(); layer.runs.len()];
+        for &at in page.iter().chain(&parents) {
+            let marks = &mut returned[gated[at].level as usize];
+            let ordinal = gated[at].ordinal as usize;
+            if marks.len() <= ordinal {
+                marks.resize(ordinal + 1, false);
+            }
+            marks[ordinal] = true;
+        }
+        let is_returned = |&(level, ordinal): &(u32, u32)| {
+            returned
+                .get(level as usize)
+                .and_then(|marks| marks.get(ordinal as usize))
+                .copied()
+                .unwrap_or(false)
+        };
+        let mut children: HashMap<(u32, u32), u64> = HashMap::new();
+        if linked && !(page.is_empty() && parents.is_empty()) {
+            for g in &gated {
+                for (i, at) in g.parents.iter().enumerate() {
+                    if is_returned(at) && !g.parents[..i].contains(at) {
+                        *children.entry(*at).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut parent_rows: Vec<BrowseRow> = parents
+            .iter()
+            .map(|&at| row_of(&gated[at], &children))
+            .collect();
         parent_rows.sort_by_key(|row| row.tessera_id.raw());
         parent_rows.dedup_by_key(|row| row.tessera_id.raw());
         Ok(BrowseOut {
-            artifacts: page.iter().map(|&at| row_of(&gated[at])).collect(),
+            artifacts: page
+                .iter()
+                .map(|&at| row_of(&gated[at], &children))
+                .collect(),
             parents: parent_rows,
             next,
         })
