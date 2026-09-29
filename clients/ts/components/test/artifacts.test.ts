@@ -9,7 +9,7 @@ import '../src/artifact-list.js';
 import '../src/item-card.js';
 import '../src/selection.js';
 import '../src/status.js';
-import {deep, deepAll, deepText, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, deepText, fakeStore, mount, registered, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED} from '../src/base.js';
 
 afterEach(() => {
@@ -115,10 +115,17 @@ describe('<tessera-artifact-list>', () => {
     expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['3', '2', '4']);
     expect(deep(host, '[part="item"][data-id="3"] [part="parent"]')?.textContent).toBe('Alpha');
     expect(deep(host, '[part="item"][data-id="4"] [part="parent"]')).toBeNull();
-    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('60');
+    // The counts are the aggregate's, under the store's filters, over the artifacts listed.
+    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('');
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'clusters', artifacts: [2n, 3n, 4n]}}]}]);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 1}]}]));
+    await settle(host);
+    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('6');
+    // Largest first by the exact counts.
+    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['2', '3', '4']);
     const fits: unknown[] = [];
     host.addEventListener('tessera-artifactfit', (e) => fits.push((e as CustomEvent).detail));
-    (rows[0] as HTMLElement).click();
+    (deep(host, '[part="item"][data-id="3"]') as HTMLElement).click();
     expect(fits).toEqual([{id: '3'}]);
     expect(store.calls.find((c) => c.name === 'openArtifact')).toBeUndefined();
   });
@@ -183,6 +190,8 @@ describe('<tessera-artifact-list>', () => {
     const nameless = deep(host, '[part="item"][data-id="2"] [part="name"]');
     expect(nameless?.textContent?.trim()).toBe(UNNAMED);
     expect(nameless?.hasAttribute('data-unnamed')).toBe(true);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 1n, count: 70}, {key: 2n, count: 40}]}]));
+    await settle(host);
     expect(deepText(deep(host, '[part="item"][data-id="2"] [part="count"]')).trim()).toBe('40');
     // Nowhere in the list — not in a title, not in a row — does the key appear.
     expect(deepText(host)).not.toContain('c-2');

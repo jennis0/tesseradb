@@ -1,18 +1,18 @@
 import {css, html, nothing, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {artifactName, withMember, withoutMember, type Artifact, type ArtifactsProjection, type ClauseVerb, type Masked, type Meta} from '@tesseradb/client';
+import {artifactName, withMember, withoutMember, type Artifact, type ArtifactsProjection, type ClauseVerb, type Meta} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {clusterLayerOf, css as rgb} from '@tesseradb/deck/internal';
+import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {refusalText, renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
-import './count.js';
 
 /**
  * The clusters on screen at the level the map draws, as a flat list, largest first: each row its
- * colour, its name, its parent's name in grey, and its masked count. The list is the colouring
+ * colour, its name, its parent's name in grey, and its exact count under the store's filters. The list is the colouring
  * layer's served artifacts while the points are coloured by a layer, else the drawn layers'.
  * `level` is the level the map draws at: on a layer that declares levels the rows are that level's
  * artifacts, the deepest served where `level` is unset; on any other layer they are the deepest
@@ -24,8 +24,11 @@ import './count.js';
  * `member_of` clause on its artifact in that position, named by the row's name; a pressed button
  * stays shown as a ×, which takes the clause off, and fills the row.
  *
- * The count is the artifact's whole membership as the viewer sees it, not the part in view; the
- * view decides only whether an artifact is listed.
+ * The counts are the server's: the list keeps an aggregate registered with the store
+ * (`Store.setAggregate`) over the artifacts it lists, the same count the legend shows for the same
+ * artifact. A count is over the artifact's whole membership that passes the filters, not the part
+ * in view; the view decides only whether an artifact is listed. Until the answer lands the rows
+ * show no count and are ordered by their masked counts.
  *
  * @summary The clusters on screen at the level drawn, with their counts.
  * @tagname tessera-artifact-list
@@ -43,7 +46,7 @@ import './count.js';
  * @csspart swatch - An artifact's colour on the map.
  * @csspart name - An artifact's name, with `data-unnamed` where it has none.
  * @csspart parent - The name of an artifact's parent, where one is served.
- * @csspart count - An artifact's `<tessera-count>`.
+ * @csspart count - An artifact's exact count, once the server's answer lands.
  * @csspart highlight - A row's Highlight button, with `aria-pressed`.
  * @csspart filter - A row's Filter button, with `aria-pressed`.
  * @csspart more - The "N more" button, which shows the next `rows` rows until the layers change.
@@ -114,10 +117,10 @@ export class TesseraArtifactList extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-3);
       }
-      [part='count']::part(count) {
+      [part='count'] {
         color: var(--_tessera-ink-2);
         font-size: 12px;
-        font-weight: 400;
+        font-variant-numeric: tabular-nums;
       }
       /* The buttons sit over the row's end, on the row's own fill, so showing them moves nothing. */
       .verbs {
@@ -164,6 +167,22 @@ export class TesseraArtifactList extends TesseraElement {
   /** Rows shown beyond `rows` after "N more" was pressed, for the layers it was pressed under. */
   @state() private accessor extra = 0;
   private extraFor = '';
+  private readonly counts = new HeldAggregate('in-view');
+  /** The artifacts the list shows, as last rendered, which its aggregate counts. */
+  private listedNow: Artifact[] = [];
+
+  override disconnectedCallback(): void {
+    this.counts.set(null, null);
+    super.disconnectedCallback();
+  }
+
+  protected override updated(): void {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta');
+    const layer = meta?.layers.find((l) => l.name === this.listedNow[0]?.layer);
+    const own = this.artifacts === null && layer && this.listedNow.every((a) => a.layer === layer.name);
+    this.counts.set(s, own && meta && this.listedNow.length > 0 ? {groupings: artifactGroupings(layer, this.listedNow, meta.selection)} : null);
+  }
 
   protected override onStoreChange(): void {
     // Other layers are another list, which starts at `rows` again.
@@ -214,9 +233,13 @@ export class TesseraArtifactList extends TesseraElement {
     if (a.status === 'refused') {
       return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Layer unavailable', a.refusal?.code)}</span></div>`;
     }
-    const listed = listedAt(source, this.level, meta, colourLayer === null);
-    if (listed.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in view</span></div>`;
-    const stale = this.resolvedStore?.get('status').stale ?? false;
+    const byMasked = listedAt(source, this.level, meta, colourLayer === null);
+    this.listedNow = byMasked;
+    if (byMasked.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in view</span></div>`;
+    const counts = countsByKey(this.counts.entry());
+    const countOf = (x: Artifact) => counts?.get(x.tesseraId.toString());
+    // Largest first by the exact counts once they land; the masked counts' order until then.
+    const listed = counts === null ? byMasked : [...byMasked].sort((x, y) => (countOf(y) ?? -1) - (countOf(x) ?? -1));
     const byId = new Map(source.map((x) => [x.tesseraId, x]));
     const shown = listed.slice(0, this.rows + this.extra);
     const n = listed.length;
@@ -228,7 +251,7 @@ export class TesseraArtifactList extends TesseraElement {
           const name = artifactName(artifact, a.attached);
           const up = artifact.parentIds.map((p) => byId.get(p)).find((p) => p !== undefined);
           const parent = up ? (artifactName(up, a.attached) ?? UNNAMED) : null;
-          const masked: Masked = {value: Number(artifact.maskedCount), exact: true};
+          const count = countOf(artifact);
           const colour = a.colours.get(a.table.ordinalOf(artifact.layer, artifact.tesseraId)) ?? NEUTRAL;
           const clauses = this.clausesOn(artifact);
           const title = name ?? UNNAMED;
@@ -258,7 +281,7 @@ export class TesseraArtifactList extends TesseraElement {
           >
             <span part="swatch" style=${`--c:${rgb(colour)}`}></span>
             <span class="names"><span part="name" ?data-unnamed=${name === null}>${title}</span>${parent === null ? nothing : html`<span part="parent">${parent}</span>`}</span>
-            <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
+            <span part="count">${count === undefined ? '' : count.toLocaleString('en-GB')}</span>
             ${filterable ? html`<span class="verbs">${verb('highlight')}${verb('filter')}</span>` : nothing}
           </li>`;
         })}
