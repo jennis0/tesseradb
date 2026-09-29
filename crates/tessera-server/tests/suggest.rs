@@ -566,6 +566,8 @@ async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
             total += expected;
         }
         assert!(total > 0, "the filter passes some item for {terms:?}");
+        let passing = (0..N).filter(|&e| sees(e) && passes(e)).count() as u64;
+        assert_eq!(body["total"], passing, "{terms:?}: total under a region leaf: {body}");
     }
 }
 
@@ -595,6 +597,43 @@ async fn a_value_the_filter_excludes_is_offered_with_zero() {
             0
         };
         assert_eq!(value["count"], expected, "{body}");
+    }
+}
+
+/// **`total` is the size of the set the counts are taken over**: this principal's visible items,
+/// within the view, passing the filter. It is present iff counts were asked for, and it counts
+/// items whose value the page does not offer.
+#[tokio::test]
+async fn total_is_the_counted_set() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _) = serve(&tmp).await;
+    let filter = serde_json::json!({ "department": { "in": ["d01", "d02", "d03"] } });
+    let passes = |e: u64| ["d01", "d02", "d03"].contains(&department_of(e).as_str());
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let visible = (0..N).filter(|&e| sees(e)).count() as u64;
+        let passing = (0..N).filter(|&e| sees(e) && passes(e)).count() as u64;
+
+        let (_, body) = get(&server, &token, "/v1/categories/archive/suggest?q=&counts=true").await;
+        assert_eq!(body["total"], visible, "{terms:?}: {body}");
+        let (_, body) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=&counts=true&view=s0").await;
+        assert_eq!(body["total"], visible, "{terms:?}: {body}");
+        let (_, body) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true&view=s0").await;
+        assert_eq!(body["total"], visible, "a narrower page counts over the same set: {body}");
+        let (status, _, body) = post(
+            &server,
+            &token,
+            "/v1/categories/archive/suggest",
+            &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": filter }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], passing, "{terms:?}: {body}");
+
+        let (_, body) = get(&server, &token, "/v1/categories/archive/suggest?q=&view=s0").await;
+        assert!(body.get("total").is_none(), "counts were not asked for: {body}");
     }
 }
 

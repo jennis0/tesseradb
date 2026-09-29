@@ -436,6 +436,10 @@ pub struct SuggestPage {
     /// How exactly the filter's `region` leaves were answered, where the request's filter holds
     /// one and counts were taken under it.
     pub region: Option<crate::RegionVerdict>,
+    /// The number of items in the set the counts were taken over: this viewer's visible items,
+    /// within the view and passing the filter where the request names them. Present iff the
+    /// request asked for counts.
+    pub total: Option<u64>,
 }
 
 /// One `/v1/categories/{column}/suggest` request, as the engine sees it.
@@ -681,6 +685,7 @@ impl Engine {
             set.as_deref(),
         )?;
         let mut region = None;
+        let mut total = None;
         let counted = match (&candidate, counts) {
             (Some(candidate), true) => {
                 // Under a view, both forms open it as the viewport does, so a count covers the
@@ -709,6 +714,7 @@ impl Engine {
                         &within
                     }
                 };
+                total = Some(set.cardinality());
                 let codes: Vec<u32> = found.iter().map(|found| found.code).collect();
                 let buffered = |visit: &mut dyn FnMut(u32, u32)| {
                     buffered_codes(&generation.bundle.manifest, &generation.buffer, column, visit)
@@ -752,6 +758,7 @@ impl Engine {
             values,
             more,
             region,
+            total,
         }))
     }
 }

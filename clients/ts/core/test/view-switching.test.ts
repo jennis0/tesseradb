@@ -212,9 +212,9 @@ describe('a switch within a group keeps the camera and the selection', () => {
     const {store} = open({view: 'v0', clock, scheduler});
     await clock.advance(1);
 
-    store.suggest('archive', '');
+    store.suggest('archive', '', 'filter');
     await clock.advance(200);
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', verb: 'filter', values: [], more: false, total: null});
 
     store.setCurrentView('v1');
     // A suggestion page is per column and view, so it does not carry over.
@@ -222,9 +222,9 @@ describe('a switch within a group keeps the camera and the selection', () => {
     expect(store.get('filters').suggestErrors).toEqual({});
 
     // The dedupe was cleared with it, so the same ask under the new view reaches the client.
-    store.suggest('archive', '');
+    store.suggest('archive', '', 'filter');
     await clock.advance(200);
-    expect(store.get('filters').suggestions['archive']).toEqual({q: '', values: [], more: false});
+    expect(store.get('filters').suggestions['archive']).toEqual({q: '', verb: 'filter', values: [], more: false, total: null});
   });
 });
 

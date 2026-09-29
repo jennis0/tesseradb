@@ -25,7 +25,7 @@ export type {
   ViewInput,
   ViewProjection
 } from './store.js';
-export type {SuggestState} from './suggestions.js';
+export type {SuggestionPage, SuggestState} from './suggestions.js';
 export type {Band, BandMembership} from './bands.js';
 export type {ComposedTile, Composition, StandInPiece} from './compose.js';
 export type {PresentedStatus, Refusal} from './presented.js';

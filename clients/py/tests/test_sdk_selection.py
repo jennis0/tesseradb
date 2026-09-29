@@ -241,6 +241,7 @@ def test_categories_with_a_prefix_counts_the_items_carrying_each_value(db, point
     found = db.categories("archive", prefix="ma")
     assert found.column_names == ["key", "code", "title", "count"]
     assert found.schema.metadata[b"tessera.more"] == b"false"
+    assert found.schema.metadata[b"tessera.total"] == str(len(points)).encode()
     found = found.to_pandas()
     assert "math" in set(found["key"])
     carried = points["archive"].value_counts()
@@ -271,6 +272,7 @@ def test_categories_under_a_filter_count_the_rows_it_passes(db, points):
     counts = dict(zip(found.column("key").to_pylist(), found.column("count").to_pylist()))
     assert counts == {key: carried.get(key, 0) for key in counts}
     assert 0 in counts.values() and any(counts.values())
+    assert found.schema.metadata[b"tessera.total"] == str(len(passing)).encode()
     with pytest.raises(Refusal):
         db.categories("archive", view="s0", filters=expression)
     with pytest.raises(Refusal):

@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {emptyDraft, type FilterDraft, type LegendProjection} from '@tesseradb/client';
+import {emptyDraft, type FilterDraft, type LegendProjection, type Meta} from '@tesseradb/client';
 import {CATEGORY_PALETTES} from '@tesseradb/deck';
 import {hexOf} from '@tesseradb/deck/internal';
 import '../src/legend.js';
@@ -427,5 +427,38 @@ describe('the colour choices across a change of viewer', () => {
     const {encodingOf} = await import('@tesseradb/deck/internal');
     const encoding = encodingOf(META, legend('field'), colouringOf(store));
     expect(encoding.kind === 'category' && encoding.chosen.size).toBe(0);
+  });
+});
+
+describe('the Colour heading under a layer with several depths served', () => {
+  const TITLE = 'HDBSCAN clusters over SPECTER2 embeddings';
+  const clusters = {name: 'clusters', title: TITLE, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'nested', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1} as unknown as Meta['layers'][number];
+  const served = (id: bigint, rung: number) => ({layer: 'clusters', tesseraId: id, key: null, maskedCount: 1n, centroid: null, box: null, shape: null, content: [], parentIds: [], rung, matched: null, highlighted: null, target: null});
+
+  async function mountHeading() {
+    const host = await mount('<tessera-legend selectable></tessera-legend>');
+    const el = host.querySelector('tessera-legend') as HTMLElement & {store: unknown; autoLevel: number | null};
+    const store = fakeStore({meta: {...META, layers: [clusters]}, status: status({}), legend: legend('cluster:clusters'), filters: filtersOf(emptyDraft(META.filterOperands))});
+    store.set('artifacts', {...store.get('artifacts'), colourServed: [served(1n, 0), served(2n, 1), served(3n, 2)]});
+    el.store = store;
+    await settle(host);
+    return {host, el};
+  }
+
+  it('names the level as its option does, lists every depth, and gives the colour-by name as its tooltip', async () => {
+    const {host, el} = await mountHeading();
+    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Deepest level');
+    const options = [...(deep(host, '[part="level-select"]') as HTMLSelectElement).options].map((o) => o.textContent);
+    expect(options).toEqual(['Deepest level', 'Level 0', 'Level 1', 'Level 2']);
+    expect(deep(host, '[part="colour-by"] .t')?.getAttribute('title')).toBe(TITLE);
+
+    el.autoLevel = 1;
+    await settle(host);
+    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Automatic (Level 1)');
+    const select = deep(host, '[part="level-select"]') as HTMLSelectElement;
+    select.value = '2';
+    select.dispatchEvent(new Event('change'));
+    await settle(host);
+    expect(deep(host, '[part="level"] .t')?.textContent).toBe('Level 2');
   });
 });

@@ -49,7 +49,7 @@ const projections = {
             expr: {title: {match: 'quantum entanglement'}},
             highlight: {archive: {in: ['quant-ph']}},
             members: [{layer: 'mesh/descriptors', artifact: 111n, outside: false, verb: 'highlight'}],
-            suggestions: {archive: {q: '', more: false, values: [{code: 1, key: 'quant-ph', title: null, match: {field: 'key', start: 0, len: 0}}]}},
+            suggestions: {archive: {q: '', verb: 'filter', more: false, total: null, values: [{code: 1, key: 'quant-ph', title: null, match: {field: 'key', start: 0, len: 0}}]}},
             suggestErrors: {}},
   legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
   replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
@@ -73,6 +73,7 @@ const store = {
   setLayers: () => {},
   openArtifact: async () => {},
   suggest: () => {},
+  forgetSuggestions: () => {},
   requestFilters: () => ({title: {match: 'quantum entanglement'}}),
   dataXY: (x: number, y: number) => [x, y] as [number, number],
   extentOf: () => null,
