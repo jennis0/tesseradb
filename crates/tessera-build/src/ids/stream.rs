@@ -685,6 +685,8 @@ impl Pass {
     /// its number, which is looked up a partition by row at a time, so the file's numbers are read
     /// in order; what that finds is sorted back into key order. So a file of edits costs two
     /// sequential passes over its values and no random reads.
+    // A record's width is the key type's, which `as_chunks` cannot take as a generic parameter.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     fn set_values<K: Key>(
         &mut self,
         unset: &RunReceipt,
