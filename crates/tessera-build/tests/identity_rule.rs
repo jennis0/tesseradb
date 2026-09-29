@@ -902,3 +902,113 @@ artifacts                 = [{ key = "p", members = { a = [1, 30, 7] } }]
     assert_eq!(refused(&report, object, "outside_limit").map(|e| e.rows), Some(1));
     assert_eq!(refused(&report, object, "names_no_item").map(|e| e.rows), Some(1));
 }
+
+/// **With two unique fields, `--limit` decides a row by the item it names, not by its own value.**
+/// The points create (a=1..3, kept) and (a=40, 50, left out). A second view's row naming a kept
+/// item by `b` joins it whatever its `a`, and one giving it a=60 moves its `a` past the limit. An
+/// attribute row naming a kept item by `b` alone, or by a=60, is read, and one naming a left-out
+/// item is outside the limit; so is a member at 40 or with no `a`, and the member at 60 is read.
+/// Nothing is refused, so `--strict` builds.
+#[test]
+fn two_unique_fields_under_limit_decide_by_the_item_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let b = |values: &[&str]| strings(&values.iter().map(|v| Some(*v)).collect::<Vec<_>>());
+    points(
+        &dir.join("points.parquet"),
+        &[Some(1), Some(2), Some(3), Some(40), Some(50)],
+        vec![("b", b(&["p1", "p2", "p3", "p40", "p50"]))],
+    );
+    points(
+        &dir.join("near.parquet"),
+        &[None, Some(60), None, Some(70)],
+        vec![("b", b(&["p1", "p3", "p50", "z"]))],
+    );
+    write(
+        &dir.join("notes.parquet"),
+        vec![
+            ("a", u64s(&[None, None, Some(1), Some(60)])),
+            ("b", strings(&[Some("p2"), Some("p40"), None, None])),
+            ("note", i64s(&[20, 400, 10, 30])),
+        ],
+    );
+    write(
+        &dir.join("members.parquet"),
+        vec![
+            ("key", strings(&[Some("k"); 4])),
+            ("a", u64s(&[Some(1), Some(60), Some(40), None])),
+        ],
+    );
+    let declaration = r#"
+[sources]
+points  = "points.parquet"
+near    = "near.parquet"
+notes   = "notes.parquet"
+members = "members.parquet"
+
+[defaults]
+source          = "points"
+allocation_view = "s0"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[view]]
+name             = "near"
+source           = "near"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "a"
+type   = "u64"
+unique = true
+
+[[attribute]]
+name   = "b"
+type   = "keyword"
+unique = true
+
+[[attribute]]
+name   = "note"
+type   = "i64"
+source = "notes"
+
+[[layer]]
+name                      = "groups"
+views                     = ["s0"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+
+  [layer.members]
+  source = "members"
+"#;
+    let out = dir.join("bundle");
+    let limited = BuildArgs {
+        limit: Some(10),
+        strict: true,
+        ..args(dir, declaration, &out)
+    };
+    let report = build(&limited).expect("a clean corpus builds under --strict");
+
+    assert_eq!(report.items, 3, "only the kept items");
+    let near = report.views.iter().find(|v| v.view_id == "near").unwrap();
+    assert_eq!(near.rows, 2, "the rows naming kept items by `b`");
+    let by_b = |value: &str| holders(&out, "b", &[UniqueKey::keyword(value)]).remove(0);
+    assert_eq!(by_b("p3"), vec![item(&out, "a", 60)], "a=60 moved to the item p3 names");
+    let records = records(&out);
+    assert!(records[&by_b("p2")[0]].contains(&(2, RecordValue::I64(20))));
+    assert!(records[&item(&out, "a", 1)].contains(&(2, RecordValue::I64(10))));
+    assert!(records[&by_b("p3")[0]].contains(&(2, RecordValue::I64(30))), "named by a=60");
+
+    let outside = |object: &str| refused(&report, object, "outside_limit").map(|e| e.rows);
+    assert_eq!(outside("attribute source 'notes'"), Some(1), "b = p40");
+    assert_eq!(outside("layer 'groups' members"), Some(2), "a = 40 and the null");
+    assert!(report.refused.iter().all(|entry| !entry.is_refusal()), "{:?}", report.refused);
+}

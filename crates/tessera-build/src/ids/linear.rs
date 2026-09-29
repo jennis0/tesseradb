@@ -5,9 +5,9 @@ use rustc_hash::FxHashMap;
 use tessera_lifecycle::resolve::{self, Batch, Holdings, RowIdentity, Verdict};
 use tessera_types::{EntityId, TesseraId};
 
-use super::report::Tally;
+use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::FileRead;
-use super::{Limit, Numbering, Numbers, Read, ReadInput, ReadRows};
+use super::{check_cap, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows};
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 use crate::spill::mix64;
@@ -47,9 +47,12 @@ impl Holdings for Held {
     }
 }
 
+/// One row the rule reads, and whether `--limit` leaves it out unless it names an item.
+type Row = (RowIdentity, bool);
+
 /// Number every file of the build.
 pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
-    let limit = Limit::of(&args.schema, args.limit)?;
+    let mut limited = Limit::of(&args.schema, args.limit)?.map(Limited::new);
     let mut held = Held::default();
     let mut next = 0u64;
     let mut numbering = Numbering {
@@ -59,90 +62,84 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
     };
     for read in super::reads(args)? {
         let mut outside = Tally::default();
-        let (identities, texts): (Vec<Option<RowIdentity>>, Option<Vec<String>>) =
-            match &read.input {
-                ReadInput::File {
-                    path,
-                    fields,
-                    select,
-                } => {
-                    let groups = FileGroups::open(path)?;
-                    let carried = super::carried_unique(groups.schema(), fields, &args.schema)
-                        .map_err(|detail| BuildError::Schema {
-                            path: path.clone(),
-                            detail,
-                        })?;
-                    let file = FileRead::new(
-                        path,
-                        &groups,
-                        &carried,
-                        select.as_ref(),
-                        limit.as_ref(),
-                        read.batch == Batch::Creates,
-                    );
-                    if read.batch != Batch::Creates {
-                        resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
-                            BuildError::Invalid(super::no_identifier(&read.object, path))
-                        })?;
-                    }
-                    let mut identities = vec![None; groups.rows() as usize];
-                    file.scan(|scanned| {
-                        for offset in 0..scanned.len {
-                            if !scanned.selected.as_ref().is_none_or(|s| s[offset]) {
-                                if scanned.outside.as_ref().is_some_and(|o| o[offset]) {
-                                    outside.refuse("outside_limit", scanned.first + offset as u64);
-                                }
-                                continue;
-                            }
-                            let carries_tessera =
-                                scanned.tessera.as_ref().is_some_and(|t| t[offset]);
-                            identities[scanned.first as usize + offset] = Some(RowIdentity {
-                                tessera_id: carries_tessera.then(|| TesseraId::new(0)),
-                                unique: carried
-                                    .iter()
-                                    .zip(&scanned.keys)
-                                    .filter_map(|(field, keys)| {
-                                        keys[offset].map(|key| (field.position, key.widen()))
-                                    })
-                                    .collect(),
-                            });
-                        }
-                        Ok(())
+        let (rows, texts): (Vec<Option<Row>>, Option<Vec<String>>) = match &read.input {
+            ReadInput::File {
+                path,
+                fields,
+                select,
+            } => {
+                let groups = FileGroups::open(path)?;
+                let carried = super::carried_unique(groups.schema(), fields, &args.schema)
+                    .map_err(|detail| BuildError::Schema {
+                        path: path.clone(),
+                        detail,
                     })?;
-                    (identities, None)
+                let creates = read.batch == Batch::Creates;
+                let limit_read = limited.as_ref().and_then(|l| l.read(&carried, creates));
+                let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit_read);
+                if !creates {
+                    resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
+                        BuildError::Invalid(super::no_identifier(&read.object, path))
+                    })?;
                 }
-                ReadInput::Lists(lists) => (
-                    {
-                        let scanned = Limit::lists(limit.as_ref(), lists);
-                        for (member, &out) in scanned.outside.iter().flatten().enumerate() {
-                            if out {
-                                outside.refuse("outside_limit", member as u64);
+                let mut rows = vec![None; groups.rows() as usize];
+                file.scan(|scanned| {
+                    for offset in 0..scanned.len {
+                        if !scanned.selected.as_ref().is_none_or(|s| s[offset]) {
+                            if scanned.outside.as_ref().is_some_and(|o| o[offset]) {
+                                outside.refuse(OUTSIDE_LIMIT, scanned.first + offset as u64);
                             }
+                            continue;
                         }
-                        let selected = scanned.selected;
-                        (0..lists.len())
-                        .map(|member| {
-                            if selected.as_ref().is_some_and(|s| !s[member]) {
-                                return None;
-                            }
-                            Some(RowIdentity {
-                                tessera_id: None,
-                                unique: lists
-                                    .carried
-                                    .iter()
-                                    .zip(&lists.keys)
-                                    .filter_map(|(field, keys)| {
-                                        keys[member].map(|key| (field.position, key.widen()))
-                                    })
-                                    .collect(),
-                            })
-                        })
-                        .collect()
-                    },
-                    Some(lists.texts.clone()),
-                ),
-            };
-        let (rows, mut tally) = decide(&read, &identities, &mut held, &mut next)?;
+                        let carries_tessera = scanned.tessera.as_ref().is_some_and(|t| t[offset]);
+                        let identity = RowIdentity {
+                            tessera_id: carries_tessera.then(|| TesseraId::new(0)),
+                            unique: carried
+                                .iter()
+                                .zip(&scanned.keys)
+                                .filter_map(|(field, keys)| {
+                                    keys[offset].map(|key| (field.position, key.widen()))
+                                })
+                                .collect(),
+                        };
+                        let left_out = scanned.left_out.as_ref().is_some_and(|l| l[offset]);
+                        rows[scanned.first as usize + offset] = Some((identity, left_out));
+                    }
+                    Ok(())
+                })?;
+                (rows, None)
+            }
+            ReadInput::Lists(lists) => {
+                let scanned = Limited::lists(limited.as_ref(), lists);
+                for (member, &out) in scanned.outside.iter().flatten().enumerate() {
+                    if out {
+                        outside.refuse(OUTSIDE_LIMIT, member as u64);
+                    }
+                }
+                let rows = (0..lists.len())
+                    .map(|member| {
+                        if scanned.selected.as_ref().is_some_and(|s| !s[member]) {
+                            return None;
+                        }
+                        let identity = RowIdentity {
+                            tessera_id: None,
+                            unique: lists
+                                .carried
+                                .iter()
+                                .zip(&lists.keys)
+                                .filter_map(|(field, keys)| {
+                                    keys[member].map(|key| (field.position, key.widen()))
+                                })
+                                .collect(),
+                        };
+                        let left_out = scanned.left_out.as_ref().is_some_and(|l| l[member]);
+                        Some((identity, left_out))
+                    })
+                    .collect();
+                (rows, Some(lists.texts.clone()))
+            }
+        };
+        let (rows, mut tally) = decide(&read, &rows, &mut held, &mut next, limited.as_mut())?;
         tally.merge(outside);
         let refused = match (&read.input, texts) {
             (_, Some(texts)) => {
@@ -155,14 +152,7 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
                         path: path.clone(),
                         detail,
                     })?;
-                let file = FileRead::new(
-                    path,
-                    &groups,
-                    &carried,
-                    select.as_ref(),
-                    limit.as_ref(),
-                    read.batch == Batch::Creates,
-                );
+                let file = FileRead::new(path, &groups, &carried, select.as_ref(), None);
                 let values = file.values_at(&tally.sampled())?;
                 tally.finish(&read.source, &read.object, |row| {
                     values.get(&row).cloned().unwrap_or_else(|| format!("row {row}"))
@@ -180,31 +170,46 @@ pub(crate) fn number(args: &crate::BuildArgs) -> Result<Numbering> {
     Ok(numbering)
 }
 
-/// One file's rows decided by the rule: the selected rows resolved as one batch against what the
+/// One file's rows decided by the rule: the rows read resolved as one batch against what the
 /// earlier files hold, the new items numbered in row order, and the values set taken into the
-/// holdings.
+/// holdings. A row `--limit` leaves out unless it names an item, and which names none, is not part
+/// of the batch.
 fn decide(
     read: &Read,
-    identities: &[Option<RowIdentity>],
+    rows: &[Option<Row>],
     held: &mut Held,
     next: &mut u64,
+    mut limited: Option<&mut Limited>,
 ) -> Result<(ReadRows, Tally)> {
-    let rows: Vec<usize> = (0..identities.len())
-        .filter(|&row| identities[row].is_some())
-        .collect();
-    let batch: Vec<RowIdentity> = rows
-        .iter()
-        .map(|&row| identities[row].clone().expect("selected"))
-        .collect();
+    let mut tally = Tally::default();
+    let mut positions: Vec<usize> = Vec::new();
+    let mut batch: Vec<RowIdentity> = Vec::new();
+    for (row, entry) in rows.iter().enumerate() {
+        let Some((identity, left_out)) = entry else {
+            continue;
+        };
+        let names = identity.tessera_id.is_some()
+            || identity
+                .unique
+                .iter()
+                .any(|value| held.holder.contains_key(value));
+        if *left_out && !names {
+            if read.batch != Batch::Creates {
+                tally.refuse(OUTSIDE_LIMIT, row as u64);
+            }
+            continue;
+        }
+        positions.push(row);
+        batch.push(identity.clone());
+    }
     let verdicts = match resolve::resolve(&batch, held, read.batch) {
         Ok(verdicts) => verdicts,
         Err(never) => match never {},
     };
-    let mut numbers = vec![0u32; identities.len()];
-    let mut tally = Tally::default();
+    let mut numbers = vec![0u32; rows.len()];
     let mut named = 0u64;
     let mut mixed = 0u64;
-    for ((&row, verdict), identity) in rows.iter().zip(&verdicts).zip(&batch) {
+    for ((&row, verdict), identity) in positions.iter().zip(&verdicts).zip(&batch) {
         let item = match verdict {
             Verdict::Refused(refusal) => {
                 tally.refuse_row(refusal, row as u64);
@@ -212,6 +217,7 @@ fn decide(
             }
             Verdict::Names(entity) => entity.raw() as u32,
             Verdict::Creates => {
+                check_cap(*next + 1)?;
                 let item = *next as u32;
                 *next += 1;
                 item
@@ -228,6 +234,12 @@ fn decide(
                     }
                 }
                 held.holder.insert((field, key), item);
+                if let Some(limited) = limited.as_deref_mut() {
+                    limited.given(field);
+                    if limited.raises(field, key) {
+                        limited.raise();
+                    }
+                }
             }
         }
     }

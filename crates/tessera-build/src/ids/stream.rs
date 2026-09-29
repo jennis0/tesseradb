@@ -14,34 +14,39 @@
 //!    row order.
 //! 4. **Holdings.** The keys the file's accepted rows gave items become a new run for later files.
 //!
-//! Every pass is sequential in the file's row order or in key order. A file whose rows all create
-//! items, with nothing refused, is numbered by its row position alone and writes no numbers: the
-//! first view of a corpus whose values are unique costs one sort per field, and its sorted keys
-//! are the next file's holdings as they stand.
+//! Every pass is sequential in the file's row order or in key order, and holds no more memory than
+//! its sorts' share of the budget whatever the file holds: in a file carrying several fields, the
+//! rows of each unset value that several rows carry go through a sort of their own, and which of
+//! them sets it is kept as a bit on disk. A file whose rows all create items, with nothing refused,
+//! is numbered by its row position alone and writes no numbers: the first view of a corpus whose
+//! values are unique costs one sort per field, and its sorted keys are the next file's holdings as
+//! they stand.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 use tessera_lifecycle::resolve::{self, Batch, Named, Refusal};
 use tessera_store::key_index::{Key, KeySpill};
 use super::run::{RunReader, RunReceipt, RunWriter};
 use tessera_store::unique::{KeyKind, UniqueKey};
 use tessera_types::EntityId;
 
-use super::report::Tally;
+use super::report::{Tally, OUTSIDE_LIMIT};
 use super::scan::{FileRead, Scanned};
-use super::{CarriedField, Limit, Numbering, Numbers, Read, ReadInput, ReadRows};
+use super::{check_cap, CarriedField, Limit, Limited, Numbering, Numbers, Read, ReadInput, ReadRows};
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
 use crate::spill::{self, boundaries_uniform, mix64, MappedArray, Partition};
 
-/// The most items a build numbers: the codes above it are the walk's decisions.
-const ITEMS_MAX: u64 = u32::MAX as u64 - 4;
-
 /// A row the walk has not decided, in a file's numbers.
 const PENDING: u32 = u32::MAX;
+
+/// A row the walk has not decided and `--limit` leaves out unless it names an item, in a file's
+/// numbers.
+const LEFT_OUT: u32 = u32::MAX - 1;
 
 /// A decision about one row, routed by row: an item it names (`item + 1`), or a refusal.
 const UNKNOWN_TESSERA_ID: u32 = u32::MAX;
@@ -72,11 +77,11 @@ pub(super) fn number_with(
     let budget = args
         .memory_budget
         .unwrap_or_else(crate::pipeline::detect_memory_budget);
-    let limit = Limit::of(&args.schema, args.limit)?;
     let mut pass = Pass {
         tmp: tmp.to_path_buf(),
         sort_bytes: (budget / SORT_SHARE).clamp(SORT_MIN, SORT_MAX) as usize,
         held: BTreeMap::new(),
+        limited: Limit::of(&args.schema, args.limit)?.map(Limited::new),
         zip_trial,
         next: 0,
         sequence: 0,
@@ -87,7 +92,7 @@ pub(super) fn number_with(
         refused: Vec::new(),
     };
     for read in super::reads(args)? {
-        let (rows, refused) = pass.read(args, &read, limit.as_ref())?;
+        let (rows, refused) = pass.read(args, &read)?;
         if args.strict && refused.iter().any(super::RefusedRows::is_refusal) {
             return Err(strict_refusal(&refused));
         }
@@ -130,6 +135,38 @@ struct ZipSource {
     field: CarriedField,
     /// Its rows when it was numbered.
     rows: u64,
+    stamp: Stamp,
+}
+
+/// A file's length and modification time, which a rewrite of the file changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Stamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    pub(super) fn of(path: &Path) -> Result<Stamp> {
+        let metadata = std::fs::metadata(path).map_err(|e| BuildError::io(path, e))?;
+        Ok(Stamp {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    /// Refuse a file that is not the one stamped, `rows` then and `now` rows now.
+    pub(super) fn check(&self, path: &Path, rows: u64, now: u64) -> Result<()> {
+        if rows != now || Stamp::of(path)? != *self {
+            return Err(BuildError::Invalid(format!(
+                "{} changed while the build read it: it held {rows} rows of {} bytes and holds \
+                 {now} rows of {} bytes. Build again from files that do not change",
+                path.display(),
+                self.len,
+                Stamp::of(path)?.len,
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// One field's keys of a file, row after row, decoded on a thread of their own.
@@ -149,15 +186,7 @@ impl KeyStream {
             .spawn(move || {
                 let read = || -> Result<()> {
                     let groups = FileGroups::open(&source.path)?;
-                    if groups.rows() != source.rows {
-                        return Err(BuildError::Invalid(format!(
-                            "{} changed while the build read it: it held {} rows and holds {}. \
-                             Build again from files that do not change",
-                            source.path.display(),
-                            source.rows,
-                            groups.rows()
-                        )));
-                    }
+                    source.stamp.check(&source.path, source.rows, groups.rows())?;
                     let (index, _) = groups
                         .schema()
                         .column_with_name(&source.field.column)
@@ -223,6 +252,7 @@ struct Pass {
     tmp: PathBuf,
     sort_bytes: usize,
     held: BTreeMap<u16, Vec<HeldRun>>,
+    limited: Option<Limited>,
     /// [`ZIP_TRIAL`], lowered by tests.
     zip_trial: u64,
     next: u64,
@@ -278,19 +308,20 @@ impl FieldSort {
     }
 }
 
-/// The rows of a run of one unset value that several rows carry, in a file carrying several
-/// fields: which of them sets it is decided once every field is merged.
-struct Candidate {
-    field: u16,
-    key: u128,
-    rows: Vec<u32>,
-}
-
 /// What merging one field against the holdings found.
 struct Merged {
     /// The file's `(key, row)` for keys nobody held, sorted: the values its accepted rows may set.
     unset: Option<RunReceipt>,
-    candidates: Vec<Candidate>,
+    /// How many unset values several rows carry, in a file carrying several fields: which of those
+    /// rows sets each is decided once every field is merged.
+    candidates: u64,
+}
+
+/// A row of an unset value several rows carry, as the candidates' sort keys it: in row order, and
+/// a row's values in the order of the fields the file carries. The entry beside it is the value's
+/// number among its field's candidates.
+fn candidate_key(row: u32, field: usize) -> u64 {
+    u64::from(row) << 16 | field as u64
 }
 
 impl Pass {
@@ -321,7 +352,6 @@ impl Pass {
         &mut self,
         args: &crate::BuildArgs,
         read: &Read,
-        limit: Option<&Limit>,
     ) -> Result<(ReadRows, Vec<super::RefusedRows>)> {
         match &read.input {
             ReadInput::File {
@@ -335,15 +365,10 @@ impl Pass {
                         path: path.clone(),
                         detail,
                     })?;
-                let file = FileRead::new(
-                    path,
-                    &groups,
-                    &carried,
-                    select.as_ref(),
-                    limit,
-                    read.batch == Batch::Creates,
-                );
-                if read.batch != Batch::Creates {
+                let creates = read.batch == Batch::Creates;
+                let limit = self.limited.as_ref().and_then(|l| l.read(&carried, creates));
+                let file = FileRead::new(path, &groups, &carried, select.as_ref(), limit);
+                if !creates {
                     resolve::require_identifier(file.tessera, carried.len()).map_err(|_| {
                         BuildError::Invalid(super::no_identifier(&read.object, path))
                     })?;
@@ -371,7 +396,8 @@ impl Pass {
                 ))
             }
             ReadInput::Lists(lists) => {
-                let (rows, tally) = self.number_rows(read, Input::Lists(lists, limit))?;
+                let scanned = Limited::lists(self.limited.as_ref(), lists);
+                let (rows, tally) = self.number_rows(read, Input::Lists(lists, &scanned))?;
                 let refused = tally.finish(&read.source, &read.object, |row| {
                     lists.texts[row as usize].clone()
                 });
@@ -395,6 +421,10 @@ impl Pass {
         let single = carried.len() == 1;
         let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
         let one_row_per_item = read.batch != Batch::Names;
+        // Where the file carries several fields, what is left to decide once every field is merged
+        // is decided after the walk: one item twice, and which row sets a value several carry.
+        let deferred = !single && (one_row_per_item || sets_values);
+        let sorts_candidates = sets_values && !single;
         let mut tally = Tally::default();
 
         // A file of new items with nothing to name them by: each row is the next item.
@@ -413,17 +443,22 @@ impl Pass {
         let boundaries = boundaries_uniform(total);
         let mut updates = Partition::create(&updates_path, "row", boundaries.clone(), 8, total)?;
         let mut decided = 0u64;
-        // Every field's sort is held at once, so they share the sort's part of the budget.
-        let sort_bytes = (self.sort_bytes / carried.len().max(1)).max(SORT_MIN as usize);
+        // The sorts held at once share the sort's part of the budget: every field's while the
+        // file is merged, and after it, the candidates', the named items' and the refused rows'.
+        let spills = match deferred {
+            true => (carried.len() + usize::from(sorts_candidates)).max(3),
+            false => carried.len().max(1),
+        };
+        let share = (self.sort_bytes / spills).max(SORT_MIN as usize);
+        let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
         let mut sorts: Vec<FieldSort> = carried
             .iter()
             .map(|field| {
-                let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
                 Ok(match KeyKind::of(field.ty) {
                     Some(KeyKind::Keyword) => {
-                        FieldSort::Keyword(KeySpill::create(&self.tmp, sort_bytes).map_err(store)?)
+                        FieldSort::Keyword(KeySpill::create(&self.tmp, share).map_err(store)?)
                     }
-                    _ => FieldSort::Int(KeySpill::create(&self.tmp, sort_bytes).map_err(store)?),
+                    _ => FieldSort::Int(KeySpill::create(&self.tmp, share).map_err(store)?),
                 })
             })
             .collect::<Result<_>>()?;
@@ -443,21 +478,26 @@ impl Pass {
             _ => None,
         };
         let ordered = zip.is_some();
+        let comparing = Cell::new(ordered);
         let mut zip = zip;
         // Rows compared and rows that matched: a file in another order stops being compared.
         let (mut compared, mut matched) = (0u64, 0u64);
-        let mut on_batch = |scanned: Scanned| -> Result<()> {
+        let mut on_batch = |scanned: &Scanned| -> Result<()> {
             let numbers = rows.as_mut().map(Rows::slice);
             let mut numbers = numbers;
             for offset in 0..scanned.len {
                 let row = scanned.first + offset as u64;
                 let selected = scanned.selected.as_ref().is_none_or(|s| s[offset]);
                 if let Some(numbers) = numbers.as_deref_mut() {
-                    numbers[row as usize] = if selected { PENDING } else { 0 };
+                    numbers[row as usize] = match selected {
+                        false => 0,
+                        true if scanned.left_out.as_ref().is_some_and(|l| l[offset]) => LEFT_OUT,
+                        true => PENDING,
+                    };
                 }
                 if !selected {
                     if scanned.outside.as_ref().is_some_and(|o| o[offset]) {
-                        tally.refuse("outside_limit", row);
+                        tally.refuse(OUTSIDE_LIMIT, row);
                     }
                     continue;
                 }
@@ -476,6 +516,7 @@ impl Pass {
                         }
                         if compared == self.zip_trial && matched * 2 < compared {
                             zip = None;
+                            comparing.set(false);
                         }
                         if hit {
                             continue;
@@ -491,14 +532,20 @@ impl Pass {
             Ok(())
         };
         match &input {
-            Input::File(file) if ordered => file.scan_ordered(&mut on_batch)?,
-            Input::File(file) => file.scan(&mut on_batch)?,
-            Input::Lists(lists, limit) => on_batch(Limit::lists(*limit, lists))?,
+            Input::File(file) if ordered => {
+                file.scan_ordered(|| comparing.get(), |scanned| on_batch(&scanned))?
+            }
+            Input::File(file) => file.scan(|scanned| on_batch(&scanned))?,
+            Input::Lists(_, scanned) => on_batch(scanned)?,
         }
 
         // ---- 2. merge each field against what earlier files hold ------------------------------
+        let mut candidates: Option<KeySpill<u64>> = match sorts_candidates {
+            true => Some(KeySpill::create(&self.tmp, share).map_err(store)?),
+            false => None,
+        };
         let mut merged: Vec<Merged> = Vec::with_capacity(carried.len());
-        for (field, sort) in carried.iter().zip(sorts) {
+        for (index, (field, sort)) in carried.iter().zip(sorts).enumerate() {
             let context = FieldContext {
                 single,
                 creates,
@@ -507,21 +554,24 @@ impl Pass {
             };
             let unset_path = self.scratch("unset");
             let runs = self.held.get(&field.position).map_or(&[][..], Vec::as_slice);
+            let merge = Merge {
+                index,
+                context,
+                unset_path: &unset_path,
+                updates: &mut updates,
+                candidates: candidates.as_mut(),
+            };
             let outcome = match sort {
-                FieldSort::Int(sort) => {
-                    merge_field::<u64>(sort, runs, field, context, &unset_path, &mut updates)?
-                }
-                FieldSort::Keyword(sort) => {
-                    merge_field::<u128>(sort, runs, field, context, &unset_path, &mut updates)?
-                }
+                FieldSort::Int(sort) => merge_field::<u64>(sort, runs, merge)?,
+                FieldSort::Keyword(sort) => merge_field::<u128>(sort, runs, merge)?,
             };
             decided += outcome.1;
             merged.push(outcome.0);
         }
-        let updates = updates.finish()?;
+        let mut updates = updates.finish()?;
 
         // A file of new items that named nothing and was refused nothing: row `r` is `base + r`.
-        if lazy && decided == 0 && merged.iter().all(|m| m.candidates.is_empty()) {
+        if lazy && decided == 0 && merged.iter().all(|m| m.candidates == 0) {
             let offset = self.offset(base, total)?;
             for (field, outcome) in carried.iter().zip(merged) {
                 if let Some(unset) = outcome.unset {
@@ -530,9 +580,13 @@ impl Pass {
                             path: file.path.to_path_buf(),
                             field: field.clone(),
                             rows: total,
+                            stamp: Stamp::of(file.path)?,
                         }),
                         Input::Lists(..) => None,
                     };
+                    if let Some(limited) = self.limited.as_mut().filter(|_| unset.count() > 0) {
+                        limited.given(field.position);
+                    }
                     self.held.entry(field.position).or_default().push(HeldRun {
                         receipt: unset,
                         base: Some(base as u32),
@@ -550,18 +604,14 @@ impl Pass {
         // ---- 3. walk the decisions in row order ------------------------------------------------
         // Where the file carries one field, nothing is left to decide once the walk has applied the
         // merge's decisions, so the walk numbers the rows too.
-        let deferred = !single && (one_row_per_item || sets_values);
         let mut named_items: Option<KeySpill<u32>> = match deferred && one_row_per_item {
-            true => Some(
-                KeySpill::create(&self.tmp, self.sort_bytes)
-                    .map_err(|e| BuildError::Invalid(e.to_string()))?,
-            ),
+            true => Some(KeySpill::create(&self.tmp, share).map_err(store)?),
             false => None,
         };
         let mut numbering = FileNumbers::new(base, creates);
         walk(
             &mut rows,
-            &updates,
+            &mut updates,
             &boundaries,
             total,
             lazy,
@@ -570,57 +620,68 @@ impl Pass {
             &mut named_items,
             (!deferred).then_some(&mut numbering),
         )?;
+        drop(updates);
 
         // ---- 4. with several fields: one item twice, one value twice, then the numbers --------
         if deferred {
             let numbers = rows.slice();
             if let Some(named) = named_items {
-                let mut later: Vec<u32> = Vec::new();
-                let mut stream: Vec<(u32, usize)> = Vec::new();
-                let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+                let mut later = KeySpill::<u32>::create(&self.tmp, share).map_err(store)?;
+                // A run of one item is held as its first row and the row after it.
+                let mut run: Vec<(u32, usize)> = Vec::with_capacity(2);
                 named
                     .drain(|item, row| {
-                        stream.push((item, row as usize));
-                        // Runs of one item are short; decide each as it closes.
-                        if stream.len() > 1 && stream[stream.len() - 2].0 != item {
-                            let last = stream.pop().expect("pushed");
-                            later.extend(resolve::collisions(stream.drain(..)).map(|(_, r)| r as u32));
-                            stream.push(last);
+                        if run.first().is_some_and(|&(held, _)| held != item) {
+                            run.clear();
                         }
+                        run.push((item, row as usize));
+                        for (_, refused) in resolve::collisions(run.iter().copied()) {
+                            later.push(refused as u32, 0)?;
+                        }
+                        run.truncate(1);
                         Ok(())
                     })
                     .map_err(store)?;
-                later.extend(resolve::collisions(stream.drain(..)).map(|(_, r)| r as u32));
-                later.sort_unstable();
-                for row in later {
-                    numbers[row as usize] = 0;
-                    tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
-                }
-            }
-            if sets_values {
-                let mut involved: BTreeMap<u32, Vec<(u16, u128)>> = BTreeMap::new();
-                for outcome in &merged {
-                    for candidate in &outcome.candidates {
-                        for &row in &candidate.rows {
-                            involved
-                                .entry(row)
-                                .or_default()
-                                .push((candidate.field, candidate.key));
-                        }
-                    }
-                }
-                let mut claimed: FxHashMap<(u16, u128), usize> = FxHashMap::default();
-                for (row, values) in involved {
-                    // A refused row claims nothing, nor does one naming no item where rows do not
-                    // create: the numbering refuses it.
-                    let stored = numbers[row as usize];
-                    if stored == 0 || (stored == PENDING && !creates) {
-                        continue;
-                    }
-                    if resolve::one_value_twice(&mut claimed, row as usize, &values).is_some() {
+                later
+                    .drain(|row, _| {
                         numbers[row as usize] = 0;
-                        tally.refuse(Refusal::ONE_VALUE_TWICE, u64::from(row));
-                    }
+                        tally.refuse(Refusal::ONE_ITEM_TWICE, u64::from(row));
+                        Ok(())
+                    })
+                    .map_err(store)?;
+            }
+            let total_candidates: u64 = merged.iter().map(|m| m.candidates).sum();
+            if let Some(candidates) = candidates.filter(|_| total_candidates > 0) {
+                // Each candidate value's bit: its field's first, plus its number in the field.
+                let firsts: Vec<u64> = merged
+                    .iter()
+                    .scan(0u64, |sum, m| {
+                        let first = *sum;
+                        *sum += m.candidates;
+                        Some(first)
+                    })
+                    .collect();
+                let name = self.name("claimed");
+                let words = total_candidates.div_ceil(64) as usize;
+                let mut claimed = MappedArray::<u64>::zeroed(&self.tmp, &name, words)?;
+                let claimed = claimed.as_mut_slice();
+                let mut at: Option<u32> = None;
+                let mut bits: Vec<u64> = Vec::new();
+                candidates
+                    .drain(|key, number| {
+                        let row = (key >> 16) as u32;
+                        if let Some(done) = at.filter(|&done| done != row) {
+                            let stored = &mut numbers[done as usize];
+                            claim(stored, done, &bits, claimed, creates, &mut tally);
+                            bits.clear();
+                        }
+                        at = Some(row);
+                        bits.push(firsts[(key & 0xffff) as usize] + u64::from(number));
+                        Ok(())
+                    })
+                    .map_err(store)?;
+                if let Some(done) = at {
+                    claim(&mut numbers[done as usize], done, &bits, claimed, creates, &mut tally);
                 }
             }
             for (row, number) in numbers.iter_mut().enumerate() {
@@ -637,11 +698,25 @@ impl Pass {
             for (field, outcome) in carried.iter().zip(merged) {
                 let Some(unset) = outcome.unset else { continue };
                 let kind = KeyKind::of(field.ty).expect("a unique field has a key kind");
-                let (runs, retired) = match kind {
-                    KeyKind::Keyword => self.set_values::<u128>(&unset, numbers, &created, base)?,
-                    _ => self.set_values::<u64>(&unset, numbers, &created, base)?,
+                let limit = self
+                    .limited
+                    .as_ref()
+                    .filter(|l| l.limit.position == field.position)
+                    .map(|l| l.limit.clone());
+                let (runs, retired, raised) = match kind {
+                    KeyKind::Keyword => {
+                        self.set_values::<u128>(unset, numbers, &created, base, limit.as_ref())?
+                    }
+                    _ => self.set_values::<u64>(unset, numbers, &created, base, limit.as_ref())?,
                 };
-                let _ = std::fs::remove_file(&unset.path);
+                if let Some(limited) = self.limited.as_mut() {
+                    if runs.iter().any(|run| run.receipt.count() > 0) {
+                        limited.given(field.position);
+                    }
+                    if raised {
+                        limited.raise();
+                    }
+                }
                 let held_before = self.held.get(&field.position).is_some_and(|runs| !runs.is_empty());
                 if held_before && !retired.is_empty() {
                     self.retire(field.position, kind, &retired)?;
@@ -679,22 +754,31 @@ impl Pass {
     }
 
     /// Turn a file's unset `(key, row)` into runs of `(key, item)` for the rows the rule accepted,
-    /// and name the items whose value of this field changed.
+    /// name the items whose value of this field changed, and say whether one was given a value at
+    /// or above `limit`. The unset run is removed once read.
     ///
     /// A created row's item is its rank among the file's created rows. Every other row's item is
     /// its number, which is looked up a partition by row at a time, so the file's numbers are read
     /// in order; what that finds is sorted back into key order. So a file of edits costs two
-    /// sequential passes over its values and no random reads.
+    /// sequential passes over its values and no random reads, and its disk at any moment is the
+    /// unset run beside what it is turned into, then one copy of the edits.
     // A record's width is the key type's, which `as_chunks` cannot take as a generic parameter.
     #[allow(clippy::chunks_exact_to_as_chunks)]
     fn set_values<K: Key>(
         &mut self,
-        unset: &RunReceipt,
+        unset: RunReceipt,
         numbers: &[u32],
         created: &Created,
         base: u64,
-    ) -> Result<(Vec<HeldRun>, croaring::Bitmap)> {
+        limit: Option<&Limit>,
+    ) -> Result<(Vec<HeldRun>, croaring::Bitmap, bool)> {
         let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+        let mut raised = false;
+        let mut note = |key: K| {
+            if limit.is_some_and(|limit| limit.beyond(key.widen() as u64)) {
+                raised = true;
+            }
+        };
         let created_path = self.scratch("held");
         let mut created_run = RunWriter::<K>::create(&created_path)?;
         let by_row_path = self.scratch("named-by-row");
@@ -702,11 +786,12 @@ impl Pass {
         let total = numbers.len() as u64;
         let boundaries = boundaries_uniform(total);
         let mut by_row = Partition::create(&by_row_path, "row", boundaries, 4 + K::WIDTH, total)?;
-        let mut reader = RunReader::<K>::open(unset)?;
+        let mut reader = RunReader::<K>::open(&unset)?;
         let mut record = [0u8; 20];
         while let Some((key, row)) = reader.next_entry()? {
             let row64 = u64::from(row);
             if created.contains(row64) {
+                note(key);
                 created_run.push(key, (base + created.rank(row64)) as u32)?;
                 continue;
             }
@@ -714,20 +799,25 @@ impl Pass {
             key.write(&mut record[4..4 + K::WIDTH]);
             by_row.push(&record[..4 + K::WIDTH])?;
         }
+        drop(reader);
+        let _ = std::fs::remove_file(&unset.path);
         let buckets = by_row.buckets();
-        let by_row = by_row.finish()?;
+        let mut by_row = by_row.finish()?;
         let mut named = KeySpill::<K>::create(&self.tmp, self.sort_bytes).map_err(store)?;
         let mut retired = croaring::Bitmap::new();
         for k in 0..buckets {
             let bytes = by_row.load(k)?;
+            by_row.delete(k)?;
             for entry in bytes.chunks_exact(4 + K::WIDTH) {
                 let row = u32::from_le_bytes(entry[..4].try_into().expect("four bytes"));
                 // A row naming an item and giving it a value it did not hold: its old one goes.
                 let Some(item) = numbers[row as usize].checked_sub(1) else {
                     continue;
                 };
+                let key = K::read(&entry[4..]);
+                note(key);
                 retired.add(item);
-                named.push(K::read(&entry[4..]), item).map_err(store)?;
+                named.push(key, item).map_err(store)?;
             }
         }
         drop(by_row);
@@ -751,7 +841,7 @@ impl Pass {
                 source: None,
             })
             .collect();
-        Ok((runs, retired))
+        Ok((runs, retired, raised))
     }
 
     /// Drop the holdings of `items` from every run of one field: their values changed.
@@ -774,7 +864,7 @@ impl Pass {
 /// Where a file's rows come from.
 enum Input<'a> {
     File(&'a FileRead<'a>),
-    Lists(&'a crate::layers::MemberLists, Option<&'a Limit>),
+    Lists(&'a crate::layers::MemberLists, &'a Scanned),
 }
 
 /// What the rule lets a file's rows do, for the merge of one field.
@@ -841,17 +931,44 @@ impl<K: Key> HeldCursor<K> {
     }
 }
 
+/// Where the merge of one field sends what it finds.
+struct Merge<'a> {
+    /// The field's place among those the file carries.
+    index: usize,
+    context: FieldContext,
+    unset_path: &'a Path,
+    updates: &'a mut Partition,
+    /// The rows of each unset value several rows carry, where the file carries several fields
+    /// and sets values.
+    candidates: Option<&'a mut KeySpill<u64>>,
+}
+
+/// The run of one key being merged.
+struct KeyRun<K> {
+    key: K,
+    holder: Option<u32>,
+    /// Its first row, and how many rows it has had.
+    first: u32,
+    rows: u64,
+    /// Its number among the field's candidates, once a second row makes it one.
+    candidate: Option<u32>,
+}
+
 /// Merge one field's sorted `(key, row)` against its holdings: route each decision to `updates`,
-/// write the keys nobody held for the holdings, and gather the runs of one unset value that
-/// several rows carry. Returns what was found and how many decisions were routed.
+/// write the keys nobody held for the holdings, and send the rows of each unset value several
+/// rows carry to the candidates' sort. Returns what was found and how many decisions were routed.
 fn merge_field<K: Key>(
     sort: KeySpill<K>,
     runs: &[HeldRun],
-    field: &CarriedField,
-    context: FieldContext,
-    unset_path: &Path,
-    updates: &mut Partition,
+    merge: Merge<'_>,
 ) -> Result<(Merged, u64)> {
+    let Merge {
+        index,
+        context,
+        unset_path,
+        updates,
+        mut candidates,
+    } = merge;
     let mut held = HeldCursor::<K>::open(runs)?;
     // The unset keys matter only where a row may set them: a new item's, or an edit's where the
     // file names items by another field too.
@@ -860,37 +977,26 @@ fn merge_field<K: Key>(
         true => Some(RunWriter::<K>::create(unset_path)?),
         false => None,
     };
-    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut numbered = 0u64;
     let mut decided = 0u64;
-    // The run of one key being walked: the key, its holder, and its rows so far.
-    let mut current: Option<(K, Option<u32>, Vec<u32>)> = None;
-    let close = |run: Option<(K, Option<u32>, Vec<u32>)>, candidates: &mut Vec<Candidate>| {
-        if let Some((key, None, rows)) = run {
-            if rows.len() > 1 && context.sets_values && !context.single {
-                candidates.push(Candidate {
-                    field: field.position,
-                    key: key.widen(),
-                    rows,
-                });
-            }
-        }
-    };
+    let mut current: Option<KeyRun<K>> = None;
     let mut failure: Option<BuildError> = None;
     let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
     sort.drain(|key, row| {
         let result = (|| -> Result<()> {
-            let same = current.as_ref().is_some_and(|(held_key, _, _)| *held_key == key);
-            if !same {
-                close(current.take(), &mut candidates);
-                current = Some((key, held.holder(key)?, Vec::new()));
+            if current.as_ref().is_none_or(|run| run.key != key) {
+                current = Some(KeyRun {
+                    key,
+                    holder: held.holder(key)?,
+                    first: row,
+                    rows: 0,
+                    candidate: None,
+                });
             }
-            let (_, holder, rows) = current.as_mut().expect("opened above");
-            let first = rows.is_empty();
-            // Only a run that may become a candidate keeps its rows.
-            if first || (holder.is_none() && context.sets_values && !context.single) {
-                rows.push(row);
-            }
-            match *holder {
+            let run = current.as_mut().expect("opened above");
+            let first = run.rows == 0;
+            run.rows += 1;
+            match run.holder {
                 Some(item) => {
                     let code = match first || !(context.single && context.one_row_per_item) {
                         true => item + 1,
@@ -906,6 +1012,20 @@ fn merge_field<K: Key>(
                     } else if let Some(unset) = unset.as_mut() {
                         unset.push(key, row)?;
                     }
+                    if let Some(candidates) = candidates.as_deref_mut().filter(|_| !first) {
+                        let number = match run.candidate {
+                            Some(number) => number,
+                            None => {
+                                let number = numbered as u32;
+                                numbered += 1;
+                                let first = candidate_key(run.first, index);
+                                candidates.push(first, number).map_err(store)?;
+                                run.candidate = Some(number);
+                                number
+                            }
+                        };
+                        candidates.push(candidate_key(row, index), number).map_err(store)?;
+                    }
                 }
             }
             Ok(())
@@ -919,15 +1039,39 @@ fn merge_field<K: Key>(
         Ok(())
     })
     .map_err(|e| failure.take().unwrap_or_else(|| store(e)))?;
-    close(current.take(), &mut candidates);
     held.finish()?;
     Ok((
         Merged {
             unset: unset.map(RunWriter::finish).transpose()?,
-            candidates,
+            candidates: numbered,
         },
         decided,
     ))
+}
+
+/// Decide one row's claim on the unset values it carries that several rows carry, each a bit of
+/// `claimed`: refused where an earlier row claimed one, and claiming them all otherwise. A row
+/// refused, left out, or naming no item where rows do not create claims nothing.
+fn claim(
+    stored: &mut u32,
+    row: u32,
+    bits: &[u64],
+    claimed: &mut [u64],
+    creates: bool,
+    tally: &mut Tally,
+) {
+    if *stored == 0 || *stored == LEFT_OUT || (*stored == PENDING && !creates) {
+        return;
+    }
+    let set = |bit: u64| claimed[(bit / 64) as usize] & (1 << (bit % 64)) != 0;
+    if bits.iter().any(|&bit| set(bit)) {
+        *stored = 0;
+        tally.refuse(Refusal::ONE_VALUE_TWICE, u64::from(row));
+        return;
+    }
+    for &bit in bits {
+        claimed[(bit / 64) as usize] |= 1 << (bit % 64);
+    }
 }
 
 /// The rows a file creates, numbered as the walk decides them, and what a reader checks against.
@@ -949,17 +1093,27 @@ impl FileNumbers {
         }
     }
 
-    /// Decide a row the rule left pending, and count a row naming an item.
+    /// Decide a row the rule left pending, and count a row naming an item. A row `--limit` leaves
+    /// out unless it names an item, and which names none, is left out, and reported where the
+    /// file's rows do not create items.
     fn decide(&mut self, stored: &mut u32, row: u64, tally: &mut Tally) -> Result<()> {
-        if *stored == PENDING {
-            if self.creates {
+        match *stored {
+            PENDING if self.creates => {
                 check_cap(self.base + self.created.count + 1)?;
                 *stored = (self.base + self.created.count) as u32 + 1;
                 self.created.mark(row);
-            } else {
+            }
+            PENDING => {
                 *stored = 0;
                 tally.refuse(Refusal::NAMES_NO_ITEM, row);
             }
+            LEFT_OUT => {
+                *stored = 0;
+                if !self.creates {
+                    tally.refuse(OUTSIDE_LIMIT, row);
+                }
+            }
+            _ => {}
         }
         if let Some(number) = stored.checked_sub(1) {
             self.anchor.0 += 1;
@@ -969,17 +1123,6 @@ impl FileNumbers {
     }
 }
 
-/// Refuse a build creating more than `items` items where a bundle holds fewer, before the number
-/// past the last is written.
-fn check_cap(items: u64) -> Result<()> {
-    if items > ITEMS_MAX {
-        return Err(BuildError::Invalid(format!(
-            "this build's files create more than the {ITEMS_MAX} items one bundle holds. Build \
-             fewer rows, with --limit or smaller files"
-        )));
-    }
-    Ok(())
-}
 
 /// Which rows of a file created items, and how many before each: a created row's number is the
 /// file's base plus the rows created before it.
@@ -1037,7 +1180,7 @@ impl Created {
 #[allow(clippy::too_many_arguments)]
 fn walk(
     rows: &mut Rows,
-    updates: &spill::PartitionStore,
+    updates: &mut spill::PartitionStore,
     boundaries: &[u32],
     total: u64,
     lazy: bool,
@@ -1054,6 +1197,7 @@ fn walk(
             .map_or(total, |&next| u64::from(next))
             .min(total);
         let bytes = updates.load(k)?;
+        updates.delete(k)?;
         hits.clear();
         hits.extend(bytes.as_chunks::<8>().0.iter().map(|record| {
             (
@@ -1119,6 +1263,11 @@ fn decide_row(
     ]
     .into_iter()
     .find(|(code, _)| codes().any(|c| c == *code));
+    // A row `--limit` leaves out unless it names an item, repeating a value no item holds, names
+    // none: it is left out, and sets nothing.
+    if refusal.is_some_and(|(code, _)| code == ONE_VALUE_TWICE) && *stored == LEFT_OUT {
+        return Ok(());
+    }
     if let Some((_, reason)) = refusal {
         *stored = 0;
         tally.refuse(reason, row);

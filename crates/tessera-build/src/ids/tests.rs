@@ -286,9 +286,25 @@ fn numbers_of(args: &crate::BuildArgs, numbering: &super::Numbering) -> Vec<Vec<
 }
 
 fn same_numbers(seed: u64, rows: usize, budget: Option<u64>) {
+    same_numbers_within(seed, rows, budget, None)
+}
+
+/// [`same_numbers`], built with `--limit` where `limit` is given: `note` is then no longer unique,
+/// so `a` is the one unique integer the limit is over.
+fn same_numbers_within(seed: u64, rows: usize, budget: Option<u64>, limit: Option<u64>) {
     let tmp = tempfile::tempdir().unwrap();
     corpus(tmp.path(), seed, rows);
-    let args = args(tmp.path(), budget);
+    if limit.is_some() {
+        let declaration = DECLARATION.replace(
+            "name   = \"note\"\ntype   = \"i64\"\nunique = true\n",
+            "name   = \"note\"\ntype   = \"i64\"\n",
+        );
+        std::fs::write(tmp.path().join("corpus.toml"), declaration).unwrap();
+    }
+    let args = crate::BuildArgs {
+        limit,
+        ..args(tmp.path(), budget)
+    };
     let kinds: Vec<super::ReadKind> = reads(&args).unwrap().iter().map(|read| read.kind).collect();
     use super::ReadKind::*;
     assert_eq!(
@@ -327,6 +343,19 @@ fn the_sort_merge_numbers_every_kind_of_file_as_the_rule_does() {
 #[test]
 fn the_sort_merge_numbers_as_the_rule_does_when_its_sorts_spill() {
     same_numbers(77, 200_000, Some(16 << 20));
+}
+
+/// **Under `--limit` the sort-merge decides each row by the item it names, as the rule does**: in
+/// every kind of file, with values that repeat, go missing, move an item's `a` past the limit and
+/// name items the limit left out.
+#[test]
+fn the_sort_merge_numbers_as_the_rule_does_within_a_limit() {
+    for seed in 1..=10 {
+        for limit in [0, 20, 45, 1 << 40] {
+            same_numbers_within(seed, 60, None, Some(limit));
+        }
+    }
+    same_numbers_within(78, 200_000, Some(16 << 20), Some(120_000));
 }
 
 const SCOPED: &str = r#"
@@ -562,4 +591,70 @@ fn points_refusing_a_row_are_not_compared_with() {
         aligned_corpus(tmp.path(), seed, &points, 16, (128, 200));
         same_as_the_rule(tmp.path(), 1 << 20, &format!("seed {seed}"));
     }
+}
+
+/// **A points file rewritten with as many rows is not compared with as the one numbered**: its
+/// length or modification time tells it apart.
+#[test]
+fn a_file_rewritten_with_as_many_rows_is_told_apart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("world.parquet");
+    let values = |offset: u64| -> ArrayRef {
+        Arc::new(UInt64Array::from_iter_values((0..100).map(|i| i + offset)))
+    };
+    write(&path, vec![("a", values(0))]);
+    let stamp = super::stream::Stamp::of(&path).unwrap();
+    assert!(stamp.check(&path, 100, 100).is_ok());
+    assert!(stamp.check(&path, 100, 99).is_err());
+    write(&path, vec![("a", values(1 << 40))]);
+    let file = File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)).unwrap();
+    assert!(stamp.check(&path, 100, 100).is_err());
+}
+
+/// **The identity pass's scratch stays within its forecast**: the most bytes its scratch directory
+/// held, sampled while it numbers a corpus whose sorts spill, is no more than the modelled peak.
+#[test]
+fn the_identity_scratch_stays_within_its_forecast() {
+    fn bytes_under(dir: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => bytes_under(&entry.path()),
+                _ => entry.metadata().map_or(0, |m| m.len()),
+            })
+            .sum()
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    corpus(tmp.path(), 79, 200_000);
+    let args = args(tmp.path(), Some(16 << 20));
+    let scratch = tmp.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let (forecast, _) = crate::residency::identity_disk(&args).unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let most = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            let mut most = 0u64;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                most = most.max(bytes_under(&scratch));
+            }
+            most
+        });
+        let numbered = super::stream::number(&args, &scratch);
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        numbered.expect("the pass numbers");
+        sampler.join().unwrap()
+    });
+    assert!(most > 0, "the sampler saw the pass's scratch");
+    assert!(most <= forecast, "{most} bytes of scratch against a forecast of {forecast}");
+}
+
+/// **A build numbering past the most items a bundle holds is refused**, at the item past it.
+#[test]
+fn numbering_past_the_item_cap_is_refused() {
+    assert!(super::check_cap(super::ITEMS_MAX).is_ok());
+    assert!(super::check_cap(super::ITEMS_MAX + 1).is_err());
 }

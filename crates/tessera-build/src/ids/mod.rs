@@ -366,12 +366,14 @@ impl Numbering {
     }
 }
 
-/// `--limit`: the rows whose value of the one unique integer attribute is below a value.
+/// `--limit`: the items whose value of the one unique integer attribute is below a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limit {
     /// The attribute's position in the declaration.
     pub position: u16,
     pub below: u64,
+    /// Whether the attribute is a signed integer, whose keys are offset from its values.
+    signed: bool,
 }
 
 impl Limit {
@@ -392,6 +394,8 @@ impl Limit {
             [position] => Ok(Some(Limit {
                 position: *position as u16,
                 below,
+                signed: tessera_store::unique::KeyKind::of(schema.attributes[*position].ty)
+                    == Some(tessera_store::unique::KeyKind::Signed),
             })),
             _ => Err(BuildError::Invalid(format!(
                 "`--limit` keeps the rows whose value of the unique integer attribute is below \
@@ -402,40 +406,6 @@ impl Limit {
         }
     }
 
-    /// A layer's listed members as one scan: every member, and where the lists carry the limit's
-    /// attribute, those whose value is at or above it left out as outside the limit.
-    pub(crate) fn lists(limit: Option<&Limit>, lists: &crate::layers::MemberLists) -> scan::Scanned {
-        let len = lists.len();
-        let outside: Option<Vec<bool>> = limit.and_then(|limit| {
-            let at = lists.carried.iter().position(|f| f.position == limit.position)?;
-            let signed = tessera_store::unique::KeyKind::of(lists.carried[at].ty)
-                == Some(tessera_store::unique::KeyKind::Signed);
-            Some(
-                lists.keys[at]
-                    .iter()
-                    .map(|key| match key {
-                        Some(tessera_store::unique::UniqueKey::Int(key)) => {
-                            let value = match signed {
-                                true => tessera_store::key_index::signed_value(*key) as u64,
-                                false => *key,
-                            };
-                            value >= limit.below
-                        }
-                        _ => false,
-                    })
-                    .collect(),
-            )
-        });
-        scan::Scanned {
-            first: 0,
-            len,
-            selected: outside.as_ref().map(|o| o.iter().map(|&out| !out).collect()),
-            keys: lists.keys.clone(),
-            outside,
-            tessera: None,
-        }
-    }
-
     /// The column a file keeps the limit's attribute in, where it carries it.
     pub fn column<'a>(&self, carried: &'a [CarriedField]) -> Option<&'a str> {
         carried
@@ -443,4 +413,167 @@ impl Limit {
             .find(|field| field.position == self.position)
             .map(|field| field.column.as_str())
     }
+
+    /// Whether the attribute's value keyed `key` is at or above the limit. A negative value is
+    /// compared as its two's complement, as a file's column is.
+    fn beyond(&self, key: u64) -> bool {
+        let value = match self.signed {
+            true => tessera_store::key_index::signed_value(key) as u64,
+            false => key,
+        };
+        value >= self.below
+    }
+}
+
+/// How `--limit` reads one file's rows.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LimitRead<'a> {
+    /// Rows that create items and can name none but by the limit's attribute: a row is read where
+    /// its value is below the limit, and any other is not part of the build. A row group whose
+    /// statistics rule every row out is not decoded.
+    Prefix { column: &'a str, below: u64 },
+    /// Rows that name items by the limit's attribute alone: a row whose value is at or above the
+    /// limit, or null, names no item the limit kept, and is left out unread and reported.
+    Values { column: &'a str, below: u64 },
+    /// Every row is read, and a row marked left out is kept only where it names an item the build
+    /// holds. In a file whose rows create items, a row whose value is at or above the limit or
+    /// null is marked; in any other, every row is where the file carries another unique field.
+    Named {
+        column: Option<&'a str>,
+        below: u64,
+        every_row: bool,
+    },
+}
+
+/// `--limit` and what it has learnt of the items as the files are read, which decides how it
+/// reads the next ([`LimitRead`]).
+///
+/// **A row is decided by the item it names.** The items the limit keeps are those created by rows
+/// whose value is below it. A row naming one is read whatever its own value. A row naming none is
+/// left out, and is reported as outside the limit where its file's rows do not create items: the
+/// rows the limit left out are not read, so a row naming nothing may name an item one of them
+/// created. Where a file can name items only by the limit's attribute, the row's own value
+/// decides it unread, which is what keeps a prefix build from sorting every row of every file.
+#[derive(Debug)]
+pub(crate) struct Limited {
+    pub limit: Limit,
+    /// The unique fields some item has been given a value of.
+    given: std::collections::BTreeSet<u16>,
+    /// Whether some item holds a value of the limit's attribute at or above it.
+    raised: bool,
+}
+
+impl Limited {
+    pub(crate) fn new(limit: Limit) -> Limited {
+        Limited {
+            limit,
+            given: Default::default(),
+            raised: false,
+        }
+    }
+
+    /// How a file carrying `carried` is read.
+    pub(crate) fn read<'a>(
+        &self,
+        carried: &'a [CarriedField],
+        creates: bool,
+    ) -> Option<LimitRead<'a>> {
+        let position = self.limit.position;
+        let below = self.limit.below;
+        let others = carried.iter().any(|field| field.position != position);
+        let others_given = carried
+            .iter()
+            .any(|field| field.position != position && self.given.contains(&field.position));
+        match (creates, self.limit.column(carried)) {
+            (true, None) => None,
+            (true, Some(column)) if !self.raised && !others_given => {
+                Some(LimitRead::Prefix { column, below })
+            }
+            (true, Some(column)) => Some(LimitRead::Named {
+                column: Some(column),
+                below,
+                every_row: false,
+            }),
+            (false, _) if carried.is_empty() => None,
+            (false, Some(column)) if !others && !self.raised => {
+                Some(LimitRead::Values { column, below })
+            }
+            (false, column) => Some(LimitRead::Named {
+                column,
+                below,
+                every_row: others,
+            }),
+        }
+    }
+
+    /// Some item was given a value of the field at `position`.
+    pub(crate) fn given(&mut self, position: u16) {
+        self.given.insert(position);
+    }
+
+    /// Whether the value keyed `key` of the field at `position` is the limit's attribute at or
+    /// above it.
+    pub(crate) fn raises(&self, position: u16, key: u128) -> bool {
+        position == self.limit.position && self.limit.beyond(key as u64)
+    }
+
+    /// Some item was given a value of the limit's attribute at or above it.
+    pub(crate) fn raise(&mut self) {
+        self.raised = true;
+    }
+
+    /// A layer's listed members as one scan, read as a file of theirs would be.
+    pub(crate) fn lists(
+        limited: Option<&Limited>,
+        lists: &crate::layers::MemberLists,
+    ) -> scan::Scanned {
+        let len = lists.len();
+        let mut scanned = scan::Scanned {
+            first: 0,
+            len,
+            selected: None,
+            keys: lists.keys.clone(),
+            outside: None,
+            left_out: None,
+            tessera: None,
+        };
+        let Some(limited) = limited else {
+            return scanned;
+        };
+        let at = lists
+            .carried
+            .iter()
+            .position(|field| field.position == limited.limit.position);
+        let beyond = |member: usize| match at.and_then(|at| lists.keys[at][member]) {
+            Some(tessera_store::unique::UniqueKey::Int(key)) => limited.limit.beyond(key),
+            _ => true,
+        };
+        match limited.read(&lists.carried, false) {
+            None | Some(LimitRead::Prefix { .. }) => {}
+            Some(LimitRead::Values { .. }) => {
+                let outside: Vec<bool> = (0..len).map(beyond).collect();
+                scanned.selected = Some(outside.iter().map(|&out| !out).collect());
+                scanned.outside = Some(outside);
+            }
+            Some(LimitRead::Named { every_row, .. }) => {
+                scanned.left_out = Some((0..len).map(|m| every_row || beyond(m)).collect());
+            }
+        }
+        scanned
+    }
+}
+
+/// The most items a build numbers: the codes above it are the numbering's own.
+pub(crate) const ITEMS_MAX: u64 = u32::MAX as u64 - 4;
+
+/// Refuse a build creating more than `items` items where a bundle holds fewer, before the number
+/// past the last is written.
+pub(crate) fn check_cap(items: u64) -> Result<()> {
+    if items > ITEMS_MAX {
+        return Err(BuildError::Invalid(format!(
+            "this build's files create more than the {ITEMS_MAX} items one bundle holds. Build \
+             fewer rows, with --limit or smaller files"
+        )));
+    }
+    Ok(())
 }

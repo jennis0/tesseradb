@@ -25,6 +25,13 @@ pub(super) struct RunReceipt {
     anchor: u64,
 }
 
+impl RunReceipt {
+    /// How many entries the run holds.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+}
+
 fn entry_anchor(key: u128, value: u32) -> u64 {
     mix64(key as u64 ^ (key >> 64) as u64).wrapping_add(mix64(u64::from(value) << 1 | 1))
 }
@@ -155,6 +162,12 @@ impl<K: Key> RunReader<K> {
             let mut shift = 0;
             loop {
                 let byte = self.byte()?;
+                if shift > 63 {
+                    return Err(BuildError::Invalid(format!(
+                        "{} is not the run this build wrote: a gap runs past 64 bits. Build again",
+                        self.receipt.path.display()
+                    )));
+                }
                 gap |= u64::from(byte & 0x7f) << shift;
                 if byte & 0x80 == 0 {
                     break;
@@ -238,5 +251,18 @@ mod tests {
             }
         };
         assert!(refused);
+    }
+
+    /// **A gap whose bytes never end is refused, not overflowed.**
+    #[test]
+    fn a_run_whose_gap_runs_past_64_bits_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run");
+        let mut writer = RunWriter::<u64>::create(&path).unwrap();
+        writer.push(10, 1).unwrap();
+        let receipt = writer.finish().unwrap();
+        std::fs::write(&path, [0xffu8; 16]).unwrap();
+        let mut reader = RunReader::<u64>::open(&receipt).unwrap();
+        assert!(reader.next_entry().is_err());
     }
 }

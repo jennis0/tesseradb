@@ -162,3 +162,22 @@ fn a_build_refusing_nothing_writes_no_report() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(refused(tmp.path()), None);
 }
+
+/// **A build that refuses nothing removes a report left at its output**, so the bundle's report
+/// is the rows its own build refused.
+#[test]
+fn a_build_refusing_nothing_removes_a_report_left_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    project(tmp.path(), &[1, 2, 3, 2], &[1, 3]);
+    let output = build(tmp.path(), false);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report = std::fs::read(tmp.path().join("bundle/reports/refused.json")).unwrap();
+    std::fs::remove_dir_all(tmp.path().join("bundle")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("bundle/reports")).unwrap();
+    std::fs::write(tmp.path().join("bundle/reports/refused.json"), report).unwrap();
+
+    project(tmp.path(), &[1, 2, 3, 4], &[1, 3]);
+    let output = build(tmp.path(), false);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(refused(tmp.path()), None);
+}

@@ -10,7 +10,7 @@ use arrow::record_batch::RecordBatch;
 use tessera_spatial::tiler::ScalarType;
 use tessera_store::unique::{key_of_integer, UniqueKey};
 
-use super::{CarriedField, Limit, TESSERA_ID_COLUMN};
+use super::{CarriedField, LimitRead, TESSERA_ID_COLUMN};
 use crate::config::ViewSelector;
 use crate::error::{BuildError, Result};
 use crate::row_groups::FileGroups;
@@ -23,11 +23,8 @@ pub(crate) struct FileRead<'a> {
     pub carried: &'a [CarriedField],
     pub tessera: bool,
     pub select: Option<&'a ViewSelector>,
-    /// The limit's column in this file and the value its rows must be below.
-    pub limit: Option<(&'a str, u64)>,
-    /// Whether the file's rows create items. A row of one that does not, with no value in the
-    /// limit's column, is read: it may name its item by another field.
-    pub creates: bool,
+    /// How `--limit` reads the file's rows.
+    pub limit: Option<LimitRead<'a>>,
 }
 
 /// One decoded batch: consecutive rows of the file from `first`.
@@ -39,9 +36,12 @@ pub(crate) struct Scanned {
     pub selected: Option<Vec<bool>>,
     /// Each carried field's key at each row, in [`FileRead::carried`]'s order.
     pub keys: Vec<Vec<Option<UniqueKey>>>,
-    /// Whether each row names an item `--limit` left out: a value in the limit's column at or
-    /// above it, in a file whose rows do not create items. `None` where no row does.
+    /// Whether each row not read names no item `--limit` kept, and is reported as outside it.
+    /// `None` where no row does.
     pub outside: Option<Vec<bool>>,
+    /// Whether each row read is left out unless it names an item the build holds
+    /// ([`LimitRead::Named`]). `None` where no row is.
+    pub left_out: Option<Vec<bool>>,
     /// Whether each row carries a `tessera_id`, where the file has the column.
     pub tessera: Option<Vec<bool>>,
 }
@@ -52,8 +52,7 @@ impl<'a> FileRead<'a> {
         groups: &'a FileGroups,
         carried: &'a [CarriedField],
         select: Option<&'a ViewSelector>,
-        limit: Option<&Limit>,
-        creates: bool,
+        limit: Option<LimitRead<'a>>,
     ) -> FileRead<'a> {
         FileRead {
             path,
@@ -61,8 +60,7 @@ impl<'a> FileRead<'a> {
             carried,
             tessera: groups.schema().column_with_name(TESSERA_ID_COLUMN).is_some(),
             select,
-            limit: limit.and_then(|limit| limit.column(carried).map(|c| (c, limit.below))),
-            creates,
+            limit,
         }
     }
 
@@ -71,11 +69,12 @@ impl<'a> FileRead<'a> {
         self.select.is_none() && self.limit.is_none()
     }
 
-    /// The row groups that can hold a row of the read: in a file whose rows create items, those a
-    /// `--limit` cannot rule out from the column's own statistics. Every group of any other file
-    /// is read, so each row the limit leaves out is reported.
+    /// The row groups that can hold a row of the read: where `--limit` reads a prefix, those it
+    /// cannot rule out from the column's own statistics. Every group of any other file is read.
     pub(crate) fn kept_groups(&self) -> Option<Vec<usize>> {
-        let (column, below) = self.limit.filter(|_| self.creates)?;
+        let Some(LimitRead::Prefix { column, below }) = self.limit else {
+            return None;
+        };
         let index = self.groups.schema().column_with_name(column)?.0;
         Some(crate::input::prunable_row_groups(
             self.groups.metadata(),
@@ -112,14 +111,36 @@ impl<'a> FileRead<'a> {
 
     /// Every batch of the read's row groups, decoded on worker threads and handed to `visit` in
     /// no particular order.
-    pub(crate) fn scan(&self, mut visit: impl FnMut(Scanned) -> Result<()>) -> Result<()> {
+    pub(crate) fn scan(&self, visit: impl FnMut(Scanned) -> Result<()>) -> Result<()> {
+        self.scan_ordered(|| false, visit)
+    }
+
+    /// [`Self::scan`], each batch in row order on this thread for as long as `ordered` holds when
+    /// a row group begins, and the row groups after that decoded on worker threads.
+    pub(crate) fn scan_ordered(
+        &self,
+        ordered: impl Fn() -> bool,
+        mut visit: impl FnMut(Scanned) -> Result<()>,
+    ) -> Result<()> {
         let groups = self
             .kept_groups()
             .unwrap_or_else(|| (0..self.groups.count()).collect());
         let projection = self.groups.projection(&self.roots()?);
+        let mut at = 0;
+        while at < groups.len() && ordered() {
+            self.groups
+                .each_batch(self.path, &groups[at..=at], &projection, |first, batch| {
+                    visit(self.decode(first, &batch)?)?;
+                    Ok(ControlFlow::Continue(()))
+                })?;
+            at += 1;
+        }
+        if at == groups.len() {
+            return Ok(());
+        }
         self.groups.decode_parallel(
             self.path,
-            &groups,
+            &groups[at..],
             &projection,
             |first, batch| self.decode(first, &batch),
             |scanned| {
@@ -127,19 +148,6 @@ impl<'a> FileRead<'a> {
                 Ok(ControlFlow::Continue(()))
             },
         )
-    }
-
-    /// [`Self::scan`], each batch in row order on this thread.
-    pub(crate) fn scan_ordered(&self, mut visit: impl FnMut(Scanned) -> Result<()>) -> Result<()> {
-        let groups = self
-            .kept_groups()
-            .unwrap_or_else(|| (0..self.groups.count()).collect());
-        let projection = self.groups.projection(&self.roots()?);
-        self.groups
-            .each_batch(self.path, &groups, &projection, |first, batch| {
-                visit(self.decode(first, &batch)?)?;
-                Ok(ControlFlow::Continue(()))
-            })
     }
 
     fn decode(&self, first: u64, batch: &RecordBatch) -> Result<Scanned> {
@@ -162,24 +170,41 @@ impl<'a> FileRead<'a> {
         for field in self.carried {
             keys.push(keys_of(self.path, column(&field.column)?, field)?);
         }
-        let mut outside: Option<Vec<bool>> = None;
-        if let Some((name, below)) = self.limit {
+        // Whether each row's value of the limit's attribute is at or above it, or null.
+        let beyond = |name: &str, below: u64| -> Result<Vec<bool>> {
             let values = crate::input::id_values(self.path, column(name)?.as_ref(), name)?;
-            let keep = selected.get_or_insert_with(|| vec![true; len]);
-            let beyond = (0..len).map(|row| !values.is_null(row) && values.value(row) >= below);
-            match self.creates {
-                true => {
-                    for (row, keep) in keep.iter_mut().enumerate() {
-                        *keep &= !values.is_null(row) && values.value(row) < below;
-                    }
+            Ok((0..len)
+                .map(|row| values.is_null(row) || values.value(row) >= below)
+                .collect())
+        };
+        let mut outside: Option<Vec<bool>> = None;
+        let mut left_out: Option<Vec<bool>> = None;
+        match self.limit {
+            None => {}
+            Some(LimitRead::Prefix { column, below }) => {
+                let keep = selected.get_or_insert_with(|| vec![true; len]);
+                for (keep, beyond) in keep.iter_mut().zip(beyond(column, below)?) {
+                    *keep &= !beyond;
                 }
-                false => {
-                    let beyond: Vec<bool> = beyond.zip(keep.iter()).map(|(b, &k)| b && k).collect();
-                    for (keep, &beyond) in keep.iter_mut().zip(&beyond) {
-                        *keep &= !beyond;
-                    }
-                    outside = Some(beyond);
+            }
+            Some(LimitRead::Values { column, below }) => {
+                let keep = selected.get_or_insert_with(|| vec![true; len]);
+                let mut beyond = beyond(column, below)?;
+                for (keep, beyond) in keep.iter_mut().zip(beyond.iter_mut()) {
+                    *beyond &= *keep;
+                    *keep &= !*beyond;
                 }
+                outside = Some(beyond);
+            }
+            Some(LimitRead::Named {
+                column,
+                below,
+                every_row,
+            }) => {
+                left_out = Some(match (every_row, column) {
+                    (false, Some(column)) => beyond(column, below)?,
+                    _ => vec![true; len],
+                });
             }
         }
         let tessera = match self.tessera {
@@ -195,6 +220,7 @@ impl<'a> FileRead<'a> {
             selected,
             keys,
             outside,
+            left_out,
             tessera,
         })
     }
