@@ -11,7 +11,20 @@
  * does not narrow, so a pan does not recolour the map, and it resets when the identity key changes.
  */
 import type {StandInPiece} from './compose.js';
-import type {CategoryValue, ScalarColumn} from './types.js';
+import type {ArrowType, CategoryValue, DeclaredScalar, ScalarColumn} from './types.js';
+
+/** The storage types whose values are numbers: every integer and float width. */
+const NUMBER_TYPES: ReadonlySet<ArrowType> = new Set(['u8', 'u16', 'u32', 'u64', 'i8', 'i16', 'i32', 'i64', 'f32', 'f64']);
+
+/**
+ * Whether a declared column can size points: it arrives with each point (`render`), is a number
+ * type, and is not a category, whose codes are labels.
+ *
+ * @internal
+ */
+export function sizesPoints(column: DeclaredScalar): boolean {
+  return column.render && column.category === null && NUMBER_TYPES.has(column.arrowType);
+}
 
 /**
  * The range of one numeric column's values among the marks drawn, for a colour ramp. The store's
@@ -58,7 +71,7 @@ export function hasValue(column: ScalarColumn, i: number): boolean {
  * @internal
  */
 export function numericValues(column: ScalarColumn): ArrayLike<number> | null {
-  if (column.arrowType === 'bool' || column.arrowType === 'utf8') return null;
+  if (!NUMBER_TYPES.has(column.arrowType) && column.arrowType !== 'timestamp_us') return null;
   const values = column.values as ArrayLike<number | bigint>;
   const wide = column.arrowType === 'u64' || column.arrowType === 'i64' || column.arrowType === 'timestamp_us';
   if (!wide && !column.present) return column.values as ArrayLike<number>;
@@ -104,6 +117,102 @@ export function widenDomainOver(
   if (min === Infinity) return held;
   if (!held) return {min, max};
   return {min: Math.min(held.min, min), max: Math.max(held.max, max)};
+}
+
+/** {@link lacksValues} memoised per column, since bands do not change. */
+const heldLacks = new WeakMap<object, boolean>();
+
+/**
+ * Whether any point of `column` has no finite value: no value at all, or NaN or an infinity, which
+ * a size cannot place and draws as a point with no value.
+ *
+ * @internal
+ */
+export function lacksValues(column: ScalarColumn): boolean {
+  let held = heldLacks.get(column);
+  if (held === undefined) {
+    const values = numericValues(column);
+    held = false;
+    if (values) {
+      for (let i = 0; i < values.length; i++) {
+        if (!Number.isFinite(values[i]!)) {
+          held = true;
+          break;
+        }
+      }
+    }
+    heldLacks.set(column, held);
+  }
+  return held;
+}
+
+/**
+ * A uniform sample of one numeric column's values among the marks drawn, for sizing points by
+ * rank. The store's `legend` projection holds one per column sized by, in `samples`. A value's rank
+ * is where it falls among `values`; the marks are themselves a sample of the viewer's visible set,
+ * so a rank is an estimate and is never shown as a statistic.
+ *
+ * @category Projections
+ */
+export type ValueSample = {
+  /** Up to {@link SAMPLE_SIZE} finite values, drawn uniformly from the marks seen, in ascending order. */
+  values: readonly number[];
+  /**
+   * How many marks with a finite value the sample was drawn from. It grows with each sample
+   * published, so it tells one sample from the next.
+   */
+  seen: number;
+};
+
+/** The most values a {@link ValueSample} holds. @internal */
+export const SAMPLE_SIZE = 1024;
+
+/**
+ * A reservoir of values drawn uniformly from every mark offered to it, each band once. It publishes
+ * a sorted {@link ValueSample} when the marks seen have doubled since the last one, so sizes are
+ * rewritten a few times as a view fills and then hold still while the viewer pans.
+ *
+ * @internal
+ */
+export class ValueReservoir {
+  private held: number[] = [];
+  private seen = 0;
+  private published = 0;
+  private offered = new WeakSet<object>();
+  /** A fixed-seed generator, so one sequence of bands always gives one sample. */
+  private state = 0x2545f491;
+
+  /** Offer a column's values; a column offered before is skipped. */
+  offer(column: ScalarColumn): void {
+    if (this.offered.has(column)) return;
+    this.offered.add(column);
+    const values = numericValues(column);
+    if (!values) return;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i]!;
+      if (!Number.isFinite(v)) continue;
+      this.seen += 1;
+      if (this.held.length < SAMPLE_SIZE) this.held.push(v);
+      else {
+        const j = Math.floor(this.random() * this.seen);
+        if (j < SAMPLE_SIZE) this.held[j] = v;
+      }
+    }
+  }
+
+  /** The sample to publish, or null where the marks seen have not doubled since the last one. */
+  take(): ValueSample | null {
+    if (this.seen === 0 || this.seen < this.published * 2) return null;
+    this.published = this.seen;
+    return {values: [...this.held].sort((a, b) => a - b), seen: this.seen};
+  }
+
+  private random(): number {
+    this.state ^= this.state << 13;
+    this.state ^= this.state >>> 17;
+    this.state ^= this.state << 5;
+    return (this.state >>> 0) / 4294967296;
+  }
 }
 
 /**

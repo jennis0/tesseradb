@@ -113,9 +113,12 @@ describe('encodingOf', () => {
   const legend: LegendProjection = {
     ranks: {field: {1: 0, 2: 1}},
     domains: {},
+    samples: {},
+    missing: {},
     categories: {field: [{code: 1, key: 'cs.LG', title: null}, {code: 2, key: 'cs.CV', title: null}]},
     categoryErrors: {},
-    colourBy: 'field'
+    colourBy: 'field',
+    sizeBy: null
   };
 
   it('takes the palette chosen and a colour chosen for a value, by the value’s key', () => {

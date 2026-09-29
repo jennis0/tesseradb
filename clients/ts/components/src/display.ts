@@ -115,6 +115,102 @@ export const displayStyles = css`
   .ramp-choice svg {
     margin-left: auto;
   }
+  .ramp-choice .t {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ramp-choice:disabled {
+    opacity: 0.4;
+  }
+  /* A slider with its value beside it, and the two sliders of a size range either side of theirs. */
+  .with-readout,
+  .sliders .range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .with-readout input[type='range'] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .sliders .range input[type='range'] {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .readout {
+    flex: none;
+    color: var(--_tessera-ink);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .with-readout .readout {
+    min-width: 40px;
+    text-align: right;
+  }
+  .seg {
+    display: inline-flex;
+    justify-self: start;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--_tessera-surface-3);
+  }
+  .seg button {
+    padding: 3px 10px;
+    border-radius: 5px;
+    font-size: 12px;
+    color: var(--_tessera-ink-2);
+  }
+  .seg button[aria-checked='true'] {
+    background: var(--_tessera-surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    color: var(--_tessera-ink);
+    font-weight: 500;
+  }
+  /* The Size by menu, in the top layer beside the popover. */
+  .size-menu {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    width: 220px;
+    padding: 6px 0;
+    box-sizing: border-box;
+    background: var(--_tessera-surface);
+    color: var(--_tessera-ink);
+    border: 1px solid var(--_tessera-line);
+    border-radius: var(--_tessera-radius);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
+    font-size: 13px;
+  }
+  .size-menu .hd {
+    margin: 0;
+    padding: 6px 14px 4px;
+  }
+  .size-menu [role='menuitemradio'] {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 7px 14px;
+    text-align: left;
+  }
+  .size-menu [role='menuitemradio']:hover,
+  .size-menu [role='menuitemradio'][aria-checked='true'] {
+    background: var(--_tessera-surface-2);
+  }
+  .size-menu [role='menuitemradio'][aria-checked='true'] {
+    font-weight: 500;
+  }
+  .size-menu [role='menuitemradio']:focus-visible {
+    outline-offset: -2px;
+  }
+  .size-menu .kind {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--_tessera-ink-3);
+  }
   .bar {
     display: block;
     flex: none;

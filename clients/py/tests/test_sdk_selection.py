@@ -283,12 +283,13 @@ def test_a_map_opens_on_the_selections_view_filters_and_box(db, points, stub_bun
     box = box_of(points, 0.2, 0.8)
     expression = {"archive": {"eq": "cs"}}
     m = db.view("s0").filter(expression).within(box).map(
-        colour_by="primary_category", layers=[], height=320
+        colour_by="primary_category", layers=[], height=320, size_by="citations"
     )
     assert m.view == "s0"
     assert m.filters == expression
     assert m.bbox == list(box)
     assert m.colour_by == "primary_category" and m.layers == [] and m.height == 320
+    assert m.size_by == "citations"
 
 
 def test_a_box_counted_over_a_cover_counts_at_least_the_items_inside(served, corpus, points):
