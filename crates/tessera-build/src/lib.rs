@@ -287,8 +287,8 @@ pub struct BuildArgs {
     pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,
-    /// Keep the rows whose value of the declaration's one unique integer attribute is below this,
-    /// in every file that carries it ([`ids::Limit`]).
+    /// Keep the items whose value of the declaration's one unique integer attribute is below this,
+    /// and the rows of every file that name them ([`ids::Limit`]).
     pub limit: Option<u64>,
     /// Refuse the build at the first file with a row the identity rule refuses, rather than
     /// refusing those rows and reporting them ([`ids`]).

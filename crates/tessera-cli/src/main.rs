@@ -52,15 +52,18 @@ enum Command {
         /// elsewhere.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Build only the rows whose value of the declaration's one unique integer attribute is
-        /// below this value, in every file that carries its column.
+        /// Build only the items whose value of the declaration's one unique integer attribute is
+        /// below this value, and the rows of every file that name them.
         ///
-        /// A negative value counts as its unsigned 64-bit value, at least 2^63, so the limit
-        /// drops it, and so does a null in a view's points. Refused when the declaration has no
-        /// unique integer attribute, or more than one. In any other file a row whose value is at
-        /// or above the limit is left out and reported as outside it. A row of a file without the
-        /// column is read, and one that names an item the limit left out names no item and is
-        /// refused.
+        /// A view's points row whose value is at or above the limit, or null, creates no item. A
+        /// negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops
+        /// it. Refused when the declaration has no unique integer attribute, or more than one. A
+        /// row that names a kept item by any unique field is read whatever its own value. A row
+        /// that names none is left out: in a view's points it creates no item where its value is
+        /// at or above the limit or null, and in any other file it is reported as outside the
+        /// limit, since it may name an item the limit left out. The exception is a file that
+        /// names items by the limit's attribute alone, whose row naming no item is refused where
+        /// its value is below the limit.
         #[arg(long, value_name = "VALUE")]
         limit: Option<u64>,
         /// Refuse the build at the first file with a row the identity rule refuses.
