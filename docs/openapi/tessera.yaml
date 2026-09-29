@@ -361,11 +361,13 @@ paths:
         **Counts under a filter.** `POST` to this path takes the same fields as a JSON body, with a
         filter. This form carries none.
 
-        Not subject to compute admission. One suggest runs per session at a time: a second while
-        one is running is `429 backpressure`, refused before any work, with `Retry-After`. A
-        request with `view` and `counts=true` is also `429 backpressure` when another request is
-        building this session's view of the map and did not finish within
-        `single_flight_wait_ms`.
+        A request with `view` and `counts=true` opens that view as `/v1/viewport` does, which may
+        build this session's view of the map, so it is subject to compute admission. Any other
+        request is not. One suggest runs per session at a time: a second while one is running is
+        `429 backpressure`, refused before any work, with `Retry-After`. A request with `view` and
+        `counts=true` is also `429 backpressure` when the compute queue is full, when no permit
+        frees within `admission_timeout_ms`, and when another request is building this session's
+        view of the map and does not finish within `single_flight_wait_ms`.
       security:
         - sessionToken: []
       parameters:
@@ -447,15 +449,15 @@ paths:
 
         Matching, order, visibility, `view` and `more` are as on the `GET` form.
 
-        A request counting under `filters` (`counts=true` with `filters`) is subject to compute
-        admission, as `/v1/viewport` is. Any other request is not. Every request is the session's
-        one running suggest.
+        A request with `view` and `counts=true`, and so every request counting under `filters`, is
+        subject to compute admission, as on the `GET` form. Any other request is not. Every request
+        is the session's one running suggest.
 
         **`429 backpressure`** has these causes, each with `Retry-After` and told apart by `detail`:
         another suggest for this session is running, refused before any work; the compute queue is
         full, or no permit freed within `admission_timeout_ms`; another request is building this
         session's view of the map and did not finish within `single_flight_wait_ms`. The last two
-        arise only for a request counting under `filters`.
+        arise only for a request with `view` and `counts=true`.
       security:
         - sessionToken: []
       parameters:
@@ -4760,7 +4762,7 @@ components:
           type: object
           additionalProperties: false
           required: [admission, queue, in_flight, waiting, streaming, shed_total]
-          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, a suggest counting under `filters`, and `/session/authorise` share.
+          description: The compute admission limit the viewport, single-item and single-artifact reads, browse, a suggest counting within a view, and `/session/authorise` share.
           properties:
             admission:
               type: integer

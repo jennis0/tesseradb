@@ -568,7 +568,7 @@ async fn suggest_page(
     let walk_budget = state.limits.max_suggestion_walk;
     let max_suggest_set_entities = state.limits.max_suggest_set_entities;
     let q = req.q.clone();
-    let gated = filter.is_some() && counts;
+    let gated = view.is_some() && counts;
     // A client that goes away drops this handler, and the guard cancels the engine call, which
     // stops at its next check and releases the permit and the session's suggest slot.
     let cancel = CancelToken::new();
@@ -593,9 +593,9 @@ async fn suggest_page(
             )
             .map_err(map_engine_error)
     };
-    // A count under a filter evaluates the filter over the whole view, so it takes a compute
-    // permit as `/v1/viewport` does. An unfiltered keystroke does not: queued behind viewport
-    // renders it would be useless.
+    // A count within a view opens the view as `/v1/viewport` does, which may build the session's
+    // projection and evaluates any filter over the whole view, so it takes a compute permit. A
+    // keystroke that does neither does not: queued behind viewport renders it would be useless.
     let page = if gated {
         state.gated(work).await?
     } else {

@@ -630,9 +630,8 @@ export type SuggestPage = {
  * `status: 'superseded'` is any `429` the server answered, returned rather than thrown: the
  * request was shed and may be sent again after `retryAfterS` seconds. `detail` is the server's
  * reason. Usually the session's previous suggestion is still running, since a session has one in
- * flight at a time. A request with `filters` and `counts` can also be shed by compute admission,
- * and a request with `view` and `counts` while another request builds the session's view of the
- * map.
+ * flight at a time. A request with `view` and `counts` can also be shed by compute admission, or
+ * while another request builds the session's view of the map.
  *
  * @category Requests and responses
  */

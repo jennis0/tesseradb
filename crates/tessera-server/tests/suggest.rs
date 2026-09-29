@@ -634,10 +634,12 @@ async fn the_post_forms_refusals() {
     assert!(body["values"].as_array().unwrap().iter().all(|v| v.get("count").is_none()));
 }
 
-/// **A filtered suggest takes a compute permit and an unfiltered one does not**: with the gate's
-/// one permit held and no queue, the filtered request is shed with `429` and the others are served.
+/// **A suggest counting within a view takes a compute permit, and one that does not open a view
+/// does not**: with the gate's one permit held and no queue, a count within a view is shed with
+/// `429` in either form, filtered or not, and a count across the database and a page without
+/// counts are served.
 #[tokio::test]
-async fn a_filtered_suggest_is_subject_to_compute_admission() {
+async fn a_suggest_counting_within_a_view_is_subject_to_compute_admission() {
     let tmp = TempDir::new().unwrap();
     copy_categories(&tmp);
     let server = spawn_server_with_config_and_gate(
@@ -661,8 +663,13 @@ async fn a_filtered_suggest_is_subject_to_compute_admission() {
     assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
     let (status, _, body) =
         post(&server, &token, path, &serde_json::json!({ "counts": true, "view": "s0" })).await;
-    assert_eq!(status, 200, "{body}");
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, body) =
+        get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true&view=s0").await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
     let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&view=s0").await;
     assert_eq!(status, 200, "{body}");
     drop(held);
     let (status, _, body) = post(
