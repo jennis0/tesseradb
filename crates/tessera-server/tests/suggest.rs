@@ -109,7 +109,8 @@ fn build_categories(dir: &Path) {
         ],
     );
     write_pairs_n(&pairs, N);
-    build_declared(&dir.join("bundle"), &points, &pairs, SCHEMA_TOML);
+    let schema = format!("{SCHEMA_TOML}\n{ID_ATTRIBUTE}");
+    build_declared(&dir.join("bundle"), &points, &pairs, &schema);
 }
 
 /// A copy of [`build_categories`]' bundle in `tmp`, built once for this binary.
@@ -672,4 +673,138 @@ async fn a_filtered_suggest_is_subject_to_compute_admission() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
+}
+
+/// The counts a filtered `POST` serves for `archive` in `s0`, by key, and the whole body.
+async fn filtered_counts(
+    server: &TestServer,
+    token: &str,
+    filters: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let (status, _, body) = post(
+        server,
+        token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": filters }),
+    )
+    .await;
+    (status, body)
+}
+
+/// **A `member_of` leaf counts the artifact's members this principal may see**; an artifact
+/// withheld from the principal answers exactly as an identifier naming nothing, and a layer the
+/// principal cannot reach is refused exactly as one that does not exist.
+#[tokio::test]
+async fn a_member_of_filter_counts_the_members_and_withholds_as_absence() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let mut teams = flat_layer("teams");
+    teams["artifact_visibility"] = serde_json::json!({ "field": "team", "default": "inherited" });
+    register(&server, teams).await;
+    let mut hidden = flat_layer("hidden");
+    hidden["visibility"] = serde_json::json!("secret");
+    register(&server, hidden).await;
+    let publish = |layer: &'static str, artifacts: serde_json::Value| {
+        let server = &server;
+        async move {
+            let resp = server
+                .client
+                .put(server.control_url(&format!("/control/layers/{layer}/artifacts")))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!({ "field": "id", "artifacts": artifacts }))
+                .send()
+                .await
+                .unwrap();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            body["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["tessera_id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let ids = publish(
+        "teams",
+        serde_json::json!([
+            { "key": "open", "members": members(0..30), "access": null },
+            { "key": "withheld", "members": members(30..50), "access": ["secret"] },
+        ]),
+    )
+    .await;
+    publish("hidden", serde_json::json!([{ "key": "h", "members": members(0..10), "access": null }]))
+        .await;
+    let (open, withheld) = (&ids[0], &ids[1]);
+
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (status, body) = filtered_counts(
+            &server,
+            &token,
+            serde_json::json!({ "member_of": { "layer": "teams", "artifact": open } }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..30).filter(|&e| sees(e) && archive_of(e) == key).count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+        }
+    }
+
+    let withheld_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": withheld } }),
+    )
+    .await;
+    let nothing_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": "123456789" } }),
+    )
+    .await;
+    assert_eq!(withheld_answer, nothing_answer);
+    assert!(withheld_answer.1["values"].as_array().unwrap().iter().all(|v| v["count"] == 0));
+
+    let (unreachable_status, unreachable) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "hidden", "artifact": open } }),
+    )
+    .await;
+    let (unknown_status, unknown) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "nowhere", "artifact": open } }),
+    )
+    .await;
+    assert_eq!(unreachable_status, 422, "{unreachable}");
+    assert_eq!(unknown_status, unreachable_status);
+    assert_eq!(unknown["error"], unreachable["error"]);
+    assert_eq!(
+        unknown["detail"].as_str().unwrap().replace("nowhere", "hidden"),
+        unreachable["detail"].as_str().unwrap()
+    );
+}
+
+/// **A negated filter counts the items carrying a value in its column that match none of it.**
+#[tokio::test]
+async fn a_negated_filter_counts_what_it_leaves() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, body) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "none_of": [{ "department": { "in": ["d01", "d02"] } }] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let key = value["key"].as_str().unwrap();
+        let expected = (0..N)
+            .filter(|&e| !["d01", "d02"].contains(&department_of(e).as_str()) && archive_of(e) == key)
+            .count() as u64;
+        assert_eq!(value["count"], expected, "{key}: {body}");
+    }
 }
