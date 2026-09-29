@@ -333,6 +333,7 @@ fn edit(engine: &Engine, batch: &str, view: &str, row: IngestRow) {
             view: Some(view.to_string()),
             rows: vec![row],
             artifacts: Default::default(),
+            strict: false,
         })
         .expect("the edit is accepted");
     assert_eq!(receipt.edited, 1, "{batch} edits the item: {receipt:?}");
@@ -460,6 +461,7 @@ fn a_scoped_value_needs_a_row_under_its_key() {
             view: Some("quarter:q1".to_string()),
             rows: vec![row],
             artifacts: Default::default(),
+            strict: false,
         })
     };
     let refused = send("alone", None);

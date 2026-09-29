@@ -1144,6 +1144,7 @@ fn a_deletion_of_an_edited_item_reaches_every_home() {
                 view: Some("s0".to_string()),
                 rows: vec![row],
                 artifacts: Default::default(),
+                strict: false,
             })
             .expect("the batch is accepted")
     };

@@ -5,6 +5,8 @@
 //! every row through [`tessera_lifecycle::resolve`], then reads what each named item stores, in
 //! ascending entity order, and decides the row:
 //!
+//! - a row the rule refuses writes nothing, and the receipt names it with its reason; a strict
+//!   batch is refused whole at its first refused row instead;
 //! - a row naming no item creates one, in the batch's view, at the row's position;
 //! - a row naming an item and changing nothing stored writes nothing and is counted unchanged;
 //! - a row naming an item that has no row in the batch's view, carrying a position there and
@@ -24,7 +26,7 @@
 use std::collections::BTreeMap;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_lifecycle::resolve::{self, Identifier, Key, Refusal, RowIdentity};
+use tessera_lifecycle::resolve::{self, Identifier, Key, Reason, Refusal, RowIdentity};
 use tessera_lifecycle::{
     BatchArtifacts, ExecError, IngestRow, RowOutcome, RowReceipt, Slot, UnallocatedEdit,
     UnallocatedRow, WalScalar,
@@ -49,13 +51,18 @@ pub struct IngestRequest {
     pub rows: Vec<IngestRow>,
     /// The artifacts the batch's rows name in a column named for a layer.
     pub artifacts: BatchArtifacts,
+    /// Refuse the whole batch at its first refused row, instead of applying the other rows.
+    pub strict: bool,
 }
 
 /// What an accepted batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReceipt {
-    /// One per row, in request order: the item the row created or named.
-    pub tessera_ids: Vec<TesseraId>,
+    /// One per row, in request order: the item the row created or named, or none for a refused
+    /// row.
+    pub tessera_ids: Vec<Option<TesseraId>>,
+    /// The rows the identity rule refused, by position in the request, with the reason.
+    pub refused: Vec<(usize, Reason)>,
     pub created: u64,
     /// Rows that changed an item they named.
     pub edited: u64,
@@ -89,7 +96,15 @@ impl IngestReceipt {
         IngestReceipt {
             tessera_ids: receipt
                 .iter()
-                .map(|r| TesseraId::new(r.tessera_id))
+                .map(|r| r.tessera_id.map(TesseraId::new))
+                .collect(),
+            refused: receipt
+                .iter()
+                .enumerate()
+                .filter_map(|(at, r)| match r.outcome {
+                    RowOutcome::Refused(reason) => Some((at, reason)),
+                    _ => None,
+                })
                 .collect(),
             created: count(RowOutcome::Created),
             edited: count(RowOutcome::Edited),
@@ -233,11 +248,18 @@ impl Engine {
             declared,
         };
         let verdicts = resolve::resolve(&identities, &holdings, resolve::Batch::Creates)?;
-        if let Some(refusal) = resolve::first_refusal(&verdicts) {
+        if let Some(refusal) = resolve::first_refusal(&verdicts).filter(|_| request.strict) {
             return Err(AcceptError::Conflict(
                 self.refusal_text(generation, declared, request, refusal),
             ));
         }
+        let refused: Vec<Option<Reason>> = verdicts
+            .iter()
+            .map(|verdict| match verdict {
+                resolve::Verdict::Refused(refusal) => Some(refusal.kind()),
+                _ => None,
+            })
+            .collect();
         let named: Vec<Option<EntityId>> = verdicts
             .into_iter()
             .map(|verdict| match verdict {
@@ -326,6 +348,10 @@ impl Engine {
         };
 
         for (at, (row, item)) in request.rows.iter().zip(&named).enumerate() {
+            if let Some(reason) = refused[at] {
+                slots.push(Slot::Refused(reason));
+                continue;
+            }
             match item {
                 None => {
                     let (Some(view), Some((x, y))) = (view, row.position) else {

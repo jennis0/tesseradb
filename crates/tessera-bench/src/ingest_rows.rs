@@ -40,9 +40,11 @@ impl IngestRows for Engine {
             view,
             rows,
             artifacts: Default::default(),
+            strict: false,
         })?;
         Ok(self
-            .resolve_tessera_ids(&receipt.tessera_ids).unwrap()
+            .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+            .unwrap()
             .into_iter()
             .map(|entity| entity.expect("an accepted row names an item"))
             .collect())

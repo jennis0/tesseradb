@@ -561,13 +561,13 @@ pub struct BatchIdentity<'a> {
 }
 
 /// What an accepted ingest batch did with one of its rows, and the `tessera_id` of the item the
-/// row named or created.
+/// row named or created: none for a refused row.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowReceipt {
     pub outcome: RowOutcome,
-    pub tessera_id: u64,
+    pub tessera_id: Option<u64>,
     /// The row created an item whose label resolves to more terms than the plugin declares an
     /// item carries. It is stored all the same.
     pub over_bound: bool,
@@ -586,6 +586,8 @@ pub enum RowOutcome {
     Unchanged,
     /// The row changed an item it named, which moved to a new entity.
     Edited,
+    /// The identity rule refused the row, and the batch applied its other rows.
+    Refused(crate::resolve::Reason),
 }
 
 /// One item an ingest batch moved to a new entity: the old entity is deleted and the new one
@@ -1058,7 +1060,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
 // **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
 // **30**: `WalRow` lost `external_id`. A log at 29 is refused.
-const WAL_VERSION: u16 = 30;
+// **31**: `RowOutcome` gained `Refused`, and `RowReceipt::tessera_id` is optional, absent for a
+// refused row. A log at 30 is refused.
+const WAL_VERSION: u16 = 31;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -2825,7 +2829,7 @@ mod tests {
                 }],
                 receipt: vec![RowReceipt {
                     outcome: RowOutcome::Edited,
-                    tessera_id: 12_345,
+                    tessera_id: Some(12_345),
                     over_bound: false,
                 }],
             },

@@ -84,9 +84,11 @@ mod ingest_rows {
                 view,
                 rows,
                 artifacts,
+                strict: false,
             })?;
             let entities = self
-                .resolve_tessera_ids(&receipt.tessera_ids).unwrap()
+                .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .unwrap()
                 .into_iter()
                 .map(|entity| entity.expect("an accepted row names an item"))
                 .collect();

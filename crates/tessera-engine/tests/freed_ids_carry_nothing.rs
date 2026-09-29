@@ -43,9 +43,13 @@ fn send(engine: &Engine, batch: &str, view: &str, rows: Vec<IngestRow>) -> Vec<T
             view: Some(view.to_string()),
             rows,
             artifacts: Default::default(),
+            strict: false,
         })
         .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
         .tessera_ids
+        .into_iter()
+        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .collect()
 }
 
 /// A row giving the item `tid` names a new score.
@@ -846,6 +850,7 @@ fn an_edit_resolved_before_its_entity_was_freed_does_not_reach_the_new_holder() 
                 view: Some("s0".into()),
                 rows: vec![rescore(x, 777)],
                 artifacts: Default::default(),
+                strict: false,
             })
         })
     };

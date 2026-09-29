@@ -14,8 +14,9 @@
 //! [`name_row`] decides one row from what its identifiers name, [`collisions`] finds the later
 //! rows of every run of equal keys, and [`require_identifier`] says whether a batch that addresses
 //! items carries a column to address them by. [`resolve`] composes them over a batch held in
-//! memory. The service answers [`Holdings`] from a generation and refuses a batch at its first
-//! refused row. The linear build answers it from maps over the files read before, one file at a
+//! memory. The service answers [`Holdings`] from a generation; it applies a batch's accepted rows
+//! and lists the refused ones, or refuses the whole batch at its first refused row where the caller
+//! asks for a strict batch. The linear build answers it from maps over the files read before, one file at a
 //! time. The streaming build applies the same pieces to sorted runs, because a probe per row is
 //! the random access it cannot afford at 10⁹ rows.
 
@@ -129,14 +130,45 @@ impl Refusal {
     pub const ONE_ITEM_TWICE: &'static str = "one_item_twice";
     pub const ONE_VALUE_TWICE: &'static str = "one_value_twice";
 
+    /// Why the row is refused, without the rows and items the refusal names.
+    pub fn kind(&self) -> Reason {
+        match self {
+            Refusal::NamesTwo { .. } => Reason::NamesTwo,
+            Refusal::UnknownTesseraId { .. } => Reason::UnknownTesseraId,
+            Refusal::NamesNoItem { .. } => Reason::NamesNoItem,
+            Refusal::OneItemTwice { .. } => Reason::OneItemTwice,
+            Refusal::OneValueTwice { .. } => Reason::OneValueTwice,
+        }
+    }
+
     /// The reason as a report spells it.
     pub fn reason(&self) -> &'static str {
+        self.kind().as_str()
+    }
+}
+
+/// Why a row is refused, as a receipt records it.
+///
+/// On-disk format: variants are positional under postcard, since an ingest record's receipt
+/// carries them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Reason {
+    NamesTwo,
+    UnknownTesseraId,
+    NamesNoItem,
+    OneItemTwice,
+    OneValueTwice,
+}
+
+impl Reason {
+    /// The reason as a receipt and a report spell it.
+    pub fn as_str(self) -> &'static str {
         match self {
-            Refusal::NamesTwo { .. } => Self::NAMES_TWO,
-            Refusal::UnknownTesseraId { .. } => Self::UNKNOWN_TESSERA_ID,
-            Refusal::NamesNoItem { .. } => Self::NAMES_NO_ITEM,
-            Refusal::OneItemTwice { .. } => Self::ONE_ITEM_TWICE,
-            Refusal::OneValueTwice { .. } => Self::ONE_VALUE_TWICE,
+            Reason::NamesTwo => Refusal::NAMES_TWO,
+            Reason::UnknownTesseraId => Refusal::UNKNOWN_TESSERA_ID,
+            Reason::NamesNoItem => Refusal::NAMES_NO_ITEM,
+            Reason::OneItemTwice => Refusal::ONE_ITEM_TWICE,
+            Reason::OneValueTwice => Refusal::ONE_VALUE_TWICE,
         }
     }
 }

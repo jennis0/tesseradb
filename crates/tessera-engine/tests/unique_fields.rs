@@ -1281,6 +1281,7 @@ fn fill(
             view: None,
             rows,
             artifacts: Default::default(),
+            strict: false,
         })
         .map(|_| ())
 }

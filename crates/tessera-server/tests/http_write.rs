@@ -480,9 +480,10 @@ fn concurrent_ingest_and_change_both_survive() {
                 view: Some("s0".to_string()),
                 rows: vec![row],
                 artifacts: Default::default(),
+                strict: false,
             })
             .expect("ingest should be accepted");
-        let tessera_id = receipt.tessera_ids[0];
+        let tessera_id = receipt.tessera_ids[0].expect("an accepted row has a tessera_id");
         let entity = engine_b.resolve_tessera_ids(&[tessera_id]).unwrap()[0];
         (tessera_id, entity.expect("the item it created"))
     });
