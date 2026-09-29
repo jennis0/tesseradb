@@ -6,7 +6,8 @@
 //! ascending entity order, and decides the row:
 //!
 //! - a row the rule refuses writes nothing, and the receipt names it with its reason; a strict
-//!   batch is refused whole at its first refused row instead;
+//!   batch is refused whole at its first refused row instead. A row naming no item and carrying no
+//!   position is refused as naming no item, since it cannot create one;
 //! - a row naming no item creates one, in the batch's view, at the row's position;
 //! - a row naming an item and changing nothing stored writes nothing and is counted unchanged;
 //! - a row naming an item that has no row in the batch's view, carrying a position there and
@@ -247,7 +248,31 @@ impl Engine {
             generation,
             declared,
         };
-        let verdicts = resolve::resolve(&identities, &holdings, resolve::Batch::Creates)?;
+        // A row carrying no position cannot create an item, so a batch without one creates nothing
+        // and refuses a row naming no item, as a build refuses an attribute file's. Where some rows
+        // carry positions, a row without one that would create is refused, and the batch is
+        // decided again without its values, so that a refused row sets none a later row sets.
+        let creates = view.is_some() && request.rows.iter().any(|row| row.position.is_some());
+        let batch = match creates {
+            true => resolve::Batch::Creates,
+            false => resolve::Batch::Edits,
+        };
+        let mut verdicts = resolve::resolve(&identities, &holdings, batch)?;
+        let unplaced: Vec<usize> = (0..request.rows.len())
+            .filter(|at| {
+                request.rows[*at].position.is_none() && verdicts[*at] == resolve::Verdict::Creates
+            })
+            .collect();
+        if !unplaced.is_empty() {
+            let mut without = identities.clone();
+            for at in &unplaced {
+                without[*at].unique.clear();
+            }
+            verdicts = resolve::resolve(&without, &holdings, batch)?;
+            for at in unplaced {
+                verdicts[at] = resolve::Verdict::Refused(Refusal::NamesNoItem { row: at });
+            }
+        }
         if let Some(refusal) = resolve::first_refusal(&verdicts).filter(|_| request.strict) {
             return Err(AcceptError::Conflict(
                 self.refusal_text(generation, declared, request, refusal),
@@ -355,11 +380,7 @@ impl Engine {
             match item {
                 None => {
                     let (Some(view), Some((x, y))) = (view, row.position) else {
-                        return Err(AcceptError::Contract(format!(
-                            "row {at} names no item and carries no position, so it creates \
-                             nothing; send its coordinates in the batch's view, or name the item \
-                             it is about"
-                        )));
+                        unreachable!("a row naming no item without a position is refused above")
                     };
                     let descriptors = self.label_of(at, row.labels.as_deref(), view)?;
                     keys.extend(identities[at].unique.iter().copied());
@@ -1065,7 +1086,8 @@ impl Engine {
                 )
             }
             Refusal::NamesNoItem { row } => format!(
-                "row {row} names no item; send a value that names one, or send the row as a new item"
+                "row {row} names no item and carries no position, so it creates nothing; send a \
+                 value that names an item, or the row's coordinates in the batch's view"
             ),
             Refusal::OneItemTwice { rows, item } => format!(
                 "rows {} and {} both name item {}; send one row per item",

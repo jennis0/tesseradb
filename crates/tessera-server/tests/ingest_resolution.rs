@@ -238,13 +238,38 @@ async fn a_strict_batch_with_a_refused_row_is_a_conflict_and_writes_nothing() {
     assert_eq!(body["refused"], json!([]));
 }
 
-/// **A row creating an item needs a position, and a row carries both coordinates or neither**:
-/// either is `422`.
+/// **A row creating an item needs a position**: a row naming no item and carrying none is refused
+/// as naming no item, and the batch's other rows apply. **A row carries both coordinates or
+/// neither**: one alone is `422`.
 #[tokio::test]
 async fn a_new_item_needs_both_coordinates() {
     let served = Served::build(fixture).await;
-    let (status, body) = ingest(&served, "no-position", json!([{ "access": ["0"], "gid": 11 }])).await;
-    assert_eq!(status, 422, "{body}");
+    let three = holder(&served, gid_of(3)).await;
+    let (status, body) = ingest(
+        &served,
+        "no-position",
+        json!([{ "access": ["0"], "gid": 11 }, { "tessera_id": three }]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(body["unchanged"], 1, "{body}");
+    // A refused row sets no value, so a later row giving the value a position creates the item.
+    let (status, body) = ingest(
+        &served,
+        "no-position-then-placed",
+        json!([
+            { "access": ["0"], "gid": 11 },
+            { "x": 4.0, "y": 4.0, "access": ["0"], "gid": 11 },
+        ]),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["refused"], json!([{ "row": 0, "reason": "names_no_item" }]));
+    assert_eq!(body["created"], 1, "{body}");
+    let (status, body) =
+        ingest_strict(&served, "no-position-strict", json!([{ "access": ["0"], "gid": 12 }])).await;
+    assert_eq!(status, 409, "{body}");
     let (status, body) =
         ingest(&served, "one-coordinate", json!([{ "x": 5.0, "access": ["0"], "gid": 11 }])).await;
     assert_eq!(status, 422, "{body}");

@@ -1308,7 +1308,8 @@ paths:
         what the item stores; a new item has no value there. A null clears it: on an item that
         holds a value it is a change. The coordinates are `x` and `y` on a view whose projection is
         `none`, and `lon` and `lat` in degrees on any other, `float32` or `float64` in Arrow; a row
-        carries both or neither. A row that creates an item needs them, and without them is `422`.
+        carries both or neither. A row that creates an item needs them: a row naming no item and
+        carrying none is refused as naming no item.
         A coordinate outside the view's extent is stored on its edge and counted in `clamped`; one
         outside the projection's domain is counted in `clipped`; a non-finite one is `422`.
         `access` holds the row's access labels: in JSON a string or a list of strings, in Arrow a
@@ -1332,8 +1333,9 @@ paths:
         changes nothing names only artifacts that already hold its item.
 
         **Refused rows.** A row is refused where its values name more than one item, where its
-        `tessera_id` names no item, where it names an item an earlier row of the batch names, or
-        where it sets a unique value an earlier row sets: of two rows naming one item or setting
+        `tessera_id` names no item, where it names no item and carries no coordinates, where it
+        names an item an earlier row of the batch names, or where it sets a unique value an earlier
+        row sets: of two rows naming one item or setting
         one value, the first is kept. A refused row writes nothing. The batch applies its other
         rows, lists each refused row in `refused` by position with its reason, and answers `null`
         in its place in `tessera_ids`. With `strict=true` the batch is `409` at its first refused
@@ -1396,7 +1398,7 @@ paths:
             Nothing was written. The detail names rows by position, values as sent and items by `tessera_id`.
 
             - The batch id was used for a different body
-            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `tessera_id` names no live or suppressed item; or it names an item, or sets a unique value, an earlier row does
+            - With `strict=true`, a row is refused: its values name more than one item, as when a row gives an item a unique value another item holds; its `tessera_id` names no live or suppressed item; it names no item and carries no coordinates; or it names an item, or sets a unique value, an earlier row does
             - An item a row edits changed while the batch was checked; sending it again answers
             - The items the batch names changed while it was checked twice; sending it again answers
           content:
@@ -1415,7 +1417,6 @@ paths:
             - A cell does not fit its column
             - A key is not in a closed vocabulary or layer
             - A row creates an item with no label on a view with no default
-            - A row names no item and carries no coordinates
             - A row carries one coordinate and not the other, or coordinates in a batch naming no view
             - The batch is over the row cap
           content:
@@ -4207,7 +4208,7 @@ components:
     RefusalReason:
       type: string
       enum: [names_two_items, unknown_tessera_id, names_no_item, one_item_twice, one_value_twice]
-      description: "`names_two_items`: the row's values name more than one item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request that creates none. `one_item_twice`: an earlier row names the same item. `one_value_twice`: an earlier row sets the same unique value."
+      description: "`names_two_items`: the row's values name more than one item. `unknown_tessera_id`: its `tessera_id` names no live or suppressed item. `names_no_item`: its values name no item, in a request or a row that creates none. `one_item_twice`: an earlier row names the same item. `one_value_twice`: an earlier row sets the same unique value."
 
     ChangesApplied:
       type: object
