@@ -886,13 +886,17 @@ export class TesseraExplorer extends TesseraElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (typeof ResizeObserver === 'undefined') return;
-    this.resize ??= new ResizeObserver((entries) => {
-      const width = entries.at(-1)?.contentRect.width ?? 0;
-      this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
-      this.narrow = width > 0 && width <= COMPACT_BETWEEN[0];
-    });
+    // The width is taken once now, so the first render already has the layout it will keep.
+    this.fitWidth(this.getBoundingClientRect().width);
+    this.resize ??= new ResizeObserver((entries) => this.fitWidth(entries.at(-1)?.contentRect.width ?? 0));
     this.resize.observe(this);
     this.sizes ??= new ResizeObserver(() => this.measure());
+  }
+
+  /** Take the compact or the narrow form, or neither, for a container `width` pixels wide. */
+  private fitWidth(width: number): void {
+    this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
+    this.narrow = width > 0 && width <= COMPACT_BETWEEN[0];
   }
 
   override disconnectedCallback(): void {
