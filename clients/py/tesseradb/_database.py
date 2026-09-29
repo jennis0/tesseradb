@@ -1479,6 +1479,7 @@ class Database:
         colour_by: str | None = None,
         filters: dict | None = None,
         height: int = 480,
+        size_by: str | None = None,
         **kwargs,
     ) -> Map:
         """The interactive map of this database, as a notebook widget, showing everything.
@@ -1488,8 +1489,9 @@ class Database:
         - `colour_by`: the column to colour points by, or `"cluster:<layer>"`.
         - `filters`: a filter expression to apply, as `Selection.filter` takes one.
         - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
 
-        Other keywords go to `Map` unchanged. `db.view(name).map()` opens on a selection instead,
+        Other keywords go to `Map` unchanged, such as `size_scale`. `db.view(name).map()` opens on a selection instead,
         and `db.viewer(terms).map()` shows what a reader holding those terms sees.
 
             db.map(colour_by="cluster:clusters")
@@ -1501,6 +1503,7 @@ class Database:
             colour_by=colour_by,
             filters=filters,
             height=height,
+            size_by=size_by,
             **kwargs,
         )
 

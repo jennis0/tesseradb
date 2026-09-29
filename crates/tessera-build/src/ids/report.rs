@@ -16,8 +16,8 @@ pub struct RefusedRows {
     /// The block reading it: `view 'world'`, `layer 'taxonomy' members`.
     pub object: String,
     /// `names_two_items`, `one_item_twice`, `one_value_twice`, `names_no_item` or
-    /// `unknown_tessera_id`; or `outside_limit`, a row naming an item `--limit` left out, which is
-    /// left out with it and is not a refusal.
+    /// `unknown_tessera_id`; or `outside_limit`, a row naming no item `--limit` kept, which is
+    /// left out and is not a refusal.
     pub reason: String,
     pub rows: u64,
     /// The values of the first ten refused rows in the file, each once.
@@ -31,7 +31,7 @@ impl RefusedRows {
     }
 }
 
-const OUTSIDE_LIMIT: &str = "outside_limit";
+pub(crate) const OUTSIDE_LIMIT: &str = "outside_limit";
 
 /// How many rows a report names by their values, for each file and reason.
 pub(crate) const SAMPLES: usize = 10;
@@ -144,7 +144,7 @@ fn reason_text(reason: &str) -> &'static str {
         Refusal::ONE_VALUE_TWICE => "each gives a unique value an earlier row of the file gives",
         Refusal::NAMES_NO_ITEM => "each names no item",
         Refusal::UNKNOWN_TESSERA_ID => "each carries a tessera_id, which names no item at a build",
-        OUTSIDE_LIMIT => "each names an item --limit left out, and is left out with it",
+        OUTSIDE_LIMIT => "each names no item --limit kept, and is left out",
         _ => "refused",
     }
 }

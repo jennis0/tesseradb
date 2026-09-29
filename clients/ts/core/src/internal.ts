@@ -13,7 +13,7 @@ export {compose, fold} from './compose.js';
 export {GRID32_PER_WORLD_UNIT, mortonOfTile, tileXY} from './coords.js';
 export {decodeViewport} from './decode.js';
 export {workerDecoder} from './decoder.js';
-export {hasValue, numericValues, rankedValues} from './encoding.js';
+export {hasValue, numericValues, rankedValues, sizesPoints} from './encoding.js';
 export {artifactColours, positionalEntry, NEUTRAL} from './palette.js';
 export {worldBbox} from './prefetch.js';
 export {assertCompositionMatchesServed, refusalOf} from './presented.js';

@@ -4,7 +4,7 @@ import {CATEGORY_PALETTES} from '@tesseradb/deck';
 import {hexOf} from '@tesseradb/deck/internal';
 import '../src/legend.js';
 import '../src/map.js';
-import {colouringOf} from '../src/colouring.js';
+import {colouringOf, setSizing} from '../src/colouring.js';
 import {deep, deepAll, fakeStore, meta, mount, scalar, settle, status, type FakeStore} from './fake-store.js';
 
 /**
@@ -40,8 +40,11 @@ function legend(colourBy: string, over: Partial<LegendProjection> = {}): LegendP
     ranks: {field: {1: 0, 2: 1, 3: 2}, venue: {1: 0}},
     domains: {citations: {min: 0, max: 1000}},
     categories: {field: VALUES, venue: [{code: 1, key: 'neurips', title: 'NeurIPS'}]},
+    samples: {},
+    missing: {},
     categoryErrors: {},
     colourBy,
+    sizeBy: null,
     ...over
   };
 }
@@ -460,5 +463,89 @@ describe('the Colour heading under a layer with several depths served', () => {
     select.dispatchEvent(new Event('change'));
     await settle(host);
     expect(deep(host, '[part="level"] .t')?.textContent).toBe('Level 2');
+  });
+});
+
+describe('the Size section', () => {
+  const SIZED = meta({
+    declaredScalars: [
+      ...META.declaredScalars,
+      scalar('score', 'f64', {render: true, homes: ['rendered']})
+    ]
+  });
+
+  /** A legend sized by `column` over `domain` on `scale`, with whatever else `over` names. */
+  async function sized(column: string, domain: {min: number; max: number} | null, scale: 'linear' | 'log' | 'rank', over: Partial<LegendProjection> = {}) {
+    const host = await mount('<tessera-legend selectable readout></tessera-legend>');
+    const el = host.querySelector('tessera-legend') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: SIZED, status: status({}), legend: legend('field', {sizeBy: column, domains: domain ? {[column]: domain} : {}, ...over}), filters: filtersOf(emptyDraft(META.filterOperands))});
+    setSizing(store, {min: 2, max: 9, scale});
+    el.store = store;
+    await settle(host);
+    return host;
+  }
+
+  /** The circles' diameters and values, in order. */
+  const key = (host: HTMLElement) =>
+    deepAll(host, '[part="size-entry"]').map((e) => [Number.parseFloat((e.querySelector('.circle') as HTMLElement).style.width), e.querySelector('[part="size-value"]')!.textContent] as const);
+  const labels = (host: HTMLElement) => key(host).map(([, label]) => label);
+  const diameter = (v: number, max: number) => 2 * (2 + 7 * (Math.log1p(v) / Math.log1p(max)));
+
+  it('follows Colour with the column sized by, as circles at round values drawn at the sizes the map gives them', async () => {
+    const host = await sized('citations', {min: 0, max: 12_345}, 'log');
+    const size = deep(host, '[part="size"]')!;
+    expect(size.getAttribute('data-state')).toBe('shown');
+    expect(size.previousElementSibling?.querySelector('[part="title"]')).not.toBeNull();
+    expect(deep(host, '[part="size-by"]')!.textContent).toBe('Citations');
+    // A third and two thirds of the way on the log scale, to one figure; the last marked as having
+    // larger values drawn, at the largest size.
+    const drawn = key(host);
+    expect(drawn.map(([, label]) => label)).toEqual(['0', '20', '500', '10,000+']);
+    expect(drawn[0]![0]).toBe(4);
+    expect(drawn[1]![0]).toBeCloseTo(diameter(20, 12_345), 1);
+    expect(drawn[2]![0]).toBeCloseTo(diameter(500, 12_345), 1);
+    expect(drawn[3]![0]).toBe(18);
+    expect(deep(host, '[part="size-note"]')).toBeNull();
+    expect(deep(host, '[part="size-entry"][data-missing]')).toBeNull();
+  });
+
+  it('keeps every value inside the range and in order, printing each once, and whole numbers for an integer column', async () => {
+    expect(labels(await sized('citations', {min: 150, max: 199}, 'linear'))).toEqual(['150', '166', '183', '199']);
+    document.body.innerHTML = '';
+    expect(labels(await sized('score', {min: 0.001, max: 0.005}, 'linear'))).toEqual(['0.001', '0.002', '0.004', '0.005']);
+    document.body.innerHTML = '';
+    expect(labels(await sized('citations', {min: 0, max: 2}, 'log'))).toEqual(['0', '1', '2']);
+    document.body.innerHTML = '';
+    expect(labels(await sized('score', {min: 1e12, max: 3e12}, 'linear'))).toEqual(['1.00e+12', '2.00e+12', '2.33e+12', '3.00e+12']);
+  });
+
+  it('under rank, takes its middle values from the sample and its ends from the range drawn, and notes the rank', async () => {
+    const values = [0, 0, 1, 2, 3, 5, 8, 13, 40, 900];
+    const host = await sized('citations', {min: 0, max: 5_432}, 'rank', {samples: {citations: {values, seen: 10}}});
+    expect(labels(host)).toEqual(['0', '2', '8', '5,000+']);
+    expect(deep(host, '[part="size-note"]')!.getAttribute('data-note')).toBe('rank');
+  });
+
+  it('adds a ring for the points with no value, alone where no value is drawn yet', async () => {
+    const host = await sized('citations', {min: 0, max: 100}, 'linear', {missing: {citations: true}});
+    const ring = deep(host, '[part="size-entry"][data-missing]')!;
+    expect(ring).not.toBeNull();
+    expect(Number.parseFloat((ring.querySelector('.circle') as HTMLElement).style.width)).toBe(6);
+    document.body.innerHTML = '';
+    const only = await sized('citations', null, 'linear', {missing: {citations: true}});
+    expect(deep(only, '[part="size"]')!.getAttribute('data-state')).toBe('shown');
+    expect(deepAll(only, '[part="size-entry"]').map((e) => e.hasAttribute('data-missing'))).toEqual([true]);
+  });
+
+  it('is absent with one size, and says so where the column cannot size points or nothing is drawn yet', async () => {
+    const {host, store} = await mountLegend('field');
+    expect(deep(host, '[part="size"]')).toBeNull();
+    store.set('legend', legend('field', {sizeBy: 'venue'}));
+    await settle(host);
+    expect(deep(host, '[part="size"]')!.getAttribute('data-state')).toBe('unavailable');
+    store.set('legend', legend('field', {sizeBy: 'citations', domains: {}}));
+    await settle(host);
+    expect(deep(host, '[part="size"]')!.getAttribute('data-state')).toBe('empty');
+    expect(deep(host, '[part="size-entry"]')).toBeNull();
   });
 });

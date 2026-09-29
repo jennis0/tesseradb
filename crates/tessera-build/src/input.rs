@@ -852,7 +852,7 @@ pub enum PointSurvey {
 /// boundary value as a clamp would report every tightly-fitted corpus as damaged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoordinateSurvey {
-    /// Rows the build would place — `limit` honoured.
+    /// Rows the build would place: where the survey is given the rows kept, those.
     pub rows: u64,
     /// The tightest box holding every one of them. `None` when the selection is empty.
     pub bounds: Option<Bounds>,
@@ -883,6 +883,10 @@ impl CoordinateSurvey {
     }
 }
 
+/// The rows of one view's points the identity pass kept.
+#[derive(Debug, Clone, Copy)]
+pub struct KeptRows<'a>(pub(crate) &'a crate::ids::ReadRows);
+
 /// The tightest box holding every point this build would read, and — where `against` supplies a
 /// frame — how many of those rows that frame clamps.
 ///
@@ -895,10 +899,9 @@ impl CoordinateSurvey {
 /// clamp question at all: a row group's bounds say nothing about how many of its rows sit outside
 /// the frame.
 ///
-/// `limit` is honoured, because the extent must frame the rows the build actually places: a
-/// prefix build whose box was computed over the whole file would quantise its rows into a
-/// fraction of the grid. It is the column the limit's attribute is read from and the value its
-/// rows must be below; a file without the column is not limited.
+/// `kept` is the rows the identity pass kept, where it has run: under `--limit` the extent frames
+/// those rows, since a prefix build whose box was computed over the whole file would quantise its
+/// rows into a fraction of the grid, and a row naming a kept item is kept whatever its own value.
 ///
 /// A Morton points file has no coordinates to bound. With a frame in hand that is simply
 /// [`PointSurvey::Quantised`] — nothing is quantised at build, so nothing clamps. With none it is
@@ -909,7 +912,7 @@ pub fn survey_points(
     path: &Path,
     fields: &Fields,
     projection: Projection,
-    limit: Option<(&str, u64)>,
+    kept: Option<KeptRows<'_>>,
     select: Option<&ViewSelector>,
     against: Option<&Bounds>,
 ) -> Result<PointSurvey> {
@@ -962,19 +965,7 @@ pub fn survey_points(
         });
     }
 
-    let limit = limit.and_then(|(column, below)| {
-        schema
-            .column_with_name(column)
-            .map(|(index, _)| (index, column, below))
-    });
-    let keep = match limit {
-        Some((index, _, below)) => prunable_row_groups(builder.metadata(), index, Some(below)),
-        None => (0..builder.metadata().num_row_groups()).collect(),
-    };
-    let mut roots = Vec::with_capacity(4);
-    if let Some((index, _, _)) = limit {
-        roots.push(index);
-    }
+    let mut roots = Vec::with_capacity(3);
     for canonical in ["x", "y"] {
         roots.push(field_index(path, &schema, fields, canonical)?);
     }
@@ -989,6 +980,10 @@ pub fn survey_points(
     drop(builder);
     let groups = FileGroups::open(path)?;
     let mask = groups.projection(&roots);
+    let keep = match kept {
+        Some(kept) => kept.0.groups(groups.count()),
+        None => (0..groups.count()).collect(),
+    };
 
     let mut found = false;
     let (mut x_min, mut x_max) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -1001,23 +996,14 @@ pub fn survey_points(
         clamped_y: 0,
         clipped: 0,
     };
+    let mut numbers: Vec<u64> = Vec::new();
     groups.each_batch(path, &keep, &mask, |first, batch| {
         let column = |name: &str| column_index(path, &batch.schema(), name);
         let (x_idx, y_idx) = (column(x_name)?, column(y_name)?);
-        let below: Option<(UInt64Array, u64)> = match limit {
-            Some((_, column, below)) => Some((
-                id_values(
-                    path,
-                    batch
-                        .column_by_name(column)
-                        .expect("the limit's column is projected")
-                        .as_ref(),
-                    column,
-                )?,
-                below,
-            )),
-            None => None,
-        };
+        numbers.clear();
+        if let Some(kept) = kept {
+            kept.0.numbers.extend(first, batch.num_rows(), &mut numbers);
+        }
         let name_of = |i: usize| format!("row {}", first + i as u64);
         let xs = read_coordinate_column(path, &batch, x_idx, x_name, &name_of)?;
         let ys = read_coordinate_column(path, &batch, y_idx, y_name, &name_of)?;
@@ -1030,9 +1016,7 @@ pub fn survey_points(
             None => None,
         };
         for i in 0..xs.len() {
-            if below
-                .as_ref()
-                .is_some_and(|(values, below)| values.is_null(i) || values.value(i) >= *below)
+            if numbers.get(i).is_some_and(|&number| number == crate::ids::NO_SOURCE)
                 || !keep.as_ref().is_none_or(|keep| keep[i])
             {
                 continue;

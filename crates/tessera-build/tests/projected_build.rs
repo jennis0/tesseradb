@@ -111,7 +111,6 @@ fn a_projected_build_places_a_place_at_its_published_tile() {
         &whole_world(),
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     // The domain is the whole unit square, and only the whole world contains it.
@@ -163,7 +162,6 @@ fn clipped_points_are_counted_and_clamped_points_are_not() {
         &whole_world(),
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     assert_eq!(frame.clipped(), 3, "two north of the domain and one south");
@@ -208,7 +206,6 @@ fn auto_snaps_the_datas_own_lon_lat_box() {
         &Extent::AutoLonLat,
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     let snap = frame.snap.expect("a projected frame snaps");
@@ -258,7 +255,6 @@ fn auto_over_an_empty_source_is_refused() {
             &Extent::AutoLonLat,
             &points,
             &geographic(),
-            None,
         )
         .expect_err("an empty source frames nothing")
     );
@@ -281,7 +277,6 @@ fn a_coordinate_outside_the_wgs84_range_is_refused() {
             &whole_world(),
             &points,
             &geographic(),
-            None,
         )
         .expect_err("a value outside the range is not a coordinate")
         .to_string()
@@ -324,7 +319,6 @@ fn an_unprojected_view_stores_the_files_own_coordinates() {
         &Extent::Fixed(extent),
         &points,
         &Default::default(),
-        None,
     )
     .expect("the frame resolves");
     assert_eq!(
@@ -474,7 +468,6 @@ fn a_projected_bundles_manifest_names_its_projection() {
         &whole_world(),
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     let out = build_bundle(
@@ -539,7 +532,6 @@ fn report_over(points: &Path, extent: &Extent) -> String {
         extent,
         points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves")
     .report()
@@ -627,7 +619,6 @@ fn clipped_rows_are_also_clamped_at_a_sub_square() {
         &whole_world(),
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     assert_eq!(world.clipped(), 3);
@@ -650,7 +641,6 @@ fn clipped_rows_are_also_clamped_at_a_sub_square() {
         &lon_lat([0.0, 45.0], [1.0, 45.0]),
         &points,
         &geographic(),
-        None,
     )
     .expect("the frame resolves");
     assert_eq!(sub.extent.y_min, 0.25, "the z2 square (2, 1)");
@@ -760,7 +750,6 @@ fn an_unprojected_views_report_is_word_for_word_the_report_it_has_always_been() 
         }),
         &points,
         &Default::default(),
-        None,
     )
     .expect("the frame resolves");
 
@@ -793,7 +782,6 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
             &whole_world(),
             &points,
             &geographic(),
-            None,
         )
         .expect_err("a projected view has no Morton geometry")
     );
@@ -821,7 +809,6 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
         &Extent::Fixed(identity),
         &points,
         &Default::default(),
-        None,
     )
     .expect("an unprojected view reads codes against the grid's own frame");
     assert_eq!(frame.survey, PointSurvey::Quantised);

@@ -57,7 +57,7 @@ const META = {
 /** A layer points can be coloured by: it declares geometry and depends on nothing. */
 const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -173,6 +173,7 @@ describe('the up-sync', () => {
     expect(model.state.layers).toEqual(['clusters/a']);
     expect(model.state.colour_by).toBe('cluster:clusters/a');
     expect(model.state.filters).toBeNull();
+    expect([model.state.size_by, model.state.size_min, model.state.size_max, model.state.size_scale]).toEqual([null, 2, 9, 'linear']);
     // The same composition presented again is not a new settle.
     store.set('status', status({}));
     expect(model.saves).toBe(1);
@@ -284,6 +285,22 @@ describe('the down-sync', () => {
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(model.sent.at(-1)?.content).toMatchObject({type: 'error', what: 'filters'});
+  });
+
+  it('applies the size settings set in the kernel, the scale before the column, and follows each change', async () => {
+    const {sizingOf} = await import('../src/colouring.js');
+    const {model, store} = setUp({size_by: 'citations', size_min: 3, size_max: 11, size_scale: 'rank'});
+    // Sized by rank, the store is asked to keep a sample of the column's values.
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args)).toEqual([['citations', {rank: true}]]);
+    expect(sizingOf(store)).toEqual({min: 3, max: 11, scale: 'rank'});
+    model.set('size_max', 7);
+    model.set('size_scale', 'log');
+    expect(sizingOf(store)).toEqual({min: 3, max: 7, scale: 'log'});
+    // A radius that is not a number above zero leaves the one drawn, which the next settle reports.
+    model.set('size_min', -1);
+    expect(sizingOf(store).min).toBe(3);
+    model.set('size_by', null);
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').at(-1)!.args).toEqual([null, {rank: false}]);
   });
 
   it('reports a colour_by naming no layer this view can colour by, once meta lists the layers', () => {

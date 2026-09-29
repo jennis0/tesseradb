@@ -2066,13 +2066,7 @@ pub(crate) fn forecast_warning(disk: &Residency, corpus: Corpus<'_>, free: u64) 
 }
 
 /// **What the identity pass asks the disk for** ([`crate::ids`]), printed before it runs, with a
-/// warning where the free space is short of it. Modelled from each file's footer, not measured:
-/// per unique field a file carries, its sort's buckets and the file's unset keys at the key's width
-/// and a row's four bytes each; the decisions routed by row at 8 bytes a row and field; the file's
-/// numbers at 4 bytes a row, except a view's points read whole, which the common case numbers by
-/// position and writes nothing for; and the holdings every value-setting file leaves for the files
-/// after it. The pass reads one file at a time, so the peak is the largest file's scratch beside
-/// the holdings and numbers the files before it left.
+/// warning where the free space is short of it.
 ///
 /// It warns and the build goes on, as the build's own disk pre-flight does
 /// (`crate::pipeline::plan_build` carries why).
@@ -2080,49 +2074,10 @@ pub(crate) fn report_identity_disk(
     args: &crate::BuildArgs,
     free: Option<u64>,
 ) -> crate::error::Result<()> {
-    use tessera_lifecycle::resolve::Batch;
-    let mut held = 0u64;
-    let mut numbers = 0u64;
-    let mut peak = 0u64;
-    for read in crate::ids::reads(args)? {
-        let crate::ids::ReadInput::File {
-            path,
-            fields,
-            select,
-        } = &read.input
-        else {
-            continue;
-        };
-        let groups = crate::row_groups::FileGroups::open(path)?;
-        let rows = groups.rows();
-        let carried =
-            crate::ids::carried_unique(groups.schema(), fields, &args.schema).unwrap_or_default();
-        let entry: u64 = carried
-            .iter()
-            .map(|field| match field.ty {
-                ScalarType::Keyword => 20,
-                _ => 12,
-            })
-            .sum();
-        let own_numbers = match (read.batch, select, args.limit) {
-            (Batch::Creates, None, None) => 0,
-            _ => 4 * rows,
-        };
-        // Each field's sort spills its (key, row) once; a file whose rows set values writes the
-        // values it set beside it, and every row's decision goes through a partition by row.
-        let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
-        let copies = if sets_values { 2 } else { 1 };
-        let transient = rows
-            .saturating_mul(copies * entry)
-            .saturating_add(rows.saturating_mul(8 * carried.len().max(1) as u64));
-        peak = peak.max(held + numbers + own_numbers + transient);
-        numbers += own_numbers;
-        if sets_values {
-            held += rows.saturating_mul(entry);
-        }
-    }
+    let (peak, numbers) = identity_disk(args)?;
     eprintln!(
-        "identity: ~{} MiB of scratch at peak, {} MiB of it the row numbers the later passes read",
+        "identity: at most ~{} MiB of scratch at peak, up to {} MiB of it the row numbers the \
+         later passes read",
         peak >> 20,
         numbers >> 20
     );
@@ -2134,6 +2089,108 @@ pub(crate) fn report_identity_disk(
         );
     }
     Ok(())
+}
+
+/// The identity pass's scratch at its peak, and the part of it that is the files' numbers the later
+/// passes read. Modelled from each file's footer, not measured, and an upper bound on both.
+///
+/// The pass reads one file at a time, so the peak is one file's scratch beside the holdings and
+/// numbers the files before it left. A row costs a field's entry (a key and a row's four bytes:
+/// 12 bytes for an integer, 20 for a keyword) in each sort and run, and a file's scratch is the
+/// largest of three phases:
+///
+/// - **The merge.** Each field's sort, which becomes the field's unset keys as it is drained; the
+///   decisions routed by row, 8 bytes a row and field; and, in a file carrying several fields and
+///   setting values, the candidates' sort at 12 bytes a row and field.
+/// - **The rows decided against each other**, in a file carrying several fields, beside its unset
+///   keys: the decisions as they are read and deleted with the sort of the items rows name, 8
+///   bytes a row; that sort with the sort of the rows it refuses; or the candidates' sort with a
+///   bit a row and field.
+/// - **The values set**, one field at a time: every field's unset keys or the runs made from them,
+///   beside one field's copy of its own, or of its holdings as a changed value is removed from
+///   them.
+///
+/// A sort holds two copies of its largest bucket while it routes that bucket again, and keys that
+/// arrive nearly sorted put most of a sort in one bucket. So the merge and each sort are charged a
+/// second copy of their largest part.
+///
+/// Every file's numbers are charged at 4 bytes a row. A view's points read whole write none where
+/// every row creates an item and none is refused, which the footer cannot tell. The holdings a
+/// file leaves are its unset keys.
+pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u64, u64)> {
+    use tessera_lifecycle::resolve::Batch;
+    let mut held: std::collections::BTreeMap<u16, u64> = Default::default();
+    let mut numbers = 0u64;
+    let mut peak = 0u64;
+    for read in crate::ids::reads(args)? {
+        let crate::ids::ReadInput::File { path, fields, .. } = &read.input else {
+            continue;
+        };
+        let groups = crate::row_groups::FileGroups::open(path)?;
+        let rows = groups.rows();
+        let carried =
+            crate::ids::carried_unique(groups.schema(), fields, &args.schema).unwrap_or_default();
+        let entries: Vec<(u16, u64)> = carried
+            .iter()
+            .map(|field| {
+                let entry = match field.ty {
+                    ScalarType::Keyword => 20,
+                    _ => 12,
+                };
+                (field.position, rows.saturating_mul(entry))
+            })
+            .collect();
+        let entry: u64 = entries.iter().map(|&(_, bytes)| bytes).sum();
+        let largest = entries.iter().map(|&(_, bytes)| bytes).max().unwrap_or(0);
+        let fields = carried.len().max(1) as u64;
+        let own_numbers = 4 * rows;
+        let sets_values = matches!(read.batch, Batch::Creates | Batch::Edits);
+        let several = carried.len() > 1;
+        let one_row_per_item = read.batch != Batch::Names;
+        let keeps_unset = sets_values && (read.batch == Batch::Creates || several);
+        let candidates = match sets_values && several {
+            true => rows.saturating_mul(12 * fields),
+            false => 0,
+        };
+        let decisions = rows.saturating_mul(8 * fields);
+        let merge = entry
+            .saturating_add(largest)
+            .saturating_add(decisions)
+            .saturating_add(candidates);
+        let against = match several && (one_row_per_item || sets_values) {
+            true => {
+                let named = match one_row_per_item {
+                    true => rows.saturating_mul(8),
+                    false => 0,
+                };
+                let walk = decisions.saturating_add(named);
+                let refused = named.saturating_mul(3);
+                let claimed = candidates.saturating_mul(2).saturating_add(rows * fields / 8);
+                entry.saturating_add(walk.max(refused).max(claimed))
+            }
+            false => 0,
+        };
+        let set = match keeps_unset {
+            true => {
+                let one = entries
+                    .iter()
+                    .map(|&(position, bytes)| bytes.max(held.get(&position).copied().unwrap_or(0)))
+                    .max()
+                    .unwrap_or(0);
+                entry.saturating_add(one)
+            }
+            false => 0,
+        };
+        let before: u64 = held.values().sum();
+        peak = peak.max(before + numbers + own_numbers + merge.max(against).max(set));
+        numbers += own_numbers;
+        if keeps_unset {
+            for (position, bytes) in entries {
+                *held.entry(position).or_default() += bytes;
+            }
+        }
+    }
+    Ok((peak, numbers))
 }
 
 /// What the artifact pass's row-column lanes cost **one** view.

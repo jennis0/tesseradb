@@ -338,7 +338,6 @@ fn auto_extent_over_no_rows_is_still_refused() {
         &tessera_build::config::Extent::Auto { margin: 0.01 },
         &inputs.points,
         &Default::default(),
-        None,
     )
     .expect_err("`auto` cannot be fitted to no rows");
     let text = error.to_string();

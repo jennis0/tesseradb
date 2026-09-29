@@ -153,9 +153,21 @@ def test_the_synced_surface_is_exactly_the_design_s(make):
     synced = {k for k in synced if not k.startswith("_")}  # `_esm` and `_css` are anywidget's
     assert synced == {
         "url", "view", "explorer_layout", "height", "title_field",
-        "bbox", "layers", "colour_by", "filters",
+        "bbox", "layers", "colour_by", "size_by", "size_min", "size_max", "size_scale", "filters",
         "selected", "selected_artifact", "region",
     }
+
+
+def test_size_settings_are_synced_and_leave_the_map_s_choice_by_default(make):
+    state = make(token="t").get_state()
+    assert [state[k] for k in ("size_by", "size_min", "size_max", "size_scale")] == [None, None, None, None]
+    m = make(token="t", size_by="citations", size_min=1.5, size_max=12, size_scale="log")
+    state = m.get_state()
+    assert (state["size_by"], state["size_min"], state["size_max"], state["size_scale"]) == ("citations", 1.5, 12.0, "log")
+    m.size_scale = "rank"
+    assert m.get_state()["size_scale"] == "rank"
+    with pytest.raises(traitlets.TraitError):
+        m.size_scale = "square"
 
 
 def test_title_field_is_synced_down_and_defaults_to_none(make):
