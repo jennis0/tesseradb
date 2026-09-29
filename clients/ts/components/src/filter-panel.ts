@@ -33,7 +33,9 @@ const MODES: [ClauseVerb, string][] = [
  * `pinned` and those holding a clause in either position, in `meta`'s order, and any the user has
  * opened or changed. A listed column shows its `<tessera-filter>` while it holds a clause in the
  * current position or the user opened or changed it, and otherwise a row reading "Any" that opens
- * it. Add filter lists the other filterable columns, with a search box, and opens the one chosen.
+ * it. Add filter lists every filterable column, with a search box, and the listed ones are checked.
+ * Choosing an unchecked column lists and opens it. Choosing a checked one takes it off the panel and
+ * empties its clause in both positions; a column in `pinned` stays, since the host lists it.
  *
  * Pressing a column's chip sets `mode` to the chip's position and opens, scrolls to and focuses
  * the column's control; under `chips-only`, where there are no controls, it fires
@@ -69,7 +71,8 @@ const MODES: [ClauseVerb, string][] = [
  * @csspart add - The Add filter button, with `aria-expanded`.
  * @csspart add-list - The list of columns to add, while it is open.
  * @csspart add-search - The search box over that list.
- * @csspart add-option - One column in that list, with `data-column`.
+ * @csspart add-option - One column in that list, with `data-column`, `aria-checked` while it is
+ *   listed, and `aria-disabled` where it is pinned and so cannot be taken off.
  * @csspart filter-<part> - A part of an inner `<tessera-filter>`, forwarded under a `filter-`
  *   prefix: `filter-entry`, `filter-tick`, and so on.
  */
@@ -203,8 +206,15 @@ export class TesseraFilterPanel extends TesseraElement {
         text-align: left;
       }
       [part~='add-option']:hover,
-      [part~='add-option']:focus-visible {
+      [part~='add-option']:focus-visible,
+      [part~='add-option'][aria-checked='true'] {
         background: var(--_tessera-surface-2);
+      }
+      [part~='add-option'][aria-checked='true'] {
+        font-weight: 500;
+      }
+      [part~='add-option']:focus-visible {
+        outline-offset: -2px;
       }
       .none {
         display: block;
@@ -325,6 +335,47 @@ export class TesseraFilterPanel extends TesseraElement {
     this.show(column, this.mode);
   }
 
+  /** Take a column off the panel, emptying its clause in both positions. */
+  private takeOff(column: string): void {
+    this.adding = false;
+    this.addSearch = '';
+    const opened = new Set(this.opened);
+    opened.delete(column);
+    this.opened = opened;
+    const s = this.resolvedStore;
+    if (s) {
+      const draft = s.get('filters').draft;
+      const held = MODES.map(([verb]) => verb).filter((verb) => {
+        const d = draft[verb][column];
+        return d !== undefined && isPopulated(d);
+      });
+      if (held.length > 0) {
+        s.setFilters(held.reduce((d, verb) => withoutClause(d, column, verb), draft));
+        for (const verb of held) emit(this, 'tessera-filterchange', {column, verb, expr: null});
+      }
+    }
+    void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="add"]')?.focus());
+  }
+
+  /** The arrow keys, Home and End move among the Add filter options; Up from the first goes to the search box. */
+  private addKeys(e: KeyboardEvent, i: number | null): void {
+    const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="add-option"]'));
+    if (items.length === 0) return;
+    const last = items.length - 1;
+    const next =
+      i === null
+        ? {ArrowDown: 0}[e.key]
+        : {ArrowDown: Math.min(i + 1, last), ArrowUp: i - 1, Home: 0, End: last}[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    if (next < 0) {
+      this.renderRoot.querySelector<HTMLElement>('[part="add-search"]')?.focus();
+      return;
+    }
+    items.forEach((item, j) => (item.tabIndex = j === next ? 0 : -1));
+    items[next]?.focus();
+  }
+
   override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const meta = s?.get('meta') ?? null;
@@ -366,7 +417,6 @@ export class TesseraFilterPanel extends TesseraElement {
 
     const pinned = new Set(this.pinned.split(/[\s,]+/).filter(Boolean));
     const listed = operands.filter((o) => pinned.has(o.column) || this.opened.has(o.column) || holds(o.column, 'filter') || holds(o.column, 'highlight'));
-    const rest = operands.filter((o) => !listed.includes(o));
     const at = MODES.findIndex(([v]) => v === this.mode);
     const modeSwitch = html`<div class="head"><div part="mode" role="radiogroup" aria-label="Edit">
       ${MODES.map(
@@ -385,10 +435,12 @@ export class TesseraFilterPanel extends TesseraElement {
       </div>`;
     };
     const q = this.addSearch.trim().toLowerCase();
-    const offered = rest.filter((o) => q === '' || o.column.toLowerCase().includes(q) || columnCaption(o.column).toLowerCase().includes(q));
-    const adder =
-      rest.length > 0
-        ? html`<div class="adder">
+    const offered = operands.filter((o) => q === '' || o.column.toLowerCase().includes(q) || columnCaption(o.column).toLowerCase().includes(q));
+    const choose = (column: string) => {
+      if (!listed.some((o) => o.column === column)) this.add(column);
+      else if (!pinned.has(column)) this.takeOff(column);
+    };
+    const adder = html`<div class="adder">
             <button part="add" class="btn" type="button" aria-expanded=${this.adding ? 'true' : 'false'} aria-controls="add-list"
               @click=${() => {
                 this.adding = !this.adding;
@@ -403,14 +455,19 @@ export class TesseraFilterPanel extends TesseraElement {
                 }}>
                   <div class="input">${icon('search', 14)}<input part="add-search" type="search" autocomplete="off" placeholder="Find a field" aria-label="Find a field to filter" .value=${this.addSearch}
                     @input=${(e: Event) => (this.addSearch = (e.target as HTMLInputElement).value)}
-                    @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && offered[0] && this.add(offered[0].column)} /></div>
+                    @keydown=${(e: KeyboardEvent) => (e.key === 'Enter' && offered[0] ? choose(offered[0].column) : this.addKeys(e, null))} /></div>
                   ${offered.length > 0
-                    ? offered.map((o) => html`<button part="add-option" type="button" data-column=${o.column} @click=${() => this.add(o.column)}>${columnCaption(o.column)}</button>`)
+                    ? html`<div role="menu" aria-label="Fields">${offered.map((o, i) => {
+                        const added = listed.includes(o);
+                        const kept = added && pinned.has(o.column);
+                        return html`<button part="add-option" type="button" role="menuitemcheckbox" data-column=${o.column} aria-checked=${added ? 'true' : 'false'}
+                          aria-disabled=${kept ? 'true' : nothing} title=${kept ? 'Always shown here' : added ? 'Remove from the panel' : nothing} tabindex=${i === 0 ? '0' : '-1'}
+                          @click=${() => choose(o.column)} @keydown=${(e: KeyboardEvent) => this.addKeys(e, i)}>${columnCaption(o.column)}</button>`;
+                      })}</div>`
                     : html`<span class="none">No field by that name</span>`}
                 </div>`
               : nothing}
-          </div>`
-        : nothing;
+          </div>`;
     return html`${summary}${modeSwitch}${repeat(
       listed,
       (o) => o.column,

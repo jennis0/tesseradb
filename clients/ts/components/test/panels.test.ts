@@ -420,6 +420,83 @@ describe('<tessera-filter-panel>', () => {
     expect(deep(host, '[part="add-list"]')).toBeNull();
   });
 
+  it('checks the listed fields in Add filter, and choosing one takes it off with its clause in both positions', async () => {
+    const draft: FilterDraft = {filter: {...none().filter, archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['math']}}};
+    const {host, store, sent, fields} = await mountPanel(draft);
+    const changes: unknown[] = [];
+    host.addEventListener('tessera-filterchange', (e) => changes.push((e as CustomEvent).detail));
+    const open = async () => {
+      (deep(host, '[part="add"]') as HTMLButtonElement).click();
+      await settle(host);
+    };
+    const options = () => deepAll(host, '[part~="add-option"]').map((o) => [o.getAttribute('data-column'), o.getAttribute('aria-checked')]);
+    await open();
+    (deep(host, '[part~="add-option"][data-column="title"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(fields()).toEqual([
+      ['archive', true],
+      ['title', true]
+    ]);
+    await open();
+    expect(options()).toEqual([
+      ['archive', 'true'],
+      ['title', 'true'],
+      ['submitted_at', 'false']
+    ]);
+    (deep(host, '[part~="add-option"][data-column="archive"]') as HTMLButtonElement).click();
+    expect(sent()).toEqual({filter: {...draft.filter, archive: {family: 'category', keys: []}}, highlight: {archive: {family: 'category', keys: []}}});
+    expect(changes).toEqual([
+      {column: 'archive', verb: 'filter', expr: null},
+      {column: 'archive', verb: 'highlight', expr: null}
+    ]);
+    store.set('filters', filtersOf(sent()));
+    await settle(host);
+    expect(fields()).toEqual([['title', true]]);
+    // A field holding no clause comes off without a write.
+    const writes = store.calls.filter((c) => c.name === 'setFilters').length;
+    await open();
+    (deep(host, '[part~="add-option"][data-column="title"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(fields()).toEqual([]);
+    expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(writes);
+  });
+
+  it('keeps a pinned field listed when it is chosen in Add filter', async () => {
+    const {host, store, fields} = await mountPanel(none(), 'pinned="title"');
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const option = deep(host, '[part~="add-option"][data-column="title"]') as HTMLButtonElement;
+    expect(option.getAttribute('aria-checked')).toBe('true');
+    expect(option.getAttribute('aria-disabled')).toBe('true');
+    option.click();
+    await settle(host);
+    expect(fields()).toEqual([['title', false]]);
+    expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(0);
+  });
+
+  it('moves through Add filter with the arrow keys, Home and End, and closes on Escape', async () => {
+    const {host, panel} = await mountPanel(none());
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const focused = () => (panel.shadowRoot!.activeElement as HTMLElement | null)?.getAttribute('data-column') ?? panel.shadowRoot!.activeElement?.getAttribute('part');
+    const press = (key: string) => panel.shadowRoot!.activeElement!.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, composed: true}));
+    expect(focused()).toBe('add-search');
+    press('ArrowDown');
+    expect(focused()).toBe('archive');
+    press('ArrowDown');
+    expect(focused()).toBe('title');
+    press('End');
+    expect(focused()).toBe('submitted_at');
+    press('Home');
+    expect(focused()).toBe('archive');
+    press('ArrowUp');
+    expect(focused()).toBe('add-search');
+    press('Escape');
+    await settle(host);
+    expect(deep(host, '[part="add-list"]')).toBeNull();
+    expect(focused()).toBe('add');
+  });
+
   it('keeps a field open while its clause is emptied under the user', async () => {
     vi.useFakeTimers();
     const draft: FilterDraft = {filter: {...none().filter, title: {family: 'text', query: 'graph', phrase: true}}, highlight: {}};
