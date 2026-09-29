@@ -63,7 +63,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
 | `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold the session credential. The server logs a warning at start when it is set. `"*"` is refused. |
 | `compute_threads` | integer | the number of CPUs the process may use | Threads in the pool that computes responses. |
-| `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse` and `/session/authorise`, never the control plane. |
+| `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`, never the control plane. |
 | `compute_queue` | integer | twice `compute_admission` | Requests that may wait for an admission slot beyond those running. A request finding no place is refused with 429 at once. `compute_admission` and `compute_queue` together may not exceed 2305843009213693951. |
 | `admission_timeout_ms` | integer | `250` | Milliseconds a queued request waits for an admission slot before it is refused with 429. |
 | `single_flight_wait_ms` | integer | `6000` | Milliseconds a request waits for another request's build of a shared cached structure before it is refused with 429. |
@@ -82,7 +82,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `max_region_cells` | integer | `262144` | The most boundary cells a `region` filter is resolved to at one zoom level. Past it the filter is answered for a cover of the polygon, which the `x-tessera-region` header reports, rather than refused. |
 | `region_cache_bytes` | integer | `268435456` (256 MiB) | Bytes of resolved `region` filters kept for reuse, shared by every viewer. |
 | `max_category_values` | integer | `1000` | The most values one page of `GET /v1/categories/{column}` returns, and the page size of a request that names none. A larger `limit` is lowered to it. |
-| `max_suggestions` | integer | `20` | The most values one `GET /v1/categories/{column}/suggest` returns, and the `limit` of a request that names none. |
+| `max_suggestions` | integer | `20` | The most values one `/v1/categories/{column}/suggest` returns, `GET` or `POST`, and the `limit` of a request that names none. |
 | `max_suggestion_walk` | integer | `100000` | The most values one suggestion request examines, hidden ones included, before it stops and answers `more: true`. |
 | `max_suggest_set_entities` | integer | `10000000` | The size of a viewer's visible set at or below which suggestions are answered from a set of the values that viewer can see, built once per session, rather than by checking each value in turn. |
 | `max_browse_rows` | integer | `200` | The most rows one page of `POST /v1/artifacts/browse` returns, and the page size of a request that names none. |
