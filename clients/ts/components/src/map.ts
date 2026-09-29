@@ -645,9 +645,10 @@ export class TesseraMap extends TesseraElement {
   }
 
   protected override resetServerData(): void {
-    // A hover's title is a record the server answered.
+    // A hover's title is a record the server answered, and a pick names an item it served.
     this.hover = null;
     this.hoveredArtifact = null;
+    this.pickedAt = null;
   }
 
   /** Stops following the colour and size choices of the store adopted last. */

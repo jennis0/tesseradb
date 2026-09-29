@@ -249,6 +249,39 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
   });
 
+  /** An explorer with the item picked at 256, 256 pinned, and another item picked and shown live. */
+  async function pinnedAndLive() {
+    const ctx = await picked([256, 256]);
+    callouts(ctx.shadow)[0]!.querySelector<HTMLButtonElement>('[part="pin"]')!.click();
+    await settle(ctx.host);
+    ctx.map.pickedAt = {kind: 'item', id: 6n, world: [200, 300]};
+    ctx.store.set('selection', item(6n));
+    await settle(ctx.host);
+    await settle(ctx.host);
+    expect(callouts(ctx.shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5', 'live']);
+    return ctx;
+  }
+
+  it('drops every card, pinned or not, when the store forgets what the server answered, as clear() and an identity change do', async () => {
+    const {host, shadow, store, map} = await pinnedAndLive();
+    store.set('meta', null);
+    await settle(host);
+    store.set('meta', META);
+    await settle(host);
+    expect(callouts(shadow)).toEqual([]);
+    expect(map.pickedAt).toBeNull();
+  });
+
+  it('drops every card when it is given another store', async () => {
+    const {host, el, shadow} = await pinnedAndLive();
+    const other = fakeStore({meta: META, status: status({})});
+    other.set('selection', item(6n));
+    el.store = other;
+    await settle(host);
+    await settle(host);
+    expect(callouts(shadow)).toEqual([]);
+  });
+
   it('goes first in the right column, folding Colour and In view, where the map holds no position for the selection', async () => {
     const {host, shadow, store, map} = await picked([256, 256]);
     map.pickedAt = null;

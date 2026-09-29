@@ -798,6 +798,14 @@ export class TesseraExplorer extends TesseraElement {
   /** Stops following the size choices of the store adopted last, which the Display section shows. */
   private unwatchChoices: (() => void) | null = null;
 
+  /** The pinned cards and what the callouts measured name records the server answered. */
+  protected override resetServerData(): void {
+    this.pinned = [];
+    this.calloutSizes.clear();
+    const m = this.map;
+    if (m) m.pickedAt = null;
+  }
+
   protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
     this.unwatchChoices?.();
