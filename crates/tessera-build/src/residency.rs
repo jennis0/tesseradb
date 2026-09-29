@@ -2164,9 +2164,17 @@ pub(crate) fn identity_disk(args: &crate::BuildArgs) -> crate::error::Result<(u6
                     false => 0,
                 };
                 let walk = decisions.saturating_add(named);
-                let refused = named.saturating_mul(3);
-                let claimed = candidates.saturating_mul(2).saturating_add(rows * fields / 8);
-                entry.saturating_add(walk.max(refused).max(claimed))
+                // Each row's link to the row before it naming its item, and a bit per row.
+                let chains = match one_row_per_item {
+                    true => rows.saturating_mul(4).saturating_add(rows / 8),
+                    false => 0,
+                };
+                let linked = named.saturating_add(chains);
+                let claimed = candidates
+                    .saturating_mul(2)
+                    .saturating_add(rows * fields / 8)
+                    .saturating_add(chains);
+                entry.saturating_add(walk.max(linked).max(claimed))
             }
             false => 0,
         };

@@ -92,7 +92,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -114,7 +114,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -172,7 +172,7 @@ async fn fixture(server: &TestServer, range: std::ops::Range<u64>, text: &str) -
         TOPICS,
         json!([{
             "key": "t",
-            "members": [],
+            "members": {},
             "attached_to": { "layer": CLUSTERS, "key": "c" },
             "content": [{ "values": [text] }]
         }]),
@@ -344,13 +344,13 @@ async fn the_labels_masked_count_is_the_clusters_for_every_principal() {
         json!([
             {
                 "key": "t-small",
-                "members": [],
+                "members": {},
                 "attached_to": { "layer": CLUSTERS, "key": "small" },
                 "content": [{ "values": ["the small one"] }]
             },
             {
                 "key": "t-big",
-                "members": [],
+                "members": {},
                 "attached_to": { "layer": CLUSTERS, "key": "big" },
                 "content": [{ "values": ["the large one"] }]
             }
@@ -466,7 +466,7 @@ async fn a_label_with_its_own_members_keeps_them() {
             },
             {
                 "key": "borrowed",
-                "members": [],
+                "members": {},
                 "attached_to": { "layer": CLUSTERS, "key": "c" },
                 "content": [{ "values": ["of the cluster"] }]
             }
@@ -526,7 +526,7 @@ async fn a_label_published_after_the_form_is_warm_is_served_over_its_cluster() {
         TOPICS,
         json!([{
             "key": "second",
-            "members": [],
+            "members": {},
             "attached_to": { "layer": CLUSTERS, "key": "c" },
             "content": [{ "values": ["also of the cluster"] }]
         }]),
@@ -732,7 +732,7 @@ async fn a_built_label_set_with_no_members_is_served_over_its_clustering() {
         BUILT_TOPICS,
         json!([{
             "key": "l-0-live",
-            "members": [],
+            "members": {},
             "attached_to": { "layer": BUILT_CLUSTERS, "key": "0" },
             "content": [{ "values": ["the first thirty"] }]
         }]),

@@ -79,7 +79,9 @@ item: a sentiment score recomputed each quarter, for instance. Reading it under 
 group returns that view's own value. Reading it from anywhere else requires naming the view
 explicitly, because the field holds no single value outside one.
 
-An ingest row names an item by its `tessera_id` or the value of a unique field.
+An ingest row names an item by its `tessera_id` and the value of every unique field it carries,
+and names no item where none of them is held; a change and a layer's member name an item the same
+way, by those columns ([resolving a batch](write-path.md#resolving-a-batch)).
 A row naming an item that has no row in the batch's view, carrying a position there and changing
 nothing else, adds the item to that view under its existing identity and entity, keeping its label
 and every value declared once for the whole item. The item stays served in its other views, and
@@ -285,8 +287,10 @@ stored value, and the declaration takes effect once that finds no value held twi
 refused with the same count and examples, and the field stays as it was. Declaring it `false` drops
 the index at once and keeps the values. Both survive a restart. How the index is built while writes
 continue is in [the write path](write-path.md#unique-values). An ingest row carrying a unique value
-names the item that holds it; a row whose values name two items is refused, as is a batch in which
-two rows set one value ([resolving a batch](write-path.md#resolving-a-batch)).
+names the item that holds it; a row whose values name two items is refused, as is a later row
+setting a value an earlier row of its batch sets. A refused row is listed in the answer and the
+batch's other rows apply, unless the caller asks for a strict batch, which is refused whole
+([resolving a batch](write-path.md#resolving-a-batch)).
 
 ## Vocabularies
 

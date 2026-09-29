@@ -175,12 +175,12 @@ await register(
 );
 await register(labelLayerDeclaration({name: labelLayer, title: 'write-cycle demo labels', view: meta.views[0].id, clusters: clusterLayer}));
 
-await publish(clusterLayer, [{key: 'c0', members: members.map(String)}]);
+await publish(clusterLayer, [{key: 'c0', members: {tessera_id: members.map(String)}}]);
 await publish(labelLayer, [
   {
     key: 'l-c0',
-    members: members.map(String),
-    content: [{values: ['written from three documents'], generated_from: sources.map(String)}],
+    members: {tessera_id: members.map(String)},
+    content: [{values: ['written from three documents'], generated_from: {tessera_id: sources.map(String)}}],
     attached_to: {layer: clusterLayer, level: 0, key: 'c0'}
   }
 ]);
@@ -195,7 +195,7 @@ if (!before.has(`${labelLayer}::l-c0`)) {
 
 console.log('\n2. delete one of the three documents the label was written from');
 line('tessera_id', sources[0]);
-accepted('delete', await control.changes([{tessera_id: sources[0].toString(), op: 'delete'}]));
+accepted('delete', await control.changes([{op: 'delete', match: {tessera_id: sources[0].toString()}}]));
 
 const afterDelete = await artifacts(token, [clusterLayer, labelLayer]);
 line('cluster', describe(afterDelete.get(`${clusterLayer}::c0`)));

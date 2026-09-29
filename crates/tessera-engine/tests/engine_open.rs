@@ -367,9 +367,14 @@ fn create(engine: &Engine, batch: &str, names: &[&str]) -> Vec<TesseraId> {
             view: Some("s0".to_string()),
             rows,
             artifacts: Default::default(),
+            strict: false,
+            tessera_id_column: false,
         })
         .expect("the batch is accepted")
         .tessera_ids
+        .into_iter()
+        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .collect()
 }
 
 /// **The buffered rows an open reports are the rows it replayed**, before any write.

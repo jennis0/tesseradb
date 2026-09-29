@@ -204,7 +204,7 @@ async fn a_decimal_string_finds_an_integer_past_two_to_the_fifty_three() {
 }
 
 /// **A row carrying a held value names its holder**: it edits the holder, which keeps its
-/// `tessera_id`; a batch setting one new value in two rows is `409`.
+/// `tessera_id`.
 #[tokio::test]
 async fn a_row_carrying_a_held_value_names_the_holder() {
     let served = Served::build(fixture).await;
@@ -214,17 +214,6 @@ async fn a_row_carrying_a_held_value_names_the_holder() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["edited"], 1, "{body}");
     assert_eq!(body["tessera_ids"][0], holder.to_string(), "{body}");
-
-    let (status, body) = ingest(
-        &served,
-        "twice",
-        batch(&[(7, "a"), (7, "b")]),
-    )
-    .await;
-    assert_eq!(status, 409, "one value in two rows: {body}");
-
-    let (status, body) = ingest(&served, "free", batch(&[(7, "a")])).await;
-    assert_eq!(status, 200, "{body}");
 }
 
 /// **`PUT /control/attributes` changes `unique` on a column that exists**: refused with `409`

@@ -12,6 +12,7 @@ import pyarrow as pa
 import pytest
 
 from conftest import browse, item, viewport
+from tesseradb._refusal import Refusal
 
 pytest.importorskip("pyarrow")
 
@@ -140,3 +141,223 @@ def test_an_unnamed_index_is_the_tessera_id_route_and_remove_addresses_by_it(ser
     report = db.remove([picked])
     assert report.ok, report
     assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
+
+
+def test_a_row_carrying_no_unique_column_creates_an_item_after_the_first_commit(served, corpus):
+    """Points naming no item are items of their own, at a running server as at the build."""
+    db = served(string_ids)
+    frame = papers(["r0", "r1", "r2"], x=30.0).drop_columns(["paper"])
+    db.insert("map", frame, x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 3} and report.refused == []
+    assert len(report.tessera_ids) == 3 and None not in report.tessera_ids
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 23
+
+
+def test_a_row_repeating_an_earlier_rows_unique_value_is_left_out_and_counted(served, corpus):
+    """The first row of a repeated value is kept; the later one is refused, has no `tessera_id`,
+    and the report counts it by its row in the table inserted."""
+    db = served(string_ids)
+    db.insert("map", papers(["r0", "r0", "r1"], x=30.0), x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2}
+    assert [one["row"] for one in report.refused] == [1]
+    assert sum(report.refused_by_reason.values()) == 1
+    assert report.tessera_ids[1] is None and None not in (report.tessera_ids[0], report.tessera_ids[2])
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 22
+
+
+def test_remove_names_items_by_a_unique_column_or_by_a_list_of_tessera_ids(served, corpus):
+    """A table's rows name items by the unique columns they carry; a bare list is `tessera_id`s."""
+    db = served(string_ids)
+    report = db.remove({"paper": ["p0", "p1"]})
+    assert report.ok and report.accepted == 2 and report.refused == [], report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+    held = db.lookup("map", "paper", ["p2", "p3"]).column("tessera_id").to_pylist()
+    report = db.remove(held)
+    assert report.ok and report.accepted == 2, report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 16
+
+    # A table read back from the database names each item twice over, by both of its columns.
+    report = db.remove(db.lookup("map", "paper", ["p4"]))
+    assert report.accepted == 1, report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 15
+
+
+def test_a_remove_naming_nothing_is_refused_by_row_and_strict_refuses_the_whole_call(
+    served, corpus
+):
+    """A row naming no item is listed with its reason and the others are applied; with `strict`
+    the call applies nothing and raises."""
+    db = served(string_ids)
+    report = db.remove({"paper": ["nobody", "p5"]})
+    assert report.ok and report.accepted == 1, report
+    assert report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert report.refused_by_reason == {"names_no_item": 1}
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
+
+    with pytest.raises(Refusal) as raised:
+        db.remove({"paper": ["p6", "nobody"]}, strict=True)
+    assert raised.value.report.accepted == 0 and [
+        one["status"] for one in raised.value.report.refusals
+    ] == [404]
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
+
+
+
+def test_a_column_naming_no_item_is_ignored_and_named_in_the_report(served, corpus):
+    """A column that is neither `tessera_id` nor a unique attribute is not sent, and the report
+    names it; the rows are applied by the columns that name items."""
+    db = served(string_ids)
+    report = db.remove({"paper": ["p0", "p1"], "title": ["one", "two"]})
+    assert report.ok and report.accepted == 2 and report.refused == [], report
+    assert report.ignored_columns == ["title"] and "title" in str(report)
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+    report = db.suppress({"paper": ["p2"], "note": ["x"]})
+    assert report.accepted == 1 and report.ignored_columns == ["note"], report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 17
+    report = db.unsuppress({"note": ["x"], "paper": ["p2"]})
+    assert report.accepted == 1 and report.ignored_columns == ["note"], report
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+
+def test_items_the_call_would_misread_are_refused_and_nothing_is_applied(served, corpus):
+    """A string would be read one character per item, a list of dicts is a table written by rows,
+    columns of different lengths pair no rows, and a table whose every column names no item names
+    nothing: each is refused before a request is sent."""
+    db = served(string_ids)
+    for items in (
+        "p0",
+        [{"paper": "p0"}],
+        {"paper": ["p0", "p1"], "tessera_id": ["1"]},
+        {"paper": "p0"},
+        {"title": ["p0"]},
+    ):
+        for verb in (db.remove, db.suppress):
+            with pytest.raises(Refusal):
+                verb(items)
+        with pytest.raises(Refusal):
+            db.leave("clusters", "c0", items)
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 20
+    assert browse(db, "map", "clusters")["artifacts"][0]["masked_count"] == 20
+
+
+def test_a_none_in_a_list_names_no_item_and_is_refused_by_row(served, corpus):
+    """A `None` among `tessera_id`s is sent as a null, which names no item: the server refuses
+    that row and applies the rest, whether it is the only row or not."""
+    db = served(string_ids)
+    [held] = db.lookup("map", "paper", ["p0"]).column("tessera_id").to_pylist()
+    report = db.remove([None, held])
+    assert report.ok and report.accepted == 1, report
+    assert report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 19
+
+    report = db.remove([None])
+    assert report.accepted == 0 and report.refused_by_reason == {"names_no_item": 1}, report
+
+    # A row whose cells are all null names no item the same way.
+    report = db.remove({"paper": [None, "p1"]})
+    assert report.accepted == 1 and report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert viewport(db, "map", FRAME)["counts"]["visible"] == 18
+
+
+def test_members_are_named_by_any_mix_of_tessera_id_and_unique_columns(served, corpus):
+    """A members table carrying `tessera_id` and a unique column names each member by whichever
+    its row carries; a member naming nothing is left out and counted."""
+    db = served(string_ids)
+    [by_id] = db.lookup("map", "paper", ["p1"]).column("tessera_id").to_pylist()
+    db.insert(
+        "clusters",
+        artifacts=pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"])}),
+        key="key",
+        level="level",
+    )
+    db.insert(
+        "clusters",
+        members=pa.table(
+            {
+                "level": pa.array([0, 0, 0], pa.uint32()),
+                "key": pa.array(["c1", "c1", "c1"]),
+                "tessera_id": pa.array([str(by_id), None, None]),
+                "paper": pa.array([None, "p2", "nobody"]),
+            }
+        ),
+        key="key",
+        level="level",
+    )
+    report = db.commit()
+    assert report.ok, report
+    assert [(one["key"], one["member"], one["reason"]) for one in report.refused] == [
+        ("c1", {"paper": "nobody"}, "names_no_item")
+    ]
+    counts = {row["key"]: row["masked_count"] for row in browse(db, "map", "clusters")["artifacts"]}
+    assert counts == {"c0": 20, "c1": 2}
+
+    # Strict, the same member refuses its publication.
+    db.insert(
+        "clusters",
+        members=pa.table({"key": pa.array(["c1"]), "paper": pa.array(["nobody"])}),
+        key="key",
+    )
+    with pytest.raises(Refusal):
+        db.commit(strict=True)
+
+
+def test_a_member_structs_fields_naming_no_item_are_ignored_and_named_in_the_report(
+    served, corpus
+):
+    """A member struct is read by its `tessera_id` and unique fields, as a table's columns are;
+    another field is not sent, and the plan and the commit name it."""
+    db = served(string_ids)
+    [by_id] = db.lookup("map", "paper", ["p3"]).column("tessera_id").to_pylist()
+    member = pa.struct(
+        [("paper", pa.string()), ("tessera_id", pa.string()), ("note", pa.string())]
+    )
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {
+                "level": pa.array([0], pa.uint32()),
+                "key": pa.array(["c2"]),
+                "members": pa.array(
+                    [[{"paper": "p1", "tessera_id": None, "note": "x"},
+                      {"paper": None, "tessera_id": str(by_id), "note": "y"}]],
+                    pa.list_(member),
+                ),
+            }
+        ),
+        key="key",
+        level="level",
+        members="members",
+    )
+    plan = db.check()
+    assert plan.ok and plan.ignored_columns == {"clusters": ["note"]}, plan
+    report = db.commit()
+    assert report.ok and report.ignored_columns == {"clusters": ["note"]}, report
+    assert "note" in str(report) and report.refused == []
+    counts = {row["key"]: row["masked_count"] for row in browse(db, "map", "clusters")["artifacts"]}
+    assert counts == {"c0": 20, "c2": 2}
+
+    # Members whose every field names no item name nothing, which is refused before sending.
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {
+                "level": pa.array([0], pa.uint32()),
+                "key": pa.array(["c3"]),
+                "members": pa.array(
+                    [[{"note": "x"}]], pa.list_(pa.struct([("note", pa.string())]))
+                ),
+            }
+        ),
+        key="key",
+        level="level",
+        members="members",
+    )
+    assert db.check().findings
+    with pytest.raises(Refusal):
+        db.commit()

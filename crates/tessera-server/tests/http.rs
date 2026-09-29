@@ -213,7 +213,7 @@ async fn a_tessera_id_from_another_bundle_names_nothing() {
     }
     let deletes: Vec<serde_json::Value> = issued
         .iter()
-        .map(|id| serde_json::json!({ "tessera_id": id.to_string(), "op": "delete" }))
+        .map(|id| serde_json::json!({ "op": "delete", "match": { "tessera_id": id.to_string() } }))
         .collect();
     let resp = b
         .client
@@ -223,7 +223,15 @@ async fn a_tessera_id_from_another_bundle_names_nothing() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "the delete names nothing bundle B issued");
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(answer["accepted"], 0, "the delete names nothing bundle B issued: {answer}");
+    let refused = answer["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), issued.len(), "{answer}");
+    assert!(
+        refused.iter().all(|row| row["reason"] == "unknown_tessera_id"),
+        "{answer}"
+    );
     assert_eq!(
         visible(whole_map(&b, &token, 5).await),
         before,
@@ -878,7 +886,9 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "field": "id", "value": member(SUPPRESS_SOURCE_ID), "op": "suppress" }]))
+        .json(&serde_json::json!([
+            { "op": "suppress", "match": { "id": member(SUPPRESS_SOURCE_ID) } }
+        ]))
         .send()
         .await
         .unwrap();

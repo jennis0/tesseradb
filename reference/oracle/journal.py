@@ -8,7 +8,9 @@ WAL, which are out of contract and invisible in any bundle file.
 ## The one rule
 
 **Only a 200 is journalled.** An operation that was *submitted* is not an operation that was
-*acked*, and the I1 differential is only entitled to assume the latter. Everything else — a 409
+*acked*, and the I1 differential is only entitled to assume the latter. Every write is sent with
+`strict=true`, so a row the identity rule refuses refuses the whole request, and a 200 means every
+row was applied. Everything else — a 409
 duplicate, a 422 contract error, a 503 fail-closed, a connection that died mid-flight — is
 recorded in [`AckedJournal.refused`] for a test to assert on, and contributes **nothing** to the
 composed mask. The asymmetry is deliberate and is the whole point of the type: a journal that
@@ -160,7 +162,7 @@ class AckedJournal:
         supplied = tessera_id
         if supplied is None:
             supplied = self.bundle.tessera_id_of(entity_id)
-        response = self.server.change(supplied, op)
+        response = self.server.change(supplied, op, strict=True)
 
         if response.status_code == 200 and tessera_id is not None:
             raise AssertionError(
@@ -196,18 +198,18 @@ class AckedJournal:
     def changes(self, items: list[tuple[int, str, set[int] | None]]) -> requests.Response:
         """Submit a whole `/control/changes` batch in one request.
 
-        **All or nothing, on the service's own terms.** Contracts §3.4 makes a duplicate a `409`
-        with "the batch has no effect", so a non-200 journals nothing at all here — not even the
+        **All or nothing, on the service's own terms.** Sent with `strict=true`, a request with a
+        refused row is refused whole and has no effect, so a non-200 journals nothing at all here — not even the
         items that would individually have been fine. A per-item journal on a refused batch is the
         exact fail-open this type exists to prevent.
         """
         payload = []
         for entity_id, op, _term_ids in items:
             payload.append(
-                {"tessera_id": str(self.bundle.tessera_id_of(entity_id)), "op": op}
+                {"op": op, "match": {"tessera_id": str(self.bundle.tessera_id_of(entity_id))}}
             )
 
-        response = self.server.changes(payload)
+        response = self.server.changes(payload, strict=True)
         if response.status_code == 200:
             for entity_id, op, term_ids in items:
                 self._sequence += 1
@@ -240,7 +242,7 @@ class AckedJournal:
         at once.
         """
         before = int(self.server.status()["entity_id_high_water"])
-        response = self.server.ingest(body, batch_id)
+        response = self.server.ingest(body, batch_id, strict=True)
         self._sequence += 1
         if response.status_code == 200:
             payload = response.json()

@@ -160,10 +160,9 @@ async fn an_artifacts_only_commit_is_served_once_the_counter_reaches_the_answer(
         .put(server.control_url("/control/layers/clusters/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
             "artifacts": [{
                 "key": "k0",
-                "members": [member(1), member(2)],
+                "members": members([1, 2]),
             }],
         }))
         .send()
@@ -502,7 +501,7 @@ async fn a_gated_node_does_not_reach_the_number_and_the_posture_says_why() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "op": "suppress", "field": "id", "value": "1" }]))
+        .json(&json!([{ "op": "suppress", "match": { "id": "1" } }]))
         .send()
         .await
         .unwrap();
@@ -656,10 +655,9 @@ async fn wait_visible_holds_an_artifact_publication_until_it_is_served() {
         .put(server.control_url("/control/layers/clusters/artifacts?wait=visible"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
             "artifacts": [{
                 "key": "k0",
-                "members": [member(1), member(2)],
+                "members": members([1, 2]),
             }],
         }))
         .send()

@@ -215,8 +215,7 @@ async fn layer_versions(server: &TestServer) -> Vec<(String, u64)> {
 async fn register_grown(server: &TestServer, name: &str) {
     register(server, declaration(name, None)).await;
     let artifacts = json!({
-        "field": "id",
-        "artifacts": [{ "key": "c0", "members": [member(0), member(1), member(2)] }]
+        "artifacts": [{ "key": "c0", "members": members([0, 1, 2]) }]
     });
     assert_eq!(publish(server, name, artifacts).await.0, 201);
     let route = format!("/control/layers/{}/artifacts", name.replace('/', "%2F"));
@@ -225,8 +224,7 @@ async fn register_grown(server: &TestServer, name: &str) {
         .patch(server.control_url(&route))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
-            "artifacts": [{ "key": "c0", "members": [member(3), member(4)] }]
+            "artifacts": [{ "key": "c0", "members": members([3, 4]) }]
         }))
         .send()
         .await
@@ -377,10 +375,9 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
         &server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [
-                { "key": "c0", "members": [member(0), member(1), member(2)] },
-                { "key": "c1", "members": [member(3), member(4)] },
+                { "key": "c0", "members": members([0, 1, 2]) },
+                { "key": "c1", "members": members([3, 4]) },
             ]
         }),
     )
@@ -409,29 +406,29 @@ async fn publishing_artifacts_returns_an_identifier_each_and_never_an_ordinal() 
     assert_eq!(server.state.engine.published_artifacts(), 2);
 }
 
-/// **An unresolvable member refuses the batch rather than being dropped.** A silently dropped member
-/// shrinks both the masked count a viewer is shown and the declared size the proportional criterion
-/// divides by — so a typo in a pipeline would move artifacts across their own existence threshold,
-/// in the direction of hiding them, with nothing anywhere saying so.
+/// **In a strict batch an unresolvable member refuses the batch whole**, naming the member by its
+/// position and nothing else.
 #[tokio::test]
 async fn an_unresolvable_member_refuses_the_whole_batch() {
     let tmp = TempDir::new().unwrap();
     let server = serve_standard(&tmp).await;
     register(&server, declaration("clusters/a", None)).await;
 
-    let nonexistent = member(u64::MAX);
-    let (status, body) = publish(
-        &server,
-        "clusters/a",
-        json!({
-            "field": "id",
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers/clusters%2Fa/artifacts?strict=true"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
             "artifacts": [
-                { "key": "c0", "members": [member(0)] },
-                { "key": "c1", "members": [member(1), nonexistent] },
+                { "key": "c0", "members": members([0]) },
+                { "key": "c1", "members": members([1, u64::MAX]) },
             ]
-        }),
-    )
-    .await;
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status, 404, "{body}");
     assert_eq!(body["error"], "unknown", "{body}");
     // Member 1 of artifact 1, the coordinate the caller's pipeline holds, and no other number.
@@ -463,8 +460,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
         &server,
         "regions/uk",
         json!({
-            "field": "id",
-            "artifacts": [{ "key": "c0", "members": [member(0)] }]
+            "artifacts": [{ "key": "c0", "members": members([0]) }]
         }),
     )
     .await;
@@ -476,8 +472,7 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422() {
         &server,
         "clusters/never",
         json!({
-            "field": "id",
-            "artifacts": [{ "key": "c0", "members": [member(0)] }]
+            "artifacts": [{ "key": "c0", "members": members([0]) }]
         }),
     )
     .await;
@@ -518,13 +513,12 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
     register(&server, d).await;
 
     // 300 documents; the fixture gives term 1 to every third source id.
-    let members: Vec<String> = (0..300u64).map(member).collect();
+    let members = members(0..300u64);
     let expected_narrow = (0..300u64).filter(|s| terms_of(*s).contains(&1)).count() as u64;
     let (status, body) = publish(
         &server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -572,8 +566,7 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
         &server,
         "clusters/a",
         json!({
-            "field": "id",
-            "artifacts": [{ "key": "c0", "members": [member(0), member(1)] }]
+            "artifacts": [{ "key": "c0", "members": members([0, 1]) }]
         }),
     )
     .await;
@@ -607,11 +600,10 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
         &server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [
-                { "key": "c0", "members": [member(0), member(3)] },
-                { "key": "c1", "members": [member(6), member(9)] },
-                { "key": "c2", "members": [member(12), member(15)] },
+                { "key": "c0", "members": members([0, 3]) },
+                { "key": "c1", "members": members([6, 9]) },
+                { "key": "c2", "members": members([12, 15]) },
             ]
         }),
     )
@@ -644,20 +636,20 @@ async fn the_artifacts_frame_serves_a_level_in_key_order() {
     register(&server, d).await;
     for artifacts in [
         json!([
-            { "key": "c2", "members": [member(0)] },
-            { "members": [member(3)] },
+            { "key": "c2", "members": members([0]) },
+            { "members": members([3]) },
         ]),
         json!([
-            { "key": "c3", "members": [member(6)] },
-            { "key": "c0", "members": [member(9)] },
-            { "members": [member(12)] },
-            { "key": "c1", "members": [member(15)] },
+            { "key": "c3", "members": members([6]) },
+            { "key": "c0", "members": members([9]) },
+            { "members": members([12]) },
+            { "key": "c1", "members": members([15]) },
         ]),
     ] {
         let (status, body) = publish(
             &server,
             "clusters/a",
-            json!({ "field": "id", "artifacts": artifacts }),
+            json!({ "artifacts": artifacts }),
         )
         .await;
         assert_eq!(status, 201, "{body}");
@@ -706,12 +698,11 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = json!({ "count": expected_narrow + 1 });
     register(&server, d).await;
-    let members: Vec<String> = (0..300u64).map(member).collect();
+    let members = members(0..300u64);
     let (status, _) = publish(
         &server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -765,12 +756,11 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     d["require_member_visibility"] = serde_json::Value::Null;
     register(&server, d).await;
 
-    let members: Vec<String> = (0..300u64).map(member).collect();
+    let members = members(0..300u64);
     let (status, body) = publish(
         &server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -841,13 +831,12 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
 async fn plant_three_levels(server: &TestServer) {
     register(server, tiered_zoomed("admin/boundaries")).await;
     for (level, key) in [(0u32, "country"), (1, "state"), (2, "county")] {
-        let members: Vec<String> = (0..300u64).map(member).collect();
+        let members = members(0..300u64);
         let (status, body) = publish(
             server,
             "admin/boundaries",
             json!({
                 "level": level,
-                "field": "id",
                 "artifacts": [{ "key": key, "members": members }]
             }),
         )
@@ -971,12 +960,11 @@ async fn one_cluster(server: &TestServer) {
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
     register(server, d).await;
-    let members: Vec<String> = (0..300u64).map(member).collect();
+    let members = members(0..300u64);
     let (status, body) = publish(
         server,
         "clusters/a",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members }]
         }),
     )
@@ -1223,8 +1211,7 @@ async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_on
         &server,
         "clusters/hulled",
         json!({
-            "field": "id",
-            "artifacts": [{ "key": "c0", "members": [member(0), member(3), member(6)] }]
+            "artifacts": [{ "key": "c0", "members": members([0, 3, 6]) }]
         }),
     )
     .await;
@@ -1288,7 +1275,7 @@ async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_princi
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+        json!({ "artifacts": [{ "key": "sw", "members": {}, "wkt": SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1358,7 +1345,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+        json!({ "artifacts": [{ "key": "sw", "members": {}, "wkt": SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1371,7 +1358,7 @@ async fn a_shape_published_into_a_warm_level_is_served() {
     let (status, body) = publish(
         &server,
         "boundaries/b",
-        json!({ "artifacts": [{ "key": "ne", "members": [], "wkt": NE_SQUARE }] }),
+        json!({ "artifacts": [{ "key": "ne", "members": {}, "wkt": NE_SQUARE }] }),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1449,13 +1436,12 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
     let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
     assert_eq!(kinds, vec![json!("authored")]);
 
-    let members: Vec<String> = (0..30u64).map(member).collect();
+    let members = members(0..30u64);
     // A polygon that is not WKT is refused naming the row and the content, and nothing lands.
     let (status, body) = publish(
         &server,
         "clusters/drawn",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", "not a polygon"] }] }]
         }),
     )
@@ -1467,7 +1453,6 @@ async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_
         &server,
         "clusters/drawn",
         json!({
-            "field": "id",
             "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", SQUARE] }] }]
         }),
     )

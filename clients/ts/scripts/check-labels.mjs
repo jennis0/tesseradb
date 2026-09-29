@@ -196,7 +196,7 @@ if (!cluster) throw new Error(`no cluster ${label.key.replace(/^l-/, '')} served
 expect('the label answers on its identifier before the suppression', (await byIdentifier(witnessToken, label.id)) !== null);
 
 const change = async (op) => {
-  accepted(op, await control.changes([{tessera_id: cluster.id.toString(), op}]));
+  accepted(op, await control.changes([{op, match: {tessera_id: cluster.id.toString()}}]));
 };
 
 // The unsuppress runs in `finally`, so a throw does not leave the cluster hidden.

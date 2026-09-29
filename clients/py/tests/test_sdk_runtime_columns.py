@@ -297,7 +297,8 @@ def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served,
 
 def test_a_unique_column_is_declared_filled_looked_up_and_refuses_a_held_value(served, corpus):
     """`unique=True` on a column declared after the first commit: its values are filled, `lookup`
-    finds the items holding them through `in`, and a fill giving one to a second item is refused."""
+    finds the items holding them through `in`, and a row giving one to a second item names two
+    items and is refused: left out and counted, or, strict, the commit refused."""
     db = notebook(served, corpus)
     db.declare_attribute("doi", type="keyword", unique=True)
     fill(db, "doi", pa.array([f"10.{i}/x" for i in range(len(HELD))], pa.string()))
@@ -310,14 +311,22 @@ def test_a_unique_column_is_declared_filled_looked_up_and_refuses_a_held_value(s
     assert found.num_rows == 2
 
     # An item holding no `doi` yet, given one another item holds.
-    db.insert(
-        "doi",
-        pa.table({"entity_id": pa.array([HELD[-1] + 1], pa.uint64()), "doi": ["10.7/x"]}),
-        columns={"id": "entity_id"},
-        value="doi",
-    )
+    def give_a_held_doi() -> None:
+        db.insert(
+            "doi",
+            pa.table({"entity_id": pa.array([HELD[-1] + 1], pa.uint64()), "doi": ["10.7/x"]}),
+            columns={"id": "entity_id"},
+            value="doi",
+        )
+
+    give_a_held_doi()
+    report = db.commit()
+    assert report.refused_by_reason == {"names_two_items": 1}, report
+    assert db.lookup("s0", "doi", ["10.7/x"]).num_rows == 1
+    give_a_held_doi()
     with pytest.raises(Refusal):
-        db.commit()
+        db.commit(strict=True)
+    assert db.lookup("s0", "doi", ["10.7/x"]).num_rows == 1
 
 
 def test_declare_unique_on_a_held_column_is_sent_at_the_next_commit(served, corpus):

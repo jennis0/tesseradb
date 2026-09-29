@@ -247,16 +247,19 @@ console.log(`registered ${layer.name} (tessera_id ${layer.tessera_id}), the addr
 let batch = [];
 let batchMembers = 0;
 let published = 0;
+let refused = 0;
 const publish = async () => {
   if (batch.length === 0) return;
   const answer = await control.publish(layerName, {
     level: 0,
     artifacts: batch.map((c) => ({
       key: c.key,
-      members: c.members.map((id) => id.toString())
+      members: {tessera_id: c.members.map((id) => id.toString())}
     }))
   });
-  published += accepted('publish', answer).artifacts.length;
+  const body = accepted('publish', answer);
+  published += body.artifacts.length;
+  refused += body.refused.length;
   batch = [];
   batchMembers = 0;
 };
@@ -266,7 +269,7 @@ for (const cluster of clusters) {
   batchMembers += cluster.members.length;
 }
 await publish();
-console.log(`published ${published} artifacts`);
+console.log(`published ${published} artifacts, leaving out ${refused} members that named no item or two`);
 
 // One label per cluster. The per-term variation is generated from the `--label-term` principal's
 // own sample intersected with the cluster. Visibility is a disjunction over terms, so every viewer
@@ -317,22 +320,23 @@ if (labelLayer) {
 
   let pending = [];
   let pendingIds = 0;
+  let refusedLabelMembers = 0;
   const publishLabels = async () => {
     if (pending.length === 0) return;
     const answer = await control.publish(labelLayer, {
       level: 0,
       artifacts: pending.map((l) => ({
         key: l.key,
-        members: l.members.map((id) => id.toString()),
+        members: {tessera_id: l.members.map((id) => id.toString())},
         content: l.variations.map((v) => ({
           values: v.values,
-          generated_from: v.generated_from.map((id) => id.toString())
+          generated_from: {tessera_id: v.generated_from.map((id) => id.toString())}
         })),
         // The target is named by its key.
         attached_to: {layer: layerName, level: 0, key: l.cluster}
       }))
     });
-    accepted('publish labels', answer);
+    refusedLabelMembers += accepted('publish labels', answer).refused.length;
     pending = [];
     pendingIds = 0;
   };
@@ -343,7 +347,7 @@ if (labelLayer) {
     pendingIds += size;
   }
   await publishLabels();
-  console.log(`published ${labels.length} labels into ${labelLayer}`);
+  console.log(`published ${labels.length} labels into ${labelLayer}, leaving out ${refusedLabelMembers} members that named no item or two`);
 }
 
 /**

@@ -873,13 +873,12 @@ async fn a_page_without_positions_records_an_edge_the_artifact_does_not_hold() {
     );
     let server = open(&built.dir).await;
 
-    let members: Vec<String> = members(0..N);
+    let members = members(0..N);
     let resp = server
         .client
         .put(server.control_url("/control/layers/clusters%2Fa/artifacts"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
             "artifacts": [
                 { "key": "root", "members": members.clone() },
                 { "key": "k0", "members": members },

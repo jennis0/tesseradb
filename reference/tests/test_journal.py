@@ -45,15 +45,15 @@ class _StubServer:
     def status(self):
         return {"entity_id_high_water": self.high_water}
 
-    def change(self, tessera_id, op):
+    def change(self, tessera_id, op, *, strict=False):
         self.change_calls.append((tessera_id, op))
         return self.next_change
 
-    def changes(self, items):
+    def changes(self, items, *, strict=False):
         self.batch_calls.append(items)
         return self.next_batch
 
-    def ingest(self, body, batch_id):
+    def ingest(self, body, batch_id, *, strict=False):
         self.ingest_calls.append((body, batch_id))
         return self.next_ingest
 
@@ -75,7 +75,7 @@ def stub():
 
 
 def test_a_refused_batch_journals_nothing_at_all(stub):
-    """Contracts §3.4: a duplicate is a 409 and **the batch has no effect**.
+    """A strict request with a refused row is refused whole, and **the batch has no effect**.
 
     So a non-200 journals nothing — not even the items that would individually have been fine. A
     per-item journal on a refused batch is the exact fail-open the type exists to prevent, and it
@@ -113,8 +113,8 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
     assert not journal.refused
 
     sent = server.batch_calls[0]
-    assert sent[0]["tessera_id"] == "1007"
-    assert all(set(item) == {"tessera_id", "op"} for item in sent)
+    assert sent[0]["match"] == {"tessera_id": "1007"}
+    assert all(set(item) == {"op", "match"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
     # the `\\ L` arm — not a deny, and not the same code path.

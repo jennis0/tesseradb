@@ -371,7 +371,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     payload = []
     for entity_id, op, terms in batch:
-        item = {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id)), "op": op}
+        item = {"op": op, "match": {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id))}}
         if op == "predicate":
             # `builtin:passthrough`'s access label is the comma-joined decimal term ids (R6);
             # the dictionary's descriptor bytes for these ids are exactly those decimal strings.
@@ -384,6 +384,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
 
     resp = requests.post(
         f"{server.control_base}/control/changes",
+        params={"strict": "true"},
         headers={"Authorization": f"Bearer {server.operator_credential}"},
         json=payload,
         timeout=10,

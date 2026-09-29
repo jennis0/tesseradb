@@ -753,10 +753,10 @@ def _(before_week, db, pd, visible, week_report):
 def _(mo):
     mo.md("""
     `suppress()` hides papers from every reader from the moment it is accepted, without
-    deleting them, and `unsuppress()` shows them again. `remove()` deletes. Each takes papers by
-    their `tessera_id`, or with `field=`, by their values of a unique column. The cell below
-    suppresses five of the new machine-learning papers and counts what the database and the
-    machine-learning reader see at each step.
+    deleting them, and `unsuppress()` shows them again. `remove()` deletes. Each takes a list of
+    `tessera_id`s, or a table whose columns are `tessera_id` or unique columns, each row naming
+    one paper. The cell below suppresses five of the new machine-learning papers by their
+    `entity_id`, and counts what the database and the machine-learning reader see at each step.
     """)
     return
 
@@ -771,9 +771,9 @@ def _(db, learning, pd, visible, week, week_report):
         return {"database": visible(db)["papers"], "cs.LG + stat.ML": visible(learning)["papers"]}
 
     _before = both()
-    print(db.suppress(hidden, field="entity_id"))
+    print(db.suppress({"entity_id": hidden}))
     _suppressed = both()
-    print(db.unsuppress(hidden, field="entity_id"))
+    print(db.unsuppress({"entity_id": hidden}))
     suppression = pd.DataFrame(
         {"before": _before, "suppressed": _suppressed, "unsuppressed": both()}
     )

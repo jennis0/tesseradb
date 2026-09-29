@@ -249,12 +249,11 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
         put_layer(&server, drawing_layer("regions/row")).await.0,
         201
     );
-    let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
+    let members = members(0..PLACES.len() as u64);
     let (status, body) = publish(
         &server,
         "regions/batch",
         json!({
-            "field": "id",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
         }),
@@ -265,7 +264,6 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
         &server,
         "regions/row",
         json!({
-            "field": "id",
             "artifacts": [{
                 "key": "uk", "members": members, "space": "wgs84",
                 "content": [{ "values": [UK] }]
@@ -305,12 +303,11 @@ async fn an_authored_shape_report_carries_the_decomposition() {
         put_layer(&server, drawing_layer("regions/report")).await.0,
         201
     );
-    let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
+    let members = members(0..PLACES.len() as u64);
     let (status, body) = publish(
         &server,
         "regions/report",
         json!({
-            "field": "id",
             "default_space": "wgs84",
             "artifacts": [{ "key": "uk", "members": members, "content": [{ "values": [UK] }] }]
         }),
@@ -348,7 +345,7 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         "regions/flat",
         json!({
             "default_space": "wgs84",
-            "artifacts": [{ "key": "uk", "members": [], "content": [{ "values": [UK] }] }]
+            "artifacts": [{ "key": "uk", "members": {}, "content": [{ "values": [UK] }] }]
         }),
     )
     .await;
@@ -361,7 +358,7 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         &server,
         "regions/flat",
         json!({
-            "artifacts": [{ "key": "uk", "members": [], "content": [{ "values": [UK] }] }]
+            "artifacts": [{ "key": "uk", "members": {}, "content": [{ "values": [UK] }] }]
         }),
     )
     .await;
@@ -380,7 +377,7 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         json!({
             "default_space": "wgs84",
             "artifacts": [{
-                "key": "uk", "members": [],
+                "key": "uk", "members": {},
                 "content": [{ "values": ["POLYGON ((-8 50, 2 91, -8 91, -8 50))"] }]
             }]
         }),
