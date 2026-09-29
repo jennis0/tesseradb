@@ -6,7 +6,7 @@ import '../src/filter-panel.js';
 import type {TesseraItemCard} from '../src/item-card.js';
 import type {TesseraFilter} from '../src/filter.js';
 import type {TesseraFilterPanel} from '../src/filter-panel.js';
-import {deep, deepAll, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED, dateRangeText, parseDateText} from '../src/base.js';
 
 afterEach(() => {
@@ -298,6 +298,46 @@ describe('<tessera-filter> on a category', () => {
       ['archive', 'ma', 'filter'],
       ['archive', 'ma', 'filter']
     ]);
+  });
+});
+
+describe('<tessera-filter> on a category, before anything is typed', () => {
+  const empty = () => filtersOf({filter: {archive: {family: 'category', keys: []}}, highlight: {}});
+  const TOP = aggregateEntry([{rows: [{key: 'cs', title: 'Computer science', count: 600}, {key: 'math', count: 300}, {key: 'stat', count: 100}], groups: 38, total: 1000}]);
+
+  it('counts its five commonest values without its own clause in the filter position, and under the whole filter in the highlight position', async () => {
+    const {host, store, el} = await mountFilter('archive', empty());
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}], without: 'archive'}]);
+    el.verb = 'highlight';
+    await settle(host);
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}]}]);
+    el.remove();
+    expect(registered(store).size).toBe(0);
+  });
+
+  it('lists them with their counts and bars as a share of the set, says how many values the set holds, and a checkbox chooses one', async () => {
+    const {host, store} = await mountFilter('archive', empty());
+    expect(deep(host, '[part="top"]')).toBeNull();
+    answerAggregate(store, 'filter', TOP);
+    await settle(host);
+    const rows = deepAll(host, '[part~="top-value"]');
+    expect(rows.map((r) => r.getAttribute('data-key'))).toEqual(['cs', 'math', 'stat']);
+    expect(rows.map((r) => r.querySelector('[part="value-count"]')!.textContent)).toEqual(['600', '300', '100']);
+    expect((rows[0]!.querySelector('[part="bar"]') as HTMLElement).style.width).toBe('60.0%');
+    expect(rows[0]!.textContent).toContain('Computer science');
+    expect(deep(host, '[part="aside"]')!.textContent).toBe('38 values');
+    const box = rows[1]!.querySelector('input') as HTMLInputElement;
+    box.click();
+    await settle(host);
+    expect(drafts(store).at(-1)!.filter['archive']).toEqual({family: 'category', keys: ['math']});
+  });
+
+  it('shows a chosen value as a chip only where it is not among the five', async () => {
+    const {host, store} = await mountFilter('archive', filtersOf({filter: {archive: {family: 'category', keys: ['cs', 'hep']}}, highlight: {}}));
+    answerAggregate(store, 'filter', TOP);
+    await settle(host);
+    expect((deep(host, '[part~="top-value"][data-key="cs"] input') as HTMLInputElement).checked).toBe(true);
+    expect(deepAll(host, '[part="chosen"]').map((c) => c.textContent!.trim())).toEqual(['hep']);
   });
 });
 
