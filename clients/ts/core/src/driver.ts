@@ -100,6 +100,29 @@ const DEFAULTS = {
   budget: 50_000
 };
 
+/** The options {@link retryDelayMs} reads. */
+export type RetryOptions = Required<Pick<DriverOptions, 'maxRetries' | 'notReadyBackoffMs' | 'retryBackoffMaxMs'>>;
+
+/** The retry settings every request the store sends again uses, unless `StoreOptions.driver` sets them. */
+export const RETRY_DEFAULTS: RetryOptions = {maxRetries: DEFAULTS.maxRetries, notReadyBackoffMs: DEFAULTS.notReadyBackoffMs, retryBackoffMaxMs: DEFAULTS.retryBackoffMaxMs};
+
+/**
+ * How long to wait before sending a refused request again, or `null` where it is not sent again. A
+ * `429` backpressure is the server shedding load and a `503` not-ready a server still starting;
+ * each is retried up to `maxRetries` times, after a backoff doubled per attempt from 1 s or from
+ * `notReadyBackoffMs`, or after the server's `Retry-After` where that is longer, and never after
+ * more than `retryBackoffMaxMs`.
+ *
+ * @param attempt - Retries already made, from 0.
+ */
+export function retryDelayMs(error: unknown, attempt: number, o: RetryOptions): number | null {
+  const status = error instanceof TesseraError ? error.status : 0;
+  if ((status !== 429 && status !== 503) || attempt >= o.maxRetries) return null;
+  const base = status === 503 ? o.notReadyBackoffMs : 1000;
+  const asked = (error as TesseraError).retryAfterS ?? 0;
+  return Math.min(Math.max(base * 2 ** attempt, asked * 1000), o.retryBackoffMaxMs);
+}
+
 /** @internal */
 export class Driver {
   private readonly o: Required<DriverOptions>;
@@ -732,14 +755,9 @@ export class Driver {
       this.inFlightAt = null;
       this.inFlight = null;
 
-      // Two retryable refusals with different waits: a 429 `backpressure` is the server shedding
-      // load, and a 503 `not-ready` is a server still starting. Both report `retrying`.
-      const status = error instanceof TesseraError ? error.status : 0;
-      const retryable = status === 429 || status === 503;
-      if (retryable && attempt < this.o.maxRetries) {
+      const backoff = retryDelayMs(error, attempt, this.o);
+      if (backoff !== null) {
         this.events.onStatus?.('retrying');
-        const base = status === 503 ? this.o.notReadyBackoffMs : 1000;
-        const backoff = Math.min(base * 2 ** attempt, this.o.retryBackoffMaxMs);
         this.retryHandle = this.clock.after(backoff, () => {
           this.retryHandle = null;
           // Anything newer supersedes the retry.

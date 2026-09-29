@@ -214,6 +214,30 @@ as given, choosing no fields and no order on the caller's behalf.
 `selection.items` sends the selection's own filters and box as the read's filter, so its rows are
 the items the selection counts.
 
+## Counts by group
+
+`POST /v1/aggregate` answers how a set is distributed, one table of counts per grouping.
+
+| Client | Call | What it gives back |
+|---|---|---|
+| TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
+| TypeScript store | `store.setAggregate(id, {groupings, reference, without})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
+| Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
+
+The store sends a reference only where the component registered one, as a filter expression or as
+the whole visible set. It chooses no grouping. A registration can name one column in `without`, as
+the filter draft keys its controls, and the store then sends its filters less that column's
+control. A category control uses this to list its own values: with its clause set, the values it
+excludes are still counted, and every other clause, the `member_of` clauses and the selected
+region still narrow them. `without` names a draft control only, so the `member_of` clauses and the
+region are always sent, and nothing is left out unless a registration names it. A `429` or `503`
+is sent again as the map's own requests are, after the same backoff or the server's
+`Retry-After` where that is longer, and a newer change cancels the wait. `selection.aggregate` sends the selection's filters
+and box as the request's `filters`, so every grouping's total is the selection's count.
+
+There is no command-line command for this route. It is reached over HTTP and through the
+TypeScript and Python clients.
+
 ## Not built
 
 Switching between two views that use different layouts refits the camera without animating an
