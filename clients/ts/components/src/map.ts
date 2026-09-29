@@ -126,6 +126,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  *   moved.
  * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and
  *   again with its record once the record arrives.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click found no point
+ *   and no artifact.
  * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved onto
  *   or over a point.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An
@@ -1077,6 +1079,7 @@ export class TesseraMap extends TesseraElement {
         if (id === null) {
           this.lastPick = {kind: 'miss'};
           this.pickedAt = null;
+          emit(this, 'tessera-miss', {});
           return;
         }
         this.lastPick = null;

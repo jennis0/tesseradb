@@ -76,6 +76,7 @@ const withStableAuthorise = <C extends React.ForwardRefExoticComponent<any>>(Inn
 /** The handler props for events a map emits, which the explorer also carries. */
 const mapEvents = {
   onPick: ev('tessera-pick'),
+  onMiss: ev('tessera-miss'),
   onHover: ev('tessera-hover'),
   onViewChange: ev('tessera-viewchange'),
   onSelectChange: ev('tessera-selectchange'),
@@ -87,7 +88,7 @@ const mapEvents = {
 export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreElement, {}));
 /**
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
- * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
+ * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
  * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
  * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
  * `onDisplayChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
@@ -112,8 +113,8 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onViewFollow: ev('tessera-viewfollow')
 }));
 /**
- * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onHover`
- * (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
+ * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onMiss`
+ * (`tessera-miss`), `onHover` (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
  * (`tessera-selectchange`), `onArtifactOpen` (`tessera-artifactopen`) and `onLayerChange`
  * (`tessera-layerchange`).
  */

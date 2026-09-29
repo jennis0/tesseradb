@@ -149,6 +149,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @slot top-right - Content in the map's top-right corner, above the right-hand cards.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The map's camera moved.
  * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and again with its record.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click on the map found nothing; the explorer closes the card that is not pinned and drops the selection.
  * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved over a point.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
  * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
@@ -1028,6 +1029,7 @@ export class TesseraExplorer extends TesseraElement {
           .valueColours=${this.valueColours}
           @tessera-viewchange=${() => this.requestUpdate()}
           @tessera-pick=${() => this.requestUpdate()}
+          @tessera-miss=${() => this.onMiss()}
           @click=${() => this.requestUpdate()}
         >
           ${layersButton}
@@ -1560,6 +1562,16 @@ export class TesseraExplorer extends TesseraElement {
       stop();
       this.following = null;
     };
+  }
+
+  /** A click on empty map closes the card that is not pinned and drops the selection; pinned cards stay. */
+  private onMiss(): void {
+    const s = this.resolvedStore;
+    const sel = s?.get('selection');
+    if (s && sel && (sel.item || sel.artifact || sel.itemRefusal || sel.artifactRefusal)) s.clearSelection();
+    const m = this.map;
+    if (m) m.lastPick = null;
+    this.requestUpdate();
   }
 
   /**

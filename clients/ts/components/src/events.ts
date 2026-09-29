@@ -26,6 +26,8 @@ export type TesseraEventDetails = {
    * with the item's record once it arrives.
    */
   'tessera-pick': {id: string; record?: ItemDetail};
+  /** A click on the map found no point and no artifact. */
+  'tessera-miss': Record<string, never>;
   /** The pointer is over the point `id`, at `x`, `y` in canvas pixels. */
   'tessera-hover': {id: string; x: number; y: number};
   /**

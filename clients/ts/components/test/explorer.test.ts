@@ -272,6 +272,18 @@ describe('<tessera-explorer> the item card beside its point', () => {
     expect(map.pickedAt).toBeNull();
   });
 
+  it('closes the card that is not pinned and drops the selection on a click that finds nothing; a pinned card stays', async () => {
+    const {host, shadow, store, map} = await pinnedAndLive();
+    map.pickedAt = null;
+    map.dispatchEvent(new CustomEvent('tessera-miss', {detail: {}, bubbles: true, composed: true}));
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+    store.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
+    await settle(host);
+    expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5']);
+    expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
+  });
+
   it('drops every card when it is given another store', async () => {
     const {host, el, shadow} = await pinnedAndLive();
     const other = fakeStore({meta: META, status: status({})});
