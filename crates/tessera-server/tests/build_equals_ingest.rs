@@ -187,7 +187,7 @@ struct Corpus {
 impl Corpus {
     fn draw(seed: u64) -> Corpus {
         let mut d = Draws(seed);
-        let two_fields = seed % 2 == 0;
+        let two_fields = seed.is_multiple_of(2);
         let rows = |d: &mut Draws, n: usize, range: u64, points: bool| {
             let at = |i: usize, salt: u64| ((i as u64 * 37 + salt) % 97) as f64 + 0.5;
             Rows {
