@@ -54,7 +54,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -71,7 +71,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -250,7 +250,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
     let (status, body) = put(
         &server,
         LAYER,
-        json!([{ "key": "everything", "excluding": [] }]),
+        json!([{ "key": "everything", "excluding": {} }]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -259,7 +259,7 @@ async fn the_complement_holds_a_point_that_is_buffered_and_not_yet_flushed() {
     let (status, body) = patch(
         &server,
         LAYER,
-        json!([{ "key": "everything", "members": [member(new_id)] }]),
+        json!([{ "key": "everything", "members": members([new_id]) }]),
     )
     .await;
     assert_eq!(status, 200, "{body}");
@@ -297,7 +297,7 @@ async fn the_complement_leaves_out_a_deleted_entity() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(
             &(0..deleted)
-                .map(|id| json!({ "field": "id", "value": member(id), "op": "delete" }))
+                .map(|id| json!({ "op": "delete", "match": { "id": member(id) } }))
                 .collect::<Vec<_>>(),
         )
         .send()
@@ -308,7 +308,7 @@ async fn the_complement_leaves_out_a_deleted_entity() {
     let (status, body) = put(
         &server,
         PROPORTIONAL,
-        json!([{ "key": "the-living", "excluding": [] }]),
+        json!([{ "key": "the-living", "excluding": {} }]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -353,7 +353,7 @@ async fn a_second_exclusion_on_a_held_key_is_a_conflict() {
     let (status, body) = put(&server, LAYER, json!([{ "key": "c0" }])).await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(body["error"], "contract", "{body}");
-    let (status, body) = put(&server, LAYER, json!([{ "key": "c0", "members": [] }])).await;
+    let (status, body) = put(&server, LAYER, json!([{ "key": "c0", "members": {} }])).await;
     assert_eq!(status, 201, "an empty membership is a real state: {body}");
 
     // A membership has one spelling: both on one row is refused at decoding.

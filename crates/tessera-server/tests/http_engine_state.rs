@@ -105,7 +105,9 @@ async fn an_overlay_swap_does_not_stale_a_geometry_stamp() {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "field": "id", "value": member(SUPPRESS_SOURCE_ID), "op": "suppress" }]))
+        .json(&serde_json::json!([
+            { "op": "suppress", "match": { "id": member(SUPPRESS_SOURCE_ID) } }
+        ]))
         .send()
         .await
         .unwrap();

@@ -176,7 +176,7 @@ async fn put(
             layer.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -466,7 +466,7 @@ async fn a_shape_published_into_one_view_is_drawn_on_no_other() {
     let (status, body) = put(
         &server,
         SHAPES,
-        json!([{ "key": "everywhere", "view": "q2", "members": [], "bbox": [0.0, 0.0, 1000.0, 1000.0] }]),
+        json!([{ "key": "everywhere", "view": "q2", "members": {}, "bbox": [0.0, 0.0, 1000.0, 1000.0] }]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -913,8 +913,8 @@ async fn a_recreated_view_takes_no_row_structure_of_the_view_it_replaced_at_a_re
         &server,
         SHAPES,
         json!([
-            { "key": "left", "view": "q1", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
-            { "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] },
+            { "key": "left", "view": "q1", "members": {}, "bbox": [0.0, 0.0, 500.0, 1000.0] },
+            { "key": "left", "view": "q2", "members": {}, "bbox": [0.0, 0.0, 500.0, 1000.0] },
         ]),
     )
     .await;
@@ -973,7 +973,7 @@ async fn a_global_row_major_level_over_a_recreated_view_answers_the_same_after_a
             PLAIN.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": [
+        .json(&json!({ "artifacts": [
             { "key": "c0", "members": members(50..80) }
         ] }))
         .send()
@@ -1165,7 +1165,7 @@ async fn a_flushed_segment_the_size_of_the_base_is_not_read_off_the_base_column(
     let (status, body) = put(
         &server,
         SHAPES,
-        json!([{ "key": "left", "view": "q2", "members": [], "bbox": [0.0, 0.0, 500.0, 1000.0] }]),
+        json!([{ "key": "left", "view": "q2", "members": {}, "bbox": [0.0, 0.0, 500.0, 1000.0] }]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
@@ -1233,14 +1233,14 @@ async fn a_growth_grows_the_artifact_in_the_view_it_names() {
             .json(&body)
             .send()
     };
-    let resp = patch(json!({ "field": "id", "artifacts": [
+    let resp = patch(json!({ "artifacts": [
         { "key": "c1", "members": members(10..20) }
     ] }))
     .await
     .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
 
-    let resp = patch(json!({ "field": "id", "artifacts": [
+    let resp = patch(json!({ "artifacts": [
         { "key": "c1", "view": "q2", "members": members(10..25) }
     ] }))
     .await
@@ -1308,14 +1308,13 @@ async fn a_view_dropped_during_its_first_flush_takes_none_of_its_rows() {
 
 
 /// One Arrow growth body: `key`, `members` and, where given, a `view` column of the type named.
-fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<&str>)>) -> Vec<u8> {
-    use arrow::array::{ArrayRef, Int64Array, ListBuilder, StringArray, StringBuilder};
-    let mut list = ListBuilder::new(StringBuilder::new());
-    for member in members {
-        list.values().append_value(member);
-    }
-    list.append(true);
-    let list: ArrayRef = Arc::new(list.finish());
+fn arrow_growth(
+    key: &str,
+    members: serde_json::Value,
+    view: Option<(DataType, Option<&str>)>,
+) -> Vec<u8> {
+    use arrow::array::{ArrayRef, Int64Array, StringArray};
+    let list: ArrayRef = Arc::new(arrow_member_lists(&[members]));
     let mut fields = vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("members", list.data_type().clone(), false),
@@ -1328,8 +1327,7 @@ fn arrow_growth(key: &str, members: Vec<String>, view: Option<(DataType, Option<
             _ => Arc::new(Int64Array::from(vec![Some(2)])),
         });
     }
-    let metadata = [("field".to_string(), "id".to_string())].into_iter().collect();
-    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();

@@ -76,7 +76,7 @@ async fn put(server: &TestServer, artifacts: serde_json::Value) -> serde_json::V
         .client
         .put(artifacts_url(server))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -92,7 +92,7 @@ async fn patch(server: &TestServer, artifacts: serde_json::Value) -> serde_json:
         .client
         .patch(artifacts_url(server))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -128,7 +128,7 @@ async fn change(server: &TestServer, id: u64, op: &str) {
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!([{ "field": "id", "value": member(id), "op": op }]))
+        .json(&json!([{ "op": op, "match": { "id": member(id) } }]))
         .send()
         .await
         .unwrap();
@@ -216,18 +216,18 @@ async fn build_matrix(server: &TestServer) {
 
     // Members whose rows the build wrote. `0`, `3` and `6` carry both terms; `1` carries only the
     // broad principal's, and is the one member the narrow principal lacks.
-    let shared = vec![member(0), member(3), member(6)];
-    let broad_only = member(1);
+    let shared = [0, 3, 6];
+    let broad_only = 1;
 
     // A set of built members alone.
     put(
         server,
         json!([{
             "key": BUILT,
-            "members": (0..40).map(member).collect::<Vec<_>>(),
+            "members": members(0..40),
             "content": [{
                 "values": ["from the build"],
-                "generated_from": shared.iter().cloned().chain([broad_only.clone()]).collect::<Vec<_>>()
+                "generated_from": members(shared.into_iter().chain([broad_only]))
             }]
         }]),
     )
@@ -252,25 +252,25 @@ async fn build_matrix(server: &TestServer) {
         json!([
             {
                 "key": FLUSHED,
-                "members": (0..40).map(member).collect::<Vec<_>>(),
+                "members": members(0..40),
                 "content": [{
                     "values": ["from the ingest"],
-                    "generated_from": [member(FLUSH_A), member(FLUSH_B), member(FLUSH_C)]
+                    "generated_from": members([FLUSH_A, FLUSH_B, FLUSH_C])
                 }]
             },
             {
                 "key": MIXED,
-                "members": (0..40).map(member).collect::<Vec<_>>(),
+                "members": members(0..40),
                 "content": [{
                     "values": ["from both"],
-                    "generated_from": shared.iter().cloned().chain([member(FLUSH_C)]).collect::<Vec<_>>()
+                    "generated_from": members(shared.into_iter().chain([FLUSH_C]))
                 }]
             },
             {
                 // Published over built members alone; a flushed member joins the set below.
                 "key": GROWN,
-                "members": (0..40).map(member).collect::<Vec<_>>(),
-                "content": [{ "values": ["grown at ingest"], "generated_from": shared.clone() }]
+                "members": members(0..40),
+                "content": [{ "values": ["grown at ingest"], "generated_from": members(shared) }]
             }
         ]),
     )
@@ -280,7 +280,7 @@ async fn build_matrix(server: &TestServer) {
     // **A growth by a member that already has a row.** The set gains it at this publication.
     patch(
         server,
-        json!([{ "key": GROWN, "rank": 0, "members": [member(FLUSH_C)] }]),
+        json!([{ "key": GROWN, "rank": 0, "members": members([FLUSH_C]) }]),
     )
     .await;
     tick(server).await;
@@ -300,10 +300,10 @@ async fn build_matrix(server: &TestServer) {
         server,
         json!([{
             "key": BUFFERED,
-            "members": (0..40).map(member).collect::<Vec<_>>(),
+            "members": members(0..40),
             "content": [{
                 "values": ["published with its members"],
-                "generated_from": [member(BUFFER_A), member(BUFFER_B)]
+                "generated_from": members([BUFFER_A, BUFFER_B])
             }]
         }]),
     )

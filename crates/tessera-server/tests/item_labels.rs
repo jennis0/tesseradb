@@ -247,11 +247,7 @@ async fn a_suppressed_item_is_the_identical_404() {
 
     let changes: Vec<serde_json::Value> = (0..N_ITEMS)
         .map(|source| {
-            serde_json::json!({
-                "field": "id",
-                "value": member(source),
-                "op": "suppress"
-            })
+            serde_json::json!({ "op": "suppress", "match": { "id": member(source) } })
         })
         .collect();
     let accepted = fx

@@ -57,7 +57,7 @@ async fn put(
         .client
         .put(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -79,7 +79,7 @@ async fn patch(
         .client
         .patch(artifacts_url(server, layer))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": artifacts }))
+        .json(&json!({ "artifacts": artifacts }))
         .send()
         .await
         .unwrap();
@@ -307,7 +307,7 @@ async fn a_parent_is_filled_by_patch_and_a_held_key_on_put_mints_nothing() {
     let (status, body) = put(
         &server,
         TREE,
-        json!([{ "key": "child", "members": [], "parent": ["leaf"] }]),
+        json!([{ "key": "child", "members": {}, "parent": ["leaf"] }]),
     )
     .await;
     assert_eq!(status, 409, "{body}");
@@ -360,7 +360,7 @@ async fn a_key_repeated_in_one_batch_with_a_fixed_part_is_422_at_both_routes() {
         &server,
         TREE,
         json!([
-            { "key": "k", "members": [], "parent": ["a"] },
+            { "key": "k", "members": {}, "parent": ["a"] },
             { "key": "k", "members": members(30..35) },
         ]),
     )

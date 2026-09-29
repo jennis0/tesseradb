@@ -906,7 +906,7 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
 
     let change = |op: &str| {
         let body =
-            json!([{ "tessera_id": tessera_id.to_string(), "op": op }]);
+            json!([{ "op": op, "match": { "tessera_id": tessera_id.to_string() } }]);
         served
             .server
             .client
@@ -2083,7 +2083,7 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
 
     // The item is deleted, so the re-ingest below names no live item and creates one, where a
     // live item would have been edited.
-    let body = json!([{ "tessera_id": first.to_string(), "op": "delete" }]);
+    let body = json!([{ "op": "delete", "match": { "tessera_id": first.to_string() } }]);
     let resp = served
         .server
         .client
@@ -2136,7 +2136,7 @@ async fn a_row_whose_item_is_deleted_under_it_creates_a_fresh_item_that_keeps_it
         assert_eq!(seed.status(), 200);
         let holder = ingested_ids(&seed.json::<Value>().await.unwrap())[0];
 
-        let body = json!([{ "tessera_id": holder.to_string(), "op": "delete" }]);
+        let body = json!([{ "op": "delete", "match": { "tessera_id": holder.to_string() } }]);
         let batch_id = format!("demote-race-again-{round}");
         let rows = [(id, 800.0, 300.0, &["1"][..], Some(7))];
         let (deleted, again) = tokio::join!(

@@ -47,7 +47,6 @@ async fn register_and_plant(server: &TestServer) {
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({
-            "field": "id",
             // Flat over HTTP: the publish route carries no parent edge (lineage arrives with an
             // ingest batch's list column), and the tree's resolution is the engine tests' business.
             // What this file pins is the frame.

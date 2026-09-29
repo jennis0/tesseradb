@@ -757,7 +757,7 @@ async fn a_member_of_filter_counts_the_members_and_withholds_as_absence() {
                 .client
                 .put(server.control_url(&format!("/control/layers/{layer}/artifacts")))
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!({ "field": "id", "artifacts": artifacts }))
+                .json(&serde_json::json!({ "artifacts": artifacts }))
                 .send()
                 .await
                 .unwrap();

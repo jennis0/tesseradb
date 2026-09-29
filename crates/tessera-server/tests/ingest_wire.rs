@@ -640,9 +640,8 @@ fn plain_json_body(ids: std::ops::Range<u64>) -> Vec<u8> {
 }
 
 /// A publication of `artifacts`, each member named by its `id`.
-fn publish_body(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
+fn publish_body(artifacts: &[(&str, Value)]) -> Vec<u8> {
     json!({
-        "field": "id",
         "artifacts": artifacts
             .iter()
             .map(|(key, members)| json!({ "key": key, "members": members }))
@@ -680,33 +679,18 @@ async fn patch_raw(server: &TestServer, content_type: &str, body: Vec<u8>) -> (u
     (status, resp.json().await.unwrap_or(Value::Null))
 }
 
-fn grow_json(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
+fn grow_json(artifacts: &[(&str, Value)]) -> Vec<u8> {
     publish_body(artifacts)
 }
 
-/// The growth route's Arrow form: `key` and `members` per row, and the field naming the members
-/// in the schema's metadata.
-fn grow_arrow(artifacts: &[(&str, Vec<String>)]) -> Vec<u8> {
-    use arrow::array::{ListBuilder, StringBuilder};
-    let mut lists = ListBuilder::new(StringBuilder::new());
-    for (_, members) in artifacts {
-        for member in members {
-            lists.values().append_value(member);
-        }
-        lists.append(true);
-    }
-    let lists = lists.finish();
-    let schema = Arc::new(
-        Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new("members", lists.data_type().clone(), true),
-        ])
-        .with_metadata(
-            [("field".to_string(), "id".to_string())]
-                .into_iter()
-                .collect(),
-        ),
-    );
+/// The growth route's Arrow form: `key` and a `members` table per row.
+fn grow_arrow(artifacts: &[(&str, Value)]) -> Vec<u8> {
+    let tables: Vec<Value> = artifacts.iter().map(|(_, table)| table.clone()).collect();
+    let lists = arrow_member_lists(&tables);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("members", lists.data_type().clone(), true),
+    ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -738,9 +722,9 @@ async fn served_plain(limits: IngestLimits) -> (TempDir, TestServer) {
 #[tokio::test]
 async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
     let three_rows = plain_json_body(0..3);
-    // Two artifacts of five members: the at-cap body, and long enough that every count leg
+    // Two artifacts of six members: the at-cap body, and long enough that every count leg
     // below (three artifacts of one member, a growth of four) sits under the byte cap.
-    let two_artifacts = publish_body(&[("p1", members(0..5)), ("p2", members(5..10))]);
+    let two_artifacts = publish_body(&[("p1", members(0..6)), ("p2", members(6..12))]);
     let limits = IngestLimits {
         admission: 8,
         max_batch_rows: 3,
@@ -868,7 +852,7 @@ async fn every_limit_in_the_block_is_enforced_at_its_published_value() {
     let items = |n: usize| -> Value {
         Value::Array(
             (0..n)
-                .map(|i| json!({ "field": "id", "value": member(i as u64), "op": "suppress" }))
+                .map(|i| json!({ "op": "suppress", "match": { "id": member(i as u64) } }))
                 .collect(),
         )
     };
@@ -996,16 +980,8 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
         writer.write(&batch).unwrap();
         writer.into_inner().unwrap()
     }
-    fn one_list(members: &[Option<&str>]) -> arrow::array::ListArray {
-        let mut lists = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
-        for member in members {
-            lists.values().append_option(*member);
-        }
-        lists.append(true);
-        lists.finish()
-    }
     let key = || Arc::new(StringArray::from(vec!["a"])) as Arc<dyn Array>;
-    let list = one_list(&[Some("40")]);
+    let list = arrow_member_lists(&[members([40])]);
     let list_type = list.data_type().clone();
     let (status, body) = patch_raw(
         &server,
@@ -1017,7 +993,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
                 Field::new("parent", DataType::Utf8, true),
             ],
             vec![key(), Arc::new(list.clone()), key()],
-            &[("field", "id")],
+            &[],
         ),
     )
     .await;
@@ -1036,7 +1012,7 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
                 Field::new("members", list_type.clone(), true),
             ],
             vec![key(), Arc::new(list.clone())],
-            &[("field", "id"), ("default_space", "wgs84")],
+            &[("default_space", "wgs84")],
         ),
     )
     .await;
@@ -1046,21 +1022,16 @@ async fn a_growth_page_as_arrow_lands_what_the_json_page_lands() {
         body["detail"].as_str().unwrap().contains("`default_space`"),
         "{body}"
     );
-    let null_members = {
-        let mut lists = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
-        lists.append(false);
-        lists.finish()
-    };
     let (status, body) = patch_raw(
         &server,
         ARROW,
         stream(
             vec![
                 Field::new("key", DataType::Utf8, false),
-                Field::new("members", null_members.data_type().clone(), true),
+                Field::new("members", list_type.clone(), true),
             ],
-            vec![key(), Arc::new(null_members)],
-            &[("field", "id")],
+            vec![key(), arrow::array::new_null_array(&list_type, 1)],
+            &[],
         ),
     )
     .await;

@@ -186,7 +186,7 @@ pub fn build_fixture_with_access(dir: &Path, n: u64, access: AccessInput) -> std
 }
 
 /// A declaration of one attribute: `id`, a unique `u64` read from the points file's `entity_id`,
-/// so a test names a built item by `{"field": "id", "value": "<source id>"}` or a row's `id`.
+/// so a test names a built item by its `id` in a change's `match`, a member table or a row.
 pub fn id_schema() -> tessera_build::config::Schema {
     tessera_build::config::Schema {
         attributes: vec![tessera_build::config::Attribute {
@@ -1125,8 +1125,8 @@ pub async fn refused(resp: reqwest::Response, status: u16) -> String {
     error_code(&resp.text().await.unwrap())
 }
 
-/// A built item's member address in a batch whose `field` is `id` ([`id_schema`]): its source id
-/// as text.
+/// A built item's cell in an `id` ([`id_schema`]) column of a member table or a change's `match`:
+/// its source id as text.
 pub fn member(source_id: u64) -> String {
     source_id.to_string()
 }
@@ -1142,9 +1142,62 @@ pub fn tessera_id_of(server: &TestServer, source_id: u64) -> u64 {
     engine.tessera_id_of(entity).unwrap().raw()
 }
 
-/// [`member`] for each of `range`.
-pub fn members(range: std::ops::Range<u64>) -> Vec<String> {
-    range.map(member).collect()
+/// A member table naming each of `source_ids` by [`id_schema`]'s `id`.
+pub fn members(source_ids: impl IntoIterator<Item = u64>) -> serde_json::Value {
+    serde_json::json!({ "id": source_ids.into_iter().map(member).collect::<Vec<_>>() })
+}
+
+/// Member tables in the Arrow form of a growth's `members` column: one list per table, of
+/// structs whose fields are the tables' columns, every cell as text.
+pub fn arrow_member_lists(tables: &[serde_json::Value]) -> arrow::array::ListArray {
+    let mut names: Vec<String> = Vec::new();
+    for table in tables {
+        for name in table.as_object().expect("a member table is an object").keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    let rows = |table: &serde_json::Value| {
+        table
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .map_or(0, |cells| cells.as_array().unwrap().len())
+    };
+    let columns: Vec<ArrayRef> = names
+        .iter()
+        .map(|name| {
+            let cells = tables.iter().flat_map(|table| {
+                let column = table[name.as_str()].as_array().cloned();
+                (0..rows(table)).map(move |row| match column.as_ref().map(|cells| &cells[row]) {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(text)) => Some(text.clone()),
+                    Some(other) => Some(other.to_string()),
+                })
+            });
+            Arc::new(arrow::array::StringArray::from_iter(cells)) as ArrayRef
+        })
+        .collect();
+    let fields: arrow::datatypes::Fields = names
+        .iter()
+        .map(|name| Field::new(name, DataType::Utf8, true))
+        .collect();
+    let elements = arrow::array::StructArray::new(fields.clone(), columns, None);
+    arrow::array::ListArray::new(
+        Arc::new(Field::new_list_field(DataType::Struct(fields), false)),
+        arrow::buffer::OffsetBuffer::from_lengths(tables.iter().map(rows)),
+        Arc::new(elements),
+        None,
+    )
+}
+
+/// A member table naming each of `tessera_ids`.
+pub fn members_by_tessera_id(tessera_ids: impl IntoIterator<Item = u64>) -> serde_json::Value {
+    serde_json::json!({
+        "tessera_id": tessera_ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>()
+    })
 }
 
 /// `PUT /control/layers` with `declaration`: the status and the body, or null where there is none.

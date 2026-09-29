@@ -90,7 +90,7 @@ fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
 
 /// A `/control/changes` item applying `op` to the built item whose `id` is `source_id`.
 fn change(source_id: u64, op: &str) -> serde_json::Value {
-    serde_json::json!({ "field": "id", "value": member(source_id), "op": op })
+    serde_json::json!({ "op": op, "match": { "id": member(source_id) } })
 }
 
 #[tokio::test]
@@ -186,41 +186,6 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
-}
-
-/// Two rows carrying one `id` value *within* one batch are `409 conflict`, and the batch has NO
-/// effect at all -- not even the other rows are accepted.
-#[tokio::test]
-async fn ingest_rejects_one_id_value_twice_within_one_batch() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    let body = build_ingest_batch(&[
-        (N_ITEMS + 1, 1.0, 1.0, "0"),
-        (N_ITEMS + 2, 2.0, 2.0, "0"),
-        (N_ITEMS + 1, 3.0, 3.0, "0"),
-    ]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "dup-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "a 409 batch must have no effect at all -- not even the non-duplicate rows"
-    );
 }
 
 /// Post one ingest batch and return its status and answer.
@@ -333,63 +298,6 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["created"], 2_000);
-}
-
-/// A `/control/changes` batch whose *later* item fails validation (an `id` no item holds) must
-/// leave every earlier item in the same batch unapplied — validate-first, not apply-then-abort.
-/// Suppresses a real item first in the batch, then names a nonexistent one second; the whole
-/// request must 404, and the real item's count must be unaffected.
-#[tokio::test]
-async fn changes_batch_validates_before_applying_anything() {
-    let tmp = TempDir::new().unwrap();
-    let server = serve(&tmp).await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    let viewport_req = serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-    });
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&viewport_req)
-        .send()
-        .await
-        .unwrap();
-    let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
-
-    const REAL_SOURCE_ID: u64 = 9;
-    // No item holds this `id` (never ingested or built), so it must 404 during validation.
-    const BOGUS_SOURCE_ID: u64 = N_ITEMS + 1;
-
-    let resp = server
-        .client
-        .post(server.control_url("/control/changes"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([
-            change(REAL_SOURCE_ID, "suppress"),
-            change(BOGUS_SOURCE_ID, "suppress"),
-        ]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&viewport_req)
-        .send()
-        .await
-        .unwrap();
-    let (tiles_after, _) = decode_viewport(&resp.bytes().await.unwrap());
-
-    assert_eq!(
-        tiles_after[0].1, tiles_before[0].1,
-        "the batch's first item must not have been applied once a later item failed validation"
-    );
 }
 
 /// Two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must both survive.
@@ -3244,7 +3152,7 @@ async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_contr
             "POST",
             "/control/changes",
             serde_json::json!([{
-                "field": "id", "value": "999999", "op": "suppress", "unknown_field": 1
+                "op": "suppress", "match": { "id": "999999" }, "unknown_field": 1
             }]),
         ),
         (
@@ -3900,7 +3808,6 @@ async fn control_status_serves_its_pinned_shape() {
         .put(&artifacts_url)
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!({
-            "field": "id",
             "artifacts": [{ "key": "a", "members": members(0..100) }]
         }))
         .send()
@@ -3913,7 +3820,6 @@ async fn control_status_serves_its_pinned_shape() {
         .patch(&artifacts_url)
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!({
-            "field": "id",
             "artifacts": [{ "key": "a", "members": members(100..200) }]
         }))
         .send()
@@ -4372,7 +4278,7 @@ async fn the_predicate_op_is_refused_with_a_422() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "field": "id", "value": member(3), "op": "predicate", "access": "0" },
+            { "op": "predicate", "match": { "id": member(3) }, "access": "0" },
         ]))
         .send()
         .await

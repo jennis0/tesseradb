@@ -89,7 +89,7 @@ async fn fixture_with(bulk_gate: ComputeGate) -> Fixture {
             LAYER.replace('/', "%2F")
         )))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&json!({ "field": "id", "artifacts": planted() }))
+        .json(&json!({ "artifacts": planted() }))
         .send()
         .await
         .unwrap();
