@@ -4,7 +4,8 @@
     python3 probe.py run --binary tessera --data DIR --cap 600M --budget 500m --out run.json
     python3 probe.py run ... --main      # the declaration as main reads it, with a join field
 
-`make` writes `points.parquet` (`id` u64, `x`, `y`) and `members.parquet` (`entity` u64, `key` i32), one
+`make` writes `points.parquet` (`id` u64, `x`, `y`, and with `--names` a keyword `name` the record
+blob holds) and `members.parquet` (`entity` u64, `key` i32), one
 row per item in each. The ids have GBIF's spacing: blocks of ten ids over eighteen values, the two
 gaps of one in each block placed at random, so the gaps average 1.8. With `--order shuffled` the
 points file holds the ranks in the order `(a * row + c) mod items` and the members file in another
@@ -84,11 +85,10 @@ def make(args: argparse.Namespace) -> None:
     n = args.items
     points_order = (multiplier(n, 0.6180339887), n // 3)
     members_order = (multiplier(n, 0.7548776662), n // 7)
-    points = pq.ParquetWriter(
-        out / "points.parquet",
-        pa.schema([("id", pa.uint64()), ("x", pa.float64()), ("y", pa.float64())]),
-        compression="zstd",
-    )
+    point_fields = [("id", pa.uint64()), ("x", pa.float64()), ("y", pa.float64())]
+    if args.names:
+        point_fields.append(("name", pa.string()))
+    points = pq.ParquetWriter(out / "points.parquet", pa.schema(point_fields), compression="zstd")
     members = pq.ParquetWriter(
         out / "members.parquet",
         pa.schema([("entity", pa.uint64()), ("key", pa.int32())]),
@@ -101,9 +101,13 @@ def make(args: argparse.Namespace) -> None:
         h = mix(ranks + np.uint64(0x9E3779B97F4A7C15))
         x = (h >> np.uint64(11)).astype(np.float64) / float(1 << 53) * 100.0
         y = (mix(h) >> np.uint64(11)).astype(np.float64) / float(1 << 53) * 100.0
-        points.write_table(
-            pa.table({"id": ids_of(ranks), "x": x, "y": y}), row_group_size=1 << 20
-        )
+        table = {"id": ids_of(ranks), "x": x, "y": y}
+        if args.names:
+            genus = (h % np.uint64(50_000)).astype(np.int64)
+            table["name"] = pa.array(
+                [f"Genus{g} species{r}" for g, r in zip(genus.tolist(), ranks.tolist())]
+            )
+        points.write_table(pa.table(table), row_group_size=1 << 20)
         if args.order != "aligned":
             ranks = ranks_at(rows, n, args.order, *members_order)
         key = (mix(ranks) % np.uint64(KEYS)).astype(np.int32)
@@ -135,11 +139,12 @@ session = "127.0.0.1:18142"
 control = "127.0.0.1:18143"
 """
     )
-    (out / "corpus.toml").write_text(declaration(main=False))
-    (out / "corpus-main.toml").write_text(declaration(main=True))
+    (out / "corpus.toml").write_text(declaration(main=False, names=args.names))
+    (out / "corpus-main.toml").write_text(declaration(main=True, names=args.names))
 
 
-def declaration(main: bool) -> str:
+def declaration(main: bool, names: bool = False) -> str:
+    name = '\n[[attribute]]\nname = "name"\ntype = "keyword"\n' if names else ""
     join = 'join_field = "id"\n' if main else ""
     fields = "" if main else '  fields = { id = "entity" }\n'
     return f"""[sources]
@@ -158,7 +163,7 @@ point_visibility = {{ default = "public" }}
 name   = "id"
 type   = "u64"
 unique = true
-
+{name}
 [[layer]]
 name                      = "groups"
 views                     = ["s0"]
@@ -241,6 +246,8 @@ def run(args: argparse.Namespace) -> int:
     ]
     if args.budget:
         cmd += ["--memory-budget", args.budget]
+    if args.batch_items:
+        cmd += ["--batch-items", str(args.batch_items)]
     scoped = ["systemd-run", "--user", "--scope", "--collect", "-p", f"MemoryMax={args.cap}",
               "-p", "MemorySwapMax=2G",
               *(["-p", f"RuntimeMaxSec={args.max_seconds}"] if args.max_seconds else []),
@@ -315,12 +322,14 @@ def main() -> int:
     m.add_argument("--items", type=int, required=True)
     m.add_argument("--order", choices=["shuffled", "aligned", "file"], required=True)
     m.add_argument("--out", type=Path, required=True)
+    m.add_argument("--names", action="store_true", help="a keyword column the record blob holds")
     r = sub.add_parser("run")
     r.add_argument("--binary", type=Path, required=True)
     r.add_argument("--data", type=Path, required=True)
     r.add_argument("--cap", required=True)
     r.add_argument("--budget")
     r.add_argument("--main", action="store_true")
+    r.add_argument("--batch-items", type=int, help="the entity-order batch, in items")
     r.add_argument("--max-seconds", type=int, help="stop the build after this long")
     r.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()

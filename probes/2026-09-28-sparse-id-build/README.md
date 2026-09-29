@@ -99,3 +99,24 @@ at its position there names that row's item; only the rows that differ go throug
 merge. After 2²⁰ compared rows a file in which fewer than half matched stops being compared. The
 pass is still bound by the disc: the points file's sort spills its `(key, row)` pairs and reads
 them back, which is most of what remains.
+
+## `record_blob` against main, 2026-09-29
+
+The GBIF build's `record_blob` was reported slower on this branch. Here 10⁸ items, members in the
+points' order (`--order aligned`), plus a keyword `name` column the record blob holds (`--names`).
+Both binaries were built with the one line of `build_observed` changed to take the extent route
+(the route GBIF's string columns take for lack of disc) and not committed: `f99da0dc` (main before
+this branch) against this branch after its merge with main. Each ran twice, alternating, under a
+4–6 GiB cap, on a box shared with other builds (load 5–18). Figures in
+[`record-blob-results.json`](record-blob-results.json).
+
+| batches | main | this branch |
+|---|---|---|
+| 2 (budget 4 GiB) | 37.5 s, 41.4 s | 40.7 s, 38.8 s |
+| 6 (budget 2.1 GiB, `--batch-items 16777216`) | 32.9 s, 38.0 s | 37.4 s, 40.1 s |
+
+The difference is inside the spread, and a 25-second profile of the stage in each binary has the
+same shape: the merge 20–22%, the heap's `pop` 8–11%, `from_utf8` 7%, extent decompression 6%.
+The record blob's code is the same in both. What this branch changes on its way there is the
+order ordinals are numbered in, and so which rows land in which entity batch; at this scale that
+moves the stage by no more than the box does.
