@@ -1,13 +1,16 @@
 import {ContextProvider} from '@lit/context';
-import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
+import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import type {ClauseVerb, Store} from '@tesseradb/client';
+import {repeat} from 'lit/directives/repeat.js';
+import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {activeCount, browsableLayers, emptyDraft} from '@tesseradb/client';
+import {artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
-import './hierarchy.js';
+import {listedAt} from './artifact-list.js';
+import {HeldAggregate} from './aggregate.js';
 import {TesseraElement, columnCaption, emit} from './base.js';
+import {placeCallout, type Rect} from './callout.js';
 import {sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
@@ -16,7 +19,6 @@ import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
 import {drawnDensityColours, type TesseraMap} from './map.js';
-import type {TesseraFilterPanel} from './filter-panel.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -38,15 +40,14 @@ const FORWARD = {
   'key-picker': exportparts('key-picker'),
   legend: exportparts('legend'),
   'layer-picker': exportparts('layer-picker'),
-  'filter-panel': exportparts('filter-panel', forwarded('filter')),
-  hierarchy: exportparts('hierarchy'),
+  'filter-panel': exportparts('filter-panel', [...forwarded('filter'), ...forwarded('cluster-filter')]),
   'artifact-list': exportparts('artifact-list'),
   selection: exportparts('selection'),
   'item-card': exportparts('item-card'),
   'artifact-card': exportparts('artifact-card')
 };
 
-const ALL_PANELS = ['toolbar', 'legend', 'filters', 'hierarchy', 'artifacts', 'selection', 'detail'] as const;
+const ALL_PANELS = ['toolbar', 'legend', 'filters', 'artifacts', 'selection', 'detail'] as const;
 /** The container widths, in pixels, between which the explorer takes its compact form. */
 const COMPACT_BETWEEN = [720, 1000] as const;
 type Panel = (typeof ALL_PANELS)[number];
@@ -70,6 +71,14 @@ const DENSITY_MODES: readonly {mode: DensityMode; label: string; icon: IconName}
   {mode: 'grid', label: 'Grid', icon: 'density-grid'},
   {mode: 'contours', label: 'Lines', icon: 'density-lines'}
 ];
+/** A card kept open by Pin: what it shows, and where on the map it points, in the view it was pinned in. */
+type Pinned = {key: string; world: [number, number]; view: string} & (
+  | {kind: 'item'; item: {id: bigint; detail: ItemDetail}}
+  | {kind: 'artifact'; artifact: {id: bigint; detail: ArtifactDetail}}
+);
+/** A card's size before it has been measured. */
+const CALLOUT_SIZE = {width: 300, height: 220};
+
 /** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
 const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
   {sheet: 'filters', icon: 'filter', label: 'Filters', panel: 'filters'},
@@ -79,40 +88,56 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
 ];
 
 /**
- * The map with its status strip, toolbar, layers, colour legend, filters, hierarchy, artifact
- * list, selection and detail card, laid out together. It builds its own store from `viewer-url`
- * and `token` or an `authorise` property, or takes a `store` property, and provides it by context
- * to everything inside it, including elements a host puts in its slots.
+ * The map with its status strip, toolbar, layers, filters, colour legend, In view list, selection
+ * and item card, laid out together: the controls on the left and what the map shows on the right.
+ * It builds its own store from `viewer-url` and `token` or an `authorise` property, or takes a
+ * `store` property, and provides it by context to everything inside it, including elements a host
+ * puts in its slots.
  *
  * The heading names what is shown: `dataset-title` where the host sets one, with the view's name
  * under it, else the view's name alone. With several views the view's name is the view choice.
  *
- * `layout="docked"` puts a sidebar left of the map: the heading, then Colour (the legend), then
- * Filters (the applied clauses as chips, with Clear all, the Filter / Highlight switch and the
- * filter controls), and Hierarchy and In view as sections that start collapsed.
- * `layout="overlay"` folds the same content into one card over the map's top-left: the heading and
- * a Filters button with the number of clauses applied, the chips, then Colour. The Filters button
- * opens the switch and the controls in a panel beside the card, and the map's tools move to its
- * right while it is open; its close button, the Filters button and Escape close it. In both, the
- * map's tools sit at the top-left of the map (beside the card in the overlay layout) with a Layers
- * button beneath them. The map's top-right corner holds the selection while a region is selected
- * and, under it, the detail card; the status strip sits in its bottom-right. The Layers button
- * opens a popover with a Display section (whether the points are drawn, what sizes them, their
- * opacity, and how density is drawn, in which colours and how strongly) over the layer picker.
- * Size by lists None and the number columns the points arrive with. Under None one Size slider
- * sets every point's radius, which `hide-size` leaves out; under a column two sliders set the
- * radii of its smallest and largest value, and a Linear, Log or Rank choice places values between
- * them. The legend then gains a Size section. The display settings are the explorer's properties
- * of the same names, passed to its map. `pinned-filters` names the columns whose controls are
- * listed before they hold a clause.
+ * The left holds the heading and the filter panel: the Filters heading with Clear all, the Filter /
+ * Highlight switch with the number of clauses in each, the fields, and Add filter, which offers the
+ * columns and the layers whose clusters can be filtered by. `layout="docked"` puts them in a
+ * sidebar left of the map; `layout="overlay"` puts them in a card over the map's top-left, which
+ * scrolls inside itself when tall. The map's tools sit at the top-left of the map, right of the
+ * card in the overlay layout, with a Layers button beneath them.
  *
- * In a container narrower than 1000 px, either layout folds into the card, 300 px wide, whose
- * legend names four values and offers the rest under "N more"; the tools move to the bottom-left,
- * the strip shortens its figures, and the filter panel opens beside the card over the map. In a
- * container 720 px wide or narrower, the status strip runs full width above a tab bar (Filters,
- * Layers, In view, Item), and each tab opens its panel as a sheet. The Hierarchy section appears
- * only where the bundle has a hierarchical layer, and the detail card only once something is
- * selected.
+ * The right holds, over the map in both layouts, a card with Colour (the legend, with the Colour by
+ * choice in its heading and exact counts beside the colours, then Size where the points are sized
+ * by a column) and In view (the clusters on screen at the level the map draws, each fitting the map
+ * to it when pressed). While a region is selected its card goes first, and Colour and In view fold
+ * to one-line headings with a hint of what they hold; pressing one opens it, the chevron beside an
+ * opened one folds it again, and clearing the region unfolds them. The hint names the colouring and
+ * how many values the current set holds, counted by the aggregate route once it answers, or how
+ * many clusters are in view. The status strip sits in the map's bottom-right.
+ *
+ * Picking a point opens its item card beside the point, joined to it by a short leader: on the side
+ * with most room, clear of the left and right cards, following the point as the map pans and zooms,
+ * hidden while the point is off the map, and clear of the other cards beside points. The card shows
+ * the headline, the `subtitle-field` field, three fields and "Show all N fields". Picking another
+ * point replaces it unless Pin was pressed, which keeps it open; Close or Escape closes it and drops
+ * the selection, and a click on the map that finds nothing does the same for the card that is not
+ * pinned. Tab from the map goes to the card, which is named by its item's title and gives focus back
+ * to the map as it closes. A picked cluster's card behaves the
+ * same way. Where the map holds no position for the selection, as after following an item into
+ * another view, the card goes first in the right column, as a region's does.
+ *
+ * The Layers button opens a popover with a Display section (whether the points are drawn, what sizes
+ * them, their opacity, and how density is drawn, in which colours and how strongly) over the layer
+ * picker. Size by lists None and the number columns the points arrive with. Under None one Size
+ * slider sets every point's radius, which `hide-size` leaves out; under a column two sliders set the
+ * radii of its smallest and largest value, and a Linear, Log or Rank choice places values between
+ * them. The display settings are the explorer's properties of the same names, passed to its map.
+ * `pinned-filters` names the columns whose controls are listed before they hold a clause.
+ *
+ * In a container narrower than 1000 px, either layout takes the overlay's form with both cards
+ * narrower: the left 300 px, the right 272 px with Colour and In view folded until opened, and a
+ * legend naming four values with the rest under "N more"; the tools move to the bottom-left and the
+ * strip shortens its figures. In a container 720 px wide or narrower, the status strip runs full
+ * width above a tab bar (Filters, Layers, In view, Item), and each tab opens its panel as a sheet;
+ * the item card is the Item sheet there, and the cards over the map are not drawn.
  *
  * Every event its elements fire bubbles out of it, since each is composed.
  *
@@ -122,17 +147,16 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @slot toolbar - Replaces the view picker and the key picker.
  * @slot colour - Replaces the legend.
  * @slot layers - Replaces the layer picker, in the Layers popover.
- * @slot filters - Replaces the filter panel: the chips and the controls in the sidebar, the
- *   controls in the overlay's panel, whose card then shows no chips of its own.
- * @slot hierarchy - Replaces the hierarchy panel.
+ * @slot filters - Replaces the filter panel.
  * @slot artifacts - Replaces the In view list.
  * @slot selection - Replaces the selection panel, shown while a region is selected.
- * @slot detail - Replaces the item and artifact cards.
+ * @slot detail - Replaces the item and artifact cards, in the card beside the point.
  * @slot status - Replaces the status strip drawn on the map.
  * @slot tooltip - Replaces the map's hover tooltip.
- * @slot top-right - Content in the map's top-right corner, above the detail card.
+ * @slot top-right - Content in the map's top-right corner, above the right-hand cards.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewchange']>} tessera-viewchange - The map's camera moved.
  * @fires {CustomEvent<TesseraEventDetails['tessera-pick']>} tessera-pick - A point was clicked, and again with its record.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-miss']>} tessera-miss - A click on the map found nothing; the explorer closes the card that is not pinned and drops the selection.
  * @fires {CustomEvent<TesseraEventDetails['tessera-hover']>} tessera-hover - The pointer moved over a point.
  * @fires {CustomEvent<TesseraEventDetails['tessera-artifactopen']>} tessera-artifactopen - An artifact was opened and its drill-down arrived.
  * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - A selection was drawn, changed or cleared, or its counts arrived.
@@ -147,26 +171,27 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @fires {CustomEvent<TesseraEventDetails['tessera-expired']>} tessera-expired - The session expired.
  * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - A filter control or chip changed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A `member_of` clause was put on or taken off.
- * @fires {CustomEvent<TesseraEventDetails['tessera-chipopen']>} tessera-chipopen - A filter chip was pressed while the controls were closed, which opens them.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactselect']>} tessera-artifactselect - A row of the In view list was pressed.
- * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card or in the hierarchy; the explorer fits its map to the artifact.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit was pressed on the artifact card, or a row of In view; the explorer fits its map to the artifact.
  * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed on the item card.
- * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - A card's close button was pressed; the explorer drops the selection.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - A card's close button was pressed; the explorer closes the card and drops the selection it shows.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewswitch']>} tessera-viewswitch - The view changed through the view or key picker.
  * @fires {CustomEvent<TesseraEventDetails['tessera-viewfollow']>} tessera-viewfollow - A view chip on the item card was pressed; the explorer switches to that view and centres on the item.
  * @csspart frame - The explorer's grid.
  * @csspart sidebar - The sidebar, in the docked layout.
- * @csspart panel - The card over the map, in the overlay layout and in a container narrower than
- *   1000 px.
+ * @csspart panel - The card over the map's top-left, in the overlay layout and in a container
+ *   narrower than 1000 px.
  * @csspart dataset-title - The heading's dataset title, where `dataset-title` is set.
  * @csspart view-name - The view's name in the heading, where there is one view to show.
- * @csspart filters-toggle - The card's Filters button, with `aria-expanded` while the controls show
- *   and `data-count` set to the number of clauses applied.
- * @csspart filters-popover - The panel beside the card holding the filter controls, while it is
- *   open.
- * @csspart filters-close - The close button of that panel.
  * @csspart selection-card - The card in the map's top-right corner holding the selection, while a
  *   region is selected.
+ * @csspart info - The card in the map's top-right corner holding Colour and In view.
+ * @csspart fold - A folded section's one-line heading in that card, with `data-section` (`colour`
+ *   or `in-view`) and `aria-expanded`; pressing it opens the section.
+ * @csspart fold-hint - What a folded section holds, in its heading.
+ * @csspart callout - A card beside a point on the map, with `data-side` (`right`, `left`, `below`
+ *   or `above`) and `data-pinned` while pinned.
+ * @csspart pin - A callout's Pin button, with `aria-pressed`.
+ * @csspart leaders - The lines joining each callout to its point.
  * @csspart layers-toggle - The Layers button under the map's tools, with `data-on` while any layer
  *   is drawn.
  * @csspart layers-popover - The popover holding the Display section and the layer picker, while it
@@ -190,7 +215,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart density-colours - The button that opens the list of density colours, while density is
  *   drawn in colours.
  * @csspart density-strength - The Strength slider, while density is drawn.
- * @csspart detail - The detail card in the map's top-right corner.
+ * @csspart detail - The item or artifact card in the map's top-right corner, where the map holds no
+ *   position for the selection.
  * @csspart sheet - The open sheet, in the narrow layout.
  * @csspart strip-row - The full-width status strip, in the narrow layout.
  * @csspart tabs - The tab bar, in the narrow layout.
@@ -202,7 +228,7 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart layer-picker-<part> - A part of the inner `<tessera-layer-picker>`.
  * @csspart filter-panel-<part> - A part of the inner `<tessera-filter-panel>`.
  * @csspart filter-<part> - A part of a `<tessera-filter>` inside the filter panel.
- * @csspart hierarchy-<part> - A part of the inner `<tessera-hierarchy>`.
+ * @csspart cluster-filter-<part> - A part of a `<tessera-cluster-filter>` inside the filter panel.
  * @csspart artifact-list-<part> - A part of the inner `<tessera-artifact-list>`.
  * @csspart selection-<part> - A part of the inner `<tessera-selection>`.
  * @csspart item-card-<part> - A part of the inner `<tessera-item-card>`, such as `item-card-title`.
@@ -224,6 +250,7 @@ export class TesseraExplorer extends TesseraElement {
         height: var(--tessera-explorer-height, 100%);
         min-height: 320px;
         --_panel-width: var(--tessera-sidebar-width, 340px);
+        --_right-width: 320px;
       }
       /* The compact form's corners are nearer the edges. */
       :host([data-compact]) {
@@ -242,6 +269,7 @@ export class TesseraExplorer extends TesseraElement {
       }
       [part='frame'].compact {
         --_panel-width: min(var(--tessera-sidebar-width, 340px), 300px);
+        --_right-width: 272px;
         --_tessera-tool-size: 30px;
       }
       .stage {
@@ -256,14 +284,11 @@ export class TesseraExplorer extends TesseraElement {
         height: 100%;
         min-height: 320px;
       }
-      /* What the map draws at its top-left, its tools or a region's tag, sits right of the card, and
-         of the filter panel while it is open; in the narrow layout there is no card. */
+      /* What the map draws at its top-left, its tools or a region's tag, sits right of the card; in
+         the narrow layout there is no card. */
       @container explorer (width > 720px) {
         .floating tessera-map {
           --tessera-map-inset-left: calc(var(--_panel-width) + var(--_tessera-space));
-        }
-        .floating.filters-open tessera-map {
-          --tessera-map-inset-left: calc(var(--_panel-width) + 8px + 360px + var(--_tessera-space));
         }
       }
       [part='sidebar'] {
@@ -290,8 +315,9 @@ export class TesseraExplorer extends TesseraElement {
         overflow-y: auto;
         --_tessera-panel-padding: 12px 14px 14px;
       }
-      [part='panel'] tessera-filter-panel {
-        --_tessera-panel-padding: 12px 14px;
+      [part='panel'] tessera-filter-panel,
+      [part='sidebar'] tessera-filter-panel {
+        --_tessera-panel-inline: 14px;
       }
       .compact [part='panel'] {
         --_tessera-panel-padding: 10px 12px;
@@ -299,6 +325,11 @@ export class TesseraExplorer extends TesseraElement {
       /* Room beneath for the tools and the Layers button in the bottom-left corner. */
       .compact [part='panel'] {
         max-height: calc(100% - 2 * var(--_tessera-space) - 200px);
+      }
+      /* A typeahead in the card opens over what sits below it, and the card scrolls to show it. */
+      [part='panel'] tessera-filter-panel,
+      [part='sidebar'] tessera-filter-panel {
+        position: relative;
       }
       .card {
         background: var(--_tessera-surface);
@@ -372,72 +403,7 @@ export class TesseraExplorer extends TesseraElement {
       .compact .sub tessera-view-picker::part(field) {
         font-size: 12px;
       }
-      [part='filters-toggle'] {
-        margin-left: auto;
-        height: auto;
-        padding: 5px 9px 5px 8px;
-      }
-      .compact [part='filters-toggle'] {
-        height: 28px;
-        padding: 0 8px;
-        border: 0;
-      }
-      [part='filters-toggle'][aria-expanded='true'] {
-        background: var(--_tessera-accent);
-        border-color: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
-      }
-      [part='filters-toggle'][aria-expanded='true'] .badge {
-        background: var(--_tessera-accent-ink);
-        color: var(--_tessera-accent);
-      }
-      /* The filter controls in a panel beside the card, with the map's tools moved to its right. */
-      [part='filters-popover'] {
-        --_tessera-panel-inline: 14px;
-        position: absolute;
-        z-index: 2;
-        top: var(--_tessera-space);
-        left: calc(var(--_tessera-space) + var(--_panel-width) + 8px);
-        width: min(360px, calc(100% - var(--_panel-width) - 2 * var(--_tessera-space) - 8px));
-        max-height: calc(100% - 2 * var(--_tessera-space));
-        overflow-y: auto;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
-      }
-      [part='filters-close'] {
-        position: absolute;
-        z-index: 1;
-        top: 10px;
-        right: 10px;
-        width: 26px;
-        height: 26px;
-        display: grid;
-        place-items: center;
-        border-radius: 5px;
-        color: var(--_tessera-ink-2);
-      }
-      [part='filters-close']:hover {
-        background: var(--_tessera-surface-2);
-      }
-      [part='filters-popover'][hidden] {
-        display: none;
-      }
-      /* In the compact form the filter panel lies over the map's right-hand cards, so they give way. */
-      .compact.filters-open .right {
-        display: none;
-      }
-      .badge {
-        min-width: 16px;
-        padding: 0 4px;
-        border-radius: 8px;
-        background: var(--_tessera-accent);
-        color: var(--_tessera-accent-ink);
-        font-size: 11px;
-        line-height: 16px;
-        text-align: center;
-      }
-      [part='panel'] tessera-filter-panel::part(title) {
-        margin-bottom: 8px;
-      }
+
       /* The Layers button under the tools, and its popover. */
       .layers {
         position: relative;
@@ -491,15 +457,149 @@ export class TesseraExplorer extends TesseraElement {
         bottom: 0;
       }
       [part='detail'],
-      [part='selection-card'] {
-        --_tessera-panel-padding: 14px 14px 12px;
-        width: 320px;
+      [part='selection-card'],
+      [part='info'] {
+        --_tessera-panel-padding: 12px 14px;
+        width: var(--_right-width);
         max-width: 100%;
         min-height: 0;
         overflow-y: auto;
       }
-      [part='detail'] {
+      [part='detail'],
+      [part='info'] {
         flex: 0 1 auto;
+      }
+      [part='info'] tessera-legend,
+      [part='info'] tessera-artifact-list {
+        display: block;
+      }
+      [part='info'] tessera-artifact-list {
+        --_tessera-panel-padding: 12px 8px 10px;
+      }
+      [part='info'] tessera-artifact-list::part(title) {
+        padding: 0 6px;
+      }
+      [part='info'] > :last-child {
+        --_tessera-panel-rule: transparent;
+      }
+      [part='fold'] {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 14px;
+        text-align: left;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--_tessera-ink-2);
+      }
+      [part='fold'] + [part='fold'] {
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      [part='fold']:hover {
+        background: var(--_tessera-surface-2);
+      }
+      /* An opened section keeps a chevron in its heading's gutter that folds it again. */
+      .section {
+        position: relative;
+      }
+      .section + .section,
+      [part='fold'] + .section,
+      .section + [part='fold'] {
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      .section > .refold {
+        position: absolute;
+        z-index: 1;
+        top: 11px;
+        left: 6px;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        display: grid;
+        place-items: center;
+        border-radius: 4px;
+      }
+      .section tessera-legend::part(title),
+      .section tessera-artifact-list::part(title) {
+        padding-left: 12px;
+      }
+      [part='fold-hint'] {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-transform: none;
+        letter-spacing: 0;
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--_tessera-ink-3);
+      }
+      /* The cards beside points on the map, and the lines joining them to their points. */
+      .callouts {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        pointer-events: none;
+        overflow: hidden;
+      }
+      [part='leaders'] {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      [part='leaders'] line {
+        stroke: var(--_tessera-ink);
+        stroke-width: 1.5;
+      }
+      [part='leaders'] circle {
+        fill: var(--_tessera-surface);
+        stroke: var(--_tessera-ink);
+        stroke-width: 1.5;
+      }
+      [part~='callout'] {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 300px;
+        pointer-events: auto;
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+        --_tessera-panel-padding: 12px 14px 10px;
+        --_tessera-panel-inline: 14px;
+        --_tessera-panel-rule: transparent;
+        --_tessera-key-width: 76px;
+        --_tessera-field-gap: 4px 10px;
+        font-size: 12px;
+      }
+      /* A callout whose point is off the map keeps its box, so its size stays known. */
+      [part~='callout'][hidden] {
+        display: block;
+        visibility: hidden;
+      }
+      [part~='callout'] tessera-artifact-card {
+        max-height: 360px;
+        overflow-y: auto;
+      }
+      [part='pin'] {
+        flex: none;
+        width: 24px;
+        height: 24px;
+        margin: -2px 0 0;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='pin']:hover {
+        background: var(--_tessera-surface-2);
+      }
+      [part='pin'][aria-pressed='true'] {
+        background: var(--_tessera-surface-3);
+        color: var(--_tessera-ink);
       }
       /* The selection keeps its heading, counts and actions; only its list of marks scrolls, so the
          detail card under it stays on screen. */
@@ -511,15 +611,11 @@ export class TesseraExplorer extends TesseraElement {
         max-height: min(144px, 18cqh);
         overflow-y: auto;
       }
-      .compact [part='selection-card'] {
-        width: 272px;
-      }
       .compact [part='detail'] tessera-item-card,
       .compact [part='detail'] tessera-artifact-card {
         font-size: 12px;
       }
       .compact [part='detail'] {
-        width: 272px;
         --_tessera-panel-padding: 12px 12px 10px;
         --_tessera-title-size: 14px;
         --_tessera-key-width: 76px;
@@ -536,69 +632,6 @@ export class TesseraExplorer extends TesseraElement {
       .right > * {
         pointer-events: auto;
       }
-      /* Collapsed sections. */
-      details {
-        border-bottom: 1px solid var(--_tessera-line-2);
-      }
-      details > summary {
-        list-style: none;
-        cursor: pointer;
-        padding: 12px 16px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-        text-transform: uppercase;
-        color: var(--_tessera-ink-2);
-      }
-      details > summary::-webkit-details-marker {
-        display: none;
-      }
-      details > summary .t {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      details > summary .summary {
-        text-transform: none;
-        letter-spacing: 0;
-        font-size: 12px;
-        font-weight: 400;
-        color: var(--_tessera-ink-3);
-      }
-      details[open] > summary {
-        padding-bottom: 0;
-      }
-      details > summary .open-chev {
-        display: none;
-      }
-      details[open] > summary .open-chev {
-        display: inline-flex;
-      }
-      details[open] > summary .closed-chev {
-        display: none;
-      }
-      details > .body {
-        box-sizing: border-box;
-        min-width: 0;
-      }
-      details > .body tessera-hierarchy,
-      details > .body tessera-artifact-list {
-        display: block;
-        max-width: 100%;
-      }
-      details > .body ::slotted(*),
-      details > .body tessera-hierarchy::part(title),
-      details > .body tessera-artifact-list::part(title) {
-        border-bottom: 0;
-      }
-      /* The default panels' own headings repeat the summary above them. */
-      details > .body tessera-hierarchy::part(title),
-      details > .body tessera-artifact-list::part(title) {
-        display: none;
-      }
       /* The narrow container: the strip full width, a tab bar, sheets. */
       [part='tabs'],
       [part='strip-row'] {
@@ -612,9 +645,9 @@ export class TesseraExplorer extends TesseraElement {
         }
         [part='sidebar'],
         [part='panel'],
-        [part='filters-popover'],
         .layers,
         .right,
+        .callouts,
         .in-map-strip {
           display: none;
         }
@@ -708,9 +741,10 @@ export class TesseraExplorer extends TesseraElement {
    */
   @property({reflect: true}) accessor layout: 'docked' | 'overlay' = 'docked';
   /**
-   * Which regions appear, space- or comma-separated, from `toolbar` (the view choice and the
-   * legend), `legend` (the Layers button and its layer picker), `filters`, `hierarchy`,
-   * `artifacts`, `selection` and `detail`. Defaults to all seven.
+   * Which regions appear, space- or comma-separated, from `toolbar` (the heading and the
+   * legend), `legend` (the Layers button and its layer picker), `filters`, `artifacts` (In view),
+   * `selection` and `detail` (the item and artifact cards). Defaults to all six. Any other name,
+   * such as `hierarchy`, shows nothing.
    */
   @property() accessor panels: string = ALL_PANELS.join(' ');
   /** Passed to the map's `colour-by`. */
@@ -721,6 +755,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   /** The field that titles a point, in the map's tooltip and the item card's headline. Unset, the title is the `tessera_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
+  /** The field the item card shows under its headline. Unset, it shows none. */
+  @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
   /** Passed to the map's `budget`. */
   @property({type: Number}) accessor budget = 0;
   /** Passed to the map's `no-points`; the Points switch in the Layers popover changes it. */
@@ -771,23 +807,38 @@ export class TesseraExplorer extends TesseraElement {
   @state() private accessor tabFocus: Sheet | null = null;
   /** The level chosen through the legend's select; the map colours and labels at it. @internal */
   @state() accessor level: number | null = null;
-  /** Whether the card's Filters button has opened the panel of controls. @internal */
-  @state() accessor filtersOpen = false;
-  /**
-   * Where focus goes once the panel of controls shows: the control a chip asked for, or the panel
-   * itself where the Filters button opened it.
-   */
-  private showing: {column: string; verb: ClauseVerb} | 'panel' | null = null;
+  /** The cards kept open by Pin, oldest first. @internal */
+  @state() accessor pinned: Pinned[] = [];
+  /** The sections of the right card opened while they fold by default. */
+  private unfolded = new Set<'colour' | 'in-view'>();
+  /** Whether the right card's sections folded by default at the last render, `null` before it. */
+  private foldedWas: boolean | null = null;
+  /** Each callout's size as last measured, by its key. */
+  private calloutSizes = new Map<string, {width: number; height: number}>();
+  /** The cards a callout keeps clear of, in the map's pixels, as last measured. */
+  private keepClear: Rect[] = [];
   /** Whether the Layers popover is open. @internal */
   @state() accessor layersOpen = false;
   /** Whether the container is narrower than 1000 px and wider than the narrow layout. @internal */
   @state() accessor compact = false;
-  /** Whether the host put anything in the filters slot, in place of the filter panel and its chips. */
-  @state() private accessor filtersFilled = false;
-
-  private onFiltersSlot = (e: Event): void => {
-    this.filtersFilled = (e.target as HTMLSlotElement).assignedElements().length > 0;
-  };
+  /** Whether the container is 720 px wide or narrower, where the panels are sheets. @internal */
+  @state() accessor narrow = false;
+  /** The cards beside points as last rendered, which {@link placeCallouts} places. */
+  private cards: {key: string; world: [number, number]; pinned: boolean}[] = [];
+  /** The map's size as last measured; read from the map where nothing has measured it. */
+  private mapSize: {width: number; height: number} | null = null;
+  /** Measures the map, the cards over it and the callouts as they change size. */
+  private sizes: ResizeObserver | null = null;
+  private observed = new Set<Element>();
+  /** A frame asked for to place the callouts after the camera moved. */
+  private placing: number | null = null;
+  /** The zoom the level drawn was last worked out at, and the level that gave when none is chosen. */
+  private zoomSeen: number | null = null;
+  private autoSeen: number | null = null;
+  /** The count of values behind the folded Colour heading. */
+  private readonly hintCount = new HeldAggregate('colour-hint');
+  /** The folded In view heading, kept while nothing it counts has changed. */
+  private inViewHeld: {key: string; hint: string} | null = null;
 
   /** Whether the host put anything in the toolbar slot. */
   @state() private accessor toolbarFilled = false;
@@ -805,6 +856,14 @@ export class TesseraExplorer extends TesseraElement {
 
   /** Stops following the size choices of the store adopted last, which the Display section shows. */
   private unwatchChoices: (() => void) | null = null;
+
+  /** The pinned cards and what the callouts measured name records the server answered. */
+  protected override resetServerData(): void {
+    this.pinned = [];
+    this.calloutSizes.clear();
+    const m = this.map;
+    if (m) m.pickedAt = null;
+  }
 
   protected override onStoreAdopted(store: Store | null): void {
     this.provider.setValue(store);
@@ -827,13 +886,17 @@ export class TesseraExplorer extends TesseraElement {
   override connectedCallback(): void {
     super.connectedCallback();
     if (typeof ResizeObserver === 'undefined') return;
-    this.resize ??= new ResizeObserver((entries) => {
-      const width = entries.at(-1)?.contentRect.width ?? 0;
-      this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
-      // The narrow layout shows the filters as a sheet, so a panel left open beside the card closes.
-      if (width <= COMPACT_BETWEEN[0]) this.filtersOpen = false;
-    });
+    // The width is taken once now, so the first render already has the layout it will keep.
+    this.fitWidth(this.getBoundingClientRect().width);
+    this.resize ??= new ResizeObserver((entries) => this.fitWidth(entries.at(-1)?.contentRect.width ?? 0));
     this.resize.observe(this);
+    this.sizes ??= new ResizeObserver(() => this.measure());
+  }
+
+  /** Take the compact or the narrow form, or neither, for a container `width` pixels wide. */
+  private fitWidth(width: number): void {
+    this.compact = width > COMPACT_BETWEEN[0] && width < COMPACT_BETWEEN[1];
+    this.narrow = width > 0 && width <= COMPACT_BETWEEN[0];
   }
 
   override disconnectedCallback(): void {
@@ -841,6 +904,12 @@ export class TesseraExplorer extends TesseraElement {
     this.following?.();
     this.resize?.disconnect();
     this.resize = null;
+    this.sizes?.disconnect();
+    this.sizes = null;
+    this.observed.clear();
+    if (this.placing !== null) cancelAnimationFrame(this.placing);
+    this.placing = null;
+    this.hintCount.set(null, null);
     this.closeLayers();
     super.disconnectedCallback();
   }
@@ -883,23 +952,24 @@ export class TesseraExplorer extends TesseraElement {
     const region = s?.get('region') ?? null;
     const selection = s?.get('selection');
     const meta = s?.get('meta') ?? null;
-    const filterState = s?.get('filters');
-    const applied = filterState ? activeCount(filterState.draft) + filterState.members.length : 0;
     const artifacts = s?.get('artifacts');
-    const inView = artifacts && artifacts.status === 'shown' ? (artifacts.lineage.linked ? artifacts.lineage.roots.length : artifacts.served.length) : 0;
     const layersOn = artifacts?.layers.length ?? 0;
     const compact = this.compact;
-    // Short of room, the docked layout folds into the card as the overlay does.
+    // The narrow layout shows its panels as sheets and draws none of the cards over the map.
+    const narrow = this.narrow;
+    // Short of room, the docked layout takes the overlay's form.
     const floating = this.layout === 'overlay' || compact;
     // The level drawn: the one chosen through the legend, else, for a levelled layer served
     // whole, the level the view's budget would cut at, else the deepest served.
     const autoLevel = this.autoLevel();
+    this.zoomSeen = this.map?.zoom ?? null;
+    this.autoSeen = autoLevel;
     const level = this.level ?? autoLevel;
-    const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
-    // The detail region shows whichever changed last.
-    const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
-    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}></tessera-artifact-card>` : html`<tessera-item-card exportparts=${FORWARD['item-card']} title-field=${this.titleField || nothing} .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
-    // The view pickers draw nothing for a one-view bundle, so their row is left out there.
+    // A click that found nothing shows no card; a broken pick shows its fault.
+    const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick?.kind === 'broken');
+    // The detail shows whichever changed last.
+    const showArtifact = this.showsArtifact();
+    const detail = this.liveCard(showArtifact);
     // The pickers draw nothing for a one-view bundle, so their row is hidden there unless the host
     // filled the slot. The slot is always rendered, so its slotchange keeps `toolbarFilled` current.
     const pickersShown = this.toolbarFilled || (meta !== null && !hasOneLayout(meta));
@@ -915,45 +985,57 @@ export class TesseraExplorer extends TesseraElement {
     const named = pickersShown || viewName !== '' || this.datasetTitle !== '';
     const colour = html`<slot name="colour"><tessera-legend exportparts=${FORWARD.legend} selectable readout ?hide-palettes=${this.hidePalettes} .limit=${compact ? 4 : 0} .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker exportparts=${FORWARD['layer-picker']}></tessera-layer-picker></slot>`;
-    // Only the card's copy carries the id its Filters button controls, so no id repeats.
-    const filters = html`<slot name="filters" @slotchange=${this.onFiltersSlot}><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
-    // The card's chips; a chip pressed opens the panel of controls at the chip's control.
-    const chips = this.filtersFilled
-      ? nothing
-      : html`<tessera-filter-panel exportparts=${FORWARD['filter-panel']} chips-only @tessera-chipopen=${(e: CustomEvent<{column: string; verb: ClauseVerb}>) => this.openFilters(e.detail)}></tessera-filter-panel>`;
-    const hierarchy = html`<slot name="hierarchy"><tessera-hierarchy exportparts=${FORWARD.hierarchy}></tessera-hierarchy></slot>`;
-    // Drawn only where there is a hierarchy to walk; an empty section would look broken.
-    const hasHierarchy = browsableLayers(meta?.layers ?? []).length > 0;
-    const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']}></tessera-artifact-list></slot>`;
+    const filters = html`<slot name="filters"><tessera-filter-panel exportparts=${FORWARD['filter-panel']} pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>`;
+    const list = html`<slot name="artifacts"><tessera-artifact-list exportparts=${FORWARD['artifact-list']} .level=${level} .rows=${8}></tessera-artifact-list></slot>`;
     const selectionPanel = this.has('selection') && region ? html`<slot name="selection"><tessera-selection exportparts=${FORWARD.selection}></tessera-selection></slot>` : nothing;
     const selectionCard = selectionPanel === nothing ? nothing : html`<div part="selection-card" class="card">${selectionPanel}</div>`;
-    const section = (name: string, title: string, summary: string, body: unknown) =>
-      html`<details><summary><span class="t"><span class="closed-chev">${icon('chevr', 14)}</span><span class="open-chev">${icon('chev', 14)}</span>${title}</span><span class="summary">${summary}</span></summary><div class="body" data-section=${name}>${body}</div></details>`;
-    const sections = html`${this.has('hierarchy') && hasHierarchy ? section('hierarchy', 'Hierarchy', '', hierarchy) : nothing}
-      ${this.has('artifacts') ? section('artifacts', 'In view', inView > 0 ? inView.toLocaleString('en-GB') : '', list) : nothing}`;
+    const head = html`<div class="head" ?hidden=${!named}>${names}</div>`;
+
+    // The card beside the point, where the map holds a position for what is selected; else the
+    // card goes first in the right column.
+    const anchor = this.liveAnchor(showArtifact);
+    const detailInColumn = this.has('detail') && hasDetail && anchor === null;
+
+    // The right card: Colour, then In view. They fold to one line each while a region or a card
+    // takes the column's top, and in the compact form, until opened.
+    const foldedByDefault = compact || selectionCard !== nothing || detailInColumn;
+    if (foldedByDefault !== this.foldedWas) {
+      this.foldedWas = foldedByDefault;
+      this.unfolded = new Set();
+    }
+    const folded = (section: 'colour' | 'in-view') => foldedByDefault && !this.unfolded.has(section);
+    const fold = (section: 'colour' | 'in-view', title: string, hint: string) =>
+      html`<button part="fold" type="button" data-section=${section} aria-expanded="false"
+        @click=${() => {
+          this.unfolded = new Set([...this.unfolded, section]);
+          this.requestUpdate();
+        }}><span>${title}</span><span part="fold-hint">${hint}</span></button>`;
+    // An opened section, while the sections fold by default, keeps a chevron that folds it again.
+    const opened = (section: 'colour' | 'in-view', title: string, body: unknown) =>
+      foldedByDefault
+        ? html`<div class="section" data-section=${section}><button part="fold" class="refold" type="button" data-section=${section} aria-expanded="true" aria-label=${`Fold ${title}`}
+            @click=${() => {
+              const next = new Set(this.unfolded);
+              next.delete(section);
+              this.unfolded = next;
+              this.requestUpdate();
+            }}>${icon('chev', 12, 1.4)}</button>${body}</div>`
+        : body;
+    const sections = [
+      this.has('toolbar') ? (folded('colour') ? fold('colour', 'Colour', this.colourHint()) : opened('colour', 'Colour', colour)) : nothing,
+      this.has('artifacts') ? (folded('in-view') ? fold('in-view', 'In view', this.inViewHint(level)) : opened('in-view', 'In view', list)) : nothing
+    ];
+    this.hintCount.set(s, this.isConnected && !narrow && this.has('toolbar') && folded('colour') ? this.hintSpec() : null);
+    const info = this.has('toolbar') || this.has('artifacts') ? html`<div part="info" class="card">${sections}</div>` : nothing;
+    const right = html`<div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${detailInColumn ? html`<div part="detail" class="card">${detail}</div>` : nothing}${info}</div>`;
 
     const docked = html`<aside part="sidebar" aria-label="Explorer panels">
-      ${this.has('toolbar') ? html`<div class="head" ?hidden=${!named}>${names}</div>` : nothing}
-      ${this.has('toolbar') ? colour : nothing}
+      ${this.has('toolbar') ? head : nothing}
       ${this.has('filters') ? filters : nothing}
-      ${sections}
     </aside>`;
-
-    const filtersToggle = this.has('filters')
-      ? html`<button part="filters-toggle" class="btn" type="button" aria-controls=${this.filtersOpen ? 'filters' : nothing} aria-expanded=${this.filtersOpen ? 'true' : 'false'} data-count=${applied} @click=${() => (this.filtersOpen ? this.closeFilters() : this.openFilters(null))}>${icon('filter', 14, 1.3)}Filters${applied > 0 ? html`<span class="badge">${applied}</span>` : nothing}</button>`
-      : nothing;
-    const panel = html`<div part="panel" class="card" role="region" aria-label="Explorer panels">
-      ${this.has('toolbar') || this.has('filters') ? html`<div class="head" ?hidden=${!(this.has('toolbar') && named) && !this.has('filters')}>${this.has('toolbar') ? names : nothing}${filtersToggle}</div>` : nothing}
-      ${this.has('filters') ? chips : nothing}
-      ${this.has('toolbar') ? colour : nothing}
-      ${sections}
-    </div>`;
-    // Drawn while closed too, so its switch and the fields opened in it last while the explorer does.
-    const filtersPopover = this.has('filters')
-      ? html`<div part="filters-popover" id="filters" class="card" role="dialog" aria-label="Filters" ?hidden=${!this.filtersOpen} @keydown=${this.onFiltersKey}>
-            <button part="filters-close" type="button" aria-label="Close filters" @click=${() => this.closeFilters()}>${icon('close', 14, 1.4)}</button>
-            <slot name="filters" @slotchange=${this.onFiltersSlot}><tessera-filter-panel exportparts=${FORWARD['filter-panel']} controls-only pinned=${this.pinnedFilters || nothing}></tessera-filter-panel></slot>
-          </div>`
+    const panel =
+      this.has('toolbar') || this.has('filters')
+        ? html`<div part="panel" class="card" role="region" aria-label="Explorer panels">${this.has('toolbar') ? head : nothing}${this.has('filters') ? filters : nothing}</div>`
         : nothing;
 
     const layersButton = this.has('legend')
@@ -990,9 +1072,9 @@ export class TesseraExplorer extends TesseraElement {
     </div>`;
     const sheetBody =
       this.sheet === 'filters'
-        ? html`${filters}${this.has('hierarchy') && hasHierarchy ? hierarchy : nothing}${sheetFooter}`
+        ? html`${filters}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`<div class="head" ?hidden=${!named}>${names}</div>${colour}<div class="panel">${layersPanel}</div>`
+          ? html`${head}${colour}<div class="panel">${layersPanel}</div>`
           : this.sheet === 'artifacts'
             ? html`${selectionPanel}${list}`
             : this.sheet === 'detail'
@@ -1001,11 +1083,11 @@ export class TesseraExplorer extends TesseraElement {
 
     // The tooltip slot is forwarded only when the host supplied one: a slot assigned another slot
     // counts as filled even when that slot is empty, which would hide the map's own tooltip.
-    return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}${floating && this.filtersOpen ? ' filters-open' : ''}`}
+    return html`<div part="frame" class=${`${floating ? 'floating' : 'docked'}${compact ? ' compact' : ''}`}
       @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}
       @tessera-viewfollow=${(e: CustomEvent<{view: string; x: number; y: number}>) => this.followItem(e.detail)}
-      @tessera-close=${() => this.closeDetail()}>
-      ${floating ? nothing : docked}
+      @tessera-close=${(e: Event) => this.closeDetail(e)}>
+      ${floating || narrow ? nothing : docked}
       <div class="stage">
         <tessera-map
           exportparts=${FORWARD.map}
@@ -1031,17 +1113,19 @@ export class TesseraExplorer extends TesseraElement {
           .rampScale=${this.rampScale}
           .rampReverse=${this.rampReverse}
           .valueColours=${this.valueColours}
-          @tessera-viewchange=${() => this.requestUpdate()}
+          @tessera-viewchange=${() => this.onCamera()}
           @tessera-pick=${() => this.requestUpdate()}
+          @tessera-miss=${() => this.onMiss()}
+          @keydown=${this.onMapKey}
           @click=${() => this.requestUpdate()}
         >
-          ${layersButton}
-          <div slot="top-right" class="right"><slot name="top-right"></slot>${selectionCard}${this.has('detail') && hasDetail ? html`<div part="detail" class="card">${detail}</div>` : nothing}</div>
-          <div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>
+          ${narrow ? nothing : layersButton}
+          ${narrow ? nothing : right}
+          ${narrow ? nothing : html`<div slot="bottom-right" class="in-map-strip"><slot name="status"><tessera-status exportparts=${FORWARD.status} ?compact=${compact}></tessera-status></slot></div>`}
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
         </tessera-map>
-        ${floating ? panel : nothing}
-        ${floating ? filtersPopover : nothing}
+        ${narrow ? nothing : this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
+        ${floating && !narrow ? panel : nothing}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
@@ -1049,6 +1133,282 @@ export class TesseraExplorer extends TesseraElement {
       <div part="strip-row"><tessera-status exportparts=${FORWARD.status}></tessera-status></div>
       <div part="tabs" role="tablist" aria-label="Explorer panels" @keydown=${this.onTabKey}>${tabs.map(tab)}</div>
     </div>`;
+  }
+
+  /** The item or artifact card for what is selected, or the host's in the `detail` slot. */
+  private liveCard(showArtifact: boolean, pin: TemplateResult | typeof nothing = nothing): TemplateResult {
+    return html`<slot name="detail">${showArtifact
+      ? html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']}>${pin}</tessera-artifact-card>`
+      : html`<tessera-item-card exportparts=${FORWARD['item-card']} compact title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing} .pick=${this.map?.lastPick ?? null}>${pin}</tessera-item-card>`}</slot>`;
+  }
+
+  /** Whether the card for the selection is the artifact card: the artifact, or its refusal, changed last. */
+  private showsArtifact(): boolean {
+    const sel = this.resolvedStore?.get('selection');
+    return this.lastDetail === 'artifact' && Boolean(sel?.artifact || sel?.artifactRefusal);
+  }
+
+  /**
+   * The key the selection's card goes by, `item:<id>` or `artifact:<id>`, or `null` where the card
+   * shows a refusal or nothing, which cannot be pinned.
+   */
+  private liveKey(): string | null {
+    const sel = this.resolvedStore?.get('selection');
+    if (this.showsArtifact()) return sel?.artifact ? `artifact:${sel.artifact.id}` : null;
+    return sel?.item ? `item:${sel.item.id}` : null;
+  }
+
+  /** What a card is called: its item's title field, else its `tessera_id`; a cluster's name. */
+  private cardName(key: string | null): string {
+    const sel = this.resolvedStore?.get('selection');
+    const pinned = this.pinned.find((p) => p.key === key);
+    const item = pinned?.kind === 'item' ? pinned.item : key?.startsWith('item:') ? sel?.item : null;
+    if (item) {
+      const title = this.titleField ? item.detail.fields[this.titleField] : undefined;
+      return title === undefined || title === null || title === '' ? `Item ${item.id}` : String(title);
+    }
+    const id = pinned?.kind === 'artifact' ? pinned.artifact.id : key?.startsWith('artifact:') ? sel?.artifact?.id : undefined;
+    if (id !== undefined) {
+      const a = this.resolvedStore?.get('artifacts');
+      const row = a?.served.find((x) => x.tesseraId === id) ?? a?.colourServed.find((x) => x.tesseraId === id);
+      return (row && a ? artifactName(row, a.attached) : null) ?? 'Cluster';
+    }
+    return 'Unavailable';
+  }
+
+  /**
+   * Where the selection's card points, in world coordinates: where the map picked it, while the map
+   * holds that pick for what is selected. `null` otherwise.
+   */
+  private liveAnchor(showArtifact: boolean): [number, number] | null {
+    const at = this.map?.pickedAt;
+    const sel = this.resolvedStore?.get('selection');
+    if (!at || !sel) return null;
+    if (showArtifact) return at.kind === 'artifact' && (sel.artifact === null || sel.artifact.id === at.id) ? at.world : null;
+    if (at.kind !== 'item') return null;
+    return sel.item === null || sel.item.id === at.id ? at.world : null;
+  }
+
+  /** Keep the selection's card open when another point is picked, or let it go again. */
+  private togglePin(): void {
+    const key = this.liveKey();
+    const sel = this.resolvedStore?.get('selection');
+    const at = this.map?.pickedAt;
+    const view = this.resolvedStore?.get('view').id ?? '';
+    if (!key || !sel || !at) return;
+    if (this.pinned.some((p) => p.key === key)) {
+      this.pinned = this.pinned.filter((p) => p.key !== key);
+      return;
+    }
+    if (key.startsWith('artifact:') && sel.artifact) this.pinned = [...this.pinned, {key, kind: 'artifact', artifact: sel.artifact, world: at.world, view}];
+    else if (sel.item) this.pinned = [...this.pinned, {key, kind: 'item', item: sel.item, world: at.world, view}];
+  }
+
+  /**
+   * The cards beside their points: each pinned card, then the selection's where `anchor` places it
+   * and no pinned card shows it already. {@link placeCallouts} places them, and hides a card whose
+   * point is off the map.
+   */
+  private callouts(anchor: [number, number] | null, detail: TemplateResult): TemplateResult | typeof nothing {
+    const m = this.map;
+    const view = this.resolvedStore?.get('view').id ?? '';
+    if (!m) return nothing;
+    const live = this.liveKey();
+    const pinButton = (pressed: boolean, onPress: () => void) =>
+      html`<button part="pin" slot="actions" type="button" aria-pressed=${pressed ? 'true' : 'false'} aria-label=${pressed ? 'Unpin' : 'Pin'} title=${pressed ? 'Unpin' : 'Keep open'} @click=${onPress}>${icon('pin', 13, 1.5)}</button>`;
+    const cards: {key: string; world: [number, number]; body: TemplateResult; pinned: boolean; name: string}[] = this.pinned
+      .filter((p) => p.view === view)
+      .map((p) => {
+        const unpin = pinButton(true, () => (this.pinned = this.pinned.filter((q) => q.key !== p.key)));
+        const body =
+          p.kind === 'item'
+            ? html`<tessera-item-card exportparts=${FORWARD['item-card']} compact .item=${p.item} title-field=${this.titleField || nothing} subtitle-field=${this.subtitleField || nothing}>${unpin}</tessera-item-card>`
+            : html`<tessera-artifact-card exportparts=${FORWARD['artifact-card']} .artifact=${p.artifact}>${unpin}</tessera-artifact-card>`;
+        return {key: p.key, world: p.world, body, pinned: true, name: this.cardName(p.key)};
+      });
+    if (anchor && !(live && this.pinned.some((p) => p.key === live && p.view === view))) {
+      const body = live ? this.liveCard(this.showsArtifact(), pinButton(false, () => this.togglePin())) : detail;
+      cards.push({key: 'live', world: anchor, body, pinned: false, name: this.cardName(live)});
+    }
+    this.cards = cards.map(({key, world, pinned}) => ({key, world, pinned}));
+    if (cards.length === 0) return nothing;
+    return html`<div class="callouts">
+      <svg part="leaders" aria-hidden="true">
+        ${repeat(cards, (c) => c.key, (c) => svg`<g data-callout=${c.key}><line></line>${c.pinned ? svg`<circle r="4"></circle>` : nothing}</g>`)}
+      </svg>
+      ${repeat(
+        cards,
+        (c) => c.key,
+        (c) => html`<div part="callout" class="card" role="dialog" tabindex="-1" aria-label=${c.name} data-callout=${c.key} ?data-pinned=${c.pinned} @keydown=${this.onCalloutKey}>${c.body}</div>`
+      )}
+    </div>`;
+  }
+
+  /**
+   * Place each callout beside its point under the camera as it stands, clear of the cards over the
+   * map and of the callouts placed before it, and join it to its point. A callout whose point is off
+   * the map is hidden with its leader. Reads no layout: the sizes are those {@link measure} took.
+   */
+  private placeCallouts(): void {
+    const m = this.map;
+    if (!m) return;
+    const size = this.mapSize ?? {width: m.clientWidth, height: m.clientHeight};
+    const placed: Rect[] = [];
+    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
+      const key = el.dataset.callout!;
+      const card = this.cards.find((c) => c.key === key);
+      const leader = this.renderRoot.querySelector<SVGGElement>(`[part="leaders"] g[data-callout="${key}"]`);
+      if (!card) continue;
+      const point = m.screenOf(card.world);
+      const box = this.calloutSizes.get(key) ?? CALLOUT_SIZE;
+      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed]) : null;
+      el.hidden = at === null;
+      leader?.setAttribute('visibility', at === null ? 'hidden' : 'visible');
+      if (!at) continue;
+      placed.push({left: at.left, top: at.top, width: box.width, height: box.height});
+      el.style.transform = `translate(${Math.round(at.left)}px, ${Math.round(at.top)}px)`;
+      el.dataset.side = at.side;
+      const line = leader?.querySelector('line');
+      line?.setAttribute('x1', String(at.leader.x1));
+      line?.setAttribute('y1', String(at.leader.y1));
+      line?.setAttribute('x2', String(at.leader.x2));
+      line?.setAttribute('y2', String(at.leader.y2));
+      const dot = leader?.querySelector('circle');
+      dot?.setAttribute('cx', String(point[0]));
+      dot?.setAttribute('cy', String(point[1]));
+    }
+  }
+
+  /**
+   * Take the map's size, each callout's size and where the cards callouts keep clear of are, then
+   * place the callouts. Run as any of them changes size, not as the camera moves.
+   */
+  private measure(): void {
+    const m = this.map;
+    if (!m) return;
+    this.mapSize = {width: m.clientWidth, height: m.clientHeight};
+    const origin = m.getBoundingClientRect();
+    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
+      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: el.offsetHeight});
+    }
+    this.keepClear = this.keptClear().flatMap((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 ? [{left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height}] : [];
+    });
+    this.placeCallouts();
+  }
+
+  /** The cards over the map that callouts keep clear of. */
+  private keptClear(): Element[] {
+    const q = (sel: string) => Array.from(this.renderRoot.querySelectorAll(sel));
+    return [...q('[part="panel"]'), ...q('.right > *'), ...q('.in-map-strip'), ...q('.layers .group')];
+  }
+
+  /**
+   * After a render: follow the size of the map, the cards over it and the callouts, forget the size
+   * of a callout that has closed, and place the callouts. Where nothing reports sizes, measure now.
+   */
+  private followLayout(): void {
+    const m = this.map;
+    const callouts = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'));
+    const keys = new Set(callouts.map((el) => el.dataset.callout!));
+    for (const key of [...this.calloutSizes.keys()]) if (!keys.has(key)) this.calloutSizes.delete(key);
+    if (!this.sizes) {
+      if (callouts.length > 0) this.measure();
+      return;
+    }
+    const now = new Set<Element>([...(m ? [m] : []), ...this.keptClear(), ...callouts]);
+    for (const el of this.observed) if (!now.has(el)) this.sizes.unobserve(el);
+    for (const el of now) if (!this.observed.has(el)) this.sizes.observe(el);
+    this.observed = now;
+    this.placeCallouts();
+  }
+
+  /**
+   * The camera moved: place the callouts in the next frame, and draw again only where the zoom
+   * changed the level the layers are drawn at.
+   */
+  private onCamera(): void {
+    if (this.placing !== null || typeof requestAnimationFrame === 'undefined') return;
+    this.placing = requestAnimationFrame(() => {
+      this.placing = null;
+      this.placeCallouts();
+      const zoom = this.map?.zoom ?? null;
+      if (zoom !== this.zoomSeen && this.level === null) {
+        this.zoomSeen = zoom;
+        if (this.autoLevel() !== this.autoSeen) this.requestUpdate();
+      }
+    });
+  }
+
+  /**
+   * Tab from the map itself goes to the card beside the point, the selection's where it shows, so
+   * the card is the next stop after the map; from there Tab goes on in the page's order.
+   */
+  private onMapKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Tab' || e.shiftKey || e.composedPath()[0] !== this.map) return;
+    const shown = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]')).filter((c) => !c.hidden);
+    const card = shown.find((c) => c.dataset.callout === 'live') ?? shown[0];
+    if (!card) return;
+    e.preventDefault();
+    card.focus();
+  };
+
+  /** Escape on a card: the card not pinned closes, dropping the selection; focus goes back to the map. */
+  private onCalloutKey = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    const key = (e.currentTarget as HTMLElement).dataset.callout;
+    if (key === 'live') this.closeDetail(e);
+    else this.map?.focus();
+  };
+
+  /**
+   * The aggregate behind the folded Colour heading under a category colouring: how many values the
+   * current set holds. `null` under any other colouring.
+   */
+  private hintSpec(): AggregateSpec | null {
+    const s = this.resolvedStore;
+    const colourBy = s?.get('legend').colourBy ?? null;
+    const meta = s?.get('meta');
+    if (!colourBy || !meta?.declaredScalars.some((c) => c.name === colourBy && c.category && c.render)) return null;
+    return {groupings: [{by: {field: colourBy, top: 1}}]};
+  }
+
+  /**
+   * What the folded Colour heading says: what the points are coloured by, then how many values the
+   * current set holds once the aggregate answers, or how many of the layer's clusters are in view.
+   */
+  private colourHint(): string {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta');
+    const legend = s?.get('legend');
+    const colourBy = legend?.colourBy ?? null;
+    if (!s || !meta || !legend || colourBy === null) return 'None';
+    const layer = clusterLayerOf(colourBy);
+    if (layer) {
+      const n = s.get('artifacts').colourServed.filter((a) => a.layer === layer).length;
+      const decl = meta.layers.find((l) => l.name === layer);
+      return `${decl?.title || layer} · ${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
+    }
+    const n = this.hintCount.entry()?.result?.tables[0]?.groups ?? null;
+    return n === null ? columnCaption(colourBy) : `${columnCaption(colourBy)} · ${n.toLocaleString('en-GB')} value${n === 1 ? '' : 's'}`;
+  }
+
+  /** What the folded In view heading says: how many clusters are on screen at the level drawn. */
+  private inViewHint(level: number | null): string {
+    const s = this.resolvedStore;
+    const a = s?.get('artifacts');
+    if (!s || !a) return '';
+    const colourBy = s.get('legend').colourBy;
+    const key = `${a.version}|${level}|${colourBy}`;
+    if (this.inViewHeld?.key === key) return this.inViewHeld.hint;
+    const colourLayer = clusterLayerOf(colourBy);
+    const source = colourLayer ? a.colourServed.filter((x) => x.layer === colourLayer) : a.served;
+    const n = listedAt(source, level, s.get('meta'), colourLayer === null).length;
+    const hint = `${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`;
+    this.inViewHeld = {key, hint};
+    return hint;
   }
 
   /** The display settings as they stand. */
@@ -1275,24 +1635,6 @@ export class TesseraExplorer extends TesseraElement {
     emit(this, 'tessera-displaychange', this.display);
   }
 
-  /** Open the panel of controls, at `at`'s control where a chip asked for one. */
-  private openFilters(at: {column: string; verb: ClauseVerb} | null): void {
-    this.filtersOpen = true;
-    this.showing = at ?? 'panel';
-  }
-
-  private closeFilters(): void {
-    this.filtersOpen = false;
-    this.renderRoot.querySelector<HTMLElement>('[part="filters-toggle"]')?.focus();
-  }
-
-  /** Escape closes the panel of controls and returns focus to the Filters button. */
-  private onFiltersKey = (e: KeyboardEvent): void => {
-    if (e.key !== 'Escape') return;
-    e.stopPropagation();
-    this.closeFilters();
-  };
-
   /** Escape closes the Layers popover and returns focus to its button. */
   private onLayersKey = (e: KeyboardEvent): void => {
     if (e.key !== 'Escape' || !this.layersOpen) return;
@@ -1326,13 +1668,7 @@ export class TesseraExplorer extends TesseraElement {
   protected override updated(changed: PropertyValues<this>): void {
     this.toggleAttribute('data-compact', this.compact);
     this.placeSizeMenu(changed.has('sizeMenuOpen'));
-    if (this.showing) {
-      const showing = this.showing;
-      this.showing = null;
-      const panel = this.renderRoot.querySelector<TesseraFilterPanel>('[part="filters-popover"] tessera-filter-panel');
-      if (showing === 'panel') void panel?.updateComplete.then(() => panel.focus());
-      else panel?.show(showing.column, showing.verb);
-    }
+    this.followLayout();
     if (!changed.has('sheet')) return;
     const before = changed.get('sheet');
     if (this.sheet) this.renderRoot.querySelector<HTMLElement>('[part="sheet"]')?.focus();
@@ -1438,12 +1774,38 @@ export class TesseraExplorer extends TesseraElement {
     };
   }
 
-  /** The card's close button: drop the selection it shows. */
-  private closeDetail(): void {
+  /** A click on empty map closes the card that is not pinned and drops the selection; pinned cards stay. */
+  private onMiss(): void {
     const s = this.resolvedStore;
-    if (!s) return;
+    const sel = s?.get('selection');
+    if (s && sel && (sel.item || sel.artifact || sel.itemRefusal || sel.artifactRefusal)) s.clearSelection();
     const m = this.map;
     if (m) m.lastPick = null;
+    this.requestUpdate();
+  }
+
+  /**
+   * A card's close button: close the card, and drop the selection where the card shows it. A pinned
+   * card closes alone unless it shows what is selected.
+   */
+  private closeDetail(e: Event): void {
+    const refocus = () => void this.updateComplete.then(() => this.map?.focus());
+    const s = this.resolvedStore;
+    if (!s) return;
+    const from = e.composedPath().find((n): n is HTMLElement => n instanceof HTMLElement && n.dataset.callout !== undefined);
+    const key = from?.dataset.callout;
+    // A card beside a point that closes gives focus back to the map rather than to the page.
+    if (from) refocus();
+    const live = this.liveKey();
+    if (key && key !== 'live') {
+      this.pinned = this.pinned.filter((p) => p.key !== key);
+      if (key !== live) return;
+    } else if (live) this.pinned = this.pinned.filter((p) => p.key !== live);
+    const m = this.map;
+    if (m) {
+      m.lastPick = null;
+      m.pickedAt = null;
+    }
     s.clearSelection();
     this.requestUpdate();
   }

@@ -207,6 +207,25 @@ describe('an aggregate that leaves out one clause', () => {
   });
 });
 
+describe('an aggregate that leaves out one layer’s clauses', () => {
+  it('sends every clause but that layer’s filter-position member_of clauses, and asks again when they change', async () => {
+    const {store, pending} = await storeWith();
+    store.setFilters(DRAFT);
+    const topic = {layer: 'topics', artifact: 7n, outside: false, verb: 'filter' as const};
+    const venue = {layer: 'venues', artifact: 9n, outside: false, verb: 'filter' as const};
+    const lit = {layer: 'topics', artifact: 8n, outside: false, verb: 'highlight' as const};
+    store.setMembers([topic, venue, lit]);
+    store.setAggregate('topics', {groupings: [{by: {layer: 'topics', top: 5}}], withoutMembersOf: 'topics'});
+    await flush();
+    // The archive clause and the other layer's clause still narrow the counts; the topic clause does not.
+    expect(pending[0]!.req.filters).toEqual({all_of: [{archive: {in: ['cs']}}, {member_of: {layer: 'venues', artifact: '9'}}]});
+    store.setMembers([venue, lit]);
+    await flush();
+    expect(pending[0]!.signal.aborted).toBe(true);
+    expect(pending[1]!.req.filters).toEqual({all_of: [{archive: {in: ['cs']}}, {member_of: {layer: 'venues', artifact: '9'}}]});
+  });
+});
+
 describe('an aggregate the server sheds', () => {
   it('is sent again after the backoff, or the Retry-After where longer, and shows retrying meanwhile', async () => {
     const {store, pending, clock} = await storeWith();

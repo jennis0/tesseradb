@@ -1,6 +1,6 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type LegendProjection, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
+import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type AggregateSpec, type CategoryValue, type ClauseVerb, type FilterDraft, type LegendProjection, type Meta, type Rgba, type Store} from '@tesseradb/client';
 import {NEUTRAL, sizesPoints} from '@tesseradb/client/internal';
 import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale, type Sizing} from '@tesseradb/deck';
 import {
@@ -23,6 +23,7 @@ import {
   valueAtSize,
   type SizeEncoding
 } from '@tesseradb/deck/internal';
+import {HeldAggregate, artifactGroupings, countsByKey} from './aggregate.js';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit} from './base.js';
 import {colouringOf, setColouring, sizingOf, watchChoices, withValueColour} from './colouring.js';
 import {radioKeys} from './display.js';
@@ -59,13 +60,15 @@ type Picking = {column: string; key: string; title: string};
  * What the colours mean, under a "Colour" heading. For a category column, one row per value the
  * points on screen carry, in its colour; for a number column, a ramp over the range of the points
  * served, with its lowest and highest values; under colour by cluster, the served artifacts in
- * their colours. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that
+ * their colours, each with its exact count. The counts are the server's: the legend keeps an
+ * aggregate registered with the store (`Store.setAggregate`) over the values or artifacts it lists,
+ * one grouping per level on a layer with several, and a row shows no count until the answer
+ * lands. The first `limit` rows show, 40 where `limit` is 0, with an "N more" button that
  * shows the rest until the colouring changes.
  *
  * The rows sit in two columns while every name shown is short, and in one otherwise. A category
- * row is a swatch, the value's name, Highlight and Filter buttons, and a count where the store
- * holds exact counts for the column (not built yet: no route serves them, so no count shows). The
- * buttons show over the row's end while it is hovered or focused. A pressed button stays shown as
+ * row is a swatch, the value's name, Highlight and Filter buttons, and its exact count under the
+ * store's filters. The buttons show over the row's end while it is hovered or focused. A pressed button stays shown as
  * a ×, which takes the value out of that clause, and its row is filled: grey for the filter, the
  * highlight colour for the highlight. Filter adds the value to the column's filter, which may hold
  * several; the rows left out empty their swatch.
@@ -138,7 +141,7 @@ type Picking = {column: string; key: string; title: string};
  * @csspart name - A row's name, with `data-unnamed` on a cluster that has none.
  * @csspart highlight - A row's Highlight button, with `aria-pressed`; drawn as a × while pressed.
  * @csspart filter - A row's Filter button, with `aria-pressed`; drawn as a × while pressed.
- * @csspart count - A row's exact count, where the store holds one.
+ * @csspart count - A row's exact count under the store's filters, once the server's answer lands.
  * @csspart more - The "N more" button, where there are more entries than show.
  * @csspart ramp - A number column's ramp.
  * @csspart range - The span of the ramp the column's range filter keeps, while one is set.
@@ -689,6 +692,8 @@ export class TesseraLegend extends TesseraElement {
   /** A range being dragged on the ramp, as fractions of it, before it is sent. @internal */
   @state() accessor dragging: {low: number; high: number} | null = null;
   private expandedFor: string | null = null;
+  /** The counts beside the rows. */
+  private readonly counts = new HeldAggregate('legend');
   private unwatchChoices: (() => void) | null = null;
   /** Where a drag on the ramp started, and which end it moves. */
   private dragFrom: {
@@ -714,6 +719,7 @@ export class TesseraLegend extends TesseraElement {
   }
 
   override disconnectedCallback(): void {
+    this.counts.set(null, null);
     this.closePopovers(false);
     if (this.following) cancelAnimationFrame(this.following.frame);
     this.following = null;
@@ -871,19 +877,24 @@ export class TesseraLegend extends TesseraElement {
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
 
-    const plain = (c: Rgba | readonly number[], text: string, title = text, unnamed = false) =>
-      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title} ?data-unnamed=${unnamed}>${text}</span></div>`;
+    const counts = countsByKey(this.counts.entry());
+    // A count of `false` draws no count cell; `null` draws an empty one, for a row not counted.
+    const plain = (c: Rgba | readonly number[], text: string, title = text, unnamed = false, count: number | null | false = false) =>
+      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title} ?data-unnamed=${unnamed}>${text}</span>${count === false
+        ? nothing
+        : html`<span part="count">${count === null ? '' : count.toLocaleString('en-GB')}</span>`}</div>`;
     if (cluster) {
       const named = artifacts.colourServed;
       return wrap(html`<span part="state" data-state="shown"></span>${this.rows(
         [
           ...named.map((a) => {
             const name = artifactName(a, artifacts.attached);
-            return plain(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, name ?? UNNAMED, name ?? UNNAMED, name === null);
+            const count = counts ? (counts.get(a.tesseraId.toString()) ?? null) : false;
+            return plain(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, name ?? UNNAMED, name ?? UNNAMED, name === null, count);
           }),
-          plain(NEUTRAL, 'Not yet coloured')
+          plain(NEUTRAL, 'Not yet coloured', 'Not yet coloured', false, counts ? null : false)
         ],
-        false,
+        counts !== null,
         [...named.map((a) => artifactName(a, artifacts.attached) ?? UNNAMED), 'Not yet coloured'].map((name) => ({name, pressed: 0}))
       )}`);
     }
@@ -893,7 +904,7 @@ export class TesseraLegend extends TesseraElement {
     if (column.category) {
       const values = legend.categories[column.name];
       if (!values) return wrap(renderState('loading', s.get('status')));
-      return wrap(html`<span part="state" data-state="shown"></span>${this.categoryRows(s, column.name, values, legend.ranks[column.name] ?? {}, colouring, legend.counts?.[column.name])}`);
+      return wrap(html`<span part="state" data-state="shown"></span>${this.categoryRows(s, column.name, values, legend.ranks[column.name] ?? {}, colouring, countsByKey(this.counts.entry()))}`);
     }
     const domain = legend.domains[column.name];
     if (!domain) return wrap(html`<span part="state" data-state="empty">Nothing in view</span>`);
@@ -932,7 +943,7 @@ export class TesseraLegend extends TesseraElement {
   }
 
   /** The rows of a category column: swatch, name, the two verbs and the count. */
-  private categoryRows(s: Store, column: string, values: CategoryValue[], ranks: Record<number, number>, colouring: Colouring, counts: Record<string, Masked> | undefined): TemplateResult {
+  private categoryRows(s: Store, column: string, values: CategoryValue[], ranks: Record<number, number>, colouring: Colouring, counts: Map<string, number> | null): TemplateResult {
     const meta = s.get('meta');
     const {draft} = s.get('filters');
     const filterable = this.offers(column, 'category', 'in');
@@ -947,11 +958,11 @@ export class TesseraLegend extends TesseraElement {
       filtered.length > 0 && !has(filtered, key) ? 'out' : lit.length > 0 ? (has(lit, key) ? 'lit' : 'dim') : filtered.length > 0 ? 'filtered' : '';
     const chosen = colouring.values[column] ?? {};
     const shown = paletteValues(values, ranks, colouring.palette);
-    const counted = counts !== undefined;
+    const counted = counts !== null;
     const row = ({value, rank}: {value: CategoryValue; rank: number}) => {
       const title = value.title ?? value.key;
       const colour = chosen[value.key] ?? rgb(colourOfRank(rank, colouring.palette));
-      const count = counts?.[value.key];
+      const count = counts?.get(value.key);
       const onFilter = filtered.includes(value.key);
       const onLit = lit.includes(value.key);
       const clause = [onFilter ? 'filter' : '', onLit ? 'highlight' : ''].filter(Boolean).join(' ');
@@ -959,7 +970,7 @@ export class TesseraLegend extends TesseraElement {
         <button part="swatch" type="button" style=${`--c:${colour}`} aria-haspopup="dialog" aria-label=${`Change colour of ${title}`}
           @click=${() => this.openPicker({column, key: value.key, title}, colour)}></button>
         <span part="name" title=${value.key}>${title}</span>
-        ${counted ? html`<span part="count">${count?.exact ? count.value.toLocaleString('en-GB') : ''}</span>` : nothing}
+        ${counted ? html`<span part="count">${count === undefined ? '' : count.toLocaleString('en-GB')}</span>` : nothing}
         ${filterable
           ? html`<span class="verbs">
               <button part="highlight" type="button" aria-pressed=${onLit ? 'true' : 'false'} aria-label=${onLit ? `Stop highlighting ${title}` : `Highlight ${title}`}
@@ -1386,6 +1397,8 @@ export class TesseraLegend extends TesseraElement {
    * the legend, level with the swatch. Focus goes into it as it opens.
    */
   protected override updated(changed: PropertyValues<this>): void {
+    // An update that lands after the element left the page registers nothing.
+    this.counts.set(this.resolvedStore, this.isConnected && (this.readout || !this.selectable) ? countSpec(this.resolvedStore) : null);
     const open = this.menuOpen || this.picking !== null;
     if (changed.has('menuOpen') || changed.has('picking')) {
       if (open) document.addEventListener('pointerdown', this.onOutside, true);
@@ -1490,4 +1503,29 @@ declare global {
   interface HTMLElementTagNameMap {
     'tessera-legend': TesseraLegend;
   }
+}
+
+/**
+ * The aggregate the legend's counts come from: under a category colouring, the values the store
+ * has named for the column; under a layer colouring, the artifacts it serves for the colouring,
+ * one grouping per level on a layer with several. `null` where nothing is listed.
+ */
+function countSpec(s: Store | null): AggregateSpec | null {
+  const meta = s?.get('meta');
+  if (!s || !meta) return null;
+  const colourBy = s.get('legend').colourBy;
+  if (colourBy === null) return null;
+  const layer = clusterLayerOf(colourBy);
+  if (layer) {
+    const declared = meta.layers.find((l) => l.name === layer);
+    const served = s.get('artifacts').colourServed.filter((a) => a.layer === layer);
+    if (!declared || served.length === 0) return null;
+    return {groupings: artifactGroupings(declared, served, meta.selection)};
+  }
+  const values = meta.declaredScalars.some((c) => c.name === colourBy && c.category && c.render) ? s.get('legend').categories[colourBy] : undefined;
+  if (!values || values.length === 0) return null;
+  // The values in the order the legend lists them, by rank, so the first counted are the first shown.
+  const ranks = s.get('legend').ranks[colourBy] ?? {};
+  const listed = [...values].sort((x, y) => (ranks[x.code] ?? Number.MAX_SAFE_INTEGER) - (ranks[y.code] ?? Number.MAX_SAFE_INTEGER));
+  return {groupings: [{by: {field: colourBy, values: listed.slice(0, meta.selection.maxAggregateNamed).map((v) => v.key).sort()}}]};
 }

@@ -1,5 +1,5 @@
-import {css, html, nothing, type TemplateResult} from 'lit';
-import {property} from 'lit/decorators.js';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
+import {property, state} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, ItemViewPosition, Meta, Quantisation, Refusal} from '@tesseradb/client';
 import {GRID32} from '@tesseradb/client';
 import {TesseraElement, columnCaption, emit, idString, timestampText, type PickOutcome} from './base.js';
@@ -21,10 +21,17 @@ import {chrome, tokens} from './tokens.js';
  * slot, `field-<name>`, so a host can render one as a link. The item is the store's selection
  * (`Store.pick`), or the `item` property.
  *
+ * `compact` shows less: the headline, cut at three lines, the field `subtitle-field` names under
+ * it, cut at two, the first three other fields, then "Show all N fields" beside Open. Show all
+ * lists every field, the views and the group-scoped values, which scroll inside the card past
+ * 300 px. A host's buttons in the
+ * `actions` slot sit beside the close button.
+ *
  * @summary The selected item's fields, with Open and Copy id.
  * @tagname tessera-item-card
  * @category Elements
  * @slot field-<name> - Replaces the value of the field `<name>`, in the grid or the headline.
+ * @slot actions - Buttons beside the close button, such as the explorer's Pin.
  * @fires {CustomEvent<TesseraEventDetails['tessera-open']>} tessera-open - Open was pressed.
  * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
  *   pressed, with `what` set to `item`.
@@ -37,6 +44,8 @@ import {chrome, tokens} from './tokens.js';
  * @csspart refusal - The words "Item unavailable", with `data-code` set to the refusal's code where
  *   the server refused the record. A broken pick's details are on the map's `lastPick`.
  * @csspart headline - The headline, with `data-name` set to the field it shows.
+ * @csspart subtitle - The value of the `subtitle-field` field under the headline, under `compact`.
+ * @csspart show-all - The "Show all N fields" button, under `compact`, with `aria-expanded`.
  * @csspart view-chip - One view the item is in, with `data-view` and `aria-current` on the current
  *   view.
  * @csspart field - One field, with `data-name`, and `data-prose` on a value over 60 characters.
@@ -67,9 +76,60 @@ export class TesseraItemCard extends TesseraElement {
         text-transform: none;
         color: var(--_tessera-ink);
       }
-      .head [part='headline'] {
+      .head [part='headline'],
+      .head .headline {
         flex: 1 1 auto;
         min-width: 0;
+      }
+      .headline {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      [part='subtitle'] {
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+      }
+      :host([compact]) [part='title'] {
+        margin-bottom: 6px;
+      }
+      :host([compact]) .card-title {
+        font-size: 14px;
+      }
+      /* The compact card keeps its headline to three lines and its subtitle to two; Open shows them whole. */
+      :host([compact]) .card-title,
+      :host([compact]) [part='subtitle'] {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
+      :host([compact]) [part='subtitle'] {
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+      :host([compact]) .body {
+        max-height: 300px;
+        overflow-y: auto;
+      }
+      :host([compact]) .foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 10px calc(-1 * var(--_tessera-panel-inline, 14px)) 0;
+        padding: 8px var(--_tessera-panel-inline, 14px) 0;
+        border-top: 1px solid var(--_tessera-line-2);
+      }
+      :host([compact]) [part='open'] {
+        height: 24px;
+        padding: 0 8px;
+        font-size: 12px;
+      }
+      ::slotted([slot='actions']) {
+        flex: none;
       }
       .head [part='state'] {
         min-height: 24px;
@@ -145,6 +205,23 @@ export class TesseraItemCard extends TesseraElement {
   @property({attribute: false}) accessor meta: Meta | null = null;
   /** The field the headline shows. Unset, or where the item has no value for it, the headline is the `tessera_id`. */
   @property({attribute: 'title-field'}) accessor titleField = '';
+  /** Shows the headline, the subtitle and three fields, with the rest under "Show all N fields". */
+  @property({type: Boolean, reflect: true}) accessor compact = false;
+  /** The field shown under the headline under `compact`. Unset, there is no subtitle. */
+  @property({attribute: 'subtitle-field'}) accessor subtitleField = '';
+  /** Whether "Show all" was pressed, for the item it was pressed on. @internal */
+  @state() accessor expanded = false;
+  private expandedFor: bigint | null = null;
+
+  /** Another item starts folded again; set before the render, so the render changes nothing it reads. */
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    const id = this.shown.item?.id ?? null;
+    if (id !== this.expandedFor) {
+      this.expandedFor = id;
+      this.expanded = false;
+    }
+  }
 
   private get shown(): {item: {id: bigint; detail: ItemDetail} | null; refusal: Refusal | null; meta: Meta | null} {
     // A card fed by property still takes the schema from an adopted store: declaration order and
@@ -158,7 +235,7 @@ export class TesseraItemCard extends TesseraElement {
 
   override render(): TemplateResult | typeof nothing {
     const {item, refusal, meta} = this.shown;
-    const close = html`<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button>`;
+    const close = html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button>`;
     // The header row: what the card shows, and the close button where there is something to close.
     const head = (content: unknown, closable: boolean) => html`<div part="title" class="head">${content}${closable ? close : nothing}</div>`;
     const unavailable = (code: string | null) =>
@@ -181,6 +258,7 @@ export class TesseraItemCard extends TesseraElement {
     const titleName = this.titleField && fields[this.titleField] !== undefined && fields[this.titleField] !== null ? this.titleField : null;
     const rest = ordered.filter((n) => n !== titleName);
     const copy = () => void navigator.clipboard?.writeText(id);
+    if (this.compact) return this.compactBody(item, meta, titleName, rest, id);
     return html`<div class="panel">
       ${head(
         titleName
@@ -200,6 +278,42 @@ export class TesseraItemCard extends TesseraElement {
       <div class="row actions">
         <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields})}>${icon('open', 14)}Open</button>
         <button part="copy" class="btn" type="button" @click=${copy}>Copy id</button>
+      </div>
+    </div>`;
+  }
+
+  /** The card under `compact`: headline and subtitle, three fields, and Show all beside Open. */
+  private compactBody(item: {id: bigint; detail: ItemDetail}, meta: Meta | null, titleName: string | null, rest: string[], id: string): TemplateResult {
+    const declared = meta?.declaredScalars ?? [];
+    const {fields} = item.detail;
+    const subtitleName = this.subtitleField && this.subtitleField !== titleName && fields[this.subtitleField] !== undefined && fields[this.subtitleField] !== null ? this.subtitleField : null;
+    const others = rest.filter((n) => n !== subtitleName);
+    const total = others.length + (titleName ? 1 : 0);
+    const shown = this.expanded ? others : others.slice(0, 3);
+    const headline = titleName
+      ? html`<div part="headline" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${present(fields[titleName], declared.find((c) => c.name === titleName))}</span></slot></div>`
+      : html`<div part="headline" class="card-title mono" data-name="tessera_id">${id}</div>`;
+    const subtitle = subtitleName
+      ? html`<div part="subtitle" data-name=${subtitleName}><slot name=${`field-${subtitleName}`}>${present(fields[subtitleName], declared.find((c) => c.name === subtitleName))}</slot></div>`
+      : nothing;
+    return html`<div class="panel">
+      <div part="title" class="head"><div class="headline">${headline}${subtitle}</div><slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button></div>
+      <span part="state" data-state="shown"></span>
+      <div class="body">
+        ${this.expanded ? this.views(item.detail.views, meta) : nothing}
+        <div class="field">
+          ${shown.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
+          ${this.expanded && titleName
+            ? html`<div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>`
+            : nothing}
+        </div>
+        ${this.expanded ? this.scoped(item.detail.scoped) : nothing}
+      </div>
+      <div class="foot">
+        ${total > shown.length || this.expanded
+          ? html`<button part="show-all" class="more-link" type="button" aria-expanded=${this.expanded ? 'true' : 'false'} @click=${() => (this.expanded = !this.expanded)}>${this.expanded ? 'Show fewer' : `Show all ${total.toLocaleString('en-GB')} fields`}</button>`
+          : html`<span></span>`}
+        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields})}>Open</button>
       </div>
     </div>`;
   }

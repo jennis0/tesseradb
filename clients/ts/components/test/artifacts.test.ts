@@ -9,7 +9,7 @@ import '../src/artifact-list.js';
 import '../src/item-card.js';
 import '../src/selection.js';
 import '../src/status.js';
-import {deep, deepAll, deepText, fakeStore, mount, settle, status, meta, scalar} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, deepText, fakeStore, mount, registered, settle, status, meta, scalar} from './fake-store.js';
 import {UNNAMED} from '../src/base.js';
 
 afterEach(() => {
@@ -105,43 +105,79 @@ describe('<tessera-layer-picker>', () => {
 });
 
 describe('<tessera-artifact-list>', () => {
-  it('builds the tree from parentIds, a row beneath what contains it, with Masked counts, and opens on click', async () => {
+  it('lists the deepest artifact of each branch, largest first, each naming its parent, and a press asks to fit the map to it', async () => {
     const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
-    const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n), artifact(3n, 60n, 1n), artifact(4n, 5n)];
+    const served = [artifact(1n, 100n, null, ['Alpha']), {...artifact(2n, 40n, 1n), rung: 1}, {...artifact(3n, 60n, 1n), rung: 1}, artifact(4n, 5n)];
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
     (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
     const rows = deepAll(host, '[part="item"]');
-    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['1', '3', '2', '4']);
-    expect(rows.map((r) => (r as HTMLElement).style.getPropertyValue('--depth'))).toEqual(['0', '1', '1', '0']);
-    expect(deep(host, '[part="item"][data-id="1"] [part="name"]')?.textContent).toBe('Alpha');
-    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('60');
-    (rows[1] as HTMLElement).click();
-    expect(store.calls.find((c) => c.name === 'openArtifact')?.args[0]).toBe(3n);
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['3', '2', '4']);
+    expect(deep(host, '[part="item"][data-id="3"] [part="parent"]')?.textContent).toBe('Alpha');
+    expect(deep(host, '[part="item"][data-id="4"] [part="parent"]')).toBeNull();
+    // The counts are the aggregate's, under the store's filters, over the artifacts listed.
+    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('');
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'clusters', artifacts: [2n, 3n, 4n]}}]}]);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 1}]}]));
+    await settle(host);
+    expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('6');
+    // Largest first by the exact counts.
+    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['2', '3', '4']);
+    const fits: unknown[] = [];
+    host.addEventListener('tessera-artifactfit', (e) => fits.push((e as CustomEvent).detail));
+    (deep(host, '[part="item"][data-id="3"]') as HTMLElement).click();
+    expect(fits).toEqual([{id: '3'}]);
+    expect(store.calls.find((c) => c.name === 'openArtifact')).toBeUndefined();
   });
 
-  /**
-   * A `dag` layer's child served under two parents is beneath both in the lineage; the list shows
-   * it once, under the first parent the count-ordered walk reaches (the larger one here).
-   */
-  it('lists a child of two served parents once, beneath the first reached, and the walk is by count then id', async () => {
-    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
-    const served = [artifact(2n, 90n, null, ['Beta']), artifact(1n, 100n, null, ['Alpha']), {...artifact(3n, 10n, null, ['Gamma']), parentIds: [1n, 2n]}];
-    const lineage = servedLineage(served);
-    expect(lineage.roots.map((a) => a.tesseraId)).toEqual([2n, 1n]);
-    expect(lineage.childrenOf.get(1n)?.map((a) => a.tesseraId)).toEqual([3n]);
-    expect(lineage.childrenOf.get(2n)?.map((a) => a.tesseraId)).toEqual([3n]);
+  it('lists the level the map draws: each branch cut at it, or on a levelled layer that level alone', async () => {
+    const host = await mount('<tessera-artifact-list level="0"></tessera-artifact-list>');
+    const el = host.querySelector('tessera-artifact-list') as unknown as {store: unknown; level: number | null};
+    const served = [artifact(1n, 100n, null, ['Alpha']), {...artifact(2n, 40n, 1n), rung: 1}, artifact(4n, 5n)];
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    el.store = store;
+    await settle(host);
+    const ids = () => deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'));
+    expect(ids()).toEqual(['1', '4']);
+    el.level = null;
+    await settle(host);
+    expect(ids()).toEqual(['2', '4']);
+    const tiers = {...layer('clusters'), hierarchy: {kind: 'tiered' as const, pruneChildren: false}, levels: [{level: 0, title: null, zoom: null}, {level: 1, title: null, zoom: null}]};
+    store.set('meta', {...META, layers: [tiers, layer('labels', ['clusters'])]});
+    // A tiered layer's coarse artifact with no child served is not listed at the finer level.
+    el.level = 1;
+    await settle(host);
+    expect(ids()).toEqual(['2']);
+  });
+
+  it('lists the colouring layer’s artifacts while the points are coloured by a layer, drawn or not', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    const colour = [{...artifact(7n, 12n, null, ['Coloured']), layer: 'districts'}];
+    const store = fakeStore({
+      meta: META,
+      status: status({}),
+      artifacts: {...artifactsProjection([artifact(1n, 100n, null, ['Drawn'])]), colourServed: colour},
+      legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:districts', samples: {}, missing: {}, sizeBy: null}
+    });
     (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
-    const rows = deepAll(host, '[part="item"]');
-    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['1', '3', '2']);
-    expect(rows.map((r) => (r as HTMLElement).style.getPropertyValue('--depth'))).toEqual(['0', '1', '0']);
-    // Two roots of equal count list by lowest id, so the order is the served set's and not the wire's row order.
-    const tied = [artifact(5n, 7n, null, ['Epsilon']), artifact(4n, 7n, null, ['Delta'])];
-    store.set('artifacts', artifactsProjection(tied));
+    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['7']);
+  });
+
+  it('puts a member_of clause on a row’s artifact from its Highlight and Filter buttons, named by the row, without fitting', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n, null, ['Alpha'])])});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
-    expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['4', '5']);
+    const fits: unknown[] = [];
+    host.addEventListener('tessera-artifactfit', (e) => fits.push(e));
+    (deep(host, '[part="item"] [part="filter"]') as HTMLButtonElement).click();
+    expect(store.calls.find((c) => c.name === 'setMembers')!.args[0]).toEqual([{layer: 'clusters', artifact: 1n, outside: false, verb: 'filter', label: 'Alpha'}]);
+    expect(fits).toEqual([]);
+    store.set('filters', {...store.get('filters'), members: [{layer: 'clusters', artifact: 1n, outside: false, verb: 'highlight'}]});
+    await settle(host);
+    expect(deep(host, '[part="item"]')!.getAttribute('data-clause')).toBe('highlight');
+    expect(deep(host, '[part="item"] [part="highlight"]')!.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('shows a count and a neutral placeholder where a row has no name — never the key', async () => {
@@ -154,6 +190,8 @@ describe('<tessera-artifact-list>', () => {
     const nameless = deep(host, '[part="item"][data-id="2"] [part="name"]');
     expect(nameless?.textContent?.trim()).toBe(UNNAMED);
     expect(nameless?.hasAttribute('data-unnamed')).toBe(true);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 1n, count: 70}, {key: 2n, count: 40}]}]));
+    await settle(host);
     expect(deepText(deep(host, '[part="item"][data-id="2"] [part="count"]')).trim()).toBe('40');
     // Nowhere in the list — not in a title, not in a row — does the key appear.
     expect(deepText(host)).not.toContain('c-2');
@@ -372,8 +410,8 @@ describe('<tessera-explorer> on an artifact selection', () => {
     expect(row).not.toBeNull();
     row.click();
     await settle(host);
-    expect(store.calls.find((c) => c.name === 'openArtifact')?.args[0]).toBe(1n);
-    expect(fitted).toEqual([]);
+    expect(fitted).toEqual([1n]);
+    fitted.length = 0;
     store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     await settle(host);
     const card = deep(host, 'tessera-artifact-card') as HTMLElement;

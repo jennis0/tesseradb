@@ -1,4 +1,4 @@
-import {NO_COUNT, NO_MASKED, withMembers, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, withMembers, type AggregateEntry, type AggregateTable, type BrowsePage, type Projections, type ProjectionName, type Quantisation, type Store, type StatusProjection, type DeclaredScalar, type Meta} from '@tesseradb/client';
 import {regionOperand, servedLineage, SessionArtifactTable, withRegion} from '@tesseradb/client/internal';
 
 /**
@@ -220,4 +220,55 @@ export function deepText(el: Element | null): string {
   };
   walk(el);
   return out;
+}
+
+/** One row of an aggregate table as a test writes it; `group` defaults to `listed`. */
+export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key: string | bigint | null; title?: string | null; count: number};
+
+/**
+ * An answered aggregate, one table per entry of `tables`, as the store publishes it. The rows are a
+ * stand-in for an Arrow table with the columns an aggregate carries, read by name.
+ */
+export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | null; total?: number}[], view = 's0'): AggregateEntry {
+  const table = (rows: AggregateRow[]) => {
+    const column = (read: (r: AggregateRow) => unknown) => ({get: (i: number) => read(rows[i]!)});
+    const columns: Record<string, {get(i: number): unknown}> = {
+      group: column((r) => r.group ?? 'listed'),
+      key: column((r) => r.key),
+      title: column((r) => r.title ?? null),
+      count: column((r) => BigInt(r.count))
+    };
+    return {numRows: rows.length, getChild: (name: string) => columns[name] ?? null} as unknown as AggregateTable['rows'];
+  };
+  return {
+    status: 'shown',
+    view,
+    refusal: null,
+    result: {
+      tables: tables.map((t, grouping) => ({grouping, total: t.total ?? t.rows.reduce((n, r) => n + r.count, 0), referenceTotal: null, groups: t.groups ?? null, rows: table(t.rows)})),
+      region: null,
+      recomposed: false,
+      identityKey: 'ik',
+      next: null
+    }
+  };
+}
+
+/** The specs registered with `store.setAggregate` and not since dropped, by id. */
+export function registered(store: FakeStore): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  for (const {name, args} of store.calls) {
+    if (name !== 'setAggregate') continue;
+    const [id, spec] = args as [string, unknown];
+    if (spec === null) out.delete(id);
+    else out.set(id, spec);
+  }
+  return out;
+}
+
+/** Answer every registered aggregate whose id starts with `prefix` with `entry`. */
+export function answerAggregate(store: FakeStore, prefix: string, entry: AggregateEntry): void {
+  const held = new Map(store.get('aggregates'));
+  for (const id of registered(store).keys()) if (id.startsWith(prefix)) held.set(id, entry);
+  store.set('aggregates', held);
 }

@@ -1,7 +1,15 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import type {Meta} from '@tesseradb/client';
+import type {Meta, RegionProjection} from '@tesseradb/client';
 import '../src/explorer.js';
-import {deep, deepAll, fakeStore, mount, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, mount, registered, settle, status, meta, scalar, type FakeStore} from './fake-store.js';
+
+/** The folded sections of the right card, with their hints. */
+const folds = (shadow: ShadowRoot) => [...shadow.querySelectorAll('[part="info"] [part="fold"][aria-expanded="false"]')].map((f) => [f.getAttribute('data-section'), f.querySelector('[part="fold-hint"]')!.textContent]);
+/** Where a callout was placed: its offset from the map's top-left corner. */
+const placedAt = (el: HTMLElement): [number, number] => {
+  const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(el.style.transform);
+  return m ? [Number(m[1]), Number(m[2])] : [NaN, NaN];
+};
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -77,7 +85,7 @@ describe('<tessera-explorer> parts', () => {
     for (const s of shadow.querySelectorAll('tessera-status')) (s as unknown as {reauthorise: () => void}).reauthorise = () => {};
     store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
     await check();
-    for (const part of ['item-card-headline', 'artifact-card-headline', 'hierarchy-row', 'selection-items', 'status-refusal', 'map-refusal', 'status-refresh', 'status-reauthorise']) expect(seen, part).toContain(part);
+    for (const part of ['item-card-headline', 'artifact-card-headline', 'selection-items', 'status-refusal', 'map-refusal', 'status-refresh', 'status-reauthorise']) expect(seen, part).toContain(part);
   });
 
   it('forwards the filter controls’ parts through the filter panel', async () => {
@@ -110,6 +118,18 @@ describe('<tessera-explorer title-field>', () => {
 });
 
 describe('<tessera-explorer> narrow layout', () => {
+  it('draws none of the cards over the map, so nothing hidden asks for counts; a sheet asks for its own', async () => {
+    const {host, el, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{code: 1, key: 'cs', title: null}]}});
+    (el as unknown as {narrow: boolean}).narrow = true;
+    await settle(host);
+    expect(shadow.querySelector('[part="panel"], [part="sidebar"], [part="info"], tessera-legend, tessera-filter-panel')).toBeNull();
+    expect([...registered(store).keys()]).toEqual([]);
+    shadow.querySelector<HTMLButtonElement>('[role="tab"][data-sheet="layers"]')!.click();
+    await settle(host);
+    expect([...registered(store).keys()].map((id) => id.split('#')[0])).toEqual(['legend']);
+  });
+
   const tabs = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLButtonElement>('[part="tabs"] [role="tab"]')];
   const key = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, composed: true, cancelable: true}));
 
@@ -169,65 +189,208 @@ describe('<tessera-explorer> detail', () => {
   });
 });
 
+describe('<tessera-explorer> the item card beside its point', () => {
+  type Map = HTMLElement & {pickedAt: {kind: 'item' | 'artifact'; id: bigint; world: [number, number]} | null; screenOf(w: [number, number]): [number, number]; lookAt(x: number, y: number): boolean};
+  const item = (id: bigint) => ({item: {id, detail: {fields: {author: `A${id}`}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
+
+  /** An explorer whose map is 1000 × 600 px, with an item picked at `world`. */
+  async function picked(world: [number, number]) {
+    const ctx = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    const map = ctx.shadow.querySelector('tessera-map') as Map;
+    Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
+    Object.defineProperty(map, 'clientHeight', {configurable: true, value: 600});
+    map.pickedAt = {kind: 'item', id: 5n, world};
+    ctx.store.set('selection', item(5n));
+    await settle(ctx.host);
+    await settle(ctx.host);
+    return {...ctx, map};
+  }
+  /** The callouts shown: those whose point is on the map. */
+  const callouts = (shadow: ShadowRoot) => [...shadow.querySelectorAll<HTMLElement>('[part~="callout"]')].filter((c) => !c.hidden);
+
+  it('opens beside the point, compact, and not in the right column', async () => {
+    const {shadow, map} = await picked([256, 256]);
+    const [card] = callouts(shadow);
+    expect(card).toBeDefined();
+    expect(card!.querySelector('tessera-item-card')!.hasAttribute('compact')).toBe(true);
+    expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
+    const [px, py] = map.screenOf([256, 256]);
+    const [left, top] = placedAt(card!);
+    // Beside the point, on one side of it, and joined to it by a leader that starts at the point.
+    expect(left > px || left + 300 < px || top > py).toBe(true);
+    const line = shadow.querySelector('[part="leaders"] line')!;
+    expect([Number(line.getAttribute('x1')), Number(line.getAttribute('y1'))]).toEqual([px, py]);
+  });
+
+  it('follows its point as the camera moves, without drawing the explorer again, and hides while the point is off the map', async () => {
+    const {host, shadow, map} = await picked([256, 256]);
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void};
+    const before = placedAt(callouts(shadow)[0]!);
+    let renders = 0;
+    const render = (el as unknown as {render: () => unknown}).render.bind(el);
+    (el as unknown as {render: () => unknown}).render = () => {
+      renders += 1;
+      return render();
+    };
+    // A pan: the zoom holds, so the level drawn does not change.
+    map.lookAt(0.3, 0.5);
+    await new Promise((r) => requestAnimationFrame(r));
+    await settle(host);
+    expect(placedAt(callouts(shadow)[0]!)).not.toEqual(before);
+    expect(renders).toBe(0);
+    map.pickedAt = {kind: 'item', id: 5n, world: [-100_000, 0]};
+    (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
+    await settle(host);
+    expect(callouts(shadow)).toHaveLength(0);
+    // The selection stays; the card returns with its point.
+    map.pickedAt = {kind: 'item', id: 5n, world: [256, 256]};
+    (host.querySelector('tessera-explorer') as HTMLElement & {requestUpdate(): void}).requestUpdate();
+    await settle(host);
+    expect(callouts(shadow)).toHaveLength(1);
+  });
+
+  it('is replaced by the next pick unless pinned; a pinned card stays, and closing it drops only it', async () => {
+    const {host, shadow, store, map} = await picked([256, 256]);
+    const pin = () => callouts(shadow).find((c) => !c.hasAttribute('data-pinned'))!.querySelector<HTMLButtonElement>('[part="pin"]')!;
+    pin().click();
+    await settle(host);
+    expect(callouts(shadow).map((c) => [c.getAttribute('data-callout'), c.hasAttribute('data-pinned')])).toEqual([['item:5', true]]);
+    map.pickedAt = {kind: 'item', id: 6n, world: [200, 300]};
+    store.set('selection', item(6n));
+    await settle(host);
+    await settle(host);
+    expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5', 'live']);
+    // Closing the pinned card leaves the selection.
+    const pinned = callouts(shadow)[0]!.querySelector('tessera-item-card')!;
+    (pinned.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(0);
+    expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['live']);
+    // Without a pin the next pick replaces the card.
+    map.pickedAt = {kind: 'item', id: 7n, world: [300, 300]};
+    store.set('selection', item(7n));
+    await settle(host);
+    expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['live']);
+    // Closing the live card drops the selection.
+    (callouts(shadow)[0]!.querySelector('tessera-item-card')!.shadowRoot!.querySelector('[part="close"]') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+  });
+
+  /** An explorer with the item picked at 256, 256 pinned, and another item picked and shown live. */
+  async function pinnedAndLive() {
+    const ctx = await picked([256, 256]);
+    callouts(ctx.shadow)[0]!.querySelector<HTMLButtonElement>('[part="pin"]')!.click();
+    await settle(ctx.host);
+    ctx.map.pickedAt = {kind: 'item', id: 6n, world: [200, 300]};
+    ctx.store.set('selection', item(6n));
+    await settle(ctx.host);
+    await settle(ctx.host);
+    expect(callouts(ctx.shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5', 'live']);
+    return ctx;
+  }
+
+  it('drops every card, pinned or not, when the store forgets what the server answered, as clear() and an identity change do', async () => {
+    const {host, shadow, store, map} = await pinnedAndLive();
+    store.set('meta', null);
+    await settle(host);
+    store.set('meta', META);
+    await settle(host);
+    expect(callouts(shadow)).toEqual([]);
+    expect(map.pickedAt).toBeNull();
+  });
+
+  it('closes the card that is not pinned and drops the selection on a click that finds nothing; a pinned card stays', async () => {
+    const {host, shadow, store, map} = await pinnedAndLive();
+    map.pickedAt = null;
+    map.dispatchEvent(new CustomEvent('tessera-miss', {detail: {}, bubbles: true, composed: true}));
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+    store.set('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
+    await settle(host);
+    expect(callouts(shadow).map((c) => c.getAttribute('data-callout'))).toEqual(['item:5']);
+    expect(shadow.querySelector('.right [part="detail"]')).toBeNull();
+  });
+
+  it('places two cards clear of each other', async () => {
+    const {shadow} = await pinnedAndLive();
+    const [a, b] = callouts(shadow).map((c) => placedAt(c));
+    // The default size, 300 × 220, where nothing has measured a card.
+    const apart = a![0] + 300 <= b![0] || b![0] + 300 <= a![0] || a![1] + 220 <= b![1] || b![1] + 220 <= a![1];
+    expect(apart).toBe(true);
+  });
+
+  it('is named by its item’s title, is the next stop after the map, closes on Escape with the selection, and gives focus back to the map', async () => {
+    const ctx = await explorer('<tessera-explorer layout="overlay" title-field="author"></tessera-explorer>');
+    const map = ctx.shadow.querySelector('tessera-map') as Map;
+    Object.defineProperty(map, 'clientWidth', {configurable: true, value: 1000});
+    Object.defineProperty(map, 'clientHeight', {configurable: true, value: 600});
+    map.pickedAt = {kind: 'item', id: 5n, world: [256, 256]};
+    ctx.store.set('selection', item(5n));
+    await settle(ctx.host);
+    const [card] = callouts(ctx.shadow);
+    expect(card!.getAttribute('aria-label')).toBe('A5');
+    // The card follows the map in the tab order, before the left card.
+    const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
+    expect(order).toEqual(['tessera-map', 'callout', 'panel']);
+    // Tab from the map goes to the card.
+    map.focus();
+    map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));
+    expect(ctx.shadow.activeElement).toBe(card);
+    card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
+    card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+    await settle(ctx.host);
+    expect(ctx.store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
+    expect(ctx.shadow.activeElement).toBe(map);
+  });
+
+  it('drops every card when it is given another store', async () => {
+    const {host, el, shadow} = await pinnedAndLive();
+    const other = fakeStore({meta: META, status: status({})});
+    other.set('selection', item(6n));
+    el.store = other;
+    await settle(host);
+    await settle(host);
+    expect(callouts(shadow)).toEqual([]);
+  });
+
+  it('goes first in the right column, folding Colour and In view, where the map holds no position for the selection', async () => {
+    const {host, shadow, store, map} = await picked([256, 256]);
+    map.pickedAt = null;
+    store.set('selection', item(5n));
+    await settle(host);
+    expect(callouts(shadow)).toHaveLength(0);
+    const corner = shadow.querySelector('.right')!;
+    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['detail', 'info']);
+    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+  });
+});
+
 describe('<tessera-explorer> layouts', () => {
-  it('draws the panels in a sidebar when docked and in one card over the map as an overlay', async () => {
+  it('puts the filters on the left, docked in a sidebar or in a card over the map, and Colour and In view in a card on the right in both', async () => {
     const docked = await explorer('<tessera-explorer layout="docked"></tessera-explorer>');
     expect(docked.shadow.querySelector('[part="sidebar"] tessera-filter-panel')).not.toBeNull();
     expect(docked.shadow.querySelector('[part="panel"]')).toBeNull();
+    expect(docked.shadow.querySelector('.right [part="info"] tessera-legend')).not.toBeNull();
+    expect(docked.shadow.querySelector('.right [part="info"] tessera-artifact-list')).not.toBeNull();
     document.body.innerHTML = '';
     const overlay = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
     expect(overlay.shadow.querySelector('[part="sidebar"]')).toBeNull();
     expect(overlay.shadow.querySelector('[part="panel"] tessera-filter-panel')).not.toBeNull();
-    expect(overlay.shadow.querySelector('[part="panel"] tessera-legend')).not.toBeNull();
+    expect(overlay.shadow.querySelector('[part="panel"] tessera-legend')).toBeNull();
+    expect(overlay.shadow.querySelector('.right [part="info"] tessera-legend')).not.toBeNull();
+    // No hierarchy panel.
+    expect(deep(overlay.host, 'tessera-hierarchy')).toBeNull();
   });
 
-  it('opens the filter controls beside the card from its Filters button, which counts the clauses applied', async () => {
+  it('shows the filter controls inline in the left card, with the clauses in each position counted on the switch', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    const popover = () => shadow.querySelector<HTMLElement>('[part="filters-popover"]')!;
-    const open = () => !popover().hidden;
-    const card = () => shadow.querySelector('[part="panel"]')!;
-    expect(open()).toBe(false);
-    store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {}}});
-    await settle(host);
-    const toggle = shadow.querySelector<HTMLButtonElement>('[part="filters-toggle"]')!;
-    expect(toggle.getAttribute('data-count')).toBe('1');
-    // The chips show in the card with the controls closed; the card holds no control.
-    expect(deepAll(card(), '[part="chip"]')).toHaveLength(1);
-    // A highlight on the same column is a second clause and a second chip.
     store.set('filters', {...store.get('filters'), draft: {filter: {archive: {family: 'category', keys: ['cs']}}, highlight: {archive: {family: 'category', keys: ['cs']}}}});
     await settle(host);
-    expect(toggle.getAttribute('data-count')).toBe('2');
-    expect(deepAll(card(), '[part="chip"]')).toHaveLength(2);
-    // Pressing a chip opens the panel at the chip's control, in the chip's position.
-    (deepAll(card(), '[part="chip"][data-verb="highlight"] [part="edit"]')[0] as HTMLButtonElement).click();
-    await settle(host);
-    await settle(host);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(shadow.getElementById(toggle.getAttribute('aria-controls')!)).toBe(popover());
-    expect(deepAll(card(), 'tessera-filter')).toHaveLength(0);
-    const controls = deepAll(popover(), 'tessera-filter') as (HTMLElement & {column: string; verb: string})[];
-    expect(controls.map((c) => [c.column, c.verb])).toEqual([['archive', 'highlight']]);
-    // The Filters button closes it and opens it again, with focus in it and its position kept;
-    // its close button and Escape close it too, and focus goes back to the button.
-    toggle.click();
-    await settle(host);
-    expect(open()).toBe(false);
-    toggle.click();
-    await settle(host);
-    await settle(host);
-    const panel = popover().querySelector('tessera-filter-panel')!;
-    expect(panel.getAttribute('mode')).toBe('highlight');
-    expect(panel.shadowRoot!.activeElement?.getAttribute('data-verb')).toBe('highlight');
-    (popover().querySelector('[part="filters-close"]') as HTMLButtonElement).click();
-    await settle(host);
-    expect(open()).toBe(false);
-    expect(shadow.activeElement).toBe(toggle);
-    toggle.click();
-    await settle(host);
-    popover().dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
-    await settle(host);
-    expect(open()).toBe(false);
-    expect(shadow.activeElement).toBe(toggle);
+    const card = shadow.querySelector('[part="panel"]')!;
+    expect(deepAll(card, 'tessera-filter')).toHaveLength(1);
+    expect(deepAll(card, '[part="mode"] [part="mode-count"]').map((c) => c.textContent)).toEqual(['1', '1']);
+    expect(shadow.querySelector('[part="filters-popover"]')).toBeNull();
+    expect(shadow.querySelector('[part="filters-toggle"]')).toBeNull();
   });
 
   it('heads the card with the dataset title over the view’s name, or the view’s name alone', async () => {
@@ -245,14 +408,54 @@ describe('<tessera-explorer> layouts', () => {
     expect(plain.shadow.querySelector('tessera-view-picker')?.shadowRoot?.querySelector('select')).not.toBeNull();
   });
 
-  it('shows a selected region in the map’s top-right corner, above the detail card', async () => {
+  const REGION: RegionProjection = {shape: {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]}, status: 'shown' as const, refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}};
+
+  it('puts a selected region first in the right column and folds Colour and In view to their headings, each opening again, until the region is cleared', async () => {
     const {host, shadow, store} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
-    store.set('selection', {item: {id: 5n, detail: {fields: {}, labels: [], views: [], scoped: {}}}, itemRefusal: null, artifact: null, artifactRefusal: null});
-    store.set('region', {shape: {kind: 'box', bbox: [0, 0, 1, 1]}, status: 'shown', refusal: null, visible: {value: 3, exact: true}, matched: {value: 3, exact: true}, served: {shown: 1, total: 3, exact: true}, verdict: {exact: true, depth: null}, held: {ids: BigUint64Array.of(5n), positions: new Float32Array(2), count: 1}});
+    store.set('legend', {...store.get('legend'), colourBy: 'archive', categories: {archive: [{code: 1, key: 'cs', title: null}, {code: 2, key: 'math', title: null}]}});
+    await settle(host);
+    expect(folds(shadow)).toEqual([]);
+    store.set('region', REGION);
     await settle(host);
     const corner = shadow.querySelector('.right')!;
-    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card', 'detail']);
-    expect(shadow.querySelector('[part="panel"] tessera-selection')).toBeNull();
+    expect([...corner.children].map((c) => c.getAttribute('part')).filter(Boolean)).toEqual(['selection-card', 'info']);
+    // The number of values is the aggregate's, and is left out until it answers.
+    expect(folds(shadow)).toEqual([
+      ['colour', 'Archive'],
+      ['in-view', '0 clusters']
+    ]);
+    expect([...registered(store).entries()].filter(([id]) => id.startsWith('colour-hint')).map(([, spec]) => spec)).toEqual([{groupings: [{by: {field: 'archive', top: 1}}]}]);
+    answerAggregate(store, 'colour-hint', aggregateEntry([{rows: [{key: 'cs', count: 3}], groups: 7}]));
+    await settle(host);
+    expect(folds(shadow)[0]).toEqual(['colour', 'Archive · 7 values']);
+    expect(shadow.querySelector('[part="info"] tessera-legend')).toBeNull();
+    shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
+    await settle(host);
+    expect(shadow.querySelector('[part="info"] tessera-legend')).not.toBeNull();
+    expect(folds(shadow).map(([s]) => s)).toEqual(['in-view']);
+    // The opened section folds again from its chevron, and its count is no longer asked for.
+    expect(registered(store).size).toBeGreaterThan(0);
+    expect([...registered(store).keys()].some((id) => id.startsWith('colour-hint'))).toBe(false);
+    const refold = shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"][aria-expanded="true"]')!;
+    refold.click();
+    await settle(host);
+    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+    shadow.querySelector<HTMLButtonElement>('[part="fold"][data-section="colour"]')!.click();
+    await settle(host);
+    store.set('region', null);
+    await settle(host);
+    expect(folds(shadow)).toEqual([]);
+    // A second region folds them again.
+    store.set('region', REGION);
+    await settle(host);
+    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
+  });
+
+  it('folds the right card to its headings by default in the compact form', async () => {
+    const {host, el, shadow} = await explorer('<tessera-explorer layout="overlay"></tessera-explorer>');
+    (el as unknown as {compact: boolean}).compact = true;
+    await settle(host);
+    expect(folds(shadow).map(([s]) => s)).toEqual(['colour', 'in-view']);
   });
 
   it('opens the layer picker from the Layers button, passes its change on, and closes on Escape', async () => {

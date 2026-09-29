@@ -19,10 +19,17 @@ export type AggregateSpec = {
   reference?: FilterExpr | 'visible';
   /**
    * A column whose control in the store's filter position is left out of the request's `filters`,
-   * named as the filter draft keys it. The `member_of` clauses and the selected region are always
-   * sent. Unset leaves nothing out.
+   * named as the filter draft keys it. The `member_of` clauses, unless `withoutMembersOf` names
+   * their layer, and the selected region are always sent. Unset leaves nothing out.
    */
   without?: string;
+  /**
+   * A layer whose `member_of` clauses in the store's filter position are left out of the request's
+   * `filters`, so a control listing that layer's artifacts keeps counting the ones its clauses
+   * exclude. The other layers' clauses and the selected region are still sent. Unset leaves
+   * nothing out.
+   */
+  withoutMembersOf?: string;
 };
 
 /**

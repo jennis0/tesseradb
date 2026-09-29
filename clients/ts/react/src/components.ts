@@ -21,6 +21,7 @@ import * as React from 'react';
 import {
   TesseraArtifactCard as ArtifactCardElement,
   TesseraArtifactList as ArtifactListElement,
+  TesseraClusterFilter as ClusterFilterElement,
   TesseraCount as CountElement,
   TesseraExplorer as ExplorerElement,
   TesseraFilter as FilterElement,
@@ -75,6 +76,7 @@ const withStableAuthorise = <C extends React.ForwardRefExoticComponent<any>>(Inn
 /** The handler props for events a map emits, which the explorer also carries. */
 const mapEvents = {
   onPick: ev('tessera-pick'),
+  onMiss: ev('tessera-miss'),
   onHover: ev('tessera-hover'),
   onViewChange: ev('tessera-viewchange'),
   onSelectChange: ev('tessera-selectchange'),
@@ -86,16 +88,15 @@ const mapEvents = {
 export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreElement, {}));
 /**
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
- * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
- * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactSelect`,
- * `onArtifactFit`, `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
+ * elements inside it emit them and each event bubbles out of it: `onPick`, `onMiss`, `onHover`,
+ * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
+ * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
  * `onDisplayChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
- * `onClauseChange`, `onChipOpen`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
+ * `onClauseChange`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
  * of the same name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
-  onArtifactSelect: ev('tessera-artifactselect'),
   onArtifactFit: ev('tessera-artifactfit'),
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
@@ -108,13 +109,12 @@ export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', Expl
   onOpen: ev('tessera-open'),
   onClose: ev('tessera-close'),
   onClauseChange: ev('tessera-clausechange'),
-  onChipOpen: ev('tessera-chipopen'),
   onViewSwitch: ev('tessera-viewswitch'),
   onViewFollow: ev('tessera-viewfollow')
 }));
 /**
- * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onHover`
- * (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
+ * `<tessera-map>` as a React component. Event props: `onPick` (`tessera-pick`), `onMiss`
+ * (`tessera-miss`), `onHover` (`tessera-hover`), `onViewChange` (`tessera-viewchange`), `onSelectChange`
  * (`tessera-selectchange`), `onArtifactOpen` (`tessera-artifactopen`) and `onLayerChange`
  * (`tessera-layerchange`).
  */
@@ -130,6 +130,8 @@ export const TesseraCount = wrap('tessera-count', CountElement, {});
 export const TesseraItemCard = wrap('tessera-item-card', ItemCardElement, {onOpen: ev('tessera-open'), onClose: ev('tessera-close'), onViewFollow: ev('tessera-viewfollow')});
 /** `<tessera-filter>` as a React component. Event prop: `onFilterChange` (`tessera-filterchange`). */
 export const TesseraFilter = wrap('tessera-filter', FilterElement, {onFilterChange: ev('tessera-filterchange')});
+/** `<tessera-cluster-filter>` as a React component. Event prop: `onClauseChange` (`tessera-clausechange`). */
+export const TesseraClusterFilter = wrap('tessera-cluster-filter', ClusterFilterElement, {onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-filter-panel>` as a React component. Event props: `onFilterChange`
  * (`tessera-filterchange`) and `onChipOpen` (`tessera-chipopen`).
@@ -144,10 +146,10 @@ export const TesseraViewPicker = wrap('tessera-view-picker', ViewPickerElement, 
 /** `<tessera-key-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
 export const TesseraKeyPicker = wrap('tessera-key-picker', KeyPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
 /**
- * `<tessera-artifact-list>` as a React component. Event prop: `onArtifactSelect`
- * (`tessera-artifactselect`).
+ * `<tessera-artifact-list>` as a React component. Event props: `onArtifactFit`
+ * (`tessera-artifactfit`) and `onClauseChange` (`tessera-clausechange`).
  */
-export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactSelect: ev('tessera-artifactselect')});
+export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactFit: ev('tessera-artifactfit'), onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-artifact-card>` as a React component. Event props: `onArtifactFit`
  * (`tessera-artifactfit`), `onClauseChange` (`tessera-clausechange`) and `onClose`
@@ -179,6 +181,7 @@ export const TesseraHierarchy = wrap('tessera-hierarchy', HierarchyElement, {onC
 export type {
   ArtifactCardElement,
   ArtifactListElement,
+  ClusterFilterElement,
   CountElement,
   ExplorerElement,
   FilterElement,

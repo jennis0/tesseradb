@@ -26,6 +26,8 @@ export type TesseraEventDetails = {
    * with the item's record once it arrives.
    */
   'tessera-pick': {id: string; record?: ItemDetail};
+  /** A click on the map found no point and no artifact. */
+  'tessera-miss': Record<string, never>;
   /** The pointer is over the point `id`, at `x`, `y` in canvas pixels. */
   'tessera-hover': {id: string; x: number; y: number};
   /**
@@ -33,8 +35,6 @@ export type TesseraEventDetails = {
    * decimal string.
    */
   'tessera-artifactopen': {id: string; detail: Omit<ArtifactDetail, 'maskedCount'> & {maskedCount: string}};
-  /** The artifact `id` of layer `layer` was chosen from a list. */
-  'tessera-artifactselect': {id: string; layer: string};
   /** Fit was asked for the artifact `id`. `<tessera-explorer>` fits its map to it. */
   'tessera-artifactfit': {id: string};
   /**

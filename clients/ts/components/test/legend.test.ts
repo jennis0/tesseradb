@@ -5,7 +5,7 @@ import {hexOf} from '@tesseradb/deck/internal';
 import '../src/legend.js';
 import '../src/map.js';
 import {colouringOf, setSizing} from '../src/colouring.js';
-import {deep, deepAll, fakeStore, meta, mount, scalar, settle, status, type FakeStore} from './fake-store.js';
+import {aggregateEntry, answerAggregate, deep, deepAll, fakeStore, meta, mount, registered, scalar, settle, status, type FakeStore} from './fake-store.js';
 
 /**
  * The legend as a filter and a highlight, and as the place colours are chosen. What it asks of the
@@ -180,13 +180,52 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     expect(deepAll(field.host, '[part="filter"]')).toHaveLength(3);
   });
 
-  it('shows a count only where the store holds an exact one, never from the marks', async () => {
-    const without = await mountLegend('field');
-    expect(deep(without.host, '[part="count"]')).toBeNull();
-    const counts = {field: {'cs.LG': {value: 4_812_300, exact: true}, 'cs.CV': {value: 3_905_110, exact: true}}};
-    const {host} = await mountLegend('field', undefined, {counts});
+  it('counts the values it lists through the aggregate route, under the store’s filters, and shows a count only once the server answers', async () => {
+    const {host, store} = await mountLegend('field');
+    const specs = [...registered(store).values()];
+    expect(specs).toEqual([{groupings: [{by: {field: 'field', values: ['cs.CV', 'cs.LG', 'hep-th']}}]}]);
+    // No answer yet: no count, and none from the marks.
+    expect(deep(host, '[part="count"]')).toBeNull();
+    answerAggregate(store, 'legend', aggregateEntry([{rows: [{key: 'cs.LG', count: 4_812_300}, {key: 'cs.CV', count: 3_905_110}]}]));
+    await settle(host);
     expect(entry(host, 'cs.LG').querySelector('[part="count"]')!.textContent).toBe('4,812,300');
     expect(entry(host, 'hep-th').querySelector('[part="count"]')!.textContent).toBe('');
+  });
+
+  it('registers again only when what it lists changes, and drops its aggregate when the colouring goes', async () => {
+    const {host, store} = await mountLegend('field');
+    const asked = () => store.calls.filter((c) => c.name === 'setAggregate').length;
+    const before = asked();
+    store.set('status', status({stale: true}));
+    await settle(host);
+    expect(asked()).toBe(before);
+    store.set('legend', legend('venue'));
+    await settle(host);
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'venue', values: ['neurips']}}]}]);
+    store.set('legend', {...legend('field'), colourBy: null});
+    await settle(host);
+    expect(registered(store).size).toBe(0);
+  });
+
+  it('counts a layer colouring by artifact, one grouping per level on a levelled layer', async () => {
+    const layer = (name: string, levels: number) =>
+      ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: levels > 1 ? 'tiered' : 'nested', pruneChildren: false}, levels: Array.from({length: levels}, (_, level) => ({level, title: null, zoom: null})), computedContent: ['centroid'], shape: null, suppliedContent: ['name'], depsOn: [], version: 1}) as unknown as Meta['layers'][number];
+    const artifact = (name: string, id: bigint, rung: number) => ({layer: name, tesseraId: id, key: null, maskedCount: 5n, centroid: null, box: null, shape: null, content: [`c${id}`], parentIds: [], rung, matched: null, target: null});
+    const host = await mount('<tessera-legend></tessera-legend>');
+    const el = host.querySelector('tessera-legend') as HTMLElement & {store: unknown};
+    const store = fakeStore({meta: {...META, layers: [layer('tiers', 2), layer('tree', 0)]}, status: status({}), legend: legend('cluster:tiers'), filters: filtersOf(emptyDraft(META.filterOperands))});
+    const base = store.get('artifacts');
+    store.set('artifacts', {...base, colourServed: [artifact('tiers', 9n, 1), artifact('tiers', 3n, 0), artifact('tiers', 4n, 1)] as never});
+    el.store = store;
+    await settle(host);
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'tiers', level: 0, artifacts: [3n]}}, {by: {layer: 'tiers', level: 1, artifacts: [4n, 9n]}}]}]);
+    answerAggregate(store, 'legend', aggregateEntry([{rows: [{key: 3n, count: 40}]}, {rows: [{key: 9n, count: 12}, {key: 4n, count: 7}]}]));
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['12', '40', '7', '']);
+    store.set('legend', legend('cluster:tree'));
+    store.set('artifacts', {...base, colourServed: [artifact('tree', 2n, 3)] as never});
+    await settle(host);
+    expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'tree', artifacts: [2n]}}]}]);
   });
 });
 

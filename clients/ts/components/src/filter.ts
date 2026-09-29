@@ -2,6 +2,8 @@ import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit'
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@tesseradb/client';
+import {HeldAggregate, listedGroups, type GroupCount} from './aggregate.js';
+import {FloatingList} from './float.js';
 import {TesseraElement, columnCaption, emit, keyTitle, parseDateText, shortDateText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -19,6 +21,9 @@ const TYPING_DEBOUNCE_MS = 350;
 /** The narrowest bar a suggested value with any items draws, as a percentage, so it still shows. */
 const BAR_FLOOR = 2;
 
+/** How many of a category's commonest values show under its box before anything is typed. */
+const TOP_VALUES = 5;
+
 /**
  * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column, under
  * the column's name. `verb` is the position it edits: the column's filter clause or its highlight
@@ -29,16 +34,24 @@ const BAR_FLOOR = 2;
  * or plain words where the column takes no phrase; `OR` between terms asks for either. A line under
  * the box says so. A text clause set from outside that no query writes shows read-only, with Clear.
  *
- * A category is a search box over `/v1/categories/{column}/suggest`, which lists nothing until
- * something is typed. Each value suggested shows its count in the current view among the items
- * passing the filter, and a bar, its share of the total the server counted over. In the filter
- * position the count leaves out the column's own clause, so a value counts what choosing it as well
- * would add. In the highlight position the count is under the whole filter, and a value counted 0
- * is greyed, marked "none match" and cannot be chosen, though one already chosen can be taken out.
- * The arrow keys move through the suggestions, and Enter chooses the one reached, the first by
- * default, or takes it out where it is chosen; text that suggests nothing chooses nothing. Emptying
- * the box, or removing the control, has the store stop asking for the column. The values chosen sit under the box as chips, each with a ×. Where the legend holds the
- * column's values, the heading says how many there are.
+ * A category is a search box over `/v1/categories/{column}/suggest`, with the five commonest values
+ * in the current set under it before anything is typed, each with a checkbox, its exact count and
+ * a bar, its share of the set. The five are counted by the aggregate route (`Store.setAggregate`):
+ * in the filter position without the column's own clause, so a value its clause excludes is still
+ * counted, and in the highlight position under the whole filter. The control keeps that aggregate
+ * registered while it is drawn. The heading says how many values that set holds, once the
+ * aggregate has answered.
+ *
+ * The suggestions open over what sits below the box while the box has focus and holds text. Each
+ * value suggested shows its count in the current view among the items passing the filter, and a
+ * bar, its share of the total the server counted over. In the filter position the count leaves out
+ * the column's own clause, so a value counts what choosing it as well would add. In the highlight
+ * position the count is under the whole filter, and a value counted 0 is greyed, marked "none
+ * match" and cannot be chosen, though one already chosen can be taken out. The arrow keys move
+ * through the suggestions, and Enter chooses the one reached, the first by default, or takes it out
+ * where it is chosen; text that suggests nothing chooses nothing. Emptying the box, or removing the
+ * control, has the store stop asking for the column. The values chosen that are not among the five
+ * sit under them as chips, each with a ×.
  *
  * A number is two inputs, and a date two text inputs that read and write dates as day, month and
  * year (`1 Jan 2019`); a date typed as a month or a year means its first day in the lower input
@@ -66,6 +79,8 @@ const BAR_FLOOR = 2;
  *   position where it is counted 0 and not chosen.
  * @csspart bar - A suggested value's share of the items its count is taken over.
  * @csspart value-count - A suggested value's count.
+ * @csspart top - The commonest values, under the box while nothing is typed.
+ * @csspart top-value - One of them: a label holding its checkbox, with `data-key`.
  * @csspart chosen - A chosen category value's chip.
  * @csspart more - The hint that more values match than one page holds.
  * @csspart refusal - The words "Values unavailable" where the values could not be listed, with
@@ -134,10 +149,18 @@ export class TesseraFilter extends TesseraElement {
         font-size: 12px;
         color: var(--_tessera-ink-3);
       }
+      .combo {
+        position: relative;
+      }
+      /* The suggestions open over what sits below the box, in the top layer. */
       [part='values'] {
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
+        overflow-y: auto;
         display: flex;
         flex-direction: column;
-        margin-top: 6px;
         padding: 4px;
         border: 1px solid var(--_tessera-line);
         border-radius: var(--_tessera-radius-control);
@@ -231,6 +254,34 @@ export class TesseraFilter extends TesseraElement {
       [aria-disabled='true'] [part='value-count'] {
         color: var(--_tessera-ink-3);
       }
+      [part='top'] {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      [part~='top-value'] {
+        display: grid;
+        grid-template-columns: 16px minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 8px;
+        cursor: pointer;
+      }
+      [part~='top-value'] input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [part~='top-value'] input {
+        accent-color: var(--_tessera-highlight);
+      }
+      [part~='top-value'] input:checked ~ .opt [part='bar'] {
+        background: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [part~='top-value'] input:checked ~ .opt [part='bar'] {
+        background: var(--_tessera-highlight);
+      }
       .chosen {
         display: flex;
         flex-wrap: wrap;
@@ -272,9 +323,18 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor search = '';
   /** The suggestion the arrow keys moved to, by code; `null` is the first that can be chosen. @internal */
   @state() accessor activeCode: number | null = null;
+  /** Whether the category box has focus, which its suggestions show only while it does. @internal */
+  @state() accessor focused = false;
   /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
   @state() accessor invalid: {gte?: string; lte?: string} = {};
   private sent: ColumnDraft | null = null;
+  /** The commonest values under a category's box. */
+  private readonly top = new HeldAggregate('filter');
+  private readonly floating = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="values"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.combo');
+    return list && anchor ? {list, anchor} : null;
+  });
   private typing: ReturnType<typeof setTimeout> | null = null;
   /** The change `typing` is waiting to send, so a change of position can send it first. */
   private pending: (() => void) | null = null;
@@ -341,6 +401,8 @@ export class TesseraFilter extends TesseraElement {
 
   override disconnectedCallback(): void {
     this.ask('');
+    this.top.set(null, null);
+    this.floating.stop();
     super.disconnectedCallback();
   }
 
@@ -388,6 +450,18 @@ export class TesseraFilter extends TesseraElement {
   protected override updated(): void {
     if (this.draft && isPopulated(this.draft)) this.setAttribute('data-on', '');
     else this.removeAttribute('data-on');
+    this.floating.update();
+    const category = this.isConnected && this.resolvedOperand?.family === 'category';
+    this.top.set(
+      this.resolvedStore,
+      category ? {groupings: [{by: {field: this.column, top: TOP_VALUES}}], ...(this.verb === 'filter' ? {without: this.column} : {})} : null
+    );
+  }
+
+  /** The commonest values and the number of values in the set, once the aggregate has answered. */
+  private topValues(): {values: GroupCount[]; total: number; groups: number | null} | null {
+    const table = this.top.entry()?.result?.tables[0];
+    return table ? {values: listedGroups(table), total: table.total, groups: table.groups} : null;
   }
 
   /**
@@ -431,8 +505,8 @@ export class TesseraFilter extends TesseraElement {
   /** The heading's right-hand side: a category's number of values, or Clear on a range. */
   private aside(draft: ColumnDraft): TemplateResult | typeof nothing {
     if (draft.family === 'category') {
-      const values = this.resolvedStore?.get('legend').categories[this.column];
-      return values ? html`<span part="aside">${values.length.toLocaleString('en-GB')} ${values.length === 1 ? 'value' : 'values'}</span>` : nothing;
+      const n = this.topValues()?.groups ?? null;
+      return n === null ? nothing : html`<span part="aside">${n.toLocaleString('en-GB')} ${n === 1 ? 'value' : 'values'}</span>`;
     }
     if (draft.family === 'numeric' && isPopulated(draft)) {
       return html`<button part="aside" type="button" @click=${() => {
@@ -512,7 +586,8 @@ export class TesseraFilter extends TesseraElement {
     const total = this.countedOver(suggestion);
     const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
     const typed = this.search !== '';
-    const rows = typed ? (suggestion?.values ?? []) : [];
+    // The suggestions show while the box has focus and holds text; the list closes as focus leaves.
+    const rows = typed && this.focused ? (suggestion?.values ?? []) : [];
     // In the highlight position, a value no item passing the filter carries cannot be lit; one
     // already lit can still be taken out.
     const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0 && !chosen.has(v.key);
@@ -527,7 +602,10 @@ export class TesseraFilter extends TesseraElement {
     const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
         role="combobox" aria-expanded=${rows.length > 0 ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${active ? `value-${active.code}` : nothing}
         .value=${this.search}
+        @focus=${() => (this.focused = true)}
+        @blur=${() => (this.focused = false)}
         @input=${(e: Event) => {
+          this.focused = true;
           this.search = (e.target as HTMLInputElement).value;
           this.activeCode = null;
           this.ask(this.search);
@@ -551,7 +629,7 @@ export class TesseraFilter extends TesseraElement {
       const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
       return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
         aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
-        @click=${() => !left && toggle(v.key)}>
+        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => !left && toggle(v.key)}>
         <span class="opt">
           <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">none match</span>` : nothing}</span>
           ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
@@ -561,7 +639,24 @@ export class TesseraFilter extends TesseraElement {
     };
     const list =
       rows.length > 0
-        ? html`<div part="values" id="values" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        : nothing;
+    const top = this.topValues();
+    const topKeys = new Set(top?.values.map((v) => v.key) ?? []);
+    const topList =
+      top && top.values.length > 0
+        ? html`<div part="top" role="group" aria-label=${`Commonest ${columnCaption(this.column)} values`}>
+            ${top.values.map((v) => {
+              const title = v.title ?? keyTitle(s, this.column, v.key);
+              const on = chosen.has(v.key);
+              const share = top.total > 0 ? (v.count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * v.count) / top.total))) : 0;
+              return html`<label part="top-value" data-key=${v.key}>
+                <input type="checkbox" .checked=${on} @change=${() => toggle(v.key)} />
+                <span class="opt"><span class="name" title=${v.key}>${title}</span><span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span></span>
+                <span part="value-count">${v.count.toLocaleString('en-GB')}</span>
+              </label>`;
+            })}
+          </div>`
         : nothing;
     const note = !typed
       ? nothing
@@ -574,16 +669,17 @@ export class TesseraFilter extends TesseraElement {
             : suggestion.more
               ? html`<span part="more">Type more to narrow the list</span>`
               : nothing;
+    const rest = draft.keys.filter((key) => !topKeys.has(key));
     const chips =
-      draft.keys.length > 0
+      rest.length > 0
         ? html`<div class="chosen">
-            ${draft.keys.map((key) => {
+            ${rest.map((key) => {
               const title = keyTitle(s, this.column, key);
               return html`<span part="chosen" class="chip" data-verb=${this.verb}>${title}<button type="button" aria-label=${`Remove ${title} from ${columnCaption(this.column)}`} @click=${() => toggle(key)}>${icon('close', 12)}</button></span>`;
             })}
           </div>`
         : nothing;
-    return html`${field}${list}${note}${chips}`;
+    return html`<div class="combo">${field}${list}</div>${note}${topList}${chips}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {
