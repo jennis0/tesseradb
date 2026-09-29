@@ -434,6 +434,11 @@ impl Pass {
 
         // ---- 1. scan -------------------------------------------------------------------------
         let lazy = creates && takes_every_row;
+        // The file as the scan reads it, for a later file compared with it row by row.
+        let stamp = match &input {
+            Input::File(file) if lazy => Some(Stamp::of(file.path)?),
+            _ => None,
+        };
         let mut rows: Option<Rows> = match lazy {
             true => None,
             false => Some(self.rows(&input, total)?),
@@ -575,14 +580,14 @@ impl Pass {
             let offset = self.offset(base, total)?;
             for (field, outcome) in carried.iter().zip(merged) {
                 if let Some(unset) = outcome.unset {
-                    let source = match &input {
-                        Input::File(file) => Some(ZipSource {
+                    let source = match (&input, &stamp) {
+                        (Input::File(file), Some(stamp)) => Some(ZipSource {
                             path: file.path.to_path_buf(),
                             field: field.clone(),
                             rows: total,
-                            stamp: Stamp::of(file.path)?,
+                            stamp: stamp.clone(),
                         }),
-                        Input::Lists(..) => None,
+                        _ => None,
                     };
                     if let Some(limited) = self.limited.as_mut().filter(|_| unset.count() > 0) {
                         limited.given(field.position);

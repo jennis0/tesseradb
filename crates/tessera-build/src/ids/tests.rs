@@ -614,8 +614,66 @@ fn a_file_rewritten_with_as_many_rows_is_told_apart() {
 
 /// **The identity pass's scratch stays within its forecast**: the most bytes its scratch directory
 /// held, sampled while it numbers a corpus whose sorts spill, is no more than the modelled peak.
+/// One corpus has keys in no order across every kind of file; the other has two views of keys in
+/// file order, the second naming half the first's items and creating as many again, so a sort's
+/// keys arrive sorted and the second view's rows name items.
 #[test]
 fn the_identity_scratch_stays_within_its_forecast() {
+    let tmp = tempfile::tempdir().unwrap();
+    corpus(tmp.path(), 79, 200_000);
+    scratch_within_forecast(tmp.path());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let rows = 300_000u64;
+    for (name, first) in [("world", 0), ("near", rows / 2)] {
+        let a: Vec<u64> = (first..first + rows).collect();
+        let b: Vec<String> = a.iter().map(|v| format!("b{v:09}")).collect();
+        let mut columns = vec![
+            ("a", Arc::new(UInt64Array::from(a)) as ArrayRef),
+            ("b", Arc::new(StringArray::from(b))),
+        ];
+        columns.extend(positions(rows as usize));
+        write(&dir.join(format!("{name}.parquet")), columns);
+    }
+    std::fs::write(dir.join("corpus.toml"), SORTED).unwrap();
+    scratch_within_forecast(dir);
+}
+
+const SORTED: &str = r#"
+[sources]
+world = "world.parquet"
+near  = "near.parquet"
+
+[defaults]
+source          = "world"
+allocation_view = "world"
+
+[[view]]
+name             = "world"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[view]]
+name             = "near"
+source           = "near"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "a"
+type   = "u64"
+unique = true
+
+[[attribute]]
+name   = "b"
+type   = "keyword"
+unique = true
+"#;
+
+/// Number the corpus in `dir` at the smallest sort budget, sampling the scratch directory's bytes
+/// throughout, and hold the most it held within the forecast.
+fn scratch_within_forecast(dir: &Path) {
     fn bytes_under(dir: &Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return 0;
@@ -628,10 +686,8 @@ fn the_identity_scratch_stays_within_its_forecast() {
             })
             .sum()
     }
-    let tmp = tempfile::tempdir().unwrap();
-    corpus(tmp.path(), 79, 200_000);
-    let args = args(tmp.path(), Some(16 << 20));
-    let scratch = tmp.path().join("scratch");
+    let args = args(dir, Some(16 << 20));
+    let scratch = dir.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
     let (forecast, _) = crate::residency::identity_disk(&args).unwrap();
     let done = std::sync::atomic::AtomicBool::new(false);

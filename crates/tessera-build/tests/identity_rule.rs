@@ -995,7 +995,20 @@ require_member_visibility = "any"
         strict: true,
         ..args(dir, declaration, &out)
     };
-    let report = build(&limited).expect("a clean corpus builds under --strict");
+    // The second view's frame is `auto`, fitted over the rows the build keeps: both name kept
+    // items, and neither has a value of `a` below the limit.
+    let near = tessera_build::Framing {
+        subject: "view 'near'".to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: tessera_build::config::Extent::Auto { margin: 0.0 },
+        views: vec![1],
+    };
+    let report = tessera_build::build_framed(&limited, &[near], &tessera_build::NoopObserver)
+        .expect("a clean corpus builds under --strict");
+    let bundle = tessera_store::read::open_bundle(&out).expect("the bundle opens");
+    let frame = bundle.manifest.views.iter().find(|v| v.id == "near").unwrap().quantisation;
+    // The kept rows sit at (0, 11) and (37, 48); the rows left out at (74, 85) and (11, 22).
+    assert_eq!((frame.x_min, frame.x_max, frame.y_min, frame.y_max), (0.0, 37.0, 11.0, 48.0));
 
     assert_eq!(report.items, 3, "only the kept items");
     let near = report.views.iter().find(|v| v.view_id == "near").unwrap();
@@ -1011,4 +1024,89 @@ require_member_visibility = "any"
     assert_eq!(outside("attribute source 'notes'"), Some(1), "b = p40");
     assert_eq!(outside("layer 'groups' members"), Some(2), "a = 40 and the null");
     assert!(report.refused.iter().all(|entry| !entry.is_refusal()), "{:?}", report.refused);
+}
+
+/// **Under `--limit` a row carrying a `tessera_id` is refused for it, however the file is read**:
+/// the first view's points, read by their own value; a second view's, which name items by `b`
+/// too; and a members file naming items by `a` alone. Each such row's value is past the limit.
+#[test]
+fn a_tessera_id_under_limit_is_refused_in_every_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let ids = |values: &[Option<&str>]| ("tessera_id", strings(values));
+    points(
+        &dir.join("points.parquet"),
+        &[Some(1), Some(2), Some(50)],
+        vec![
+            ("b", strings(&[Some("p1"), Some("p2"), Some("p50")])),
+            ids(&[None, None, Some("t")]),
+        ],
+    );
+    points(
+        &dir.join("near.parquet"),
+        &[None, Some(70)],
+        vec![("b", strings(&[Some("p1"), Some("q")])), ids(&[None, Some("t")])],
+    );
+    write(
+        &dir.join("members.parquet"),
+        vec![
+            ("key", strings(&[Some("k"), Some("k")])),
+            ("a", u64s(&[Some(1), Some(80)])),
+            ids(&[None, Some("t")]),
+        ],
+    );
+    let declaration = r#"
+[sources]
+points  = "points.parquet"
+near    = "near.parquet"
+members = "members.parquet"
+
+[defaults]
+source          = "points"
+allocation_view = "s0"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[view]]
+name             = "near"
+source           = "near"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "a"
+type   = "u64"
+unique = true
+
+[[attribute]]
+name   = "b"
+type   = "keyword"
+unique = true
+
+[[layer]]
+name                      = "groups"
+views                     = ["s0"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
+
+  [layer.members]
+  source = "members"
+"#;
+    let report = build(&BuildArgs {
+        limit: Some(10),
+        ..args(dir, declaration, &dir.join("bundle"))
+    })
+    .expect("the build runs");
+    for object in ["view 's0'", "view 'near'", "layer 'groups' members"] {
+        let unknown = refused(&report, object, "unknown_tessera_id").map(|e| e.rows);
+        assert_eq!(unknown, Some(1), "{object}: {:?}", report.refused);
+        assert!(refused(&report, object, "outside_limit").is_none(), "{object}");
+    }
 }

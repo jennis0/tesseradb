@@ -70,9 +70,10 @@ impl<'a> FileRead<'a> {
     }
 
     /// The row groups that can hold a row of the read: where `--limit` reads a prefix, those it
-    /// cannot rule out from the column's own statistics. Every group of any other file is read.
+    /// cannot rule out from the column's own statistics. Every group of any other file is read,
+    /// and every group of a file with a `tessera_id` column, whose rows are refused.
     pub(crate) fn kept_groups(&self) -> Option<Vec<usize>> {
-        let Some(LimitRead::Prefix { column, below }) = self.limit else {
+        let Some(LimitRead::Prefix { column, below }) = self.limit.filter(|_| !self.tessera) else {
             return None;
         };
         let index = self.groups.schema().column_with_name(column)?.0;
@@ -170,11 +171,22 @@ impl<'a> FileRead<'a> {
         for field in self.carried {
             keys.push(keys_of(self.path, column(&field.column)?, field)?);
         }
-        // Whether each row's value of the limit's attribute is at or above it, or null.
+        let tessera: Option<Vec<bool>> = match self.tessera {
+            true => {
+                let column = column(TESSERA_ID_COLUMN)?;
+                Some((0..len).map(|row| !column.is_null(row)).collect())
+            }
+            false => None,
+        };
+        let carries_tessera = |row: usize| tessera.as_ref().is_some_and(|t| t[row]);
+        // Whether each row's value of the limit's attribute is at or above it, or null. A row
+        // carrying a `tessera_id` is read whatever its value, and refused for it.
         let beyond = |name: &str, below: u64| -> Result<Vec<bool>> {
             let values = crate::input::id_values(self.path, column(name)?.as_ref(), name)?;
             Ok((0..len)
-                .map(|row| values.is_null(row) || values.value(row) >= below)
+                .map(|row| {
+                    (values.is_null(row) || values.value(row) >= below) && !carries_tessera(row)
+                })
                 .collect())
         };
         let mut outside: Option<Vec<bool>> = None;
@@ -203,17 +215,10 @@ impl<'a> FileRead<'a> {
             }) => {
                 left_out = Some(match (every_row, column) {
                     (false, Some(column)) => beyond(column, below)?,
-                    _ => vec![true; len],
+                    _ => (0..len).map(|row| !carries_tessera(row)).collect(),
                 });
             }
         }
-        let tessera = match self.tessera {
-            true => {
-                let column = column(TESSERA_ID_COLUMN)?;
-                Some((0..len).map(|row| !column.is_null(row)).collect())
-            }
-            false => None,
-        };
         Ok(Scanned {
             first,
             len,

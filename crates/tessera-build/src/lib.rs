@@ -1135,7 +1135,68 @@ struct StagedItem {
 /// arrays rather than one struct per item. [`build_in_memory`] is the older, linear
 /// implementation, kept as the byte-equality oracle the two are tested against.
 pub fn build(args: &BuildArgs) -> Result<BuildReport> {
-    pipeline::build(args, &observer::NoopObserver, ExtentRoute::Derived)
+    pipeline::build(args, &[], &observer::NoopObserver, ExtentRoute::Derived)
+}
+
+/// A frame the build fits once the identity pass has run, over the rows of each view's points it
+/// kept, and gives the views it covers in place of their [`ViewArgs::extent`].
+///
+/// This is how a `--limit` build is framed: a row naming an item the limit kept is kept whatever
+/// its own value, so which rows the frame covers is known only after the pass.
+#[derive(Debug, Clone)]
+pub struct Framing {
+    /// The view or group, as the frame's report names it.
+    pub subject: String,
+    pub projection: tessera_spatial::Projection,
+    pub extent: config::Extent,
+    /// The views it covers, by index into [`BuildArgs::views`].
+    pub views: Vec<usize>,
+}
+
+/// [`build`] with the frames fitted after the identity pass ([`Framing`]), each stage reported
+/// to `observer` as it completes.
+pub fn build_framed(
+    args: &BuildArgs,
+    frames: &[Framing],
+    observer: &dyn observer::BuildObserver,
+) -> Result<BuildReport> {
+    pipeline::build(args, frames, observer, ExtentRoute::Derived)
+}
+
+/// `args` with each of `frames` fitted over the rows the identity pass kept, and given to the
+/// views it covers. Each frame's report is printed.
+pub(crate) fn fit_frames(
+    args: &BuildArgs,
+    frames: &[Framing],
+    numbering: &ids::Numbering,
+) -> Result<BuildArgs> {
+    let mut fitted = args.clone();
+    for framing in frames {
+        let sources: Vec<config::FrameSource> = framing
+            .views
+            .iter()
+            .map(|&index| {
+                let view = &args.views[index];
+                config::FrameSource {
+                    points: &view.points,
+                    fields: &view.point_fields,
+                    select: view.select.as_ref(),
+                    kept: Some(input::KeptRows(numbering.points(index))),
+                }
+            })
+            .collect();
+        let frame = config::frame_of(
+            &framing.subject,
+            framing.projection,
+            &framing.extent,
+            &sources,
+        )?;
+        eprintln!("{}", frame.report());
+        for &index in &framing.views {
+            fitted.views[index].extent = frame.extent;
+        }
+    }
+    Ok(fitted)
 }
 
 /// Which route [`build`] gives a string column that has two — an entity-ordered arena under
@@ -1163,7 +1224,7 @@ pub enum ExtentRoute {
 
 /// [`build`] with the string columns' route named rather than derived ([`ExtentRoute`]).
 pub fn build_routed(args: &BuildArgs, route: ExtentRoute) -> Result<BuildReport> {
-    pipeline::build(args, &observer::NoopObserver, route)
+    pipeline::build(args, &[], &observer::NoopObserver, route)
 }
 
 /// [`build`], reporting each pipeline stage's duration to `observer` as it completes.
@@ -1175,7 +1236,7 @@ pub fn build_observed(
     args: &BuildArgs,
     observer: &dyn observer::BuildObserver,
 ) -> Result<BuildReport> {
-    pipeline::build(args, observer, ExtentRoute::Derived)
+    pipeline::build(args, &[], observer, ExtentRoute::Derived)
 }
 
 /// The linear, fully in-memory build.
