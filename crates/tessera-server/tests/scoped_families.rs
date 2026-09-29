@@ -742,6 +742,41 @@ async fn the_value_list_is_the_views_own() {
     );
 }
 
+/// **Suggest counts a scoped family under a filter on another scoped family**, both read from the
+/// request's own view: each count is that quarter's items carrying the `mood` value whose `sector`
+/// the filter names.
+#[tokio::test]
+async fn a_scoped_family_counts_under_a_scoped_filter() {
+    let served = Served::build(build_families).await;
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/categories/mood/suggest"))
+            .bearer_auth(&served.token)
+            .json(&json!({
+                "q": "", "counts": true, "view": format!("quarter:{key}"),
+                "filters": { "sector": { "in": ["north", "rare"] } },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: Value = resp.json().await.unwrap();
+        let values = body["values"].as_array().unwrap();
+        assert_eq!(values.len(), MOODS.len(), "{body}");
+        for value in values {
+            let mood_key = value["key"].as_str().unwrap();
+            let expected = quarter_entities(slot)
+                .filter(|&e| {
+                    matches!(sector(slot, e), Some("north" | "rare")) && mood(slot, e) == Some(mood_key)
+                })
+                .count() as u64;
+            assert_eq!(value["count"], expected, "quarter:{key} {mood_key}: {body}");
+        }
+    }
+}
+
 /// **A `derived` list narrows per principal *and* per view** — the C11 channel this change opens
 /// over a per-view column (per-point-attributes §3.3).
 ///

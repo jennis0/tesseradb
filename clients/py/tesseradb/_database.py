@@ -1571,20 +1571,22 @@ class Database:
         prefix: str | None = None,
         view: str | None = None,
         codes: Sequence[int] | None = None,
+        filters: dict | None = None,
     ):
         """The values of a category column, as a pyarrow table.
 
         This is `Viewer.categories` as this database's own reader, which sees every value.
         `prefix` lists only the values starting with it, with a count of items for each; `view`
         names the view to read a column declared for a view group in; `codes` lists only the
-        values of those codes.
+        values of those codes; `filters`, with `prefix` and `view`, counts only the items in the
+        view that pass it.
 
             db.categories("venue")
             db.categories("venue", prefix="neur")
             db.categories("venue", codes=[1, 3])
         """
         self._refuse_before_the_first_commit("categories")
-        return self.viewer().categories(column, prefix, view, codes)
+        return self.viewer().categories(column, prefix, view, codes, filters)
 
     def _identity_in_words(self) -> str:
         """How this database names a row, for the commit report."""

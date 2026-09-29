@@ -1,5 +1,5 @@
 //! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items`,
-//! `/v1/items/{tessera_id}` and `/v1/artifacts`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
+//! `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
 //! session plane's `/session/authorise`.
 
 use std::sync::Arc;
@@ -35,13 +35,17 @@ pub fn router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
-        .route("/v1/categories/{column}/suggest", get(suggest))
+        .route(
+            "/v1/categories/{column}/suggest",
+            get(suggest).post(suggest_filtered),
+        )
         .route("/v1/viewport", post(viewport))
         .route("/v1/items", post(crate::records::items))
         .route("/v1/items/{tessera_id}", post(item))
         .route("/v1/artifacts", post(crate::records::artifacts))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
+        .route("/v1/aggregate", post(crate::aggregate::aggregate))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         // Trims the allocator after responses; mounted on every plane, so a node that never
@@ -271,6 +275,13 @@ async fn meta(
             // `POST /v1/items`' page ceilings: rows, and Arrow bytes before compression.
             "max_page_rows": state.limits.max_page_rows,
             "max_page_bytes": state.limits.max_page_bytes,
+            // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top`,
+            // named list and cells.
+            "max_aggregate_groupings": state.limits.max_aggregate_groupings,
+            "max_aggregate_top": state.limits.max_aggregate_top,
+            "max_aggregate_named": state.limits.max_aggregate_named,
+            // The most cells one grouping's cell level may list: its depth's cells in its area.
+            "max_aggregate_cells": state.limits.max_aggregate_cells,
         },
         // The layers this principal may know exist, with what each declared. Never a layer's
         // artifact count, which counts objects the principal may not see, and never its gate
@@ -409,40 +420,70 @@ async fn categories(
 /// Resolves the column for `/v1/categories/{column}` and its `suggest` route, so the two cannot
 /// disagree on what a spelling names. A scoped family is addressed by `?view=` or a
 /// `{column}@{key}` pin; a view the session cannot reach is the unknown-view 404. Returns the
-/// resolved column and the resolved view's id, where the request named one.
-fn resolve_category_column(
-    meta: &tessera_engine::EngineMeta,
+/// resolved column and the resolved view, where the request named one.
+fn resolve_category_column<'m>(
+    meta: &'m tessera_engine::EngineMeta,
     column: &str,
     requested_view: Option<&str>,
     visible: &tessera_engine::gate::VisibleViews,
-) -> Result<(String, Option<String>), ApiError> {
+) -> Result<(String, Option<&'m tessera_engine::MetaView>), ApiError> {
     // `view` is resolved before the column, so an unknown or unreachable view is a 404 even for
     // an entity-scoped column.
-    let view = match requested_view {
-        None => "",
+    let resolved_view = match requested_view {
+        None => None,
         Some(requested) => match meta.resolve_visible_view(requested, visible) {
-            Some(view) => view.id.as_str(),
+            Some(view) => Some(view),
             None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
         },
     };
-    match meta.resolve_category_column(column, view, visible) {
+    let view = resolved_view.map_or("", |view| view.id.as_str());
+    match category_column(meta, column, view, visible)? {
+        CategoryColumn::Resolved(resolved) => Ok((resolved, resolved_view)),
         // A non-category column gets the same 404 as no column at all.
+        CategoryColumn::NotCategory | CategoryColumn::Unknown => {
+            Err(ApiError::Unknown("unknown category column".to_string()))
+        }
+        CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+            "'{column}' is scoped to view group '{group}' and this request names no view of \
+             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
+        ))),
+    }
+}
+
+/// What a spelling names as a category column.
+pub(crate) enum CategoryColumn {
+    Resolved(String),
+    /// A column this principal can reach that is not a category.
+    NotCategory,
+    /// No column this principal can reach.
+    Unknown,
+    /// A group-scoped family named without a pin, under no view of its group.
+    Unpinned { group: String },
+}
+
+/// The category column `column` names under the resolved `view` (`""` for none), as a filter leaf
+/// resolves it. A scoped family's spelling that names a pin wrongly is refused.
+pub(crate) fn category_column(
+    meta: &tessera_engine::EngineMeta,
+    column: &str,
+    view: &str,
+    visible: &tessera_engine::gate::VisibleViews,
+) -> Result<CategoryColumn, ApiError> {
+    match meta.resolve_category_column(column, view, visible) {
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok((resolved, requested_view.map(|_| view.to_string()))),
-        tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
-            "'{column}' is scoped to view group '{group}' and this request names no view of \
-             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
-        ))),
+        } => Ok(CategoryColumn::Resolved(resolved)),
+        tessera_engine::LeafColumn::Resolved { .. } => Ok(CategoryColumn::NotCategory),
+        tessera_engine::LeafColumn::Unpinned { group } => Ok(CategoryColumn::Unpinned { group }),
         tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
             "'{column}' is not scoped to a view group; leave out the pin"
         ))),
-        _ => Err(ApiError::Unknown("unknown category column".to_string())),
+        _ => Ok(CategoryColumn::Unknown),
     }
 }
 
@@ -463,6 +504,24 @@ struct SuggestQuery {
     view: Option<String>,
 }
 
+/// `POST /v1/categories/{column}/suggest`'s body: the query string's fields, and a filter.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SuggestBody {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    counts: Option<bool>,
+    #[serde(default)]
+    view: Option<String>,
+    /// The viewport's filter object, parsed against `view`, which it needs. It narrows the counts
+    /// and nothing else.
+    #[serde(default)]
+    filters: Option<serde_json::Value>,
+}
+
 /// `GET /v1/categories/{column}/suggest`: the values whose folded key or title, or a word start in
 /// either, has `q` as a prefix. Who may see a value is decided as for `/v1/categories`. Unknown
 /// parameters and `limit=0` are 422s.
@@ -471,14 +530,40 @@ async fn suggest(
     ViewerSession(session): ViewerSession,
     AxumPath(column): AxumPath<String>,
     ApiQuery(query): ApiQuery<SuggestQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if query.q.len() > 256 {
+) -> Result<Response, ApiError> {
+    let body = SuggestBody {
+        q: query.q,
+        limit: query.limit,
+        counts: query.counts,
+        view: query.view,
+        filters: None,
+    };
+    suggest_page(state, session, column, body).await
+}
+
+/// `POST /v1/categories/{column}/suggest`: the same page, with counts taken under a filter.
+async fn suggest_filtered(
+    State(state): State<Arc<AppState>>,
+    ViewerSession(session): ViewerSession,
+    AxumPath(column): AxumPath<String>,
+    ApiJson(body): ApiJson<SuggestBody>,
+) -> Result<Response, ApiError> {
+    suggest_page(state, session, column, body).await
+}
+
+async fn suggest_page(
+    state: Arc<AppState>,
+    session: Arc<tessera_engine::Session>,
+    column: String,
+    req: SuggestBody,
+) -> Result<Response, ApiError> {
+    if req.q.len() > 256 {
         return Err(ApiError::Contract(format!(
             "q must be at most 256 bytes, got {}",
-            query.q.len()
+            req.q.len()
         )));
     }
-    let limit = match query.limit {
+    let limit = match req.limit {
         Some(0) => {
             return Err(ApiError::Contract(
                 "limit must be at least 1".to_string(),
@@ -487,17 +572,30 @@ async fn suggest(
         Some(n) => n.min(state.limits.max_suggestions),
         None => state.limits.max_suggestions,
     };
-    let counts = query.counts.unwrap_or(false);
+    let counts = req.counts.unwrap_or(false);
 
     let meta = state.engine.meta();
     let visible = session.visible_views();
     let (resolved, view) =
-        resolve_category_column(&meta, &column, query.view.as_deref(), visible)?;
+        resolve_category_column(&meta, &column, req.view.as_deref(), visible)?;
+    // Parsed before any work, so a refusal is a 422 however busy the server is.
+    let filter = match (&req.filters, &view) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return Err(ApiError::Contract(
+                "`filters` is evaluated in a view; send `view` as well".to_string(),
+            ))
+        }
+        (Some(value), Some(view)) => Some(
+            FilterParser::new(&meta, view, visible, state.limits.max_region_vertices)
+                .parse(value)?,
+        ),
+    };
+    let view = view.map(|view| view.id.clone());
 
     // At most one suggestion walk per session, refused with a 429 before any work runs, so an
-    // undebounced client cannot queue keystrokes. It takes no compute-gate permit; a keystroke
-    // queued behind viewport renders would be useless.
-    let Some(_suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
+    // undebounced client cannot queue keystrokes.
+    let Some(suggest_guard) = state.suggest_admission.try_begin(session.token_id()) else {
         return Err(ApiError::Backpressure {
             retry_after_s: crate::error::RETRY_AFTER_SECS,
             cause: crate::error::ShedCause::SuggestInFlight,
@@ -506,31 +604,46 @@ async fn suggest(
 
     let walk_budget = state.limits.max_suggestion_walk;
     let max_suggest_set_entities = state.limits.max_suggest_set_entities;
-    let q = query.q.clone();
-    let page = state
-        .blocking(move |state| {
-            let _suggest_guard = _suggest_guard;
-            state
-                .engine
-                .suggest(
-                    &session,
-                    &resolved,
-                    view.as_deref(),
-                    &q,
+    let q = req.q.clone();
+    let gated = view.is_some() && counts;
+    // A client that goes away drops this handler, and the guard cancels the engine call, which
+    // stops at its next check and releases the permit and the session's suggest slot.
+    let cancel = CancelToken::new();
+    let _cancel_guard = CancelGuard::new(cancel.clone());
+    let work = move |state: &AppState| {
+        let _suggest_guard = suggest_guard;
+        state
+            .engine
+            .suggest(
+                &session,
+                tessera_engine::SuggestRequest {
+                    column: &resolved,
+                    view: view.as_deref(),
+                    filter: filter.as_ref(),
+                    q: &q,
                     limit,
                     counts,
                     walk_budget,
                     max_suggest_set_entities,
-                )
-                .map_err(map_engine_error)
-        })
-        .await?
-        .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
+                    cancel: Some(cancel),
+                },
+            )
+            .map_err(map_engine_error)
+    };
+    // A count within a view opens the view as `/v1/viewport` does, which may build the session's
+    // projection and evaluates any filter over the whole view, so it takes a compute permit. A
+    // keystroke that does neither does not: queued behind viewport renders it would be useless.
+    let page = if gated {
+        state.gated(work).await?
+    } else {
+        state.blocking(work).await?
+    }
+    .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
-    Ok(Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         // The caller's own spelling, as `/v1/categories` echoes it.
         "column": column,
-        "q": query.q,
+        "q": req.q,
         "values": page.values.iter().map(|v| {
             let mut value = serde_json::json!({
                 "code": v.code,
@@ -549,7 +662,16 @@ async fn suggest(
             value
         }).collect::<Vec<_>>(),
         "more": page.more,
-    })))
+    }));
+    let mut response = axum::response::IntoResponse::into_response(body);
+    if let Some(verdict) = page.region {
+        response.headers_mut().insert(
+            "x-tessera-region",
+            axum::http::HeaderValue::from_str(&verdict.header_value())
+                .expect("a region verdict is a valid header value"),
+        );
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1099,6 +1221,17 @@ fn run_viewport_stream(
     // `sink` drops here, after the state stores, releasing the channel sender and the slot permit.
 }
 
+/// Refuses a bbox that is not `[x0, y0, x1, y1]` with `x0 <= x1`, `y0 <= y1`, all finite; `name`
+/// is the key that carried it.
+pub(crate) fn check_bbox(name: &str, bbox: &[f64; 4]) -> Result<(), ApiError> {
+    if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+        return Err(ApiError::Contract(format!(
+            "{name} must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite"
+        )));
+    }
+    Ok(())
+}
+
 async fn viewport(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
@@ -1110,13 +1243,7 @@ async fn viewport(
 
     // Exactly one of `bbox` and `tiles`.
     match (&req.bbox, &req.tiles) {
-        (Some(bbox), None) => {
-            if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
-                return Err(ApiError::Contract(
-                    "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-                ));
-            }
-        }
+        (Some(bbox), None) => check_bbox("bbox", bbox)?,
         (None, Some(tiles)) => {
             // A prefix carries no depth, so one with bits above `zoom` is refused rather than
             // masked off.

@@ -72,11 +72,11 @@ flowchart TB
 
 *What tessera build writes and tessera serve reads, and what the write path adds while serving.*
 
-A deny is in force from the moment it is acknowledged. It is recorded in the **overlay**, the
-in-memory record of what is hidden. A deletion leaves the overlay at the compaction that drops its
-rows. A suppression leaves it at an unsuppress, which lifts the item's suppression, or at the
-compaction that removes the entity it names. A compaction removes only deleted entities, so an item
-that still exists stays suppressed through the entity it holds.
+A deny is in force for every request that starts after it is acknowledged. It is recorded in the
+**overlay**, the in-memory record of what is hidden. A deletion leaves the overlay at the compaction
+that drops its rows. A suppression leaves it at an unsuppress, which lifts the item's suppression,
+or at the compaction that removes the entity it names. A compaction removes only deleted entities,
+so an item that still exists stays suppressed through the entity it holds.
 
 ## Generations
 

@@ -133,6 +133,10 @@ impl Set {
 }
 
 /// The members of `entities` holding a row in the view's rows the page's mask was projected over.
+pub(crate) fn in_view(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
+    restrict_under(open, entities)
+}
+
 fn restrict_under(open: &OpenView<'_>, entities: &Bitmap) -> Result<Bitmap> {
     // The projection covers an extent of this generation's row space: a projection served from
     // the generation before is served only where this one extends it, which a merge does not.
@@ -184,9 +188,6 @@ pub(super) fn compose(
     let candidate = engine.filter_candidate(served.session, generation)?;
     let resolved = ResolvedLeaves::default();
     let whole = || Set::of(Held::Whole, open.mask.visible_total(), None);
-    let total = served.data.row_space.total_rows();
-    let whole_view = 0..u32::try_from(total).unwrap_or(u32::MAX);
-    let domain = std::slice::from_ref(&whole_view);
     let (set, reference) = engine.route_filters_under(
         served,
         &open.mask,
@@ -194,32 +195,18 @@ pub(super) fn compose(
         &resolved,
         &req.cancel,
         |route| {
-            let routed = |expr: &crate::filter::FilterExpr| -> Result<Set> {
+            let route_one = |expr: &crate::filter::FilterExpr| -> Result<Set> {
                 check_cancelled(&req.cancel)?;
-                Ok(match route(expr, prefer_row)? {
-                    RoutedFilter::Entity(entities) => {
-                        let restricted = restrict_under(open, &entities)?;
-                        let size = restricted.cardinality();
-                        Set::of(Held::Entities(restricted), size, None)
-                    }
-                    RoutedFilter::Row(tree) => {
-                        let region = tree.region_verdict();
-                        let matched =
-                            engine.evaluate_row_route(&tree, served, domain, total, false)?;
-                        let rows = open.mask.visible_rows(matched.rows());
-                        let size = rows.cardinality();
-                        Set::of(Held::Rows(rows), size, region)
-                    }
-                })
+                routed(engine, open, route(expr, prefer_row)?)
             };
             let set = match &req.filter {
                 None => whole(),
-                Some(expr) => routed(expr)?,
+                Some(expr) => route_one(expr)?,
             };
             let reference = match &req.reference {
                 None => None,
                 Some(Reference::Visible) => Some(whole()),
-                Some(Reference::Filter(expr)) => Some(routed(expr)?),
+                Some(Reference::Filter(expr)) => Some(route_one(expr)?),
             };
             Ok((set, reference))
         },
@@ -228,6 +215,58 @@ pub(super) fn compose(
         set,
         reference,
         candidate,
+    })
+}
+
+/// One routed filter as a set in the view: an entity-space answer kept to the entities the mask's
+/// rows cover, a row-space one taken under the mask over the whole view.
+fn routed(engine: &Engine, open: &OpenView<'_>, routed: RoutedFilter) -> Result<Set> {
+    Ok(match routed {
+        RoutedFilter::Entity(entities) => {
+            let restricted = restrict_under(open, &entities)?;
+            let size = restricted.cardinality();
+            Set::of(Held::Entities(restricted), size, None)
+        }
+        RoutedFilter::Row(tree) => {
+            let served = &open.served;
+            let region = tree.region_verdict();
+            let total = served.data.row_space.total_rows();
+            let whole_view = 0..u32::try_from(total).unwrap_or(u32::MAX);
+            let matched = engine.evaluate_row_route(
+                &tree,
+                served,
+                std::slice::from_ref(&whole_view),
+                total,
+                false,
+            )?;
+            let rows = open.mask.visible_rows(matched.rows());
+            let size = rows.cardinality();
+            Set::of(Held::Rows(rows), size, region)
+        }
+    })
+}
+
+/// The members of `candidate` holding a row in `open`'s view that pass `expr`, and the coarsest
+/// verdict its region leaves reached: one filtered set, composed as [`compose`] composes a page's,
+/// for a caller counting by entity alone.
+pub(crate) fn entities_passing(
+    engine: &Engine,
+    open: &OpenView<'_>,
+    candidate: &Bitmap,
+    expr: &crate::filter::FilterExpr,
+    cancel: &Option<CancelToken>,
+) -> Result<(Bitmap, Option<RegionVerdict>)> {
+    check_cancelled(cancel)?;
+    let resolved = ResolvedLeaves::default();
+    engine.route_filters_under(&open.served, &open.mask, candidate, &resolved, cancel, |route| {
+        let set = routed(engine, open, route(expr, false)?)?;
+        check_cancelled(cancel)?;
+        let entities = match set.held {
+            Held::Entities(entities) => entities,
+            Held::Rows(rows) => crossing(engine, open, &rows)?,
+            Held::Whole => unreachable!("a routed filter is never the whole view"),
+        };
+        Ok((entities, set.region))
     })
 }
 

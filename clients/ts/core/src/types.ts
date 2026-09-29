@@ -596,14 +596,15 @@ export type SuggestValue = {
   /** Where the query matched. */
   match: MatchSpan;
   /**
-   * How many items carrying this value this principal can see, computed exactly per request.
-   * Present only when the request set `counts: true`.
+   * How many items carrying this value this principal can see, computed exactly per request, in
+   * the request's view where it named one and among the items passing its `filters` where it
+   * sent them. Present only when the request set `counts: true`.
    */
   count?: number;
 };
 
 /**
- * One page of `GET /v1/categories/{column}/suggest`.
+ * One page of `/v1/categories/{column}/suggest`.
  *
  * @category Requests and responses
  */
@@ -619,17 +620,24 @@ export type SuggestPage = {
    * `selection.maxSuggestionWalk` values. There is no cursor; a longer query narrows the answer.
    */
   more: boolean;
+  /** The verdict on the counts' `region` leaves (`x-tessera-region`), present only where the request's `filters` carried one and asked for counts. */
+  region?: RegionVerdict;
 };
 
 /**
- * The outcome of {@link TesseraClient.suggest}. `status: 'ok'` carries the page. A session may
- * have one suggestion request in flight at a time, and the server refuses a second with `429`.
- * That refusal arrives as `status: 'superseded'`, with `retryAfterS` the seconds to wait before
- * retrying, and is not thrown.
+ * The outcome of {@link TesseraClient.suggest}. `status: 'ok'` carries the page.
+ *
+ * `status: 'superseded'` is any `429` the server answered, returned rather than thrown: the
+ * request was shed and may be sent again after `retryAfterS` seconds. `detail` is the server's
+ * reason. Usually the session's previous suggestion is still running, since a session has one in
+ * flight at a time. A request with `view` and `counts` can also be shed by compute admission, or
+ * while another request builds the session's view of the map.
  *
  * @category Requests and responses
  */
-export type SuggestResult = ({status: 'ok'} & SuggestPage) | {status: 'superseded'; retryAfterS: number};
+export type SuggestResult =
+  | ({status: 'ok'} & SuggestPage)
+  | {status: 'superseded'; retryAfterS: number; detail: string | null};
 
 /**
  * The body of `POST /v1/viewport`, as {@link TesseraClient.viewport} takes it. Send exactly one of

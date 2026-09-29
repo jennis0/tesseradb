@@ -43,8 +43,18 @@ pub enum ConfigError {
     PageBytesTooLarge {
         value: usize,
     },
+    /// An aggregate page or response past what one frame can carry.
+    AggregateBytesTooLarge {
+        key: &'static str,
+        value: usize,
+    },
     /// No page could start inside the response's byte budget.
     ResponseBelowPage {
+        response_bytes: usize,
+        page_bytes: usize,
+    },
+    /// No aggregate page could start inside an aggregate response's byte budget.
+    AggregateResponseBelowPage {
         response_bytes: usize,
         page_bytes: usize,
     },
@@ -151,6 +161,21 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "serve.bulk_response_bytes = {response_bytes} is below serve.max_page_bytes = \
                  {page_bytes}, so no page could start; write at least {page_bytes}"
+            ),
+            ConfigError::AggregateBytesTooLarge { key, value } => write!(
+                f,
+                "{key} = {value} is above {}, the largest page one frame can carry; write a \
+                 smaller number",
+                crate::defaults::MAX_PAGE_BYTES_CEILING
+            ),
+            ConfigError::AggregateResponseBelowPage {
+                response_bytes,
+                page_bytes,
+            } => write!(
+                f,
+                "serve.aggregate_response_bytes = {response_bytes} is below \
+                 serve.aggregate_page_bytes = {page_bytes}, so no page could start; write at \
+                 least {page_bytes}"
             ),
         }
     }

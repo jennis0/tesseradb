@@ -1,4 +1,4 @@
-"""The battery, recorded against a live server — membership, the marked absence, and the
+"""The battery, recorded against a live server — membership, the counts by group, and the
 determinism the whole suite rests on.
 
 The load-bearing test here is the last one: recording the battery twice against unchanged state
@@ -17,22 +17,21 @@ because one designed corpus shared across modules is that conftest's stated reas
 
 from __future__ import annotations
 
+import json
+
 import pytest
-import requests
 
 from oracle import catalogue as cat
 from oracle import wire
 
 from .battery import (
-    Absent,
+    Aggregate,
     Categories,
     Item,
     Meta,
-    Region,
     Viewport,
     build_battery,
     record,
-    record_one,
 )
 from .canonical import Json, Streamed
 
@@ -99,31 +98,30 @@ def test_the_battery_covers_every_surface_the_design_names(catalogue_battery):
     assert any(v.tiles is not None for v in viewports), "the tiles request form is uncovered"
     assert by_kind.get(Item), "no drill-down — the only reader of all three homes (§3)"
 
-    absences = by_kind.get(Absent, [])
-    assert len(absences) == 1 and isinstance(absences[0].query, Region), (
-        "/v1/region must ride the battery as exactly one marked absence — neither silently "
-        "omitted nor duplicated"
-    )
+    aggregates = by_kind.get(Aggregate, [])
+    assert len(aggregates) == 1, "the counts by group over a region ride the battery once"
+    assert "region" in aggregates[0].filters and aggregates[0].reference == "{}"
 
 
-def test_region_is_still_a_true_absence(catalogue_server, battery_token, catalogue_battery):
-    """The marker is only honest while the route is missing. The day `/v1/region` lands, this
-    fails, and whoever reads it promotes the `Absent` entry to a live query and writes the
-    `Batches` canonicalisation (`suite.canonical.Batches`'s own doc says the same)."""
-    resp = requests.post(
-        f"{catalogue_server.viewer_base}/v1/region",
-        headers={"Authorization": f"Bearer {battery_token}"},
-        json={"view": cat.VIEW_ID, "bbox": list(BBOX)},
-        timeout=10,
-    )
-    assert resp.status_code == 404, (
-        f"/v1/region answered {resp.status_code} — the route exists now; promote the battery's "
-        f"Absent marker to a live Region query"
-    )
-
-    absent = next(e for e in catalogue_battery if isinstance(e, Absent))
-    with pytest.raises(NotImplementedError):
-        record_one(catalogue_server, battery_token, absent.query)
+def test_the_counts_by_group_are_the_viewports_over_the_same_region(
+    catalogue_server, battery_token, catalogue_battery, first_recording
+):
+    """The aggregate's size and density agree with a viewport over the same region: the set's
+    size is the viewport's matched count, and every depth-4 cell is a tile's matched count."""
+    query = next(e for e in catalogue_battery if isinstance(e, Aggregate))
+    tables = first_recording[query].payload["tables"]
+    filters = json.loads(query.filters)
+    raw = catalogue_server.viewport(battery_token, cat.VIEW_ID, 4, BBOX, k=0, filters=filters)
+    tiles, _points = wire.decode_viewport(raw)
+    matched = {tile: m for tile, _v, m, _s, _h in tiles if m}
+    assert tables[0]["rows"] == [
+        {"count": sum(matched.values()), "reference_count": tables[0]["head"]["reference_total"],
+         "lift": tables[0]["rows"][0]["lift"]}
+    ]
+    assert tables[0]["head"]["total"] == sum(matched.values()) > 0
+    assert {row["cell"]: row["count"] for row in tables[1]["rows"] if row["count"]} == matched
+    for table in tables[2:]:
+        assert sum(row["count"] for row in table["rows"]) == tables[0]["head"]["total"]
 
 
 def test_every_recorded_surface_carries_content(first_recording, catalogue_battery):
@@ -149,8 +147,9 @@ def test_every_recorded_surface_carries_content(first_recording, catalogue_batte
         elif isinstance(query, Meta):
             assert isinstance(canonical, Json)
             assert canonical.payload["declared_scalars"]
-    absent_queries = {e.query for e in catalogue_battery if isinstance(e, Absent)}
-    assert absent_queries.isdisjoint(first_recording), "an Absent entry was recorded"
+        elif isinstance(query, Aggregate):
+            assert isinstance(canonical, Json)
+            assert all(table["rows"] for table in canonical.payload["tables"]), f"{query}"
 
 
 def test_recording_the_battery_twice_against_unchanged_state_compares_equal(

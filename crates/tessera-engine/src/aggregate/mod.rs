@@ -13,7 +13,7 @@
 
 mod artifacts;
 mod cursor;
-mod set;
+pub(crate) mod set;
 mod table;
 mod values;
 
@@ -79,6 +79,10 @@ pub struct Grouping {
     pub by: Option<By>,
     /// The depth of the cells, 0 to 32.
     pub cells: Option<u8>,
+    /// With `cells`, the bbox `[x0, y0, x1, y1]` in the view's frame whose cells are listed, as a
+    /// viewport's `bbox` lists tiles; `None` is the view's whole extent. A listed cell counts all
+    /// of its items.
+    pub area: Option<[f64; 4]>,
 }
 
 /// A grouping's outer level.
@@ -111,6 +115,8 @@ pub struct AggregateCaps {
     pub groupings: u32,
     pub top: u32,
     pub named: u32,
+    /// The most cells a grouping's cell level may list, whatever its groups.
+    pub cells: u64,
 }
 
 /// What precedes a response's tables, for its headers.
@@ -201,6 +207,14 @@ pub enum AggregateRefused {
     DepthPast32(u8),
     /// No `level` on a layer with several.
     LevelRequired(String),
+    /// More cells at `depth` in the grouping's area than the deployment allows; `deepest` is the
+    /// deepest depth at which the area fits, if any does.
+    TooManyCells {
+        depth: u8,
+        count: u64,
+        limit: u64,
+        deepest: Option<u8>,
+    },
 }
 
 impl std::fmt::Display for AggregateRefused {
@@ -236,6 +250,27 @@ impl std::fmt::Display for AggregateRefused {
             ),
             AggregateRefused::LevelRequired(layer) => {
                 write!(f, "layer '{layer}' has several levels; name one with level")
+            }
+            AggregateRefused::TooManyCells { limit: 0, .. } => write!(
+                f,
+                "selection.max_aggregate_cells is 0, so no cell level can be served; ask \
+                 without cells"
+            ),
+            AggregateRefused::TooManyCells {
+                depth,
+                count,
+                limit,
+                deepest,
+            } => {
+                write!(
+                    f,
+                    "{count} cells at depth {depth} in this area is more than \
+                     selection.max_aggregate_cells allows ({limit}); "
+                )?;
+                match deepest {
+                    Some(d) => write!(f, "ask for depth {d} or less, or a smaller area"),
+                    None => write!(f, "no depth fits"),
+                }
             }
         }
     }
@@ -286,7 +321,7 @@ impl Engine {
             .iter()
             .enumerate()
             .map(|(index, grouping)| {
-                Plan::of(self, session, &generation, req.view, index, grouping)
+                Plan::of(self, session, &generation, req.view, index, grouping, req.caps.cells)
             })
             .collect::<Result<Vec<_>>>()?;
         let layers: Vec<Option<u64>> = plans.iter().map(Plan::layer_entity).collect();

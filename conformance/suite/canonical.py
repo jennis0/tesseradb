@@ -114,22 +114,7 @@ class Streamed:
         }
 
 
-@dataclass(frozen=True)
-class Batches:
-    """`/v1/region`'s canonical form: plain Arrow in three batches — summary, preview,
-    breakdowns (contracts §3.2) — a shape neither of the other two arms represents.
-
-    ⊘ The arm exists so `Recorded` can type the response; no canonicaliser is written for it,
-    because the route is not in the router and there are no wire bytes to write one against. The
-    battery carries the route as a marked absence (`suite.battery.Absent`), and
-    `test_battery.py` pins the absence so the day the route lands, a test fails and this
-    docstring is the thing it points at.
-    """
-
-    batches: tuple[bytes, ...]
-
-
-Canonical = Json | Streamed | Batches
+Canonical = Json | Streamed
 
 
 def canonicalise_viewport(body: bytes) -> Streamed:
@@ -182,3 +167,16 @@ def canonicalise_viewport(body: bytes) -> Streamed:
         artifacts=artifacts_bytes,
         trailer=trailer_bytes,
     )
+
+
+def table_rows(body: bytes) -> tuple[list[tuple[dict, list[dict]]], dict]:
+    """One `/v1/aggregate` body as its table heads, each with its rows as plain dicts, and its
+    trailer. Refuses a malformed body through `oracle.wire.split_aggregate_frames`."""
+    decoded = wire.split_aggregate_frames(body)
+    tables = []
+    for head, pages in decoded.tables:
+        rows: list[dict] = []
+        for records, _end in pages:
+            rows += ipc.open_stream(io.BytesIO(records)).read_all().to_pylist()
+        tables.append((head, rows))
+    return tables, decoded.trailer

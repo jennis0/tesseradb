@@ -363,6 +363,7 @@ fn caps() -> AggregateCaps {
         groupings: 8,
         top: 100,
         named: 100,
+        cells: u64::MAX,
     }
 }
 
@@ -518,6 +519,7 @@ fn field(column: &str, pick: Pick<String>) -> Grouping {
             pick,
         }),
         cells: None,
+        area: None,
     }
 }
 
@@ -529,6 +531,7 @@ fn size() -> Grouping {
     Grouping {
         by: None,
         cells: None,
+        area: None,
     }
 }
 
@@ -1113,6 +1116,7 @@ fn a_request_past_a_limit_or_naming_what_cannot_be_counted_is_refused() {
         Grouping {
             by: None,
             cells: Some(33),
+            area: None,
         },
     ] {
         assert!(
@@ -1623,6 +1627,7 @@ fn layer(name: &str, pick: Pick<tessera_types::TesseraId>) -> Grouping {
             pick,
         }),
         cells: None,
+        area: None,
     }
 }
 
@@ -1760,6 +1765,7 @@ fn artifact_rows_are_the_oracles_and_a_withheld_artifact_shows_nowhere() {
                     pick: Pick::Top(3),
                 }),
                 cells: Some(depth),
+                area: None,
             }];
             table(engine, &session, request(&groupings))
                 .1
@@ -2012,6 +2018,7 @@ fn artifact_cells_are_the_oracles() {
                         pick: Pick::Top(2),
                     }),
                     cells: Some(depth),
+                    area: None,
                 }];
                 let served_rows: Vec<(Option<String>, u64, u64)> =
                     table(engine, &session, request(&groupings))
@@ -2234,6 +2241,7 @@ fn a_level_is_required_on_a_layer_with_several() {
             pick: Pick::Top(5),
         }),
         cells: None,
+        area: None,
     };
     assert!(matches!(
         respond(engine, &session, request(&[at(None)])),
@@ -2571,6 +2579,113 @@ fn cell_tables_over_many_chunks_and_pages_are_the_oracles() {
         assert!(
             widest > first_batch,
             "depth {depth}: at most {widest} chunks a response"
+        );
+    }
+}
+
+// ---- the area of a cell level ---------------------------------------------------------------
+
+fn in_area(mut grouping: Grouping, area: [f64; 4]) -> Grouping {
+    grouping.area = Some(area);
+    grouping
+}
+
+/// **An area lists only its own cells, each with all of its items**: at a depth the viewport
+/// draws and one past it, with no group and grouped, beside a reference, a table over an area is
+/// the whole view's table with the cells outside the area taken out, and its head is the whole
+/// set's.
+#[test]
+fn an_area_lists_only_its_cells_and_leaves_the_head_whole() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let area = [120.0, 250.5, 610.0, 580.0];
+    for depth in [4u8, 9, 20] {
+        let rect = tessera_spatial::cells_for_bbox(area, depth, &extent());
+        for grouping in [with_cells(size(), depth), with_cells(field("kind", Pick::Top(2)), depth)] {
+            let mut req = request(std::slice::from_ref(&grouping));
+            req.reference = Some(Reference::Visible);
+            let (whole_head, whole) = table(engine, &session, req.clone());
+            let restricted = [in_area(grouping.clone(), area)];
+            let (head, rows) = table(engine, &session, AggregateRequest { groupings: &restricted, ..req });
+            let expected: Vec<Row> = whole
+                .into_iter()
+                .filter(|row| rect.contains(row.cell.unwrap()))
+                .collect();
+            assert!(!expected.is_empty(), "depth {depth}: the area holds cells");
+            assert_eq!(rows, expected, "depth {depth}: {grouping:?}");
+            assert_eq!(head, whole_head, "depth {depth}: the head is the whole set's");
+        }
+    }
+}
+
+/// **The cell limit is geometry**: it counts the cells at the depth in the area, whatever the set
+/// holds and however many groups share them, and the refusal names the deepest depth that fits.
+#[test]
+fn the_cell_limit_counts_the_areas_cells_and_nothing_else() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let mut empty = request(&[]);
+    empty.filter = Some(bbox(0.0, 0.0, 0.5, 0.5));
+    for (filter, grouping) in [
+        (None, size()),
+        (empty.filter.clone(), size()),
+        (None, field("kind", Pick::Top(3))),
+    ] {
+        let fits = [with_cells(grouping.clone(), 2)];
+        let mut req = request(&fits);
+        req.filter = filter.clone();
+        req.caps.cells = 16;
+        respond(engine, &session, req.clone()).expect("16 cells at depth 2 fit a limit of 16");
+        let over = [with_cells(grouping.clone(), 3)];
+        let Err(refused) =
+            respond(engine, &session, AggregateRequest { groupings: &over, ..req.clone() })
+        else {
+            panic!("64 cells do not fit");
+        };
+        assert!(matches!(
+            refused,
+            EngineError::AggregateRefused(tessera_engine::AggregateRefused::TooManyCells {
+                depth: 3,
+                count: 64,
+                limit: 16,
+                deepest: Some(2),
+            })
+        ), "{refused:?}");
+        // A quarter of the view at depth 3 is 16 cells again.
+        let quarter = [in_area(with_cells(grouping, 3), [0.0, 0.0, 499.0, 499.0])];
+        respond(engine, &session, AggregateRequest { groupings: &quarter, ..req })
+            .expect("a quarter of the view at depth 3 fits");
+    }
+}
+
+/// **A table over an area pages from any cell**: its pages joined are the table read whole.
+#[test]
+fn a_table_over_an_area_pages_from_any_cell() {
+    let fx = fixture();
+    let engine = &fx.engine;
+    let session = fx.session(true);
+    let area = [100.0, 100.0, 700.0, 450.0];
+    let groupings = [
+        in_area(with_cells(field("kind", Pick::Top(2)), 7), area),
+        in_area(with_cells(size(), 24), area),
+    ];
+    let mut req = request(&groupings);
+    req.reference = Some(Reference::Visible);
+    let whole = read_all(engine, &session, req.clone());
+    for (_, rows) in whole.values() {
+        assert!(rows.len() > 20, "each table spans many pages");
+    }
+    for page_rows in [13u32, 100] {
+        let mut paged = req.clone();
+        paged.page_rows = Some(page_rows);
+        paged.pages = Some(2);
+        let joined = read_all(engine, &session, paged);
+        assert_eq!(
+            joined.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+            whole.values().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+            "{page_rows} rows a page"
         );
     }
 }

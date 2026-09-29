@@ -74,6 +74,7 @@ function operationOf(ops: Operation[], method: string, path: string): string | n
 /** Operations reached under another name. */
 const REACHED_AS: Record<string, string> = {
   suggestCategoryValues: 'suggest',
+  suggestCategoryValuesFiltered: 'suggest',
   browseArtifacts: 'browse',
   addVocabularyValues: 'vocabularyValues',
   declarePlainView: 'declareView',
@@ -93,7 +94,8 @@ const NOT_REACHED = new Map([
 
 /**
  * One call of each `TesseraClient` method that reaches an operation, with arguments enough to send
- * its request, and the signal where one is given.
+ * its request, and the signal where one is given. A method reaching two operations has a call per
+ * operation, keyed by the operation's id.
  */
 const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<unknown>> = {
   authorise: (c, signal) => c.authorise(['t'], signal),
@@ -101,6 +103,8 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
   meta: (c, signal) => c.meta('tok', signal),
   categories: (c, signal) => c.categories('tok', 'archive', {signal}),
   suggest: (c, signal) => c.suggest('tok', 'archive', 'cs', {signal}),
+  suggestCategoryValuesFiltered: (c, signal) =>
+    c.suggest('tok', 'archive', 'cs', {view: 's0', filters: {archive: {eq: 'cs'}}, signal}),
   viewport: (c, signal) => c.viewport('tok', {view: 's0', zoom: 0}, signal),
   item: (c, signal) => c.item('tok', 7n, signal),
   artifact: (c, signal) => c.artifact('tok', 7n, {view: 's0', signal}),
@@ -178,7 +182,7 @@ describe('the client against the HTTP contract', () => {
       const call: (() => Promise<unknown>) | undefined =
         surfaceOf(op.path) === Control
           ? CONTROL_CALLS[method] && (() => CONTROL_CALLS[method]!(control))
-          : CALLS[method] && (() => CALLS[method]!(client));
+          : (CALLS[op.id] ?? CALLS[method]) && (() => (CALLS[op.id] ?? CALLS[method])!(client));
       expect(call, `a call for ${method}`).toBeDefined();
       sent.length = 0;
       await call!().catch(() => {});

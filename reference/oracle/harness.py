@@ -658,6 +658,15 @@ class Server:
             timeout=60,
         )
 
+    def aggregate(self, token: str, **body) -> requests.Response:
+        """`POST /v1/aggregate` with `body` as given: the raw response."""
+        return requests.post(
+            f"{self.viewer_base}/v1/aggregate",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+
     def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:
         body: dict = {}
         if pin is not None:

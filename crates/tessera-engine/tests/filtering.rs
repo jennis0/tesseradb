@@ -13,6 +13,8 @@
 
 mod common;
 
+use tessera_engine::SuggestRequest;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -3187,7 +3189,20 @@ fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value(
     };
     let suggested = || {
         let page = engine
-            .suggest(&session, "department", None, "", 20, false, 100_000, 0)
+            .suggest(
+                &session,
+                SuggestRequest {
+                    column: "department",
+                    view: None,
+                    filter: None,
+                    q: "",
+                    limit: 20,
+                    counts: false,
+                    walk_budget: 100_000,
+                    max_suggest_set_entities: 0,
+                    cancel: None,
+                },
+            )
             .expect("the column suggests")
             .expect("the column is a category");
         page.values

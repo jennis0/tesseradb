@@ -1,4 +1,4 @@
-"""The `GET /v1/categories/{column}/suggest` fixture and its Python fold oracle.
+"""The `/v1/categories/{column}/suggest` fixture and its Python fold oracle.
 
 `docs/design/value-suggestion.md` §4 declares the fold (NFKC, then full case folding, then
 whitespace collapse) and the entry construction (key, title, word starts after the first) as a
@@ -37,6 +37,8 @@ fixture would be finding a real bug, not this documented gap.
 
 from __future__ import annotations
 
+import math
+import struct
 import subprocess
 import unicodedata
 from dataclasses import dataclass
@@ -427,20 +429,53 @@ vocabulary = "archive"
 """
 
 
-def _write_points(path: Path) -> None:
+def positions() -> tuple[list[float], list[float]]:
+    """Each source's `x` and `y` as written to the points file, before the float32 cast."""
     import random
 
     rng = random.Random(SEED)
+    xs = [rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)]
+    ys = [rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)]
+    return xs, ys
+
+
+def quantise(v: float) -> int:
+    """The build's `fixed32` over the extent."""
+    floored = math.floor(v / EXTENT_MAX * 4294967296.0)
+    return min(max(floored, 0), 0xFFFF_FFFF)
+
+
+def stored_positions() -> dict[int, tuple[int, int]]:
+    """Each source's position as the build stores it: the float32 the points file holds, quantised."""
+    as_f32 = lambda v: struct.unpack("<f", struct.pack("<f", v))[0]  # noqa: E731
+    xs, ys = positions()
+    return {s: (quantise(as_f32(xs[s])), quantise(as_f32(ys[s]))) for s in range(N_ITEMS)}
+
+
+def filter_columns() -> dict:
+    """The filter oracle's columns over this corpus, keyed by source id: both categories by the
+    keys planted and the codes declared, and `region` over the stored positions."""
+    from oracle.filters import CategoryColumn, RegionColumn
+
+    return {
+        "topic": CategoryColumn(
+            values=planted_topic(), codes={k: c for k, (c, _t) in TOPIC_VALUES.items()}
+        ),
+        "archive": CategoryColumn(
+            values=planted_archive(), codes={k: c for k, (c, _t) in ARCHIVE_VALUES.items()}
+        ),
+        "region": RegionColumn(positions=stored_positions(), artifacts={}, quantise=quantise),
+    }
+
+
+def _write_points(path: Path) -> None:
+    xs, ys = positions()
     pq.write_table(
         pa.table(
             {
                 "entity_id": pa.array(range(N_ITEMS), type=pa.uint64()),
-                "x": pa.array(
-                    [rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], type=pa.float32()
-                ),
-                "y": pa.array(
-                    [rng.uniform(0.0, EXTENT_MAX) for _ in range(N_ITEMS)], type=pa.float32()
-                ),
+                "x": pa.array(xs, type=pa.float32()),
+                "y": pa.array(ys, type=pa.float32()),
                 "topic": pa.array([topic_of(s) for s in range(N_ITEMS)], type=pa.string()),
                 "archive": pa.array([archive_of(s) for s in range(N_ITEMS)], type=pa.string()),
             }

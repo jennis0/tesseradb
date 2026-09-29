@@ -7,11 +7,12 @@ use arrow::datatypes::{DataType, TimeUnit, UInt16Type};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use tessera_wire::{
-    artifacts_frame, artifacts_identity_frame, records_head_frame, page_end_frame, points_frame,
-    points_highlight_frame, read_frame, records_frame, split_frames, sub_cells_frame, tiles_frame,
-    trailer_frame, ArtifactRow, FrameError, RecordsCompression, ScalarColumn, FRAME_ARTIFACTS,
-    FRAME_HEADER_BYTES, FRAME_RECORDS_HEAD, FRAME_PAGE_END, FRAME_POINTS, FRAME_RECORDS,
-    FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+    artifacts_frame, artifacts_identity_frame, page_end_frame, points_frame,
+    points_highlight_frame, read_frame, records_frame, records_head_frame, split_frames,
+    sub_cells_frame, table_head_frame, tiles_frame, trailer_frame, ArtifactRow, FrameError,
+    RecordsCompression, ScalarColumn, FRAME_ARTIFACTS, FRAME_HEADER_BYTES, FRAME_PAGE_END,
+    FRAME_POINTS, FRAME_RECORDS, FRAME_RECORDS_HEAD, FRAME_SUB_CELLS, FRAME_TABLE_HEAD, FRAME_TILES,
+    FRAME_TRAILER,
 };
 
 /// The batches of one Arrow payload.
@@ -165,12 +166,12 @@ fn split_refuses_truncation_and_unknown_kinds() {
         Err(FrameError::TruncatedHeader { at: 0 })
     );
     let mut body = tiles.clone();
-    body.push(9);
+    body.push(10);
     body.extend(0u32.to_le_bytes());
     assert_eq!(
         split_frames(&body),
         Err(FrameError::UnknownKind {
-            kind: 9,
+            kind: 10,
             at: tiles.len()
         })
     );
@@ -249,7 +250,7 @@ fn a_body_read_as_it_arrives_is_the_body_split_whole() {
     }
 
     let mut unknown = body.clone();
-    unknown[0] = 9;
+    unknown[0] = 10;
     let (_, ended) = read_all(&unknown);
     assert_eq!(ended.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
@@ -700,6 +701,41 @@ fn an_items_body_splits_into_its_four_kinds() {
     );
     assert_eq!(frames[0].1, br#"{"order":"map","page_rows":10}"#);
     assert_eq!(batches(frames[1].1), vec![page]);
+}
+
+/// An aggregate body is a table head before each table's first page, records frames each followed
+/// by a page end, and a trailer, and each splits and decodes alone.
+#[test]
+fn an_aggregate_body_splits_into_table_heads_pages_and_a_trailer() {
+    let page = records_page(3);
+    let first = br#"{"grouping":0,"total":3,"resumed":false}"#;
+    let second = br#"{"grouping":1,"total":3,"groups":2,"resumed":false}"#;
+    let mut body = table_head_frame(first);
+    body.extend(records_frame(&page, RecordsCompression::None).unwrap());
+    body.extend(page_end_frame(br#"{"next":"c","ended_by":"rows"}"#));
+    body.extend(table_head_frame(second));
+    body.extend(records_frame(&page, RecordsCompression::Zstd).unwrap());
+    body.extend(page_end_frame(br#"{"next":null,"ended_by":"end"}"#));
+    body.extend(trailer_frame(br#"{"pages":2,"rows":6,"next":null,"ended_by":"end"}"#));
+    let frames = split_frames(&body).unwrap();
+    let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            FRAME_TABLE_HEAD,
+            FRAME_RECORDS,
+            FRAME_PAGE_END,
+            FRAME_TABLE_HEAD,
+            FRAME_RECORDS,
+            FRAME_PAGE_END,
+            FRAME_TRAILER
+        ]
+    );
+    assert_eq!((frames[0].1, frames[3].1), (&first[..], &second[..]));
+    assert_eq!(batches(frames[4].1), vec![page]);
+    let (read, end) = read_all(&body);
+    end.unwrap();
+    assert_eq!(read.len(), frames.len());
 }
 
 /// A compressed records frame decodes to the same batch as an uncompressed one, and its buffers

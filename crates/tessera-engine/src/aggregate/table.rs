@@ -32,12 +32,24 @@ use crate::error::{EngineError, Result};
 use crate::records::same_publication;
 use crate::session::Session;
 use crate::Generation;
+use tessera_spatial::{cells_for_bbox, Bounds, CellRect};
 
 /// A grouping resolved against the request's generation.
 pub(super) struct Plan {
     grouping: u32,
     outer: Outer,
     cells: Option<u8>,
+    /// The cells listed, where they are fewer than every cell at the depth.
+    area: Option<Area>,
+    /// How many cells the cell level lists.
+    area_cells: u64,
+}
+
+/// The cells of a cell level's area, and the ranges of chunk prefixes, at depth `min(depth, 16)`,
+/// that hold them.
+struct Area {
+    rect: CellRect,
+    ranges: Vec<std::ops::Range<u64>>,
 }
 
 enum Outer {
@@ -166,6 +178,19 @@ impl Columns {
         self.cells.len()
     }
 
+    /// The rows whose cell `rect` holds.
+    fn within(self, rect: &CellRect) -> Columns {
+        let keep: Vec<bool> = self.cells.iter().map(|&cell| rect.contains(cell)).collect();
+        let pick = |values: Vec<u64>| -> Vec<u64> {
+            values.into_iter().zip(&keep).filter(|(_, &k)| k).map(|(v, _)| v).collect()
+        };
+        Columns {
+            cells: pick(self.cells),
+            counts: pick(self.counts),
+            references: self.references.map(pick),
+        }
+    }
+
     /// The rows from `from` on: a chunk's cells ascend, so those before it are a prefix.
     fn starting_at(mut self, from: u64) -> Columns {
         let k = self.cells.partition_point(|&c| c < from);
@@ -234,6 +259,7 @@ impl Plan {
         view: &str,
         index: usize,
         grouping: &Grouping,
+        limit: u64,
     ) -> Result<Plan> {
         let outer = match &grouping.by {
             None => Outer::None,
@@ -242,10 +268,49 @@ impl Plan {
                 engine, session, generation, view, layer, *level, pick,
             )?),
         };
+        let (area, area_cells) = match grouping.cells {
+            None => (None, 0),
+            Some(depth) => {
+                let q = generation
+                    .bundle
+                    .manifest
+                    .quantisation_of(view)
+                    .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
+                let extent = Bounds {
+                    x_min: q.x_min,
+                    x_max: q.x_max,
+                    y_min: q.y_min,
+                    y_max: q.y_max,
+                };
+                let bbox = grouping
+                    .area
+                    .unwrap_or([extent.x_min, extent.y_min, extent.x_max, extent.y_max]);
+                let rect = |depth: u8| cells_for_bbox(bbox, depth.min(32), &extent);
+                let count = rect(depth).count();
+                if count > limit {
+                    return Err(EngineError::AggregateRefused(
+                        super::AggregateRefused::TooManyCells {
+                            depth,
+                            count,
+                            limit,
+                            deepest: (0..depth).rev().find(|&d| rect(d).count() <= limit),
+                        },
+                    ));
+                }
+                let whole = rect(depth);
+                let area = (!whole.is_whole()).then(|| Area {
+                    rect: whole,
+                    ranges: whole.prefix_ranges(depth.min(16)),
+                });
+                (area, count)
+            }
+        };
         Ok(Plan {
             grouping: index as u32,
             outer,
             cells: grouping.cells,
+            area,
+            area_cells,
         })
     }
 
@@ -313,7 +378,7 @@ impl Plan {
         let limit = page_rows as usize;
         let switches = &cx.engine.switches;
         let alone = switches.aggregate_alone_rows.load(Ordering::Relaxed) as usize;
-        let row_bytes = self.row_bytes(&groups, head.reference_total.is_some());
+        let row_bits = self.row_bits(&groups, head.reference_total.is_some());
         let dictionary = self.dictionary_bytes(&groups);
         let spilled = spill.filter(|(at, runs, complete)| {
             at == position && (*complete || runs.iter().map(Run::len).sum::<usize>() > limit)
@@ -357,12 +422,15 @@ impl Plan {
                         }
                     }
                 };
-                let rows_left =
-                    response_bytes_left.saturating_sub(dictionary as u64) / row_bytes as u64;
+                let rows_left = response_bytes_left
+                    .saturating_sub(dictionary as u64)
+                    .saturating_mul(8)
+                    / row_bits as u64;
                 let walk = Walk {
                     cx,
                     source: &source,
                     depth,
+                    area: self.area.as_ref(),
                     methods: &[],
                     reference: cx.sets.reference.is_some(),
                     min_chunk_rows: switches.aggregate_min_chunk_rows.load(Ordering::Relaxed),
@@ -384,7 +452,7 @@ impl Plan {
             }
         };
         let total: usize = runs.iter().map(Run::len).sum();
-        let fits = max_page_bytes.saturating_sub(dictionary) / row_bytes;
+        let fits = max_page_bytes.saturating_sub(dictionary).saturating_mul(8) / row_bits;
         let most = total.min(limit).min(fits.max(1));
         // A long run goes out as its own page, sent as the columns it was counted into.
         let (page, rest) = split_runs(
@@ -442,31 +510,36 @@ impl Plan {
         Ok(Some(Page {
             head,
             batch,
-            bytes: kept * row_bytes + dictionary,
+            bytes: kept.saturating_mul(row_bits).div_ceil(8).saturating_add(dictionary),
             cut_by_bytes,
             next,
         }))
     }
 
-    /// The Arrow bytes a row adds to a page, besides the dictionaries.
-    fn row_bytes(&self, groups: &Groups, reference: bool) -> usize {
+    /// The Arrow bits a row adds to a page, besides the dictionaries: its values, and a validity
+    /// bit in each column that can hold a null (`key`, `title` and `lift`).
+    fn row_bits(&self, groups: &Groups, reference: bool) -> usize {
         let mut bytes = 8;
+        let mut nullable = 0;
         if !matches!(self.outer, Outer::None) {
+            nullable += 1;
             bytes += 1 + match self.outer {
                 Outer::Layer(_) => 8,
                 _ => 4,
             };
         }
         if groups.titles.is_some() {
+            nullable += 1;
             bytes += 4;
         }
         if self.cells.is_some() {
             bytes += 8;
         }
         if reference {
+            nullable += 1;
             bytes += 16;
         }
-        bytes
+        8 * bytes + nullable
     }
 
     /// The Arrow bytes a page's dictionaries take: the group names, and a field's keys and titles.
@@ -662,7 +735,7 @@ impl Plan {
         } else {
             1u64 << (2 * u32::from(depth))
         };
-        let most_cells = cells_at_depth.min(cx.view_rows());
+        let most_cells = self.area_cells.min(cx.view_rows());
         let ranges = |size: u64| depth <= 16 && most_cells.saturating_mul(RANGE_FACTOR) <= size;
         let methods: Vec<(bool, bool)> = groups
             .sizes
@@ -759,6 +832,8 @@ struct Walk<'w> {
     cx: &'w Cx<'w>,
     source: &'w Source<'w>,
     depth: u8,
+    /// The cells listed, where not every cell at the depth is.
+    area: Option<&'w Area>,
     /// For each group, whether its set and its reference are counted by range.
     methods: &'w [(bool, bool)],
     reference: bool,
@@ -800,6 +875,10 @@ impl Walk<'_> {
                 .clamp(threads, threads * 64),
         };
         let chunks = crate::cells::chunks(self.cx.segments(), self.depth, chunk_rows);
+        let chunks = match self.area {
+            None => chunks,
+            Some(area) => clip(&chunks, &area.ranges),
+        };
         let fine = 2 * u32::from(self.depth - self.depth.min(16));
         let start = chunks.partition_point(|chunk| chunk.end <= from >> fine);
         let mut at = start;
@@ -937,9 +1016,37 @@ impl Walk<'_> {
         set.groups
             .into_iter()
             .zip(reference.groups)
-            .map(|(set, reference)| merge(set, self.reference.then_some(reference)))
+            .map(|(set, reference)| {
+                let columns = merge(set, self.reference.then_some(reference));
+                match self.area {
+                    // At depth 16 or less the chunks hold only the area's cells.
+                    Some(area) if self.depth > 16 => columns.within(&area.rect),
+                    _ => columns,
+                }
+            })
             .collect()
     }
+}
+
+/// The parts of `chunks` inside `ranges`, both ascending.
+fn clip(chunks: &[std::ops::Range<u64>], ranges: &[std::ops::Range<u64>]) -> Vec<std::ops::Range<u64>> {
+    let mut out = Vec::new();
+    let mut r = 0;
+    for chunk in chunks {
+        while r < ranges.len() && ranges[r].end <= chunk.start {
+            r += 1;
+        }
+        let mut k = r;
+        while k < ranges.len() && ranges[k].start < chunk.end {
+            let start = ranges[k].start.max(chunk.start);
+            let end = ranges[k].end.min(chunk.end);
+            if start < end {
+                out.push(start..end);
+            }
+            k += 1;
+        }
+    }
+    out
 }
 
 /// One group's cells in the set and, where there is one, the reference, joined: ascending by cell,

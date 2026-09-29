@@ -2005,3 +2005,131 @@ pub fn decode_records(bytes: &[u8]) -> DecodedRecords {
         records_payloads,
     }
 }
+
+/// One decoded `POST /v1/aggregate` body.
+#[derive(Clone)]
+pub struct DecodedAggregate {
+    /// Each table head in the order sent, with the pages that follow it: `(batch, page end)`.
+    pub tables: Vec<(serde_json::Value, Vec<(RecordBatch, serde_json::Value)>)>,
+    pub trailer: serde_json::Value,
+}
+
+impl DecodedAggregate {
+    /// Every row of the response, as `(grouping, row)`.
+    pub fn rows(&self) -> Vec<(u64, AggregateRow)> {
+        self.tables
+            .iter()
+            .flat_map(|(head, pages)| {
+                let grouping = head["grouping"].as_u64().unwrap();
+                pages
+                    .iter()
+                    .flat_map(move |(batch, _)| aggregate_rows(batch))
+                    .map(move |row| (grouping, row))
+            })
+            .collect()
+    }
+}
+
+/// An aggregate body: a table head before each table's first page, each records frame followed by
+/// its page end, then the trailer.
+pub fn decode_aggregate(bytes: &[u8]) -> DecodedAggregate {
+    use tessera_wire::{FRAME_PAGE_END, FRAME_RECORDS, FRAME_TABLE_HEAD, FRAME_TRAILER};
+    let frames = tessera_wire::split_frames(bytes).expect("an aggregate body splits into frames");
+    let json = |payload: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(payload).expect("a JSON frame parses")
+    };
+    let (last_kind, last) = *frames.last().expect("a trailer at least");
+    assert_eq!(last_kind, FRAME_TRAILER, "the trailer is last");
+    let mut tables: Vec<(serde_json::Value, Vec<(RecordBatch, serde_json::Value)>)> = Vec::new();
+    let mut at = 0;
+    let middle = &frames[..frames.len() - 1];
+    while at < middle.len() {
+        match middle[at].0 {
+            FRAME_TABLE_HEAD => {
+                tables.push((json(middle[at].1), Vec::new()));
+                at += 1;
+            }
+            FRAME_RECORDS => {
+                assert_eq!(middle.get(at + 1).map(|f| f.0), Some(FRAME_PAGE_END));
+                let mut batches: Vec<RecordBatch> =
+                    StreamReader::try_new(Cursor::new(middle[at].1), None)
+                        .expect("a records frame is an Arrow stream")
+                        .map(|batch| batch.expect("a records batch decodes"))
+                        .collect();
+                assert_eq!(batches.len(), 1, "one batch per records frame");
+                tables
+                    .last_mut()
+                    .expect("a table head precedes its pages")
+                    .1
+                    .push((batches.remove(0), json(middle[at + 1].1)));
+                at += 2;
+            }
+            kind => panic!("frame kind {kind} in an aggregate body"),
+        }
+    }
+    DecodedAggregate {
+        tables,
+        trailer: json(last),
+    }
+}
+
+/// A group's key: a vocabulary key, or an artifact's `tessera_id`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AggregateKey {
+    Text(String),
+    Id(u64),
+}
+
+/// One row of an aggregate table, each column `None` where the table lacks it or the row holds
+/// null.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateRow {
+    pub group: Option<String>,
+    pub key: Option<AggregateKey>,
+    pub title: Option<String>,
+    pub cell: Option<u64>,
+    pub count: u64,
+    pub reference_count: Option<u64>,
+    pub lift: Option<f64>,
+}
+
+/// A table page's rows, read by column name.
+pub fn aggregate_rows(batch: &RecordBatch) -> Vec<AggregateRow> {
+    use arrow::array::{AsArray, DictionaryArray, StringArray};
+    use arrow::datatypes::{Float64Type, Int32Type, Int8Type, UInt64Type};
+    let dictionary = |name: &str, row: usize| -> Option<String> {
+        let column = batch.column_by_name(name)?;
+        if column.is_null(row) {
+            return None;
+        }
+        let text = |values: &ArrayRef, key: usize| {
+            values.as_any().downcast_ref::<StringArray>().unwrap().value(key).to_string()
+        };
+        if let Some(d) = column.as_any().downcast_ref::<DictionaryArray<Int8Type>>() {
+            return Some(text(d.values(), d.keys().value(row) as usize));
+        }
+        let d = column.as_any().downcast_ref::<DictionaryArray<Int32Type>>().unwrap();
+        Some(text(d.values(), d.keys().value(row) as usize))
+    };
+    let u64s = |name: &str, row: usize| -> Option<u64> {
+        let column = batch.column_by_name(name)?;
+        (!column.is_null(row)).then(|| column.as_primitive::<UInt64Type>().value(row))
+    };
+    (0..batch.num_rows())
+        .map(|row| AggregateRow {
+            group: dictionary("group", row),
+            key: match batch.column_by_name("key").map(|c| c.data_type().clone()) {
+                Some(DataType::UInt64) => u64s("key", row).map(AggregateKey::Id),
+                Some(_) => dictionary("key", row).map(AggregateKey::Text),
+                None => None,
+            },
+            title: dictionary("title", row),
+            cell: u64s("cell", row),
+            count: u64s("count", row).expect("every row has a count"),
+            reference_count: u64s("reference_count", row),
+            lift: batch.column_by_name("lift").and_then(|c| {
+                (!c.is_null(row)).then(|| c.as_primitive::<Float64Type>().value(row))
+            }),
+        })
+        .collect()
+}

@@ -1,4 +1,5 @@
-//! Frames of the streamed `POST /v1/viewport` and `POST /v1/items` responses.
+//! Frames of the streamed `POST /v1/viewport`, `POST /v1/items`, `POST /v1/artifacts` and
+//! `POST /v1/aggregate` responses.
 //!
 //! A body is a sequence of frames: a `u8` kind, a `u32` little-endian payload length, then the
 //! payload. Every payload decodes on its own, so no reader walks Arrow messages to find a
@@ -25,6 +26,18 @@
 //!                    more, each followed by a page end, a page of no rows where a response finds
 //!                    none, and none only where a response is cancelled before its first page
 //! kind 8  page end   JSON; one after each records frame, carrying the cursor to resume after it
+//! kind 4  trailer    JSON; exactly one, last
+//! ```
+//!
+//! An aggregate body carries one table per grouping, in the order of the request's groupings,
+//! and has no response head:
+//!
+//! ```text
+//! kind 9  table head JSON; before a table's first page in this response
+//! kind 7  records    Arrow stream of one batch of the table's rows; one or more per table, each
+//!                    followed by a page end, and none only where a response is cancelled before
+//!                    its first page
+//! kind 8  page end   JSON; as in an items body
 //! kind 4  trailer    JSON; exactly one, last
 //! ```
 //!
@@ -58,6 +71,7 @@ pub const FRAME_ARTIFACTS: u8 = 5;
 pub const FRAME_RECORDS_HEAD: u8 = 6;
 pub const FRAME_RECORDS: u8 = 7;
 pub const FRAME_PAGE_END: u8 = 8;
+pub const FRAME_TABLE_HEAD: u8 = 9;
 
 pub const FRAME_HEADER_BYTES: usize = 5;
 
@@ -517,6 +531,11 @@ pub fn page_end_frame(json: &[u8]) -> Vec<u8> {
     frame(FRAME_PAGE_END, json.len(), |out| out.extend_from_slice(json))
 }
 
+/// The head of one table of an aggregate body around the caller's JSON.
+pub fn table_head_frame(json: &[u8]) -> Vec<u8> {
+    frame(FRAME_TABLE_HEAD, json.len(), |out| out.extend_from_slice(json))
+}
+
 /// How a records frame's Arrow buffers are compressed. A reader needs a zstd codec for the
 /// compressed form and nothing else: the schema and the batch framing are never compressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,6 +610,7 @@ fn known(kind: u8) -> bool {
             | FRAME_RECORDS_HEAD
             | FRAME_RECORDS
             | FRAME_PAGE_END
+            | FRAME_TABLE_HEAD
     )
 }
 
