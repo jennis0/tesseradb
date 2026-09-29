@@ -139,35 +139,48 @@ value it carries that is not null. The request handler reads one generation for 
 off the executor thread, and looks each value up there: a `tessera_id` by inverting it, a unique
 value in the field's index. A deleted item names nothing, and a `tessera_id` names an item only
 while the service holds it (a row, a buffered row, or the label a flush wrote), since a fold that
-removes a deleted item also drops its deletion. The same rule answers a change naming a
-`tessera_id` or a unique value.
+removes a deleted item also drops its deletion. The same rule answers a change and a membership's
+member, each naming its item by a `tessera_id` and unique values ([accepting a
+deny](#accepting-a-deny)). It is the rule a build applies to its files, written once in
+`tessera-lifecycle` (`resolve.rs`).
 
 | What the row's values name | What the handler decides |
 |---|---|
 | No item, and the row carries a position | The row creates an item, labelled as the row says or with the view's `point_visibility.default` |
-| No item, and no position | Refused with `422`: an item is created in a view |
+| No item, and no position | Refused: an item is created in a view |
 | One item, and every value the row carries is the one stored | The row changes nothing. It is counted `unchanged` and writes nothing |
 | One item with no row in the batch's view, the row carrying a position there and changing nothing else | The row adds the item to the view in place, counted `added`: the item keeps its entity and stays served in its other views, and the next flush places the row |
 | One item, and the row's one change is placing it in artifacts that do not hold it | A change to the artifacts, not the item: the item joins them and keeps its entity, the row is counted `unchanged` and the memberships in `joined` |
 | One item, and the row changes a value, the label or a position | The row edits the item, counted `edited` |
-| Two items | Refused with `409`, naming the values and the items' `tessera_id`s |
+| Two items | Refused |
 
-Across the batch, two rows may not name one item, and two rows may not set one unique value, since
-each row is decided without seeing the others. A `tessera_id` naming no live or
-suppressed item is refused, because a new item is given its `tessera_id` when it is created and a
-caller cannot choose one. Any refusal refuses the whole batch, and names rows by their position in
-it, values as sent and items by `tessera_id`.
+Across the batch, a row naming an item an earlier row names, and a row setting a unique value an
+earlier row sets, are refused, since each row is decided against what was held before the batch:
+of the two, the first is kept. A refused row claims no value, so it never refuses a later row. A
+`tessera_id` naming no live or suppressed item is refused, because a new item is given its
+`tessera_id` when it is created and a caller cannot choose one.
+
+A refused row writes nothing, and the batch applies its other rows. The answer lists each refused
+row in `refused`, by its position in the batch and its reason (`names_two_items`,
+`unknown_tessera_id`, `names_no_item`, `one_item_twice` or `one_value_twice`), and answers `null`
+for its `tessera_id`; it names no entity and no value the caller did not send. A caller that asks
+for `strict=true` has the whole batch refused with `409` at its first refused row instead, naming
+rows by position, values as sent and items by `tessera_id`, and nothing is written. A build refuses
+the rows of its files by the same rule, and `tessera build --strict` refuses the build at the
+first.
 
 To decide a row naming an item, the handler reads what the item stores, in ascending entity order
 across the batch: the row it holds in the buffer, or the flushed value columns, record store,
 group-scoped columns and row tails; the item's terms; its position in the batch's view, compared as
 the quantised cell the row's coordinates fall in. A term a label names is looked up and never interned for a row that
 only compares, and the terms of the rows that create items are resolved once the whole batch is
-decided, so a refused batch leaves nothing behind.
+decided, so a refused batch or row leaves nothing behind.
 
-Every accepted batch goes to the executor, a batch of rows that change nothing included: such a
-batch writes its batch id and its receipt alone, so it answers the same `tessera_id`s when it is
-sent again, as every accepted batch does.
+Every accepted batch goes to the executor, a batch of rows that change nothing or are refused
+included: such a batch writes its batch id and its receipt alone, so it answers the same
+`tessera_id`s and refused rows when it is sent again, as every accepted batch does. The WAL record
+carries the accepted rows and a receipt for every row, the refused ones with their reason, so a
+replay applies exactly the accepted rows.
 
 The batch goes with the sequence number of the in-memory unique entries the handler read, the
 items its unchanged rows named, and the rows that create or add. The executor never reads disc to
@@ -252,15 +265,18 @@ one fsync covers the entire window. Only then is the window applied to build a n
 pointer is swapped, and every waiting request is acknowledged with every row's `tessera_id`. If
 the append or the fsync fails, the window applies nothing: every waiter is refused, and a caller
 retries under the same batch id. A retry of an accepted batch answers the `tessera_id`s its first
-acceptance did, after a restart too, since the record carries them.
+acceptance did, and the rows it refused, after a restart too, since the record carries them. The
+index of accepted batch ids is built from the WAL members retained, so a batch id is remembered
+until the flush whose WAL rotation removes the member holding its record, and a retry sent after
+that is decided as a new batch.
 
 ### What the writer observes
 
 | Outcome | Meaning | Retry |
 |---|---|---|
-| 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged rows wrote nothing | Not needed |
-| 409 | A row names two items or a `tessera_id` nobody holds, two rows name one item or set one value, the same batch id with different bytes, or what the batch names moved twice while it was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
-| 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no position or no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
+| 200 | Every row is resolved. Created, added and edited rows are durable in the WAL, with their identity allocated, and not yet visible; unchanged and refused rows wrote nothing, and `refused` lists the refused ones | Not needed; a refused row after fixing it |
+| 409 | With `strict=true`, a row is refused; or the same batch id with different bytes, or what the batch names moved twice while it was checked. Nothing in the batch took effect | After fixing the request; the last as it was |
+| 422 | Validation failed: an undeclared column, a wrong type, too many rows, a new item with no label, or a coordinate that is not a place. Nothing took effect | After fixing the request |
 | 429 | The server is declining the request for load, with a retry interval attached | After that interval |
 | 500 | The WAL append or the fsync failed. Nothing was applied | With identical bytes |
 | 503 | The executor is not running | Later |
@@ -289,7 +305,8 @@ acknowledged.
 
 A value an ingest row carries identifies the item that holds it ([resolving a
 batch](#resolving-a-batch)), so a row setting a value another item holds names two items and is
-refused with `409`, naming the row, the value and both `tessera_id`s. A value the batch's own
+refused; under `strict=true` the batch is refused with `409`, naming the row, the value and both
+`tessera_id`s. A value the batch's own
 rows set is checked twice: the handler checks it against the generation current when the batch
 arrived, and the executor checks it again, from memory, against the values added since.
 
@@ -313,13 +330,22 @@ the new label, which edits it ([edits](#edits)).
 
 ### Accepting a deny
 
-A change names its item by a `tessera_id`, inverted under the bundle's identity key, or by a unique
-field and one value of it, looked up in the field's index.
+A change names its item in `match`: by its `tessera_id`, inverted under the bundle's identity key,
+and by the values of unique fields, each looked up in the field's index. Every identifier must name
+the same item. A membership's members, excluded items and generating sets are tables of the same
+columns, one row per member, resolved the same way.
 
-The whole batch is validated and every address resolved before anything is accepted. If any one
-address fails to resolve, the whole batch is refused and nothing is queued. An address that
-resolves to an item already deleted or suppressed is accepted anyway. Applying a deny a second
-time has no further effect, so a retried batch is safe to resend.
+Every change and member of a request is validated and resolved, in one call, before anything is
+accepted. A request with a malformed item, or one that names no item by any column, is refused
+with `422` and nothing is queued. A change or member naming no item, or two, is refused and listed
+in the answer's `refused` by position and reason, and the others are applied; with `strict=true`
+the request is refused instead, `404` where the row names no item and `409` where it names two.
+Many changes, or members, may name one item. A generating set is refused whole at any member it
+cannot resolve, strict or not, because a viewer must see every member of the set to be served the
+content, and a set missing a member would be served to viewers who cannot. A suppression of an
+item already suppressed is accepted and has no further effect. A deleted item names nothing, so a
+deletion sent again is listed as refused, and a retried request is safe to resend without
+`strict`.
 
 Only the entity id is written to the WAL, never a `tessera_id`. The address is resolved once, when
 the request is accepted, into the entity it names, and that entity id is stable for the item's
