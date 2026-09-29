@@ -88,15 +88,14 @@ export const TesseraStore = withStableAuthorise(wrap('tessera-store', StoreEleme
 /**
  * `<tessera-explorer>` as a React component. It has a handler prop for every event, since the
  * elements inside it emit them and each event bubbles out of it: `onPick`, `onHover`,
- * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactSelect`,
- * `onArtifactFit`, `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
+ * `onViewChange`, `onSelectChange`, `onArtifactOpen`, `onLayerChange`, `onArtifactFit`,
+ * `onColourChange`, `onLevelChange`, `onValueColour`, `onPaletteChange`,
  * `onDisplayChange`, `onFilterChange`, `onStateChange`, `onExpired`, `onOpen`, `onClose`,
  * `onClauseChange`, `onChipOpen`, `onViewSwitch` and `onViewFollow`, each for the `tessera-` event
  * of the same name in lower case.
  */
 export const TesseraExplorer = withStableAuthorise(wrap('tessera-explorer', ExplorerElement, {
   ...mapEvents,
-  onArtifactSelect: ev('tessera-artifactselect'),
   onArtifactFit: ev('tessera-artifactfit'),
   onColourChange: ev('tessera-colourchange'),
   onLevelChange: ev('tessera-levelchange'),
@@ -147,10 +146,10 @@ export const TesseraViewPicker = wrap('tessera-view-picker', ViewPickerElement, 
 /** `<tessera-key-picker>` as a React component. Event prop: `onViewSwitch` (`tessera-viewswitch`). */
 export const TesseraKeyPicker = wrap('tessera-key-picker', KeyPickerElement, {onViewSwitch: ev('tessera-viewswitch')});
 /**
- * `<tessera-artifact-list>` as a React component. Event prop: `onArtifactSelect`
- * (`tessera-artifactselect`).
+ * `<tessera-artifact-list>` as a React component. Event props: `onArtifactFit`
+ * (`tessera-artifactfit`) and `onClauseChange` (`tessera-clausechange`).
  */
-export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactSelect: ev('tessera-artifactselect')});
+export const TesseraArtifactList = wrap('tessera-artifact-list', ArtifactListElement, {onArtifactFit: ev('tessera-artifactfit'), onClauseChange: ev('tessera-clausechange')});
 /**
  * `<tessera-artifact-card>` as a React component. Event props: `onArtifactFit`
  * (`tessera-artifactfit`), `onClauseChange` (`tessera-clausechange`) and `onClose`

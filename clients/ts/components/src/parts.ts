@@ -63,7 +63,7 @@ export const PARTS = {
   'cluster-filter': ['chosen', 'entry', 'label', 'more', 'name', 'option', 'path', 'refusal', 'value-count', 'values'],
   'filter-panel': ['add', 'add-list', 'add-option', 'add-search', 'any', 'chip', 'chips', 'clear', 'edit', 'field', 'mode', 'mode-count', 'title', 'verb', ...STATE],
   hierarchy: ['actions', 'also', 'children', 'count-masked', 'count-matched', 'counts', 'dismiss', 'expander', 'filter', 'fit', 'highlight', 'layer', 'more', 'name', 'row', 'search', 'title', 'tree', ...STATE],
-  'artifact-list': ['count', 'item', 'items', 'more', 'name', 'title', ...STATE],
+  'artifact-list': ['count', 'filter', 'highlight', 'item', 'items', 'more', 'name', 'parent', 'swatch', 'title', ...STATE],
   selection: ['action', 'actions', 'count-matched', 'count-served', 'count-visible', 'counts', 'item', 'items', 'label', 'refusal', 'state', 'title'],
   'item-card': ['close', 'copy', 'field', 'headline', 'key', 'label', 'open', 'scoped', 'title', 'value', 'view-chip', ...STATE],
   'artifact-card': ['child', 'children', 'close', 'content', 'count', 'filter', 'fit', 'headline', 'highlight', 'label', 'name', 'outside', 'parent', 'parents', 'shape', 'title', 'value', 'verbs', ...STATE]

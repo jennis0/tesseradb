@@ -33,8 +33,6 @@ export type TesseraEventDetails = {
    * decimal string.
    */
   'tessera-artifactopen': {id: string; detail: Omit<ArtifactDetail, 'maskedCount'> & {maskedCount: string}};
-  /** The artifact `id` of layer `layer` was chosen from a list. */
-  'tessera-artifactselect': {id: string; layer: string};
   /** Fit was asked for the artifact `id`. `<tessera-explorer>` fits its map to it. */
   'tessera-artifactfit': {id: string};
   /**
