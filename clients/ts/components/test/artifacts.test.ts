@@ -230,7 +230,7 @@ describe('<tessera-legend limit>', () => {
     const store = fakeStore({
       meta: META,
       status: status({}),
-      legend: {ranks: {archive: Object.fromEntries(values.map((v, i) => [v.code, i]))}, domains: {}, categories: {archive: values}, categoryErrors: {}, colourBy: 'archive'}
+      legend: {ranks: {archive: Object.fromEntries(values.map((v, i) => [v.code, i]))}, domains: {}, categories: {archive: values}, categoryErrors: {}, colourBy: 'archive', samples: {}, sizeBy: null}
     });
     const host = await mount('<tessera-legend limit="4"></tessera-legend>');
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
@@ -260,7 +260,7 @@ describe('<tessera-legend selectable>', () => {
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
     // The store answers with the colour layer's rows and still draws nothing: the swatches are
     // the colour layer's served artifacts, and the choice shows in the menu and on its button.
-    store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'});
+    store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters', samples: {}, sizeBy: null});
     store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
@@ -420,7 +420,7 @@ describe('a refusal on screen', () => {
     expect(await code('<tessera-item-card></tessera-item-card>', {selection: {...selection, itemRefusal: refusal}})).toBe('withheld');
     expect(await code('<tessera-artifact-card></tessera-artifact-card>', {selection: {...selection, artifactRefusal: refusal}})).toBe('withheld');
     expect(await code('<tessera-artifact-list></tessera-artifact-list>', {artifacts: {...artifactsProjection([]), status: 'refused', refusal}})).toBe('withheld');
-    expect(await code('<tessera-legend></tessera-legend>', {legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {archive: refusal}, colourBy: 'archive'}})).toBe('withheld');
+    expect(await code('<tessera-legend></tessera-legend>', {legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {archive: refusal}, colourBy: 'archive', samples: {}, sizeBy: null}})).toBe('withheld');
     const box = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
     const held = {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0};
     expect(await code('<tessera-selection></tessera-selection>', {region: {shape: box, status: 'refused', refusal, visible: null, matched: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, verdict: null, held}})).toBe('withheld');
@@ -440,7 +440,7 @@ describe('a cluster named by the label attached to it', () => {
       meta: META,
       status: status({}),
       artifacts: {...artifactsProjection([...clusters, label]), colourServed: clusters},
-      legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'}
+      legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters', samples: {}, sizeBy: null}
     });
     for (const el of host.querySelectorAll('*')) (el as unknown as {store: unknown}).store = store;
     await settle(host);

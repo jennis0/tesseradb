@@ -373,4 +373,19 @@ describe('<tessera-map> display', () => {
     const {palette, ramp, scale, reverse} = colouringOf(store);
     expect({palette, ramp, scale, reverse}).toEqual({palette: 'dark2', ramp: 'cividis', scale: 'log', reverse: true});
   });
+
+  it('sizes by the column a host names, between the sizes it sets, shared with every element over its store', async () => {
+    await import('../src/map.js');
+    const {sizingOf} = await import('../src/colouring.js');
+    const host = await mount('<tessera-map size-by="citations" size-min="3" size-max="11" size-scale="rank"></tessera-map>');
+    const map = host.querySelector('tessera-map') as HTMLElement & {store: unknown; sizeBy: string};
+    const store = fakeStore({meta: meta(), status: status({})});
+    map.store = store;
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations']);
+    expect(sizingOf(store)).toEqual({min: 3, max: 11, scale: 'rank'});
+    map.sizeBy = 'none';
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations', null]);
+  });
 });

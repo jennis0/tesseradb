@@ -13,7 +13,7 @@ import {
 import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
 import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
 import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -23,7 +23,7 @@ import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
 import {densityChannel} from './density.js';
 import './count.js';
-import {colouringOf, setColouring, watchColouring} from './colouring.js';
+import {colouringOf, setColouring, setSizing, sizingOf, watchChoices} from './colouring.js';
 
 
 /** How long after disconnection the `Deck` is finalised, unless the element reconnects. */
@@ -441,8 +441,28 @@ export class TesseraMap extends TesseraElement {
    * @internal
    */
   @property({type: Boolean}) accessor measure = false;
-  /** A fixed point radius in pixels. Unset, points are sized by how many are drawn and by the zoom. */
+  /**
+   * A fixed point radius in pixels. Unset, points are sized by how many are drawn and by the zoom.
+   * Under `size-by`, the size column sizes the points in its place.
+   */
   @property({type: Number}) accessor radius: number | null = null;
+  /**
+   * What the points are sized by: a declared number column that is rendered, or `none` for one
+   * size. Each point's value is placed between `size-min` and `size-max` on `size-scale`, against
+   * the range and a sample of the values drawn; a point with no value draws at `size-min` as a
+   * ring. The column arrives with the points, so choosing one sends no request. Unset, the store's
+   * choice stands.
+   */
+  @property({attribute: 'size-by'}) accessor sizeBy = '';
+  /** The radius in pixels of the smallest value under `size-by`. Unset, the choice made in the explorer stands, 2 until one is made. */
+  @property({type: Number, attribute: 'size-min'}) accessor sizeMin: number | null = null;
+  /** The radius in pixels of the largest value under `size-by`. Unset, the choice made in the explorer stands, 9 until one is made. */
+  @property({type: Number, attribute: 'size-max'}) accessor sizeMax: number | null = null;
+  /**
+   * How values are placed between the two sizes: `linear`, `log`, or `rank` among a sample of the
+   * values drawn. Unset, the choice made in the explorer stands, linear until one is made.
+   */
+  @property({attribute: 'size-scale'}) accessor sizeScale: SizeScale | '' = '';
   /** Hides the toolbar. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
   /**
@@ -542,6 +562,7 @@ export class TesseraMap extends TesseraElement {
     const s = this.resolvedStore;
     if (s) {
       if (changed.has('colourBy') && this.colourBy !== '') s.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
+      if (changed.has('sizeBy') && this.sizeBy !== '') s.setSizeBy(this.sizeBy === 'none' ? null : this.sizeBy);
       if (changed.has('layers') && this.layers) {
         s.setLayers(this.layers);
         emit(this, 'tessera-layerchange', {layers: this.layers});
@@ -551,6 +572,7 @@ export class TesseraMap extends TesseraElement {
       // The ground also sets the positional palette's lightness in the store.
       if (changed.has('ground')) s.setScheme(this.scheme());
       this.pushColouring(s, changed);
+      this.pushSizing(s, changed);
     }
     const repaint = ['mode', 'drag', 'dragPolygon', 'basemap', 'ground', 'radius', 'clusterLevel', 'hoveredArtifact', 'noPoints', 'pointOpacity', 'density', 'densityColours', 'densityStrength'] as const;
     if (repaint.some((k) => changed.has(k))) this.paint();
@@ -566,6 +588,16 @@ export class TesseraMap extends TesseraElement {
     if (changed ? changed.has('rampReverse') && changed.get('rampReverse') !== undefined : this.rampReverse) patch.reverse = this.rampReverse;
     if (touched('valueColours') && this.valueColours !== null) patch.values = this.valueColours;
     if (Object.keys(patch).length > 0) setColouring(store, patch);
+  }
+
+  /** The size properties the host set, written to the choices every element over `store` shares. */
+  private pushSizing(store: Store, changed?: PropertyValues<this>): void {
+    const touched = (k: 'sizeMin' | 'sizeMax' | 'sizeScale') => !changed || changed.has(k);
+    const patch: Partial<Sizing> = {};
+    if (touched('sizeMin') && this.sizeMin !== null) patch.min = this.sizeMin;
+    if (touched('sizeMax') && this.sizeMax !== null) patch.max = this.sizeMax;
+    if (touched('sizeScale') && this.sizeScale !== '') patch.scale = this.sizeScale;
+    if (Object.keys(patch).length > 0) setSizing(store, patch);
   }
 
   /** The ground: `ground` if set, else the host's `color-scheme`, else the system preference. */
@@ -586,12 +618,12 @@ export class TesseraMap extends TesseraElement {
     this.hoveredArtifact = null;
   }
 
-  /** Stops following the colour choices of the store adopted last. */
-  private unwatchColouring: (() => void) | null = null;
+  /** Stops following the colour and size choices of the store adopted last. */
+  private unwatchChoices: (() => void) | null = null;
 
   protected override onStoreAdopted(store: Store | null): void {
-    this.unwatchColouring?.();
-    this.unwatchColouring = store ? watchColouring(store, () => this.paint()) : null;
+    this.unwatchChoices?.();
+    this.unwatchChoices = store ? watchChoices(store, () => this.paint()) : null;
     this.slab.clear();
     this.metaSeen = false;
     this.selectedWorldXY = null;
@@ -603,10 +635,12 @@ export class TesseraMap extends TesseraElement {
     }
     store.setScheme(this.scheme());
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
+    if (this.sizeBy !== '') store.setSizeBy(this.sizeBy === 'none' ? null : this.sizeBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
     if (this.palette !== 'positional') store.setPalette(this.palette);
     this.pushColouring(store);
+    this.pushSizing(store);
     this.paint();
   }
 
@@ -847,6 +881,7 @@ export class TesseraMap extends TesseraElement {
           densityColours: this.densityColours || null,
           densityStrength: this.densityStrength,
           colouring: colouringOf(s),
+          sizing: sizingOf(s),
           scheme: this.scheme(),
           onDrawn: (drawn, provisional) => {
             const p = this.probe;

@@ -1,5 +1,5 @@
 import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, RegionProjection, Refusal, SelectionShape} from '@tesseradb/client';
-import type {CategoryPaletteName, DensityColours, DensityMode, RampName, RampScale} from '@tesseradb/deck';
+import type {CategoryPaletteName, DensityColours, DensityMode, RampName, RampScale, SizeScale} from '@tesseradb/deck';
 import type {PanelState} from './states.js';
 
 /** A selection shape as an event carries it: an artifact's `tessera_id` as a decimal string. */
@@ -56,6 +56,13 @@ export type TesseraEventDetails = {
   'tessera-layerchange': {layers: string[]};
   /** The points are now coloured by `colourBy`: a column, `cluster:<layer>`, or null for one colour. */
   'tessera-colourchange': {colourBy: string | null};
+  /**
+   * The size choices changed in the explorer's Layers popover; the detail is all four as they now
+   * stand. `sizeBy` is the number column the points are sized by, or null for one size; `min` and
+   * `max` are the radii in pixels of its smallest and largest value, and `scale` how values are
+   * placed between them.
+   */
+  'tessera-sizechange': {sizeBy: string | null; min: number; max: number; scale: SizeScale};
   /** The level to colour and label at is now `level`; null is the level drawn by default. */
   'tessera-levelchange': {level: number | null};
   /**

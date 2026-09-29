@@ -1,8 +1,8 @@
 import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
+import {CLUSTER_PREFIX, artifactName, colourLayers, composeFilters, type CategoryValue, type ClauseVerb, type FilterDraft, type LegendProjection, type Masked, type Meta, type Rgba, type Store} from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
-import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale} from '@tesseradb/deck';
+import {CATEGORY_PALETTES, RAMPS, type CategoryPaletteName, type Colouring, type RampName, type RampScale, type Sizing} from '@tesseradb/deck';
 import {
   UNMAPPED,
   clusterLayerOf,
@@ -13,11 +13,17 @@ import {
   hexOf,
   lighter,
   paletteValues,
+  radiusAt,
   rgbOfHex,
-  valueAtFraction
+  sizeEncodingOf,
+  sizeFraction,
+  sizesPoints,
+  valueAtFraction,
+  valueAtSize,
+  type SizeEncoding
 } from '@tesseradb/deck/internal';
 import {TesseraElement, UNNAMED, columnCaption, dateText, emit} from './base.js';
-import {colouringOf, setColouring, watchColouring, withValueColour} from './colouring.js';
+import {colouringOf, setColouring, sizingOf, watchChoices, withValueColour} from './colouring.js';
 import {radioKeys} from './display.js';
 import {hsvOf, rgbOfHsv, type Hsv} from './hsv.js';
 import {icon} from './icons.js';
@@ -86,6 +92,13 @@ type Picking = {column: string; key: string; title: string};
  * name cut short, with the whole name as its tooltip. Which layers are drawn is
  * `<tessera-layer-picker>`'s.
  *
+ * While the store sizes the points by a number column, a Size section follows, headed by the
+ * column's name: four circles at round values across the range drawn, each drawn at the radius the
+ * map gives that value, the last marked `+` where larger values are drawn. Under the rank scale the
+ * circles stand at the values a quarter of the way along the sample of values drawn, and a note
+ * says the sizes are by rank among the points drawn. The size choices are made in the explorer's
+ * Layers popover or on the map.
+ *
  * @summary What the map's colours mean, and the colour controls.
  * @tagname tessera-legend
  * @category Elements
@@ -131,6 +144,14 @@ type Picking = {column: string; key: string; title: string};
  * @csspart range-high - The handle of the range's high end, a slider.
  * @csspart value - The ramp's lowest and highest values, beneath its ends.
  * @csspart range-value - The range's ends, beneath the ramp, while a range is set.
+ * @csspart size - The Size section, while the points are sized by a column.
+ * @csspart size-title - The Size section's heading.
+ * @csspart size-by - The name of the column the points are sized by, in that heading.
+ * @csspart size-key - The row of circles.
+ * @csspart size-entry - One circle and its value.
+ * @csspart size-value - A circle's value.
+ * @csspart size-note - "By rank among the points drawn" under the rank scale, "Nothing in view"
+ *   before a value is drawn, or "Column unavailable" where the column is not a rendered number.
  * @csspart colour-popover - The colour picker, while it is open.
  * @csspart choice - A colour in the picker's palette rows, with `aria-pressed`.
  * @csspart sv - The picker's saturation and brightness area, a slider in two directions.
@@ -391,6 +412,50 @@ export class TesseraLegend extends TesseraElement {
         color: var(--_tessera-ink);
         font-weight: 500;
       }
+      /* The Size section: the column's name, and circles at round values beneath. */
+      [part='size-title'] {
+        margin-bottom: 10px;
+      }
+      [part='size-by'] {
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0;
+        text-transform: none;
+        color: var(--_tessera-ink);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      [part='size-key'] {
+        display: flex;
+        align-items: flex-end;
+        gap: 22px;
+        padding: 0 4px;
+      }
+      [part='size-entry'] {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      [part='size-entry'] .circle {
+        box-sizing: border-box;
+        border: 1.5px solid var(--_tessera-ink-2);
+        border-radius: 50%;
+      }
+      [part='size-value'],
+      [part='size-note'] {
+        font-size: 12px;
+        color: var(--_tessera-ink-2);
+        font-variant-numeric: tabular-nums;
+      }
+      [part='size-note'] {
+        display: block;
+        margin-top: 8px;
+      }
+      [part='size-note']:first-of-type:last-child {
+        margin-top: 0;
+      }
       /* The popovers: the Colour by menu and the colour picker, in the top layer. */
       .pop {
         position: fixed;
@@ -616,7 +681,7 @@ export class TesseraLegend extends TesseraElement {
   /** A range being dragged on the ramp, as fractions of it, before it is sent. @internal */
   @state() accessor dragging: {low: number; high: number} | null = null;
   private expandedFor: string | null = null;
-  private unwatchColouring: (() => void) | null = null;
+  private unwatchChoices: (() => void) | null = null;
   /** Where a drag on the ramp started, and which end it moves. */
   private dragFrom: {
     anchor: number;
@@ -629,8 +694,8 @@ export class TesseraLegend extends TesseraElement {
   } | null = null;
 
   protected override onStoreAdopted(store: Store | null): void {
-    this.unwatchColouring?.();
-    this.unwatchColouring = store ? watchColouring(store, () => this.requestUpdate()) : null;
+    this.unwatchChoices?.();
+    this.unwatchChoices = store ? watchChoices(store, () => this.requestUpdate()) : null;
   }
 
   protected override resetServerData(): void {
@@ -792,7 +857,9 @@ export class TesseraLegend extends TesseraElement {
             </select>${icon('chev', 12, 1.4)}</span>`
         : nothing;
     const heading = html`<h2 part="title"><span class="lead">Colour${colourByButton}</span>${levelSelect}</h2>`;
-    const wrap = (body: unknown) => html`<div class="panel">${heading}${menu}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>`;
+    const size = this.readout || !this.selectable ? this.sizeSection(meta, legend, sizingOf(s)) : nothing;
+    const wrap = (body: unknown) =>
+      html`<div class="panel">${heading}${menu}${body}${this.picking ? this.colourPicker(this.picking, colouring, legend.ranks[this.picking.column] ?? {}, legend.categories[this.picking.column] ?? []) : nothing}</div>${size}`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
 
@@ -823,6 +890,28 @@ export class TesseraLegend extends TesseraElement {
     const domain = legend.domains[column.name];
     if (!domain) return wrap(html`<span part="state" data-state="empty">Nothing in view</span>`);
     return wrap(html`<span part="state" data-state="shown"></span>${this.numeric(s, column, domain, colouring)}`);
+  }
+
+  /** The Size section, while the store sizes the points by a column. */
+  private sizeSection(meta: Meta, legend: LegendProjection, sizing: Sizing): TemplateResult | typeof nothing {
+    const name = legend.sizeBy;
+    if (name === null) return nothing;
+    const column = meta.declaredScalars.find((c) => c.name === name);
+    const caption = columnCaption(name);
+    const note = (text: string) => html`<span part="size-note">${text}</span>`;
+    const panel = (body: unknown) =>
+      html`<div part="size" class="panel"><h2 part="size-title"><span>Size</span><span part="size-by" title=${caption}>${caption}</span></h2>${body}</div>`;
+    if (!column || !sizesPoints(column)) return panel(note('Column unavailable'));
+    const encoding = sizeEncodingOf(meta, legend, sizing.scale);
+    if (encoding.kind === 'none' || encoding.kind === 'pending') return panel(note('Nothing in view'));
+    const whole = column.arrowType !== 'f32' && column.arrowType !== 'f64';
+    const entries = sizeKey(encoding, sizing, whole);
+    return panel(html`<div part="size-key" role="list" aria-label=${`Sizes of ${caption}`}>
+        ${entries.map(
+          (e) => html`<div part="size-entry" role="listitem"><span class="circle" style=${`width:${(e.radius * 2).toFixed(1)}px;height:${(e.radius * 2).toFixed(1)}px`}></span><span part="size-value">${e.label}</span></div>`
+        )}
+      </div>
+      ${encoding.kind === 'rank' ? note('By rank among the points drawn') : nothing}`);
   }
 
   /** The rows of a category column: swatch, name, the two verbs and the count. */
@@ -1321,6 +1410,41 @@ export class TesseraLegend extends TesseraElement {
       target?.focus();
     }
   }
+}
+
+/** A circle in the Size section: the radius the map gives its value, and the value as text. */
+type SizeEntry = {radius: number; label: string};
+
+/**
+ * Four circles at round values across what `encoding` sizes by: at the start, a third and two thirds
+ * of the way, and the end, each rounded to one significant figure. The last is rounded down and
+ * marked `+` where larger values are drawn, and drawn at the largest size. A range of one value is
+ * one circle.
+ */
+function sizeKey(encoding: SizeEncoding, sizing: Sizing, whole: boolean): SizeEntry[] {
+  const low = valueAtSize(0, encoding)!;
+  const high = valueAtSize(1, encoding)!;
+  const text = (v: number) => v.toLocaleString('en-GB', {maximumFractionDigits: whole ? 0 : 2});
+  if (low === high) return [{radius: radiusAt(sizeFraction(low, encoding), sizing), label: text(low)}];
+  const out: SizeEntry[] = [];
+  const seen = new Set<number>();
+  for (const t of [0, 1 / 3, 2 / 3]) {
+    const v = t === 0 ? low : oneFigure(valueAtSize(t, encoding)!, Math.round);
+    if (seen.has(v) || v >= high) continue;
+    seen.add(v);
+    out.push({radius: radiusAt(sizeFraction(v, encoding), sizing), label: text(v)});
+  }
+  const top = oneFigure(high, Math.floor);
+  const last = seen.has(top) ? high : top;
+  out.push({radius: sizing.max, label: last < high ? `${text(last)}+` : text(last)});
+  return out;
+}
+
+/** `v` to one significant figure, by `round`. */
+function oneFigure(v: number, round: (x: number) => number): number {
+  if (v === 0 || !Number.isFinite(v)) return v;
+  const unit = 10 ** Math.floor(Math.log10(Math.abs(v)));
+  return Number((round(v / unit) * unit).toPrecision(12));
 }
 
 /** `rgb(r, g, b)` as RGB, for a swatch colour that is not a hex string. */

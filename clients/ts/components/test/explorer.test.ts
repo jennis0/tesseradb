@@ -339,6 +339,104 @@ describe('<tessera-explorer> layouts', () => {
     ]);
   });
 
+  describe('Size by', () => {
+    const SIZED = meta({
+      declaredScalars: [
+        ...META.declaredScalars,
+        scalar('citations', 'u32', {render: true, homes: ['rendered']}),
+        scalar('pages', 'u32'),
+        scalar('score', 'f32', {render: true, homes: ['rendered']}),
+        scalar('published_at', 'timestamp_us', {render: true, homes: ['rendered']})
+      ]
+    });
+
+    async function popover(markup = '<tessera-explorer></tessera-explorer>') {
+      const host = await mount(markup);
+      const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+      const store = fakeStore({meta: SIZED, status: status({})});
+      el.store = store;
+      await settle(host);
+      const shadow = el.shadowRoot!;
+      shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+      await settle(host);
+      const map = shadow.querySelector('tessera-map') as unknown as {sizeBy: string; sizeMin: number | null; sizeMax: number | null; sizeScale: string; radius: number | null};
+      const seen: unknown[] = [];
+      host.addEventListener('tessera-sizechange', (e) => seen.push((e as CustomEvent).detail));
+      const part = <T extends Element = HTMLElement>(name: string) => shadow.querySelector<T & Element>(`[part~="${name}"]`);
+      return {host, store, shadow, map, seen, part};
+    }
+
+    it('lists None and the number columns the points arrive with, and nothing else', async () => {
+      const {host, shadow, part} = await popover();
+      expect(part('size-by')!.textContent!.trim()).toBe('None');
+      part<HTMLButtonElement>('size-by')!.click();
+      await settle(host);
+      const options = [...shadow.querySelectorAll('[part~="size-option"]')];
+      expect(options.map((o) => o.getAttribute('data-value'))).toEqual(['', 'citations', 'score']);
+      expect(options.map((o) => o.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+    });
+
+    it('sizes by the column chosen, which the store is asked for, and reports the choice', async () => {
+      const {host, store, shadow, map, seen, part} = await popover();
+      part<HTMLButtonElement>('size-by')!.click();
+      await settle(host);
+      shadow.querySelector<HTMLButtonElement>('[part~="size-option"][data-value="citations"]')!.click();
+      await settle(host);
+      expect(map.sizeBy).toBe('citations');
+      expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations']);
+      expect(seen).toEqual([{sizeBy: 'citations', min: 2, max: 9, scale: 'linear'}]);
+      expect(shadow.querySelector('[part~="size-menu"]')).toBeNull();
+      // Under a column the one Size slider gives way to the range and the scale.
+      expect(part('point-size')).toBeNull();
+      expect(part('size-range')!.textContent!.trim()).toBe('2 – 9 px');
+
+      const low = part<HTMLInputElement>('size-min')!;
+      low.value = '10';
+      low.dispatchEvent(new Event('input'));
+      await settle(host);
+      // Moving the smallest past the largest takes the largest with it.
+      expect([map.sizeMin, map.sizeMax]).toEqual([10, 10]);
+      expect(part('size-range')!.textContent!.trim()).toBe('10 – 10 px');
+      shadow.querySelector<HTMLButtonElement>('[part="size-scale"] [data-scale="log"]')!.click();
+      await settle(host);
+      expect(map.sizeScale).toBe('log');
+      expect(shadow.querySelector('[part="size-scale"] [data-scale="log"]')!.getAttribute('aria-checked')).toBe('true');
+      expect(seen.at(-1)).toEqual({sizeBy: 'citations', min: 10, max: 10, scale: 'log'});
+
+      part<HTMLButtonElement>('size-by')!.click();
+      await settle(host);
+      shadow.querySelector<HTMLButtonElement>('[part~="size-option"][data-value=""]')!.click();
+      await settle(host);
+      expect(map.sizeBy).toBe('none');
+      expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args[0])).toEqual(['citations', null]);
+      expect(seen.at(-1)).toEqual({sizeBy: null, min: 10, max: 10, scale: 'log'});
+      expect(part('point-size')).not.toBeNull();
+    });
+
+    it('shows the size a host sets, passes it to the map, and leaves the slider out under hide-size', async () => {
+      const {map, part} = await popover('<tessera-explorer radius="5"></tessera-explorer>');
+      expect(map.radius).toBe(5);
+      expect(part<HTMLInputElement>('point-size')!.value).toBe('5');
+      expect(part('point-size')!.nextElementSibling!.textContent).toBe('5 px');
+      document.body.innerHTML = '';
+      const hidden = await popover('<tessera-explorer radius="5" hide-size></tessera-explorer>');
+      expect(hidden.part('point-size')).toBeNull();
+      expect(hidden.part('size-by')).not.toBeNull();
+      expect(hidden.map.radius).toBe(5);
+    });
+
+    it('closes the menu on Escape and gives focus back to its button, leaving the popover open', async () => {
+      const {host, shadow, part} = await popover();
+      part<HTMLButtonElement>('size-by')!.click();
+      await settle(host);
+      shadow.querySelector('[part~="size-option"]')!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
+      await settle(host);
+      expect(shadow.querySelector('[part~="size-menu"]')).toBeNull();
+      expect(shadow.querySelector('[part="layers-popover"]')).not.toBeNull();
+      expect(shadow.activeElement).toBe(part('size-by'));
+    });
+  });
+
   it('marks the Layers button while any layer is drawn', async () => {
     const {host, shadow, store} = await explorer();
     const toggle = () => shadow.querySelector('[part="layers-toggle"]')!;

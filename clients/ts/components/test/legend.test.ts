@@ -4,7 +4,7 @@ import {CATEGORY_PALETTES} from '@tesseradb/deck';
 import {hexOf} from '@tesseradb/deck/internal';
 import '../src/legend.js';
 import '../src/map.js';
-import {colouringOf} from '../src/colouring.js';
+import {colouringOf, setSizing} from '../src/colouring.js';
 import {deep, deepAll, fakeStore, meta, mount, scalar, settle, status, type FakeStore} from './fake-store.js';
 
 /**
@@ -40,8 +40,10 @@ function legend(colourBy: string, over: Partial<LegendProjection> = {}): LegendP
     ranks: {field: {1: 0, 2: 1, 3: 2}, venue: {1: 0}},
     domains: {citations: {min: 0, max: 1000}},
     categories: {field: VALUES, venue: [{code: 1, key: 'neurips', title: 'NeurIPS'}]},
+    samples: {},
     categoryErrors: {},
     colourBy,
+    sizeBy: null,
     ...over
   };
 }
@@ -460,5 +462,51 @@ describe('the Colour heading under a layer with several depths served', () => {
     select.dispatchEvent(new Event('change'));
     await settle(host);
     expect(deep(host, '[part="level"] .t')?.textContent).toBe('Level 2');
+  });
+});
+
+describe('the Size section', () => {
+  /** The circles' diameters and values, in order. */
+  const key = (host: HTMLElement) =>
+    deepAll(host, '[part="size-entry"]').map((e) => [Number.parseFloat((e.querySelector('.circle') as HTMLElement).style.width), e.querySelector('[part="size-value"]')!.textContent] as const);
+  const diameter = (v: number, max: number) => 2 * (2 + 7 * (Math.log1p(v) / Math.log1p(max)));
+
+  it('follows Colour with the column sized by, as four circles at round values drawn at the sizes the map gives them', async () => {
+    const {host, store} = await mountLegend('field', '<tessera-legend selectable readout></tessera-legend>', {sizeBy: 'citations', domains: {citations: {min: 0, max: 12_345}}});
+    setSizing(store, {min: 2, max: 9, scale: 'log'});
+    await settle(host);
+    const size = deep(host, '[part="size"]')!;
+    expect(size.previousElementSibling?.querySelector('[part="title"]')).not.toBeNull();
+    expect(deep(host, '[part="size-by"]')!.textContent).toBe('Citations');
+    // A third and two thirds of the way on the log scale, to one figure; the last marked as having
+    // larger values drawn, at the largest size.
+    const drawn = key(host);
+    expect(drawn.map(([, label]) => label)).toEqual(['0', '20', '500', '10,000+']);
+    expect(drawn[0]![0]).toBe(4);
+    expect(drawn[1]![0]).toBeCloseTo(diameter(20, 12_345), 1);
+    expect(drawn[2]![0]).toBeCloseTo(diameter(500, 12_345), 1);
+    expect(drawn[3]![0]).toBe(18);
+    expect(deep(host, '[part="size-note"]')).toBeNull();
+  });
+
+  it('says the sizes are by rank among the points drawn, at values from the sample of them', async () => {
+    const values = [0, 0, 1, 2, 3, 5, 8, 13, 40, 900];
+    const {host, store} = await mountLegend('field', '<tessera-legend></tessera-legend>', {sizeBy: 'citations', domains: {citations: {min: 0, max: 900}}, samples: {citations: {values, seen: 10}}});
+    setSizing(store, {scale: 'rank'});
+    await settle(host);
+    expect(key(host).map(([, label]) => label)).toEqual(['0', '2', '8', '900']);
+    expect(deep(host, '[part="size-note"]')!.textContent).toBe('By rank among the points drawn');
+  });
+
+  it('is absent with one size, and says so where the column cannot size points or nothing is drawn yet', async () => {
+    const {host, store} = await mountLegend('field');
+    expect(deep(host, '[part="size"]')).toBeNull();
+    store.set('legend', legend('field', {sizeBy: 'venue'}));
+    await settle(host);
+    expect(deep(host, '[part="size-note"]')!.textContent).toBe('Column unavailable');
+    store.set('legend', legend('field', {sizeBy: 'citations', domains: {}}));
+    await settle(host);
+    expect(deep(host, '[part="size-note"]')!.textContent).toBe('Nothing in view');
+    expect(deep(host, '[part="size-entry"]')).toBeNull();
   });
 });
