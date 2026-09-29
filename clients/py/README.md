@@ -391,9 +391,30 @@ drawn.num_rows                                # the points drawn
 drawn.artifacts.to_pylist()                   # the annotations drawn beside them
 ```
 
-Not built yet: `count(by=column)`, a count per value of a column, which needs a new route on the
-server. Until then, `categories(column, prefix=...)` counts the items carrying each matching
-value, over the whole of what the reader may see.
+### Counts by group: `aggregate`
+
+```python
+size, archives, density = db.aggregate(
+    "s0",
+    [{}, {"by": {"field": "archive", "top": 5}}, {"cells": {"depth": 6}}],
+    filters={"primary_category": {"eq": "cs.LG"}},
+    reference={},
+)
+archives.to_pandas()                          # group, key, title, count, reference_count, lift
+db.view("s0").within((0, 0, 10, 10)).aggregate([{"by": {"field": "archive", "top": 5}}])
+```
+
+`aggregate(view, groupings, filters=None, reference=None)` counts how the items the reader may see
+in a view are distributed, and returns one pyarrow table per grouping, in order. `{}` is the size
+of the set. `"by"` groups by the values of a category field declared with `index` or `render`, or
+by the artifacts of one level of a layer, as the `top` groups by count or the groups named in
+`values` or `artifacts`; `rest` and `none` rows count the items in no listed group and in none.
+`"cells"` divides the set, or each group, into the view's cells at a depth from 0 to 32, each row's
+`cell` being the cell's Morton prefix. `reference` is a second set to compare with, `{}` for
+everything the reader may see in the view; each row then adds `reference_count` and `lift`. The
+table's schema metadata `tessera.head` holds `total`, and `reference_total` and `groups` where they
+apply. The call follows each response's cursor until every table is whole. On a selection,
+`aggregate(groupings, reference=None)` sends the selection's filters and box as `filters`.
 
 ### Every row: `items` and `artifacts`
 

@@ -181,8 +181,8 @@ async fn a_generating_set_member_naming_nothing_refuses_the_request() {
     count(&server, 0).await;
 }
 
-/// A column that is neither `tessera_id` nor a unique field names nothing: it is ignored, as a
-/// build ignores it, and the answer names it.
+/// A column that is neither `tessera_id` nor a unique field names nothing: it is ignored whatever
+/// its cells hold, as a build ignores it, and the answer names it.
 #[tokio::test]
 async fn a_column_that_names_nothing_is_ignored_and_named() {
     let tmp = TempDir::new().unwrap();
@@ -191,11 +191,19 @@ async fn a_column_that_names_nothing_is_ignored_and_named() {
     let (status, body) = put(
         &server,
         false,
-        json!([{ "key": "a", "members": { "id": [0, 1], "name": ["x", "y"] } }]),
+        json!([{
+            "key": "a",
+            "members": {
+                "id": [0, 1],
+                "name": ["x", "y"],
+                "tags": [[1, "b"], { "c": 2 }],
+                "weight": [1.5, true],
+            },
+        }]),
     )
     .await;
     assert_eq!(status, 201, "{body}");
-    assert_eq!(body["ignored_columns"], json!(["name"]));
+    assert_eq!(body["ignored_columns"], json!(["name", "tags", "weight"]));
     assert_eq!(body["refused"], json!([]));
     assert_eq!(count(&server, 1).await, vec![2]);
 }
@@ -280,6 +288,10 @@ async fn a_malformed_table_is_refused_whole() {
             "a tessera_id that is a number",
             json!([{ "key": "a", "members": { "tessera_id": [12] } }]),
         ),
+        (
+            "a fraction for an integer field",
+            json!([{ "key": "a", "members": { "id": [0, 1.5] } }]),
+        ),
     ] {
         let (status, body) = put(&server, false, artifacts).await;
         assert_eq!(status, 422, "{what}: {body}");
@@ -353,10 +365,11 @@ async fn an_arrow_growth_names_members_as_a_list_of_structs() {
     assert_eq!(count(&server, 1).await, vec![3]);
 }
 
-/// An Arrow member struct's columns are text or integers: another type, and a column named twice,
-/// are refused by name.
+/// An Arrow member struct's columns are checked only where they name items: a unique field of
+/// another type than its values, and a column named twice, are refused; a column naming nothing is
+/// ignored whatever its type; and a `tessera_id` column may be uint64, as a read sends it.
 #[tokio::test]
-async fn an_arrow_member_column_of_another_type_or_named_twice_is_refused() {
+async fn an_arrow_member_column_is_checked_only_where_it_names_items() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     register(&server, flat_layer(LAYER)).await;
@@ -369,12 +382,13 @@ async fn an_arrow_member_column_of_another_type_or_named_twice_is_refused() {
     assert_eq!(status, 201, "{body}");
 
     let body_of = |fields: Vec<Field>, columns: Vec<ArrayRef>| {
+        let rows = columns[0].len();
         let fields = Fields::from(fields);
         let elements = StructArray::new(fields.clone(), columns, None);
         let item = Arc::new(Field::new("item", DataType::Struct(fields), false));
         let members = ListArray::new(
             item.clone(),
-            OffsetBuffer::from_lengths([1]),
+            OffsetBuffer::from_lengths([rows]),
             Arc::new(elements),
             None,
         );
@@ -410,4 +424,30 @@ async fn an_arrow_member_column_of_another_type_or_named_twice_is_refused() {
     let (status, body) = patch_arrow(&server, twice).await;
     assert_eq!(status, 422, "{body}");
     assert_eq!(count(&server, 1).await, vec![1]);
+
+    let ignored = body_of(
+        vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("weight", DataType::Float64, true),
+            Field::new("seen", DataType::Boolean, true),
+        ],
+        vec![
+            Arc::new(UInt64Array::from(vec![1])) as ArrayRef,
+            Arc::new(arrow::array::Float64Array::from(vec![0.5])) as ArrayRef,
+            Arc::new(arrow::array::BooleanArray::from(vec![true])) as ArrayRef,
+        ],
+    );
+    let (status, body) = patch_arrow(&server, ignored).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ignored_columns"], json!(["weight", "seen"]));
+    assert_eq!(count(&server, 1).await, vec![2]);
+
+    let read_back = body_of(
+        vec![Field::new("tessera_id", DataType::UInt64, true)],
+        vec![Arc::new(UInt64Array::from(vec![tessera_id_of(&server, 2)])) as ArrayRef],
+    );
+    let (status, body) = patch_arrow(&server, read_back).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["refused"], json!([]));
+    assert_eq!(count(&server, 1).await, vec![3]);
 }

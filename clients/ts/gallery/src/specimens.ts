@@ -129,7 +129,8 @@ function hierarchyStore(over: Partial<Projections> = {}, matched = false): FakeS
   const s = store(over);
   const {areas, topics} = topicArtifacts();
   const m = (a: Artifact) => (matched ? a.maskedCount / 7n : null);
-  s.setBrowse('roots', page(areas.map((a) => browseRow(a, m(a))), 'c1'));
+  const children = (a: Artifact) => topics.filter((t) => t.parentIds.includes(a.tesseraId)).length;
+  s.setBrowse('roots', page(areas.map((a) => browseRow(a, m(a), children(a))), 'c1'));
   s.setBrowse(`p:${areas[0]!.tesseraId}`, page(topics.filter((t) => t.parentIds[0] === areas[0]!.tesseraId).map((t) => browseRow(t, m(t)))));
   s.setBrowse('q:galaxy', page([browseRow(topics[4]!)]));
   s.setBrowse('q:zzz', page([]));
@@ -398,6 +399,15 @@ export const SECTIONS: Section[] = [
       {
         state: 'Add filter open',
         build: () => make('tessera-filter-panel', {store: store()}, {pinned: 'field'}),
+        ready: async (el) => {
+          await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
+          shadow(el, '[part="add"]')!.click();
+          await until(() => !!shadow(el, '[part="add-list"]'), 'the Add filter list');
+        }
+      },
+      {
+        state: 'Add filter open, clauses applied: the listed fields checked, the pinned one fixed',
+        build: () => make('tessera-filter-panel', {store: store({artifacts: mapState().artifacts, filters: APPLIED})}, {pinned: 'field', 'controls-only': ''}),
         ready: async (el) => {
           await (el as HTMLElement & {updateComplete: Promise<unknown>}).updateComplete;
           shadow(el, '[part="add"]')!.click();

@@ -138,7 +138,7 @@ describe('@tesseradb/react/components', () => {
       filterOperands: []
     } as never;
     const store = fakeStore({meta, status: status({status: 'shown'})});
-    store.setBrowse('roots', {artifacts: [{tesseraId: 2n ** 63n, key: 'd-1', name: 'Neoplasms', maskedCount: 10n, matchedCount: null, rung: 0, parentIds: []}], parents: [], next: null});
+    store.setBrowse('roots', {artifacts: [{tesseraId: 2n ** 63n, key: 'd-1', name: 'Neoplasms', maskedCount: 10n, matchedCount: null, rung: 0, parentIds: [], childCount: 0}], parents: [], next: null});
     const seen: {id: string; verb: string; on: boolean}[] = [];
     await act(async () => root.render(createElement(TesseraHierarchy, {store, onClauseChange: (e) => seen.push({id: e.detail.id, verb: e.detail.verb, on: e.detail.on})})));
     await settle(host);

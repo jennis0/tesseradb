@@ -48,6 +48,7 @@ const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<Bro
   matchedCount: null,
   rung: 0,
   parentIds: [],
+  childCount: 0,
   ...extra
 });
 
@@ -55,7 +56,7 @@ async function panel(overrides: Partial<Parameters<typeof fakeStore>[0]> = {}) {
   const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
   const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
   const store = fakeStore({meta: META, status: status({}), ...overrides});
-  store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n), row(2n, 'Anatomy', 3_400n)], parents: [], next: 'p2'});
+  store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n, {childCount: 2}), row(2n, 'Anatomy', 3_400n, {childCount: 1})], parents: [], next: 'p2'});
   el.store = store;
   await settle(host);
   await settle(host);
@@ -99,6 +100,16 @@ describe('<tessera-hierarchy>', () => {
     const names = deepAll(host, '[part="row"] [part="name"]');
     expect(names.map((n) => n.textContent?.trim())).toEqual(['spin magnetic effect', UNNAMED, UNNAMED]);
     expect(names.map((n) => n.hasAttribute('data-unnamed'))).toEqual([false, true, true]);
+  });
+
+  it('offers to expand only a row the server counts children under, and keeps every name in line', async () => {
+    const {host, store} = await panel();
+    store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n), row(12n, 'Tumours', 800n, {childCount: 4})], parents: [], next: null});
+    (deep(host, '[part="row"][data-id="1"] [part="expander"]') as HTMLButtonElement).click();
+    await settle(host);
+    await settle(host);
+    const leafAt = (id: string) => deep(host, `[part="row"][data-id="${id}"] [part="expander"]`)!.hasAttribute('data-leaf');
+    expect(['1', '11', '12', '2'].map(leafAt)).toEqual([false, true, false, false]);
   });
 
   it('fetches a node’s children on expansion, and pages them under More', async () => {

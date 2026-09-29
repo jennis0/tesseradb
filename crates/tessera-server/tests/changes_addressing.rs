@@ -163,7 +163,7 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
 
     let three = tessera_id_of(&server, 3);
     let request = serde_json::json!([
-        { "op": "suppress", "match": { "id": 1, "name": "ignored" } },
+        { "op": "suppress", "match": { "id": 1, "name": "ignored", "weight": 2.5 } },
         { "op": "suppress", "match": { "tessera_id": u64::MAX.to_string() } },
         { "op": "suppress", "match": { "id": 999_999 } },
         { "op": "suppress", "match": { "id": 2, "tessera_id": three.to_string() } },
@@ -188,7 +188,10 @@ async fn a_change_naming_no_item_or_two_is_refused_alone_or_refuses_a_strict_req
     assert_eq!(resp.status(), 200);
     let answer: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(answer["accepted"], 1);
-    assert_eq!(answer["ignored_columns"], serde_json::json!(["name"]));
+    assert_eq!(
+        answer["ignored_columns"],
+        serde_json::json!(["name", "weight"])
+    );
     assert_eq!(
         answer["refused"],
         serde_json::json!([
@@ -236,6 +239,10 @@ async fn a_malformed_change_request_is_refused_whole() {
         (
             "an integer field's value is decimal digits",
             serde_json::json!([{ "op": "suppress", "match": { "id": "five" } }]),
+        ),
+        (
+            "an integer field's value is a whole number",
+            serde_json::json!([{ "op": "suppress", "match": { "id": 1.5 } }]),
         ),
         (
             "a bare number is what loses u64s past 2^53 in a browser",

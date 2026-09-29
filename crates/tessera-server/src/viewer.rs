@@ -1633,6 +1633,8 @@ struct BrowseRowResp {
     rung: u32,
     /// This artifact's parents that this principal is also served.
     parent_ids: Vec<String>,
+    /// How many artifacts this principal is served name this one among their parents.
+    child_count: u64,
 }
 
 fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
@@ -1648,6 +1650,7 @@ fn browse_row(row: tessera_engine::browse::BrowseRow) -> BrowseRowResp {
             .iter()
             .map(|id| id.raw().to_string())
             .collect(),
+        child_count: row.child_count,
     }
 }
 

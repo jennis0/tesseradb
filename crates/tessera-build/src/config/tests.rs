@@ -1910,6 +1910,21 @@ fn an_attribute_may_name_its_own_source_and_move_a_unique_column() {
     assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), None);
 }
 
+/// **A declaration holds at most 65,535 unique fields**, as a running service's schema does.
+#[test]
+fn a_declaration_past_the_most_unique_fields_is_refused() {
+    let declaring = |count: usize| {
+        let mut text = ACQUIRED.to_string();
+        for i in 0..count {
+            text += &format!("\n[[attribute]]\nname = \"u{i}\"\ntype = \"u64\"\nunique = true\n");
+        }
+        parse_str(&text)
+    };
+    let most = tessera_store::declaration::UNIQUE_FIELDS_MAX;
+    assert!(declaring(most).is_ok());
+    assert!(declaring(most + 1).is_err());
+}
+
 /// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
 /// scalar tail being stored positionally.
 #[test]

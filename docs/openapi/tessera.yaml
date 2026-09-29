@@ -2312,8 +2312,10 @@ paths:
         The body is JSON, or an Arrow IPC stream as `application/vnd.apache.arrow.stream`. The
         Arrow form carries one row per artifact: `key` as `utf8`, `members` as `list<struct>` or
         `large_list<struct>` whose struct fields are the member table's columns, each named once:
-        `tessera_id` as `utf8` or `large_utf8`, a unique field as either or as a signed or unsigned
-        integer of any width, and any other type `422`; optionally `view` as `utf8` and
+        `tessera_id` as `utf8`, `large_utf8` or an unsigned integer (as a read sends it), a unique
+        field as `utf8` or `large_utf8` or, for an integer or timestamp field, as a signed or
+        unsigned integer of any width. Any other type in those columns is `422`; any other column
+        is ignored whatever its type. Optionally `view` as `utf8` and
         `access` in any form ingest's `access` takes, with `level` in the schema's metadata as a
         string. It carries joining members and access labels only; every other part travels as
         JSON. Any other column or metadata key is `422`.
@@ -3364,7 +3366,7 @@ components:
 
     BrowseRow:
       type: object
-      required: [tessera_id, masked_count, rung, parent_ids]
+      required: [tessera_id, masked_count, rung, parent_ids, child_count]
       properties:
         tessera_id:
           type: string
@@ -3388,6 +3390,10 @@ components:
           type: array
           description: This artifact's parents that this principal is also served, ascending. Empty for a root and for an artifact whose parents are all withheld; a client reads both as no parent here.
           items: { type: string }
+        child_count:
+          type: integer
+          minimum: 0
+          description: How many artifacts this principal is served name this one among their parents, which is how many rows the children form with this artifact as `parent` serves across its pages. A child this principal is not served is not counted. `0` for a leaf, and on a `flat` or `stacked` layer, which have no links. Not changed by `filters`.
 
     FilterExpr:
       description: |
@@ -4161,8 +4167,7 @@ components:
           pattern: "^[0-9]+$"
           description: The item's `tessera_id`, as a string of decimal digits; a JSON number is `422`.
       additionalProperties:
-        type: [string, integer, "null"]
-        description: A value of the unique field the key names. A keyword is a string; an integer or a timestamp is a number or a string of decimal digits. `null` names nothing.
+        description: A value of the unique field the key names. A keyword is a string, and a number is `422`; an integer or a timestamp is a number or a string of decimal digits. `null` names nothing. Any other value in a unique field's column is `422`; a key that is not a unique field takes any value.
 
     MemberTable:
       type: object
@@ -4176,7 +4181,7 @@ components:
       additionalProperties:
         type: array
         items:
-          type: [string, integer, "null"]
+          description: A cell as in an `AddressRow`.
 
     IgnoredColumns:
       type: array

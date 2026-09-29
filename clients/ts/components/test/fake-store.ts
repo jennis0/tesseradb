@@ -44,7 +44,11 @@ export function meta(over: Partial<Meta> = {}): Meta {
       maxSuggestionWalk: 100_000,
       maxSuggestSetEntities: 10_000_000,
       maxPageRows: 65_536,
-      maxPageBytes: 16_777_216
+      maxPageBytes: 16_777_216,
+      maxAggregateGroupings: 16,
+      maxAggregateTop: 1000,
+      maxAggregateNamed: 1000,
+      maxAggregateCells: 1_048_576
     },
     maxTilesPerRequest: 4096,
     filterOperands: [],
@@ -65,6 +69,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     filters: {draft: {filter: {}, highlight: {}}, expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
     legend: {ranks: {}, domains: {}, samples: {}, missing: {}, categories: {}, categoryErrors: {}, colourBy: null, sizeBy: null},
     replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
+    aggregates: new Map(),
     ...overrides
   };
   let held: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
@@ -101,6 +106,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setView: spy('setView'),
     setFilters: spy('setFilters'),
     setMembers: spy('setMembers'),
+    setAggregate: spy('setAggregate'),
     // Answered from `browsePages`, which a test sets: keyed by the form the request took, so a
     // walk can be scripted without a network. Every call is still recorded as `browse`.
     browse: async (req: {parent?: bigint; q?: string; cursor?: string}) => {

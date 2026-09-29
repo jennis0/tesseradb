@@ -4879,6 +4879,10 @@ fn compile_attributes(
             }
         }
     }
+    tessera_store::declaration::check_unique_fields(
+        attributes.iter().filter(|a| a.unique).count(),
+    )
+    .map_err(declaration_error)?;
     Ok((attributes, scoped))
 }
 
