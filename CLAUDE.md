@@ -36,7 +36,7 @@ Nothing is deployed, so there is no backwards compatibility: change a format and
 - Sampling before masking. A viewer with few visible items then gets a blank map and no error.
 - Gating a label on the filtered set. Labels gate on the authorised set; a filter can hide things and can never reveal them.
 - Sending an entity id to a client, these are internal and cannot be shared as they leak invisible points. Clients see `tessera_id`, a blinding permutation. It is not encryption.
-- Removing a deny early. A suppression is removed only when it is lifted, or when the compaction removes the entity it names; an item's suppression continues on its current entity. A deletion is removed only by the compaction that removes its rows. A suppression applies to every request from the moment it is accepted.
+- Removing a deny early. A suppression is removed only when it is lifted, or when the compaction removes the entity it names; an item's suppression continues on its current entity. A deletion is removed only by the compaction that removes its rows. A suppression applies to every request that starts after it is accepted.
 
 Refuse or withhold only where something would leak to a viewer or cannot be undone (entity ids, term ids, a published identity). Everywhere else the user decides: do what they asked, report what happened with numbers, and do not add a refusal, a warning or a default on their behalf.
 

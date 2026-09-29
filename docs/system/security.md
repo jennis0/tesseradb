@@ -81,8 +81,9 @@ path to the geometry: the geometry arrays have no other entry point, so no code 
 aggregate over rows the visible set excludes. Nothing checks this at build time; the guarantee
 rests on the code's shape and on review.
 
-A suppression applies to every request from the moment it is accepted, because the overlay is read
-fresh each time the visible set is composed. A deletion's rows leave the corpus only at
+A suppression applies to every request that starts after it is accepted, because the overlay is
+read fresh each time the visible set is composed. A request already running when it is accepted
+may or may not reflect it. A deletion's rows leave the corpus only at
 compaction; until then they are removed from the visible set the same way a suppressed item's are.
 
 An edit moves an item to a new entity and deletes the old one, and none of it can widen what a
@@ -220,19 +221,39 @@ ask for it, and a viewer held to map order would lose speed and no data.
 `tessera_id` in map order, an entity id in stored order, and an artifact's level and publication
 ordinal on the artifacts route. It also carries the order and the size of the next stretch the
 filter is evaluated over. It is sealed with XChaCha20-Poly1305, an authenticated cipher, under a
-key derived from the bundle's identity key, with a random nonce drawn for each cursor, so a
-viewer can read nothing from a cursor, and two cursors for one position differ and cannot be
-matched. Authenticated with it are the route, the view and its incarnation, a SHA-256 of the
-authorisation data the session was opened with, and on the artifacts route the layer's name, its
-own internal identity and the level named. A cursor therefore opens only in the read it was issued
-for, and only in a session opened with byte-identical authorisation data. A viewer cannot use one
-to name a position they were not served. Every such failure is one refusal, decided before any
-position in the cursor is used, and a cursor issued by another bundle does not open.
+key derived from the bundle's identity key, with a random nonce drawn for each cursor, so a viewer
+can read nothing from a cursor, and two cursors for one position differ and cannot be matched.
+Authenticated with it are the route, the view and its incarnation, a SHA-256 of the authorisation
+data the session was opened with, and on the artifacts route the layer's name, its own internal
+identity and the level named, and on the aggregate route a SHA-256 of the request's set, reference
+and groupings with the internal identity of each layer they name. A cursor therefore opens only in
+the read it was issued for, and only in a session opened with byte-identical authorisation data. A
+viewer cannot use one to name a position they were not served. Every such failure is one refusal,
+decided before any position in the cursor is used, and a cursor issued by another bundle does not
+open.
 
 **No stored block is sent as it is.** A compressed block of the record store, like a stored
 column, holds the values of items the viewer may not see beside those they may. Every page is
 therefore built afresh: each value of a row the read took inside the visible set is decoded and
 written into a new Arrow batch, and a request for `zstd` compresses that new batch.
+
+## Counting by group
+
+`POST /v1/aggregate` counts how the viewer's items are distributed across the values of a
+category field, the artifacts of a layer and the cells of the map, and it answers under the
+properties above. Every page composes the visible set again, and the set and the reference set it
+is compared with are both drawn from it, so every count, total and lift is taken over items the
+viewer may see, and a deletion or suppression applies from the next page.
+
+A value of a `derived` vocabulary gets a row only where the viewer can see an item carrying it,
+and is never counted in `rest`. A named value the viewer may not see gets no row, exactly as a
+value that does not exist. The artifacts of a layer are listed on the terms the viewport serves
+them on, tested against the visible set and never the filtered set, and an item held only by an
+artifact withheld from the viewer counts as `none`, so a withheld artifact cannot show through
+`rest`. Rows carry vocabulary keys, `tessera_id`s and cell prefixes; the codes and ordinals the
+engine counts with travel only inside the sealed cursor. Where a field keeps a record of which items
+carry each value, a value's count is read from that record over the whole corpus and intersected
+with the visible set, which puts this route in the timing row below.
 
 ## Residual disclosure
 
@@ -242,7 +263,7 @@ reason given, and one, the per-tile timing channel, remains open.
 
 | What a viewer can learn | How | Severity | Why | Specification rows |
 |---|---|---|---|---|
-| Roughly how much of the corpus lies outside their own set; that a token, keyword, category value or unique field value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `tessera_id` to probe the second, and is never served one for an artifact withheld from them. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
+| Roughly how much of the corpus lies outside their own set; that a token, keyword, category value or unique field value they can name exists somewhere in the corpus, and coarsely how widely; and that the corpus is being written to | Response time for a viewport, a filter, a category listing, a count by group or a bulk read in either order grows with the work a request does over rows and terms the viewer cannot see, not only their own. A changed content key on a response says the corpus has changed since the viewer's last request | Low | Only the per-tile timing component of this row is open and unquantified: correlating cost with the viewer's own visible count leaves a residual nobody has bounded. A response's cost also varies with how many artifacts in view were withheld by their own label or their membership requirement, since each is found before it is tested, and the identifier route does more work for a withheld artifact than for an identifier naming nothing; a viewer needs an artifact's `tessera_id` to probe the second, and is never served one for an artifact withheld from them. Every other component (the category, text and suggestion timing variants, and the content key itself) is bounded to a quantity the viewer already possesses or is about to receive, and is accepted on that basis. A count by group reads each value's per-value record over the whole corpus where the field keeps one, as a category listing's visibility test and a suggestion's do, so its time depends on how many values exist and coarsely how widely each is held, including a value named in the request that the viewer cannot see. That is accepted, on the same basis as the listing and suggestion timing. A finer per-term version of the content key, and a timing channel over how many partitions a token reaches, are specified but not built: a deployment holds one partition today and nothing finer than the coarse content key reaches the wire | C4, C14, C15, C19, C21, C24, C25, C26, C31 |
 | When an item they once saw was deleted or suppressed; and, by comparing `tessera_id`s out of band, that two viewers are looking at the same item | A `tessera_id` is stable for the item's life in one bundle, so a held one stops resolving on the viewer's next request after the change. Two viewers who compare `tessera_id`s for items they can each see can tell they name the same item. An operator's unique values carry whatever structure the operator put in them | Medium | The price of a `tessera_id` a client can bookmark and share. Nothing lets a client vary the key | C6, C17 |
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
@@ -276,6 +297,7 @@ membership-requirement declaration are covered under what this does not claim, b
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the visible set, that the comparison is required to disagree with | None |
 | A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works. The scan covers both bulk reads, each read whole across responses and the items read in both orders, and every cursor they issue, whose decoded bytes are swept at every offset | A cursor's bytes are swept for 8-byte values only |
 | A lookup by value answers an invisible holder as absent | Rust tests of the engine ask, as a viewer lacking a holder's term, for its value in a keyword and an integer unique field, and check that the answer equals the answer for a value nobody holds. Server tests check that the control plane's `409` names the holder's `tessera_id` | Not compared with the independent implementation, and no scan covers the answer's timing |
+| Counting by group answers under the properties above | Compared, row for row, against an independent implementation that counts sets of entities: over the adversarial mask catalogue under three principals of very different coverage, a `derived` and a `public` indexed field and a drawn one, by count and by a named list holding a hidden value, a value with no item and one that does not exist, alone and with cells down to depth 20, with no filter, a category filter and a region, against the whole visible set as reference; and cells over the whole view and over areas, which list only their own cells, with the whole view past the cell limit refused; over two spatial layers under three principals, by count and by a named list holding an id that names nothing; and over a tree of overlapping artifacts, some withheld by their own label, by a label no point carries, by their membership requirement or by the layer's default label. Server tests read tables whole through the cursor, apply a suppression from the next response, and check that a client going away frees its admission. Rust tests of the engine and the server plant a derived value whose only carrier is hidden, an artifact withheld by its own label, overlapping artifacts, a second view and a suppression between two pages of one table | A suppression between two pages of one table is not compared with the independent implementation, and no scan covers the response's timing |
 | An incomplete answer is refused | The built half is covered by tests around shared in-progress work and cancellation, though not by the differential test form the design describes | The two partition rules have no test at all: a deployment has one partition, so neither can be exercised |
 | A bulk read answers under the properties above | The identifier scan above reads the bulk read of items whole, over a synthetic catalogue of adversarial masks, in both orders and across several responses. It checks that no row is returned twice, that the number of rows equals the viewport's visible count, that both orders return the same set of rows, and that each row's unique `serial` is its own item's in the independent implementation's bundle. Rust tests of the items route plant a narrower viewer and a label the viewer does not hold, and a deletion and a suppression accepted between responses and between two pages of one response. Rust tests of the artifacts route plant an artifact withheld by its own label, an attached label whose target is withheld, content the viewer may not read and a parent the viewer is not served, and check that none of them leaves a row, a count, a parent entry or a page; a deny accepted between two responses applies from the next, and a merge between two pages of one response renews the filter. Server tests end responses at each budget and at the stream deadline, and check each trailer's cursor. The TypeScript, Python and command-line clients' tests cut responses before their trailers and check that each keeps its whole pages and the cursor after the last of them | Which rows a bulk read serves, and their values, are not compared with the independent implementation: the Rust tests compare them with each fixture's own expected values. The artifacts route has no test of a deny between two pages of one response. A response cut because its client stopped reading is tested only through the viewport, whose responses are sent by the same code |
 

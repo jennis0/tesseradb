@@ -209,6 +209,9 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         browse @ EngineError::BrowseRefused(_) => ApiError::Contract(browse.to_string()),
         // Each names only a field, a system field or a paging argument the caller sent.
         records @ EngineError::RecordsRefused(_) => ApiError::Contract(records.to_string()),
+        // Each names a grouping's shape, a limit from `/v1/meta`, a field or a layer the caller
+        // sent.
+        aggregate @ EngineError::AggregateRefused(_) => ApiError::Contract(aggregate.to_string()),
         // One fixed detail for every reason a cursor did not open.
         cursor @ EngineError::CursorRefused => ApiError::Contract(cursor.to_string()),
         // The detail names only the caller's numbers and the configured limit.

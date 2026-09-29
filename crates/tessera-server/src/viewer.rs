@@ -1,5 +1,5 @@
 //! The viewer plane: `/v1/meta`, `/v1/categories`, `/v1/viewport`, `/v1/items`,
-//! `/v1/items/{tessera_id}` and `/v1/artifacts`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
+//! `/v1/items/{tessera_id}`, `/v1/artifacts` and `/v1/aggregate`, plus `/healthz` and `/readyz`. Bearer auth is a session token minted by the
 //! session plane's `/session/authorise`.
 
 use std::sync::Arc;
@@ -45,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/artifacts", post(crate::records::artifacts))
         .route("/v1/artifacts/{tessera_id}", post(artifact))
         .route("/v1/artifacts/browse", post(browse))
+        .route("/v1/aggregate", post(crate::aggregate::aggregate))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         // Trims the allocator after responses; mounted on every plane, so a node that never
@@ -274,6 +275,13 @@ async fn meta(
             // `POST /v1/items`' page ceilings: rows, and Arrow bytes before compression.
             "max_page_rows": state.limits.max_page_rows,
             "max_page_bytes": state.limits.max_page_bytes,
+            // `POST /v1/aggregate`'s ceilings: groupings per request, and a grouping's `top`,
+            // named list and cells.
+            "max_aggregate_groupings": state.limits.max_aggregate_groupings,
+            "max_aggregate_top": state.limits.max_aggregate_top,
+            "max_aggregate_named": state.limits.max_aggregate_named,
+            // The most cells one grouping's cell level may list: its depth's cells in its area.
+            "max_aggregate_cells": state.limits.max_aggregate_cells,
         },
         // The layers this principal may know exist, with what each declared. Never a layer's
         // artifact count, which counts objects the principal may not see, and never its gate
@@ -429,24 +437,53 @@ fn resolve_category_column<'m>(
         },
     };
     let view = resolved_view.map_or("", |view| view.id.as_str());
-    match meta.resolve_category_column(column, view, visible) {
+    match category_column(meta, column, view, visible)? {
+        CategoryColumn::Resolved(resolved) => Ok((resolved, resolved_view)),
         // A non-category column gets the same 404 as no column at all.
+        CategoryColumn::NotCategory | CategoryColumn::Unknown => {
+            Err(ApiError::Unknown("unknown category column".to_string()))
+        }
+        CategoryColumn::Unpinned { group } => Err(ApiError::Contract(format!(
+            "'{column}' is scoped to view group '{group}' and this request names no view of \
+             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
+        ))),
+    }
+}
+
+/// What a spelling names as a category column.
+pub(crate) enum CategoryColumn {
+    Resolved(String),
+    /// A column this principal can reach that is not a category.
+    NotCategory,
+    /// No column this principal can reach.
+    Unknown,
+    /// A group-scoped family named without a pin, under no view of its group.
+    Unpinned { group: String },
+}
+
+/// The category column `column` names under the resolved `view` (`""` for none), as a filter leaf
+/// resolves it. A scoped family's spelling that names a pin wrongly is refused.
+pub(crate) fn category_column(
+    meta: &tessera_engine::EngineMeta,
+    column: &str,
+    view: &str,
+    visible: &tessera_engine::gate::VisibleViews,
+) -> Result<CategoryColumn, ApiError> {
+    match meta.resolve_category_column(column, view, visible) {
         tessera_engine::LeafColumn::Resolved {
             column: resolved,
             family: tessera_engine::filter::Family::Category,
             ..
-        } => Ok((resolved, resolved_view)),
-        tessera_engine::LeafColumn::Unpinned { group } => Err(ApiError::Contract(format!(
-            "'{column}' is scoped to view group '{group}' and this request names no view of \
-             it; pass `view=` a view of that group, or pin the one it means as '{column}@<key>'"
-        ))),
+        } => Ok(CategoryColumn::Resolved(resolved)),
+        tessera_engine::LeafColumn::Resolved { .. } => Ok(CategoryColumn::NotCategory),
+        tessera_engine::LeafColumn::Unpinned { group } => Ok(CategoryColumn::Unpinned { group }),
         tessera_engine::LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
         ))),
         tessera_engine::LeafColumn::PinOnUnscoped { column } => Err(ApiError::Contract(format!(
             "'{column}' is not scoped to a view group; leave out the pin"
         ))),
-        _ => Err(ApiError::Unknown("unknown category column".to_string())),
+        _ => Ok(CategoryColumn::Unknown),
     }
 }
 
@@ -1184,6 +1221,17 @@ fn run_viewport_stream(
     // `sink` drops here, after the state stores, releasing the channel sender and the slot permit.
 }
 
+/// Refuses a bbox that is not `[x0, y0, x1, y1]` with `x0 <= x1`, `y0 <= y1`, all finite; `name`
+/// is the key that carried it.
+pub(crate) fn check_bbox(name: &str, bbox: &[f64; 4]) -> Result<(), ApiError> {
+    if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
+        return Err(ApiError::Contract(format!(
+            "{name} must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite"
+        )));
+    }
+    Ok(())
+}
+
 async fn viewport(
     State(state): State<Arc<AppState>>,
     ViewerSession(session): ViewerSession,
@@ -1195,13 +1243,7 @@ async fn viewport(
 
     // Exactly one of `bbox` and `tiles`.
     match (&req.bbox, &req.tiles) {
-        (Some(bbox), None) => {
-            if bbox.iter().any(|v| !v.is_finite()) || bbox[0] > bbox[2] || bbox[1] > bbox[3] {
-                return Err(ApiError::Contract(
-                    "bbox must be [x0, y0, x1, y1] with x0 <= x1, y0 <= y1, all finite".to_string(),
-                ));
-            }
-        }
+        (Some(bbox), None) => check_bbox("bbox", bbox)?,
         (None, Some(tiles)) => {
             // A prefix carries no depth, so one with bits above `zoom` is refused rather than
             // masked off.

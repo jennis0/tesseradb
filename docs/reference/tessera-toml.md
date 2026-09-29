@@ -63,7 +63,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
 | `dev_cors_origins` | array of strings | `[]` | Browser origins whose pages may call both the viewer plane and the session plane, so a page in development can hold the session credential. The server logs a warning at start when it is set. `"*"` is refused. |
 | `compute_threads` | integer | the number of CPUs the process may use | Threads in the pool that computes responses. |
-| `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse`, a `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`, never the control plane. |
+| `compute_admission` | integer | four per compute thread | Viewer and session requests computed at once. It admits `/v1/viewport`, the single-item and single-artifact reads, `/v1/artifacts/browse`, `/v1/aggregate`, a `/v1/categories/{column}/suggest` with `view` and `counts=true`, and `/session/authorise`, never the control plane. |
 | `compute_queue` | integer | twice `compute_admission` | Requests that may wait for an admission slot beyond those running. A request finding no place is refused with 429 at once. `compute_admission` and `compute_queue` together may not exceed 2305843009213693951. |
 | `admission_timeout_ms` | integer | `250` | Milliseconds a queued request waits for an admission slot before it is refused with 429. |
 | `single_flight_wait_ms` | integer | `6000` | Milliseconds a request waits for another request's build of a shared cached structure before it is refused with 429. |
@@ -92,6 +92,12 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `bulk_admission` | integer | `2` | Bulk reads running at once. One more is refused with 429 at once, and `0` refuses every bulk read. Bulk reads may hold seven times `max_page_bytes` of memory each. A value above 2305843009213693951 is refused. |
 | `bulk_response_bytes` | integer | `268435456` (256 MiB) | The most bytes one bulk-read response carries before it ends with a cursor to resume from. A value below `max_page_bytes` is refused. |
 | `bulk_response_ms` | integer | `30000` | Milliseconds one bulk-read response may run before it ends with a cursor to resume from. `stream_deadline_ms` ends one too, whichever comes first. |
+| `max_aggregate_groupings` | integer | `16` | The most groupings one `POST /v1/aggregate` may ask for, each a table of the response. A request with more is refused with 422. |
+| `max_aggregate_top` | integer | `1000` | The largest `top` one aggregate grouping may ask for. A larger one is refused with 422. |
+| `max_aggregate_named` | integer | `1000` | The most values or artifacts one aggregate grouping may name. A longer list is refused with 422. |
+| `max_aggregate_cells` | integer | `1048576` | The most cells one aggregate grouping's cell level may list: the cells at its depth in its area, however many groups share them. A request asking for more is refused with 422. |
+| `aggregate_response_bytes` | integer | `16777216` (16 MiB) | The most bytes one `POST /v1/aggregate` response carries before it ends with a cursor to resume from. It runs under the viewport's admission, so this bounds what each one holds. A value below `aggregate_page_bytes` or above 2147483648 is refused. |
+| `aggregate_page_bytes` | integer | `4194304` (4 MiB) | The most bytes one page of an aggregate response holds, as Arrow column bytes before compression. `0` is refused, and so is a value above 2147483648. |
 | `visible_wait_max_secs` | integer | `30` | The most seconds a write asking to wait until it is visible, and `/control/flush`, wait before answering `visible: false`. |
 | `row_projection_cache_bytes` | integer | `2147483648` (2 GiB) | Bytes of each viewer's projection of the rows they may see, kept between requests. |
 | `fragment_cache_bytes` | integer | `1073741824` (1 GiB) | Bytes of cached visibility masks kept in memory. Masks also persist in the `[bundle]` cache directory, which this does not bound. |

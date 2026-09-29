@@ -172,6 +172,7 @@ fn read(
                     groupings: 8,
                     top: 1000,
                     named: 1000,
+                    cells: u64::MAX,
                 },
                 cancel: None,
             },
@@ -260,16 +261,19 @@ fn main() -> Result<(), BoxError> {
             pick: Pick::Top(10),
         }),
         cells,
+        area: None,
     };
     let density = |depth: u8| Grouping {
         by: None,
         cells: Some(depth),
+        area: None,
     };
     let mut cases: Vec<(String, Grouping, bool)> = vec![(
         "size".to_string(),
         Grouping {
             by: None,
             cells: None,
+            area: None,
         },
         true,
     )];
@@ -295,6 +299,7 @@ fn main() -> Result<(), BoxError> {
                     pick: Pick::Top(10),
                 }),
                 cells: None,
+                area: None,
             },
             true,
         ));
