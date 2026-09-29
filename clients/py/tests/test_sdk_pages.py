@@ -600,16 +600,14 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
     assert answer["counts"]["matched"] == 1
 
 
-def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(served, corpus):
-    """A commit some of whose pages landed has happened: it returns the report, which names the
-    page refused, and the rows that were accepted are served."""
-    db = served(small)
-    frame = [-5.0, -5.0, 40.0, 40.0]
-    before = viewport(db, "map", frame)["counts"]["visible"]
-    # No item is named `nobody`, and a row without coordinates creates none, so it is a `422`.
+def a_value_for_nobody_and_two_new_papers(db) -> None:
+    """A values table whose first row names no item, and two rows creating items."""
     db.insert(
         "score",
-        pa.table({"id": pa.array(["nobody"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        pa.table(
+            {"id": pa.array(["nobody", "p3"], pa.string()),
+             "score": pa.array([9.0, 3.0], pa.float64())}
+        ),
         value="score",
     )
     db.insert(
@@ -627,11 +625,49 @@ def test_a_partly_refused_commit_returns_its_report_and_serves_what_landed(serve
         y="y",
         access="labels",
     )
+
+
+def test_a_row_naming_no_item_is_left_out_and_counted_and_the_rest_of_the_commit_lands(
+    served, corpus
+):
+    """No item is named `nobody`, and a row without coordinates creates none: that row is
+    refused, the report names it by its row in the table inserted and counts it by reason, and
+    every other row lands."""
+    db = served(small)
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    before = viewport(db, "map", frame)["counts"]["visible"]
+    a_value_for_nobody_and_two_new_papers(db)
     report = db.commit()
+    assert report.ok, report
+    assert report.refused == [
+        {"target": "score", "view": None, "row": 0, "reason": "names_no_item"}
+    ]
+    assert report.refused_by_reason == {"names_no_item": 1}
+    assert report.items_edited == 1 and report.rows_accepted == {"map": 2}
+    assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
+    scored = {"score": {"range": {"gte": 2.0, "lte": 4.0}}}
+    assert viewport(db, "map", frame, filters=scored)["counts"]["matched"] == 1
+
+
+def test_a_strict_commit_refuses_the_request_carrying_a_refused_row_and_serves_what_landed(
+    served, corpus
+):
+    """A commit some of whose pages landed has happened: it returns the report, which names the
+    page refused, and the rows that were accepted are served. Strict, the values page carrying the
+    row naming nobody is refused whole."""
+    db = served(small)
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    before = viewport(db, "map", frame)["counts"]["visible"]
+    a_value_for_nobody_and_two_new_papers(db)
+    report = db.commit(strict=True)
     assert not report.ok
-    assert [r["status"] for r in report.refusals] == [422]
+    assert [r["status"] for r in report.refusals] == [409]
+    assert report.refused == []
     assert report.rows_accepted == {"map": 2}
     assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
+    scored = {"score": {"range": {"gte": 2.0, "lte": 4.0}}}
+    assert viewport(db, "map", frame, filters=scored)["counts"]["matched"] == 0
+
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the closing flush waits for the publication it arms, and a commit whose only
@@ -698,7 +734,7 @@ def test_remove_stops_a_row_being_served_and_a_removed_id_is_inserted_as_a_point
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
 
-    report = db.remove([7], field="id")
+    report = db.remove({"id": [7]})
     assert report.ok, report
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
 
@@ -717,7 +753,7 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
     [held] = db.lookup("s0", "id", [8]).column("tessera_id").to_pylist()
-    assert db.suppress([8], field="id").ok
+    assert db.suppress({"id": [8]}).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
     # The same item, named by the `tessera_id` it was served under.
     assert db.unsuppress([held]).ok
@@ -748,11 +784,11 @@ def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(se
 
     # Three of the five leave: the content is served against the two that remain. The generating
     # set shrinks; the membership the count is taken over does not.
-    assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0, field="id").ok
+    assert db.leave("topics", "l0", {"id": ["p0", "p1", "p2"]}, rank=0).ok
     assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
     # The page that empties the set withdraws the content, and it does not come back on its own.
-    assert db.leave("topics", "l0", ["p3", "p4"], rank=0, field="id").ok
+    assert db.leave("topics", "l0", {"id": ["p3", "p4"]}, rank=0).ok
     assert not [row for row in artifact_rows_of(db) if row[0] == "topics" and row[2]]
 
 
@@ -1262,7 +1298,7 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
         "attached": {"layer": "clusters", "key": "c0", "level": 0},
         "content": [["Ward A"]],
     }
-    body, remainders, count = _artifact_block(label, 4096)
+    body, remainders, count = _artifact_block(label, 4096, ["paper"])
     record = json.loads(body)
     assert "members" not in record, record
     assert record["attached_to"] == {"layer": "clusters", "key": "c0", "level": 0}
@@ -1270,11 +1306,12 @@ def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_
 
     # An attached record that does name members keeps them: they are the generating set the caller
     # claimed, and the predicate is a state rather than a flag.
-    held = dict(label, members=[b"p0"])
-    assert "members" in json.loads(_artifact_block(held, 4096)[0])
+    held = dict(label, members=[{"paper": "p0"}])
+    assert json.loads(_artifact_block(held, 4096, ["paper"])[0])["members"] == {"paper": ["p0"]}
 
-    # A record attaching to nothing has no membership to borrow, so the empty list still travels.
-    assert json.loads(_artifact_block({"key": "c0"}, 4096)[0])["members"] == []
+    # A record attaching to nothing has no membership to borrow, so the empty table still travels.
+    empty = json.loads(_artifact_block({"key": "c0"}, 4096, ["paper"])[0])["members"]
+    assert empty == {"paper": []}
 
 
 def labelled_teams(db) -> None:
@@ -1447,9 +1484,11 @@ def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
     """A growth on a layer scoped to a group says which view's artifact it grows."""
     import json
 
-    body = json.loads(commit_module.patch_body(0, "c1", joining=["p0"], view="q2"))
+    member = [{"paper": "p0"}]
+    body = json.loads(commit_module.patch_body(0, "c1", ["paper"], joining=member, view="q2"))
     assert body["artifacts"][0]["view"] == "q2"
-    assert "view" not in json.loads(commit_module.patch_body(0, "c1", joining=["p0"]))["artifacts"][0]
+    body = json.loads(commit_module.patch_body(0, "c1", ["paper"], joining=member))
+    assert "view" not in body["artifacts"][0]
 
 
 def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_route_answers(

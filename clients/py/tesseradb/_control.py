@@ -177,28 +177,33 @@ class Control:
             self._limits = self.status().get("limits", {})
         return self._limits
 
-    def ingest(self, body: bytes, batch: str, view: str | None = None) -> Answer:
+    def ingest(
+        self, body: bytes, batch: str, view: str | None = None, strict: bool = False
+    ) -> Answer:
         """`POST /control/ingest`: create items, edit them, or add them to a view.
 
-        A row names an item by its `tessera_id` or a unique column's value. A
-        row naming none creates an item at its position; one carrying what the item stores
-        changes nothing; one naming an item with no row in the view adds it there; any other
-        edits the item, which keeps its `tessera_id`. A row without coordinates changes only what
-        it carries. Any column may be left out, keeping what the item stores, and a null clears
-        it. The answer counts the rows `created`, `edited`, `added` and `unchanged`, and in
-        `joined` the annotation memberships the rows added, and gives each row's `tessera_id`. A
-        row that only places its item in an annotation changes the annotation, not the item, and
-        is counted unchanged.
+        A row names items by its `tessera_id` and its values of the unique columns. A row naming
+        none creates an item at its position; one carrying what the item stores changes nothing;
+        one naming an item with no row in the view adds it there; any other edits the item,
+        which keeps its `tessera_id`. A row naming two items, or an item or a unique value an
+        earlier row of the batch names, is refused, and the rest are applied. A row without
+        coordinates changes only what it carries. Any column may be left out, keeping what the
+        item stores, and a null clears it. The answer counts the rows `created`, `edited`,
+        `added` and `unchanged`, and in `joined` the annotation memberships the rows added; it
+        gives each row's `tessera_id`, `None` for a refused row, and lists the refused rows in
+        `refused` by position and reason. A row that only places its item in an annotation
+        changes the annotation, not the item, and is counted unchanged.
 
         - `body`: the rows, as an Arrow IPC stream.
         - `batch`: the request's batch id. A retry sends the same id with the same bytes, and the
           server answers it as a replay; the same id with other bytes is refused.
         - `view`: the view the rows are for. It may be left out where the database has one view.
+        - `strict`: `True` refuses the whole batch at its first refused row, with `409`.
         """
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest", body, headers)
+        return self._send("POST", "/control/ingest" + _query(strict=strict), body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
         """`PUT /control/layers`: declare one annotation layer.
@@ -253,32 +258,47 @@ class Control:
             {"content-type": JSON},
         )
 
-    def publish(self, layer: str, body: bytes) -> Answer:
+    def publish(self, layer: str, body: bytes, strict: bool = False) -> Answer:
         """`PUT /control/layers/{layer}/artifacts`: publish annotations into one level of a layer.
 
-        `body` is the request's JSON, as bytes. The request is applied whole or not at all, and
-        the answer gives each annotation's `tessera_id`.
+        `body` is the request's JSON, as bytes, each membership a member table. A member naming no
+        item, or two, is left out and listed in the answer's `refused`, and the request is
+        otherwise applied whole or not at all. `strict=True` refuses the request at its first
+        refused member instead, with `404` or `409`. The answer gives each annotation's
+        `tessera_id`.
         """
-        return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
+        return self._send(
+            "PUT", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
+        )
 
-    def grow(self, layer: str, body: bytes) -> Answer:
+    def grow(self, layer: str, body: bytes, strict: bool = False) -> Answer:
         """`PATCH /control/layers/{layer}/artifacts`: change annotations a level already holds.
 
         It adds members, fills parts an annotation lacks, and takes items out of a label's
-        generating set. `body` is the request's JSON, as bytes. The request is applied whole or
-        not at all. A part that differs from the one held is refused with `409`.
-        """
-        return self._send("PATCH", _artifacts(layer), body, {"content-type": JSON})
-
-    def changes(self, items: list[dict]) -> Answer:
-        """`POST /control/changes`: delete, suppress or unsuppress items.
-
-        `items` is one record per item: `op` (`"delete"`, `"suppress"` or `"unsuppress"`) and the
-        item's address, as `Database.addresses` gives it. A deletion or suppression applies to
-        every request from the moment it is accepted. This route never answers `429`.
+        generating set. `body` is the request's JSON, as bytes. A member is refused as on
+        `publish`, and `strict` is as there. A part that differs from the one held is refused
+        with `409`.
         """
         return self._send(
-            "POST", "/control/changes", json.dumps(items).encode(), {"content-type": JSON}
+            "PATCH", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
+        )
+
+    def changes(self, items: list[dict], strict: bool = False) -> Answer:
+        """`POST /control/changes`: delete, suppress or unsuppress items.
+
+        `items` is one record per change, `{"op": ..., "match": {column: value, ...}}`: `op` is
+        `"delete"`, `"suppress"` or `"unsuppress"`, and `match` names the item by its
+        `tessera_id` and its values of unique columns, as `Database.addresses` gives it. A change
+        naming no item, or two, is listed in the answer's `refused` and the others are applied;
+        `strict=True` refuses the request at its first such change instead, with `404` or `409`.
+        A deletion or suppression applies to every request from the moment it is accepted. This
+        route never answers `429`.
+        """
+        return self._send(
+            "POST",
+            "/control/changes" + _query(strict=strict),
+            json.dumps(items).encode(),
+            {"content-type": JSON},
         )
 
     def drop_layer(self, name: str, wait: bool = False) -> Answer:
@@ -328,6 +348,11 @@ def _wait(wait: bool) -> str:
     per page.
     """
     return "?wait=visible" if wait else ""
+
+
+def _query(strict: bool = False) -> str:
+    """`?strict=true`, where the caller asked for it; the routes default to `false`."""
+    return "?strict=true" if strict else ""
 
 
 def _json(body: dict) -> bytes:

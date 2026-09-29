@@ -37,6 +37,18 @@ def _count(n: int, one: str, many: str | None = None) -> str:
     return f"{n:,} {one if n == 1 else (many or one + 's')}"
 
 
+def _by_reason(refused: Sequence[dict]) -> dict:
+    """How many refused rows or members give each reason."""
+    counts: dict = {}
+    for one in refused:
+        counts[one["reason"]] = counts.get(one["reason"], 0) + 1
+    return counts
+
+
+def _reasons_in_words(counts: dict) -> str:
+    return ", ".join(f"{reason.replace('_', ' ')} {n:,}" for reason, n in counts.items())
+
+
 @dataclass(repr=False)
 class Declared(Summarised):
     """What `declare_columns` declared.
@@ -208,15 +220,22 @@ class PagedReport(Summarised):
       edge.
     - `clamped`: rows outside a view's extent, moved onto its edge.
     - `refusals`: each refused request, with its status and the server's answer.
-    - `tessera_ids`: the id given to each added row.
+    - `refused`: each row or member the identity rule refused and the server left out while
+      applying the rest of its request. A row is `{"target", "view", "row", "reason"}`, `row`
+      being its position in the table inserted into `target`; a member is `{"layer", "level",
+      "view", "key", "list", "member", "reason"}`, `member` being the row naming it as sent.
+      `reason` is one of `names_no_item`, `names_two_items`, `one_item_twice`, `one_value_twice`
+      and `unknown_tessera_id`. `refused_by_reason` counts them.
+    - `tessera_ids`: the id given to each row sent, `None` for a refused row.
     - `artifact_ids`: the id given to each added annotation, by layer and then by
       `(level, view, key)`.
     - `replayed`: requests the server had already carried out, which added nothing.
     - `publication`, `flush_wait`, `flush_reached`: the point at which the changes can be read,
       how long the commit waited for it in seconds, and whether it was reached in time.
 
-    `ok` is `True` when nothing was refused and nothing was found before sending. Every finding
-    and refusal is in the summary.
+    `ok` is `True` when no request was refused and nothing was found before sending: rows the
+    identity rule refused are counted in the summary by reason and leave `ok` as it is. Every
+    finding and refused request is in the summary.
     """
 
     sent: bool = False
@@ -234,6 +253,7 @@ class PagedReport(Summarised):
     clipped: int = 0
     clamped: int = 0
     refusals: list = field(default_factory=list)
+    refused: list = field(default_factory=list)
     tessera_ids: list = field(default_factory=list)
     replayed: list = field(default_factory=list)
     publication: int | None = None
@@ -250,6 +270,11 @@ class PagedReport(Summarised):
     def rows(self) -> int:
         """The rows added, over every view."""
         return sum(self.rows_accepted.values())
+
+    @property
+    def refused_by_reason(self) -> dict:
+        """How many rows and members `refused` holds for each reason."""
+        return _by_reason(self.refused)
 
     def summary(self) -> list[str]:
         """The lines `print()` shows: the requests planned, or what was added and when it became
@@ -291,6 +316,18 @@ class PagedReport(Summarised):
             out.append(f"  rows outside the extent, clamped onto its edge: {self.clamped:,}")
         if self.replayed:
             out.append(f"  requests replayed, adding nothing: {len(self.replayed):,}")
+        rows = [one for one in self.refused if "row" in one]
+        members = [one for one in self.refused if "member" in one]
+        if rows:
+            out.append(
+                f"  {_count(len(rows), 'row')} refused and left out: "
+                f"{_reasons_in_words(_by_reason(rows))}"
+            )
+        if members:
+            out.append(
+                f"  {_count(len(members), 'member')} refused and left out: "
+                f"{_reasons_in_words(_by_reason(members))}"
+            )
         out += [str(finding) for finding in self.findings]
         out += [
             f"refused {refusal['status']} on {refusal['what']}: {refusal['detail']}"
@@ -304,13 +341,19 @@ class ChangeReport(Summarised):
     """What `remove`, `suppress`, `unsuppress` or `leave` did.
 
     - `op`: which of them it was.
-    - `requested`: how many ids were given.
+    - `requested`: how many rows were given.
+    - `accepted`: how many were applied.
+    - `refused`: each row the identity rule refused, `{"row", "reason"}`, `row` being its
+      position in what was given, and `reason` one of `names_no_item`, `names_two_items` and
+      `unknown_tessera_id`. The other rows were applied. `refused_by_reason` counts them.
     - `refusals`: each refused request, with its status and the server's answer. `ok` is `True`
       when there were none. Each is in the summary.
     """
 
     op: str
     requested: int = 0
+    accepted: int = 0
+    refused: list = field(default_factory=list)
     refusals: list = field(default_factory=list)
 
     @property
@@ -318,9 +361,23 @@ class ChangeReport(Summarised):
         """`True` when no request was refused."""
         return not self.refusals
 
+    @property
+    def refused_by_reason(self) -> dict:
+        """How many rows `refused` holds for each reason."""
+        return _by_reason(self.refused)
+
     def summary(self) -> list[str]:
-        """The lines `print()` shows: the ids sent, then every refusal."""
-        out = [f"{self.op}: {_count(self.requested, 'id')}, {'ok' if self.ok else 'FAILED'}"]
+        """The lines `print()` shows: the rows given and applied, the rows refused by reason, then
+        every refused request."""
+        out = [
+            f"{self.op}: {_count(self.requested, 'row')}, {self.accepted:,} applied, "
+            f"{'ok' if self.ok else 'FAILED'}"
+        ]
+        if self.refused:
+            out.append(
+                f"  {_count(len(self.refused), 'row')} refused: "
+                f"{_reasons_in_words(self.refused_by_reason)}"
+            )
         out += [f"refused {refusal['status']}: {refusal['detail']}" for refusal in self.refusals]
         return out
 

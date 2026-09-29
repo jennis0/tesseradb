@@ -183,8 +183,9 @@ A row of a view's points naming no item, because its table carries no unique col
 are null, is an item of its own, addressed by the `tessera_id` a pick or the ingest route hands
 back. A row of any other table must name an item: the build leaves out and reports each row that
 names none, names two items, or repeats an item or a value an earlier row of its file gave, and
-the first commit's report lists them under `refused`. A later commit's members name their items
-by one unique attribute, which the membership routes take for a whole request.
+the first commit's report lists them under `refused`. A later commit's rows and members name their
+items the same way, by a `tessera_id` column and any unique columns in any mix, and its report
+lists what the server left out under `refused`.
 
 The SDK holds nothing about what the database contains. A re-run of a cell is a re-run: the same
 frame is inserted again and sent again, and what happens then is the database's answer: rows
@@ -232,6 +233,14 @@ db.commit()                                    # the report
 returns the report: rows accepted per view, artifacts minted, memberships joined, parts already
 present, refusals by row and part, and how long the wait for its publication took.
 
+A row names items by its `tessera_id` column and its columns of attributes declared unique. A row
+of points naming none creates an item. A row naming two items, or an item or a unique value an
+earlier row of its request names, is refused, and so is a row of values or a member naming no
+item: the server leaves it out and applies the rest. The report lists each under `refused`, a row
+by its position in the table inserted and a member by the row that named it, and its summary counts
+them by reason. `commit(strict=True)` refuses instead the whole request carrying a refused row, and
+at the first commit the whole build.
+
 `commit()` raises `Refusal` when nothing it was asked to do happened: a pre-flight finding stopped
 it before a byte was sent, or the server refused every page. The exception's text is the report's,
 and `refusal.report` is the report itself. A commit some of whose pages landed has happened, and
@@ -272,11 +281,21 @@ the artifacts-table route as the remedy, a label insert whose clustering is neit
 inserted is named, and a polygon inserted after the first commit as WKB is named with both
 encodings: the build reads a `geometry` column as WKB and the publication route takes WKT text.
 
-`remove(ids, field=None)`, `suppress(ids, field=None)` and `unsuppress(ids, field=None)` take
-`tessera_id`s, or with `field=`, values of that unique attribute; a removed item names nothing
-after, so its value inserted again creates a new item. `leave(layer, key, ids, rank, field=None)`
-shrinks a content's generating set, which is the one set that may shrink, and names its items the
-same way.
+`remove(items, strict=False)`, `suppress(items, strict=False)` and `unsuppress(items,
+strict=False)` take a list of `tessera_id`s, or a table (a pandas or polars data frame, a pyarrow
+table, or a dict of columns) whose columns are `tessera_id` and unique attributes, each row naming
+one item. A column that is neither is refused by the server and nothing is applied. A row naming no
+item, or two, is refused and listed in the report's `refused` by its position, and the other rows
+are applied; with `strict=True` the whole request is refused instead, and a call that applied
+nothing raises `Refusal`. A removed item names nothing after, so its value inserted again creates a
+new item. `leave(layer, key, items, rank, strict=False)` shrinks a content's generating set, which
+is the one set that may shrink, and names its items the same way.
+
+```python
+db.remove([tessera_id])
+db.suppress({"entity_id": [17, 23]})
+db.unsuppress(frame[["entity_id"]])
+```
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps

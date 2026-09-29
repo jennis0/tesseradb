@@ -83,18 +83,21 @@ def test_a_batch_id_is_fresh_per_request_and_never_derived_from_the_body():
     assert batch_id("points", 0).startswith("points-0-")
 
 
-def test_a_change_names_an_item_by_tessera_id_or_by_a_unique_value_as_text():
-    """Without a field the ids are `tessera_id`s; with one they are its values. Both are text."""
+def test_a_list_names_items_by_tessera_id_and_a_table_by_its_columns_as_text():
+    """A list holds `tessera_id`s; a table's rows name items by the columns they carry. Every value
+    is text, and a null names nothing."""
     assert Database.addresses([7, "8"]) == [{"tessera_id": "7"}, {"tessera_id": "8"}]
-    assert Database.addresses(["p3", 5], field="paper") == [
-        {"field": "paper", "value": "p3"},
-        {"field": "paper", "value": "5"},
+    assert Database.addresses({"paper": ["p3", None], "n": [None, 5]}) == [
+        {"paper": "p3"},
+        {"n": "5"},
     ]
     # A frame's own ids arrive as numpy scalars, which are integers and are not `int`.
     numpy = pytest.importorskip("numpy")
-    assert Database.addresses([numpy.uint64(2**63)], field="n") == [
-        {"field": "n", "value": str(2**63)}
-    ]
+    assert Database.addresses([numpy.uint64(2**63)]) == [{"tessera_id": str(2**63)}]
+    # A pandas frame's index is not one of its columns.
+    pd = pytest.importorskip("pandas")
+    frame = pd.DataFrame({"paper": ["a", "b", "c"]}).iloc[[2, 0]]
+    assert Database.addresses(frame) == [{"paper": "c"}, {"paper": "a"}]
 
 
 def test_a_timestamp_value_is_sent_as_its_microseconds_since_the_epoch():
@@ -112,7 +115,8 @@ def test_a_timestamp_value_is_sent_as_its_microseconds_since_the_epoch():
         pd.Timestamp("2020-01-01 00:00:00.000005"),
         numpy.datetime64("2020-01-01T00:00:00.000005"),
     ]
-    assert Database.addresses(held, field="ts") == [{"field": "ts", "value": micros}] * 4
+    assert [Database.addresses({"ts": [one]}) for one in held] == [[{"ts": micros}]] * 4
+    assert Database.addresses(pd.DataFrame({"ts": [held[2]]})) == [{"ts": micros}]
 
 
 def serving():

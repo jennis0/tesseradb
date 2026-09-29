@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Hashable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -649,10 +649,11 @@ class Database:
         - the other keywords: which column of the table holds each thing the target needs, such as
           `x=`, `y=` and `access=` for a view.
 
-        A table names the item each row belongs to by the columns it carries of the attributes
-        declared `unique`: the column of the attribute's name, or the one `columns=` names. A
-        view's row naming no item is an item of its own. A row of any other table must name one,
-        and the build leaves out and reports one that names none.
+        A table names the item each row belongs to by its `tessera_id` column and the columns it
+        carries of the attributes declared `unique`: the column of the attribute's name, or the
+        one `columns=` names. A view's row naming no item is an item of its own. A row of any
+        other table must name one, and a row naming none, or two, is left out at the commit and
+        reported.
 
         A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
         values it holds, wherever a column of those values is read. A column the call does not
@@ -887,7 +888,8 @@ class Database:
     def _item_columns(
         self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
     ) -> dict:
-        """The unique attributes a table names its items by, as `{attribute: column}`.
+        """The columns a table names its items by, as `{name: column}`: its `tessera_id` column,
+        and the unique attributes it carries.
 
         A table carries a unique attribute in the column `columns=` names for it, else in the
         attribute's own column: the `field` its block declares, or its name. An artifacts table names its members inside its member
@@ -923,7 +925,7 @@ class Database:
                     f"columns= has nothing to say; drop it"
                 )
             return {}
-        items = {}
+        items = {"tessera_id": "tessera_id"} if "tessera_id" in schema else {}
         for name in unique:
             column = (columns or {}).get(name) or self._unique_column(name)
             if column in schema and column != named.get("view"):
@@ -1266,7 +1268,7 @@ class Database:
             return False, f"check FAILED: {refused}"
         return report.ok, report.page
 
-    def commit(self) -> CommitReport | PagedReport:
+    def commit(self, strict: bool = False) -> CommitReport | PagedReport:
         """Make what was inserted part of the database, and return a report of what happened.
 
         The first commit checks the declaration, builds the database from the inserted tables and
@@ -1276,6 +1278,13 @@ class Database:
         Each later commit sends what was inserted since the last one to the running server and
         waits until it can be read. Then the inserts are forgotten.
 
+        A row naming two items, or naming an item or a unique value an earlier row of its table
+        names, and a member or a row of values naming no item, is refused: it is left out, the
+        rest is applied, and the report counts the refused rows by reason.
+
+        - `strict`: `True` refuses instead the whole build, or the whole request, that carries a
+          refused row.
+
         A commit that did nothing raises `Refusal`, with the report as its `report`: a problem found
         before anything was sent, a build that failed, or every request refused. A commit in which
         some requests succeeded returns its report, with the refusals listed.
@@ -1283,7 +1292,7 @@ class Database:
             db.commit()
         """
         if self.built:
-            return self._paged(sent=True)
+            return self._paged(sent=True, strict=strict)
         document = self.write()
         self._refuse_an_empty_build(document)
         findings = self._preflight(document)
@@ -1297,11 +1306,8 @@ class Database:
         if not ok:
             raise Refusal("commit: the declaration did not check\n" + page)
         build = self._run(
-            [
-                "build",
-                "--deployment",
-                str(self.path / "tessera.toml"),
-            ]
+            ["build", "--deployment", str(self.path / "tessera.toml")]
+            + (["--strict"] if strict else [])
         )
         report = CommitReport(
             what="commit",
@@ -1374,7 +1380,7 @@ class Database:
 
     # ------------------------------------------------------------------ the paged commit
 
-    def _paged(self, sent: bool) -> PagedReport:
+    def _paged(self, sent: bool, strict: bool = False) -> PagedReport:
         """The plan over what was inserted since the last commit, run where `sent`."""
         self.serve()
         control = self.control
@@ -1391,7 +1397,7 @@ class Database:
             return report
         if report.findings:
             raise Refusal(str(report), report)
-        accepted = C.run(control, pages, report)
+        accepted = C.run(control, pages, report, strict)
         self._record_label_columns(page.body for page in accepted if page.kind == "layer")
         self._record_terms(self._document())
         self.pending.clear()
@@ -1637,67 +1643,87 @@ class Database:
 
     # ------------------------------------------------------------------ verbs that are not inserts
 
-    def remove(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
+    def remove(self, items: Any, strict: bool = False) -> ChangeReport:
         """Delete items, and return a report.
 
-        - `ids`: the items' `tessera_id`s, or with `field`, their values of that field.
-        - `field`: a unique attribute, whose values `ids` then are.
+        - `items`: the items, as a list of their `tessera_id`s, or as a table (a pandas or polars
+          data frame, a pyarrow table, or a dict of columns) whose columns are `tessera_id` and
+          attributes declared `unique`, each row naming one item by the values it carries.
+        - `strict`: `True` refuses the whole request at a row that names no item, or names two.
 
-        The items stop being served at once. Their rows are removed from disk at the next
-        compaction; `compact()` asks for one.
+        A row naming no item, or two, is refused and the report lists it; the other rows are
+        applied. A column that is neither `tessera_id` nor a unique attribute is refused by the
+        server, and nothing is applied. The items stop being served at once. Their rows are
+        removed from disk at the next compaction; `compact()` asks for one.
+
+        A call whose every request the server refused raises `Refusal`, with the report as its
+        `report`: a strict call naming a row it refuses is one.
 
             db.remove([tessera_id])
-            db.remove(["paper-17", "paper-23"], field="paper")
+            db.remove({"paper": ["paper-17", "paper-23"]})
         """
-        return self._changes(ids, field, "delete")
+        return self._changes(items, "delete", strict)
 
-    def suppress(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
+    def suppress(self, items: Any, strict: bool = False) -> ChangeReport:
         """Hide items until `unsuppress` lifts it, and return a report.
 
-        - `ids`, `field`: as for `remove`.
+        - `items`, `strict`: as for `remove`.
 
         A hidden item is left out of every answer from the moment the call returns.
         """
-        return self._changes(ids, field, "suppress")
+        return self._changes(items, "suppress", strict)
 
-    def unsuppress(self, ids: Iterable[Hashable], field: str | None = None) -> ChangeReport:
+    def unsuppress(self, items: Any, strict: bool = False) -> ChangeReport:
         """Show items hidden by `suppress` again, and return a report.
 
-        - `ids`, `field`: as for `remove`.
+        - `items`, `strict`: as for `remove`.
         """
-        return self._changes(ids, field, "unsuppress")
+        return self._changes(items, "unsuppress", strict)
 
     @staticmethod
-    def addresses(ids: Iterable[Hashable], field: str | None = None) -> list[dict]:
-        """The ids given, in the form the server's change requests take them.
+    def addresses(items: Any) -> list[dict]:
+        """The items given, as the rows that name them in the server's change requests.
 
-        Each is `{"tessera_id": ...}`, or with `field`, `{"field": field, "value": ...}`. Both
-        travel as text: an integer in decimal digits, a timestamp as the decimal digits of its
+        A list is read as `tessera_id`s, and each becomes `{"tessera_id": ...}`. A table (a
+        pandas or polars data frame, a pyarrow table, or a dict of columns) gives one row per
+        table row, `{column: value}` for each column the row does not leave null. Every value
+        travels as text: an integer in decimal digits, a timestamp as the decimal digits of its
         microseconds since the epoch, and a string as itself.
         """
-        if field is None:
-            return [{"tessera_id": C.text(one)} for one in ids]
-        return [{"field": field, "value": C.text(one)} for one in ids]
+        if isinstance(items, dict) or hasattr(items, "columns"):
+            if type(items).__module__.partition(".")[0] == "pandas":
+                # A pandas index is not a column of the table: only the columns name items.
+                table = pa.Table.from_pandas(items, preserve_index=False)
+            else:
+                table = _inserts.as_table(items)
+            columns = {name: table[name].to_pylist() for name in table.column_names}
+            return [
+                {name: C.text(values[at]) for name, values in columns.items()
+                 if values[at] is not None}
+                for at in range(table.num_rows)
+            ]
+        return [{} if one is None else {"tessera_id": C.text(one)} for one in items]
 
-    def _changes(self, ids: Iterable[Hashable], field: str | None, op: str) -> ChangeReport:
+    def _changes(self, items: Any, op: str, strict: bool) -> ChangeReport:
         self._refuse_before_the_first_commit(op)
-        addresses = self.addresses(ids, field)
-        report = ChangeReport(op=op, requested=len(addresses))
+        rows = self.addresses(items)
+        report = ChangeReport(op=op, requested=len(rows))
         control = self.control
-        for answer in C.changes(control, addresses, op, control.limits()):
-            if not answer.ok:
-                report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+        for start, answer in C.changes(control, rows, op, control.limits(), strict):
+            _fold_change(report, answer, start)
+        if rows and not report.accepted and report.refusals:
+            raise Refusal(str(report), report)
         return report
 
     def leave(
         self,
         layer: str,
         key: str,
-        ids: Iterable[Hashable],
+        items: Any,
         rank: int = 0,
         level: int = 0,
         view: str | None = None,
-        field: str | None = None,
+        strict: bool = False,
     ) -> ChangeReport:
         """Take items out of the set a label's text was written from, and return a report.
 
@@ -1706,20 +1732,32 @@ class Database:
 
         - `layer`: the label set.
         - `key`: the label's key.
-        - `ids`: the items to take out, by `tessera_id`, or with `field`, by their values of it.
+        - `items`: the items to take out, as for `remove`: a list of `tessera_id`s, or a table
+          whose columns are `tessera_id` and unique attributes.
         - `rank`: which of the label's texts, where it has several. The default is 0, the first.
         - `level`: the level the label is at. The default is 0.
         - `view`: the view the label belongs to, on a layer scoped to a group.
-        - `field`: a unique attribute, whose values `ids` then are.
+        - `strict`: `True` refuses the whole request at a row that names no item, or names two.
 
-        Taking out every item withdraws the text; insert it again to replace it.
+        A row naming no item, or two, is refused and the report lists it; the other rows leave.
+        Taking out every item withdraws the text; insert it again to replace it. A call the server
+        refuses raises `Refusal`, with the report as its `report`.
         """
         self._refuse_before_the_first_commit("leave")
-        wanted = list(ids)
-        report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(wanted))
-        answer = C.leave(self.control, layer, key, wanted, rank, level, view, field)
-        if not answer.ok:
+        rows = self.addresses(items)
+        # A row carrying no column still travels, as a null `tessera_id`, for the server to refuse.
+        columns = list(dict.fromkeys(name for row in rows for name in row)) or ["tessera_id"]
+        report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(rows))
+        answer = C.leave(self.control, layer, key, rows, columns, rank, level, view, strict)
+        if answer.ok:
+            report.refused = [
+                {"row": int(one["row"]), "reason": one["reason"]}
+                for one in answer.body.get("refused", [])
+            ]
+            report.accepted = len(rows) - len(report.refused)
+        else:
             report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+            raise Refusal(str(report), report)
         return report
 
     def status(self) -> dict:
@@ -1912,6 +1950,19 @@ class Database:
 
     def __exit__(self, *exception) -> None:
         self.close()
+
+
+def _fold_change(report: ChangeReport, answer, start: int) -> None:
+    """One page of changes onto the report: its applied count and its refused rows, each by its
+    position in what the call was given, or the refusal of the whole page."""
+    if not answer.ok:
+        report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+        return
+    report.accepted += int(answer.body.get("accepted", 0))
+    report.refused += [
+        {"row": start + int(one["row"]), "reason": one["reason"]}
+        for one in answer.body.get("refused", [])
+    ]
 
 
 def _fits(kind: str, named: dict, table_word: str | None) -> bool:
