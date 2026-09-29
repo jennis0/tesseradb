@@ -8,6 +8,9 @@
  */
 export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
 export type {
+  AggregateEntry,
+  AggregateSpec,
+  AggregatesProjection,
   ArtifactsProjection,
   FiltersProjection,
   LegendProjection,
@@ -59,6 +62,7 @@ export {lonLatOfCell} from './projection.js';
 export {TesseraClient, TesseraError, type PartSink, type TesseraClientOptions} from './client.js';
 export {inlineDecoder, setWorkerFactory, type Decoder} from './decoder.js';
 export {RecordsRead} from './records.js';
+export {PartialAggregate} from './aggregate.js';
 export {
   Control,
   UNANSWERED,

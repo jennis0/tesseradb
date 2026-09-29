@@ -44,6 +44,7 @@ export const FRAME_ARTIFACTS = 5;
 export const FRAME_RECORDS_HEAD = 6;
 export const FRAME_RECORDS = 7;
 export const FRAME_PAGE_END = 8;
+export const FRAME_TABLE_HEAD = 9;
 
 /**
  * Which body a reader expects. `'viewport'` is a `/v1/viewport` body, whose frames
@@ -55,8 +56,15 @@ export const FRAME_PAGE_END = 8;
  *   page, by the stream deadline or because the client went away.
  * - Kind 8, page end: JSON carrying the cursor to resume after the page before it.
  * - Kind 4, trailer: JSON, exactly one, last. A body without it is incomplete.
+ *
+ * `'aggregate'` is a `/v1/aggregate` body, which has no head of its own:
+ *
+ * - Kind 9, table head: JSON, before a table's first page in the response.
+ * - Kind 7 and kind 8, as in a records body, each records frame after a table head.
+ * - Kind 4, trailer: JSON, exactly one, last. A response cancelled before its first page is a
+ *   trailer alone.
  */
-export type FrameGrammar = 'viewport' | 'records';
+export type FrameGrammar = 'viewport' | 'records' | 'aggregate';
 
 const FRAME_HEADER_BYTES = 5;
 
@@ -88,6 +96,7 @@ export class FrameReader {
   private sawTrailer = false;
   /** A records frame has arrived and its page end has not. */
   private openPage = false;
+  private sawTableHead = false;
 
   constructor(private readonly grammar: FrameGrammar = 'viewport') {}
 
@@ -133,6 +142,10 @@ export class FrameReader {
       }
       throw new Error(`frame at byte ${this.consumed} claims a payload past the end of the body`);
     }
+    if (this.grammar === 'aggregate') {
+      if (!this.sawTrailer) throw new Error('aggregate payload has no trailer: the response is incomplete; resume the read from its cursor');
+      return;
+    }
     if (this.grammar === 'records') {
       if (this.frames === 0) throw new Error('records payload has no head frame');
       if (!this.sawTrailer) throw new Error('records payload has no trailer: the response is incomplete; resume the read from its cursor');
@@ -152,6 +165,10 @@ export class FrameReader {
   private check(kind: number): void {
     if (this.grammar === 'records') {
       this.checkRecords(kind);
+      return;
+    }
+    if (this.grammar === 'aggregate') {
+      this.checkAggregate(kind);
       return;
     }
     switch (kind) {
@@ -201,6 +218,33 @@ export class FrameReader {
         if (this.frames !== 0) throw new Error(`a second head frame at byte ${at}`);
         break;
       case FRAME_RECORDS:
+        if (this.openPage) throw new Error(`a records frame at byte ${at} before the page end of the one before it`);
+        this.openPage = true;
+        break;
+      case FRAME_PAGE_END:
+        if (!this.openPage) throw new Error(`a page end at byte ${at} with no records frame before it`);
+        this.openPage = false;
+        break;
+      case FRAME_TRAILER:
+        if (this.openPage) throw new Error(`the trailer at byte ${at} follows a records frame with no page end`);
+        this.sawTrailer = true;
+        break;
+      default:
+        throw new Error(`unknown frame kind ${kind} at byte ${at}`);
+    }
+  }
+
+  /** An aggregate's grammar: the records grammar, with a table head in place of the response's head. */
+  private checkAggregate(kind: number): void {
+    const at = this.consumed;
+    if (this.sawTrailer) throw new Error(`a frame after the trailer at byte ${at}`);
+    switch (kind) {
+      case FRAME_TABLE_HEAD:
+        if (this.openPage) throw new Error(`a table head at byte ${at} before the page end of the records frame before it`);
+        this.sawTableHead = true;
+        break;
+      case FRAME_RECORDS:
+        if (!this.sawTableHead) throw new Error(`a records frame at byte ${at} before any table head`);
         if (this.openPage) throw new Error(`a records frame at byte ${at} before the page end of the one before it`);
         this.openPage = true;
         break;

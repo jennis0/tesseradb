@@ -326,7 +326,11 @@ export const SELECTION: Meta['selection'] = {
   maxSuggestionWalk: 100_000,
   maxSuggestSetEntities: 10_000_000,
   maxPageRows: 65_536,
-  maxPageBytes: 16_777_216
+  maxPageBytes: 16_777_216,
+  maxAggregateGroupings: 16,
+  maxAggregateTop: 1000,
+  maxAggregateNamed: 1000,
+  maxAggregateCells: 1_048_576
 };
 
 /** A deployment of one view `s0` with nothing declared, and whichever fields `over` names. */

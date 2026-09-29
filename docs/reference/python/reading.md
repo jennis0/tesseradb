@@ -36,6 +36,10 @@ A reader holds a set of access terms and sees an item when it holds one of the i
     options:
       heading_level: 3
 
+::: tesseradb._database.Database.aggregate
+    options:
+      heading_level: 3
+
 ::: tesseradb._database.Database.categories
     options:
       heading_level: 3
