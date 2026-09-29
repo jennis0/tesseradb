@@ -433,7 +433,7 @@ It takes a few seconds. Most of the report confirms what we expected. All 29,935
 default label, and every one of them has a value for each attribute. Every feature class was one of
 our nine letters, too. If one hadn't been, the build would have stopped and named it.
 
-Just above the last line, a line beginning `built` names the new bundle's directory and counts
+Above the last line, a line beginning `built` names the new bundle's directory and counts
 `29935 items`, one for each row, as the check's `identity` lines promised. It ends with
 `0 row(s) refused`. A build refuses a row that names a place an earlier row already named, such as
 a second row carrying the same GeoNames id. It keeps the first row, leaves the later one out, prints
