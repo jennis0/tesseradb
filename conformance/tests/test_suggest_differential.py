@@ -286,12 +286,14 @@ def test_counts_equal_the_oracles_masked_cardinality(suggest_server, principal_n
             f"{expected_counts[value['key']]}"
         )
         assert value["count"] > 0, "a served value's count must be its visible members, never 0"
+    assert resp.json()["total"] == len(candidate), f"{principal_name}: total is the counted set"
 
     # Without the flag, no count at all — never `0`, never `null` standing in for absent.
     plain = suggest(suggest_server, token, "topic", q="", limit=100)
     assert plain.status_code == 200
     for value in plain.json()["values"]:
         assert "count" not in value
+    assert "total" not in plain.json()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -499,6 +501,9 @@ def test_filtered_counts_equal_the_oracles(
             f"{principal_name} / {filter_name} / {column}: {value['key']} count "
             f"{value['count']} != oracle {expected[value['key']]}"
         )
+    assert resp.json()["total"] == len(passing), (
+        f"{principal_name} / {filter_name}: total is the visible items passing the filter"
+    )
 
 
 def test_a_value_the_filter_excludes_is_offered_with_zero(suggest_server):

@@ -454,7 +454,7 @@ column's values that the reader may see, one row each, with `key`, `code` and `t
 one it is the values whose key or title, or a word in either, starts with it, ignoring case, and
 each row adds `count`, the number of items the reader may see that carry the value; the server
 returns at most its `max_suggestions` setting of these, and the table's schema metadata
-`tessera.more` says whether more matched. With `codes`, such as the codes in a sample's category column, it is the values of
+`tessera.more` says whether more matched and `tessera.total` how many items the counts are taken over. With `codes`, such as the codes in a sample's category column, it is the values of
 those codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot
 be combined. A column declared for a view group holds different values in each view, so it
 takes `view=`.

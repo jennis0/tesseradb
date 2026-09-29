@@ -640,7 +640,7 @@ async fn suggest_page(
     }
     .ok_or_else(|| ApiError::Unknown("unknown category column".to_string()))?;
 
-    let body = Json(serde_json::json!({
+    let mut body = serde_json::json!({
         // The caller's own spelling, as `/v1/categories` echoes it.
         "column": column,
         "q": req.q,
@@ -662,8 +662,11 @@ async fn suggest_page(
             value
         }).collect::<Vec<_>>(),
         "more": page.more,
-    }));
-    let mut response = axum::response::IntoResponse::into_response(body);
+    });
+    if let Some(total) = page.total {
+        body["total"] = serde_json::json!(total);
+    }
+    let mut response = axum::response::IntoResponse::into_response(Json(body));
     if let Some(verdict) = page.region {
         response.headers_mut().insert(
             "x-tessera-region",
