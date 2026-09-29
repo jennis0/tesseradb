@@ -638,6 +638,7 @@ class Selection:
         colour_by: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         height: int = 480,
+        size_by: Optional[str] = None,
     ) -> Map:
         """The interactive map of this selection, as a notebook widget.
 
@@ -649,6 +650,7 @@ class Selection:
         - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws
           none.
         - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
 
         Items outside the box are still drawn when they are in frame.
 
@@ -661,6 +663,7 @@ class Selection:
             filters=self.filters,
             height=height,
             bbox=self.box,
+            size_by=size_by,
         )
 
     def _expression(self) -> Optional[dict]:
@@ -745,6 +748,7 @@ class Viewer:
         colour_by: Optional[str] = None,
         filters: Optional[dict] = None,
         height: int = 480,
+        size_by: Optional[str] = None,
         **kwargs: Any,
     ) -> Map:
         """The interactive map, as a notebook widget, showing what this reader may see.
@@ -755,6 +759,7 @@ class Viewer:
         - `colour_by`: the column to colour points by, or `"cluster:<layer>"`.
         - `filters`: a filter expression to apply, as `Selection.filter` takes one.
         - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
 
         Other keywords go to `Map` unchanged, such as `bbox` to frame the camera on a box. The
         page in the browser fetches its own data from the database with this reader's token. The
@@ -770,6 +775,7 @@ class Viewer:
             colour_by=colour_by,
             filters=filters,
             height=height,
+            size_by=size_by,
             **kwargs,
         )
 

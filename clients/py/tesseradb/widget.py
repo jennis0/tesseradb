@@ -16,11 +16,11 @@ widget cannot reach a database from them. Not built yet: a Jupyter server extens
 forward the widget's requests from the notebook's own origin.
 
 Only controls and selection cross the kernel boundary, never data. `url` goes down. `view`,
-`bbox`, `layers`, `colour_by` and `filters` go both ways, and up only when the map settles, once
-it has finished fetching for a view, so the kernel is never asked on every frame. `selected` and
-`selected_artifact` go up on a pick, and `region` when a region's counts arrive. Ids are decimal
-strings, because a `tessera_id` is a `u64`, which is not a JavaScript number, and a `BigInt`
-does not serialise.
+`bbox`, `layers`, `colour_by`, the four size settings and `filters` go both ways, and up only
+when the map settles, once it has finished fetching for a view, so the kernel is never asked on
+every frame. `selected` and `selected_artifact` go up on a pick, and `region` when a region's
+counts arrive. Ids are decimal strings, because a `tessera_id` is a `u64`, which is not a
+JavaScript number, and a `BigInt` does not serialise.
 """
 
 from __future__ import annotations
@@ -85,6 +85,14 @@ class Map(anywidget.AnyWidget):
       refused.
     - `colour_by`: the column to colour points by, or `"cluster:<layer>"` to colour them by the
       annotations of that layer.
+    - `size_by`: a number column to size points by. `None`, the default, draws every point at
+      one size.
+    - `size_min`, `size_max`: the radius in pixels of the smallest and the largest value under
+      `size_by`. A point with no value draws as a ring. The page ignores a radius that is not a
+      number above zero. `None` leaves the map's choice, 2 and 9 until one is made.
+    - `size_scale`: how values are placed between the two radii: `"linear"`, `"log"`, or
+      `"rank"` among a sample of the values the map has drawn. `None` leaves the map's choice,
+      linear until one is made.
     - `filters`: a filter expression, as `Selection.filter` takes one.
     - `bbox`: the box to frame the camera on, as `(min_x, min_y, max_x, max_y)`.
     - `height`: the widget's height in pixels. The default is 480.
@@ -103,15 +111,16 @@ class Map(anywidget.AnyWidget):
       exact for the shape or over the grid cells covering it, and `refusal` where the server
       refused it. It changes when the region's counts arrive, and is `None` when it is cleared.
     - `view`, `bbox`: the view shown and where the camera settled.
-    - `filters`, `layers`, `colour_by`: as the map shows them. Setting one redraws the map.
+    - `filters`, `layers`, `colour_by`, `size_by`, `size_min`, `size_max`, `size_scale`: as the
+      map shows them. Setting one redraws the map.
     - `last_error`: why the page last refused something set here, or `None`.
     - `url`, `height`, `explorer_layout`, `title_field`: as given.
     - `tokens_sent`: how many tokens the kernel has sent the page.
 
-    `view`, `bbox`, `filters`, `layers` and `colour_by` change when the map settles, once it has
-    finished fetching after a pan or zoom, and not during one. In marimo, `mo.ui.anywidget(m)`
-    puts every attribute in one `.value`, so a cell that reads it runs again at every settle. To
-    react to a pick alone, call `m.observe(fn, names="selected")` on the `Map`.
+    `view`, `bbox`, `filters`, `layers`, `colour_by` and the size settings change when the map
+    settles, once it has finished fetching after a pan or zoom, and not during one. In marimo,
+    `mo.ui.anywidget(m)` puts every attribute in one `.value`, so a cell that reads it runs again
+    at every settle. To react to a pick alone, call `m.observe(fn, names="selected")` on the `Map`.
 
     Setting `filters` applies the expression at once. Reading it after the filter panel changes
     gives the expression the panel built. An expression the panel cannot show, such as
@@ -143,6 +152,10 @@ class Map(anywidget.AnyWidget):
     # dependency closure, which the store adds).
     layers = traitlets.List(traitlets.Unicode(), allow_none=True, default_value=None).tag(sync=True)
     colour_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
+    size_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
+    size_min = traitlets.Float(None, allow_none=True).tag(sync=True)
+    size_max = traitlets.Float(None, allow_none=True).tag(sync=True)
+    size_scale = traitlets.Enum(["linear", "log", "rank"], default_value=None, allow_none=True).tag(sync=True)
     filters = traitlets.Dict(default_value=None, allow_none=True).tag(sync=True)
     # Up.
     # `Any` rather than `Unicode` so the validator below runs on an int and stringifies it.
@@ -160,6 +173,10 @@ class Map(anywidget.AnyWidget):
         view: Optional[str] = None,
         layers: Optional[Sequence[str]] = None,
         colour_by: Optional[str] = None,
+        size_by: Optional[str] = None,
+        size_min: Optional[float] = None,
+        size_max: Optional[float] = None,
+        size_scale: Optional[str] = None,
         filters: Optional[dict] = None,
         bbox: Optional[Sequence[float]] = None,
         height: int = 480,
@@ -187,6 +204,10 @@ class Map(anywidget.AnyWidget):
             view=view,
             layers=None if layers is None else list(layers),
             colour_by=colour_by,
+            size_by=size_by,
+            size_min=size_min,
+            size_max=size_max,
+            size_scale=size_scale,
             filters=filters,
             bbox=None if bbox is None else [float(v) for v in bbox],
             height=height,

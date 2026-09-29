@@ -258,6 +258,8 @@ export type MapOptions = {
   /** Points that satisfy the highlight, which sets each band's highlight bits. */
   highlight?: (m: {field: number; cluster: number}) => boolean;
   scheme?: PaletteScheme;
+  /** Leaves one mark in 25 with no citation count, as a sized map draws as a ring. */
+  uncited?: boolean;
 };
 
 /**
@@ -302,7 +304,7 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
       scalars: {
         field: {arrowType: 'u16', values: Uint16Array.from(list, (m) => m.field)},
         year: {arrowType: 'u16', values: Uint16Array.from(list, (m) => m.year)},
-        citations: {arrowType: 'u32', values: Uint32Array.from(list, (m) => m.citations)}
+        citations: {arrowType: 'u32', values: Uint32Array.from(list, (m) => m.citations), ...(opts.uncited ? {present: Uint8Array.from(list, (m) => (m.id % 25n === 0n ? 0 : 1))} : {})}
       },
       membership: {topics: {ordinals: ords, distinct: Uint32Array.from(new Set(ords)).sort()}},
       highlightBits: opts.highlight ? Uint8Array.from(list, (m) => (opts.highlight!(m) ? 1 : 0)) : null,
@@ -363,6 +365,12 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
   };
 }
 
+/** Every 1,024th share of the marks' citation counts, sorted: the sample a sized map ranks against. */
+const CITATION_SAMPLE = (() => {
+  const all = MARKS.map((m) => m.citations).sort((a, b) => a - b);
+  return Array.from({length: Math.min(1024, all.length)}, (_, i) => all[Math.floor((i * all.length) / Math.min(1024, all.length))]!);
+})();
+
 /** The legend a frame of these marks accumulates: ranks by frequency, the domains, the names. */
 export function legendOf(colourBy: string | null, over: Partial<LegendProjection> = {}): LegendProjection {
   const counts = new Map<number, number>();
@@ -374,9 +382,12 @@ export function legendOf(colourBy: string | null, over: Partial<LegendProjection
       citations: {min: 0, max: Math.max(...MARKS.map((m) => m.citations))},
       year: {min: 1991, max: 2025}
     },
+    samples: {citations: {values: CITATION_SAMPLE, seen: MARKS.length}},
+    missing: {},
     categories: {field: FIELDS},
     categoryErrors: {},
     colourBy,
+    sizeBy: null,
     ...over
   };
 }
