@@ -450,14 +450,15 @@ v.artifact(tessera_id, "s0")                  # one annotation's record: its cou
 Each of these exists on `db` and on any reader, and answers as that reader.
 
 `categories(column, prefix=None, view=None, codes=None)` returns a pyarrow table of a category
-column's values that the reader may see, one row each, with `key`, `code` and `title`. Without a prefix it is every value. With
-one it is the values whose key or title, or a word in either, starts with it, ignoring case, and
-each row adds `count`, the number of items the reader may see that carry the value; the server
-returns at most its `max_suggestions` setting of these, and the table's schema metadata
-`tessera.more` says whether more matched and `tessera.total` how many items the counts are taken over. With `codes`, such as the codes in a sample's category column, it is the values of
-those codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot
-be combined. A column declared for a view group holds different values in each view, so it
-takes `view=`.
+column's values that the reader may see, one row each, with `key`, `code` and `title`. Without a
+prefix it is every value. With one it is the values whose key or title, or a word in either, starts
+with it, ignoring case, and each row adds `count`, the number of items the reader may see that carry
+the value; the server returns at most its `max_suggestions` setting of these, and the table's schema
+metadata `tessera.more` says whether more matched and `tessera.total` how many items the counts are
+taken over. With `codes`, such as the codes in a sample's category column, it is the values of those
+codes, and a code with no value the reader may see is left out; `codes` and `prefix` cannot be
+combined. A column declared for a view group holds different values in each view, so it takes
+`view=`.
 
 `item()` returns `fields` by column name, `labels` (the item's labels that the reader also
 holds) and `views`. `lookup(view, field, values, fields=())` finds the items holding values of a
