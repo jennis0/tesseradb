@@ -718,9 +718,8 @@ export class TesseraClient {
    * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
    * its request. Without `filters` this is a `GET`; with it, a `POST` carrying the same fields.
    *
-   * A session has one suggestion in flight at a time. The server refuses a second with `429`, and
-   * this returns `{status: 'superseded', retryAfterS}` for it instead of throwing. A request with
-   * `filters` also waits for compute admission, and a full queue answers the same way.
+   * Every `429` the server answers is returned as `{status: 'superseded', retryAfterS, detail}`
+   * rather than thrown; {@link SuggestResult} lists the causes.
    *
    * @param column - As for {@link TesseraClient.categories}.
    * @param q - The text typed. Empty matches every value.
@@ -768,13 +767,15 @@ export class TesseraClient {
       // The body's `retry_after_s` is what the contract requires; the header is the fallback for
       // a body that does not parse.
       let retryAfterS = Number(response.headers.get('retry-after') ?? '1');
+      let detail: string | null = null;
       try {
-        const body = (await response.json()) as {retry_after_s?: number};
+        const body = (await response.json()) as {retry_after_s?: number; detail?: string};
         if (typeof body.retry_after_s === 'number') retryAfterS = body.retry_after_s;
+        if (typeof body.detail === 'string') detail = body.detail;
       } catch {
         // A non-JSON 429 (a proxy's) still yields a retryable outcome from the header alone.
       }
-      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1};
+      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1, detail};
     }
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawSuggest;

@@ -103,14 +103,14 @@ describe('TesseraClient.suggest', () => {
     );
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 2});
+    expect(result).toEqual({status: 'superseded', retryAfterS: 2, detail: 'one suggest in flight'});
   });
 
   it('falls back to the Retry-After header when a 429 body will not parse', async () => {
     vi.stubGlobal('fetch', async () => new Response('not json', {status: 429, headers: {'Retry-After': '3'}}));
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 3});
+    expect(result).toEqual({status: 'superseded', retryAfterS: 3, detail: null});
   });
 
   it('throws TesseraError for a real refusal, e.g. 500 fail-closed on a derived column', async () => {
