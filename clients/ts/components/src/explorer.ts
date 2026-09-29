@@ -1187,7 +1187,7 @@ export class TesseraExplorer extends TesseraElement {
       void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="size-by"]')?.focus());
     };
     const keys = (e: KeyboardEvent, i: number) => {
-      const items = [...this.renderRoot.querySelectorAll<HTMLElement>('[part~="size-option"]')];
+      const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="size-option"]'));
       const next = {ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1}[e.key];
       if (e.key === 'Escape') {
         e.stopPropagation();

@@ -108,7 +108,7 @@ function passCode(pass: HighlightPass): number {
 }
 
 /** The width in pixels of the ring a mark with no value draws, under sizing by a column. */
-export const HOLLOW_RING_PX = 1;
+export const HOLLOW_RING_PX = 1.5;
 
 export type MarksLayerProps = ScatterplotLayerProps & {
   /** Whether the fill colour comes from the lookup texture rather than the colour attribute. */

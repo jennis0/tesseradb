@@ -1,8 +1,8 @@
 import type {Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
 import {NO_MASKED} from '@tesseradb/client';
 import type {TesseraMap} from '@tesseradb/components';
-import type {Colouring} from '@tesseradb/deck';
-import {setColouring} from '../../components/src/colouring.js';
+import type {Colouring, Sizing} from '@tesseradb/deck';
+import {setColouring, setSizing} from '../../components/src/colouring.js';
 import {fakeStore, meta as baseMeta, settle, status, type FakeStore} from '../../components/test/fake-store.js';
 import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestionPage, topicArtifacts, withDraft} from './corpus.js';
 
@@ -157,6 +157,12 @@ const legendStore = (colourBy: string | null, over: Partial<Projections> = {}, c
   return s;
 };
 
+/** `s` with the size choices `sizing` names already made. */
+const sizedStore = <S extends Store>(s: S, sizing: Partial<Sizing>): S => {
+  setSizing(s, sizing);
+  return s;
+};
+
 /** The corpus's meta with `topics` as a tree layer titled `title`, whose depths the Level choice lists. */
 const titled = (title: string) => ({...META, layers: META.layers.map((l) => (l.name === 'topics' ? {...l, title, levels: []} : l))});
 
@@ -298,6 +304,8 @@ export const SECTIONS: Section[] = [
       {state: 'numeric, Magma on a log scale', build: () => make('tessera-legend', {store: legendStore('citations', {}, {ramp: 'magma', scale: 'log'})})},
       {state: 'numeric, no values on screen', build: () => make('tessera-legend', {store: store({legend: legendOf('citations', {domains: {}})})})},
       {state: 'a column that is not rendered', build: () => make('tessera-legend', {store: legendStore('published_at')})},
+      {state: 'sized by citations on a log scale', build: () => make('tessera-legend', {store: sizedStore(store({legend: legendOf('field', {sizeBy: 'citations'})}), {scale: 'log'})})},
+      {state: 'sized by citations by rank', build: () => make('tessera-legend', {store: sizedStore(store({legend: legendOf('field', {sizeBy: 'citations'})}), {scale: 'rank'})})},
       {state: 'colour by cluster', build: () => make('tessera-legend', {store: legendStore('cluster:topics', {artifacts: mapState().artifacts})})},
       {state: 'selectable, choice only', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true})},
       {state: 'selectable with readout, category', build: () => make('tessera-legend', {store: legendStore('field', {artifacts: mapState().artifacts}), selectable: true, readout: true})},
@@ -611,6 +619,12 @@ function mapSpecimens(): Specimen[] {
       build: (ctx) => map(mapStore(ctx, 'cluster:topics', {}, {selection: {item: null, itemRefusal: null, artifact: {id: TOPIC(0).tesseraId, detail: detail(TOPIC(0))}, artifactRefusal: null}})),
       ready: ready(true)
     },
+    {
+      state: 'coloured by field, sized by citations on a log scale, the uncited as rings',
+      wide: true,
+      build: (ctx) => map(sizedStore(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {min: 1.5, max: 9, scale: 'log'}), {'size-by': 'citations'}),
+      ready: ready(true)
+    },
     {state: 'highlight active (cs.CV lit)', wide: true, build: (ctx) => map(mapStore(ctx, 'field', {highlight: (m) => m.field === 2})), ready: ready(true)},
     {
       state: 'a box selected, toolbar bottom-left',
@@ -760,6 +774,25 @@ function explorerSpecimens(): Specimen[] {
         await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-by"]'), 'the Colour by button');
         legend()!.shadowRoot!.querySelector<HTMLElement>('[part="colour-by"]')!.click();
         await until(() => !!legend()?.shadowRoot?.querySelector('[part="colour-menu"]'), 'the Colour by menu');
+        await settle(el.parentElement!);
+      }
+    },
+    {
+      state: 'sized by citations on a log scale, with the Size key, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
+      ready
+    },
+    {
+      state: 'sized by citations, the Size by menu open, 1440 × 900',
+      pinned: 1440,
+      build: (ctx) => explorer(mapStore(ctx, 'field', {uncited: true}, {legend: legendOf('field', {sizeBy: 'citations'})}), {layout: 'overlay', 'size-by': 'citations', 'size-scale': 'log', 'size-min': '1.5', ...named}, 900),
+      ready: async (el) => {
+        await ready(el);
+        shadow(el, '[part="layers-toggle"]')?.click();
+        await until(() => !!shadow(el, '[part="size-by"]'), 'the Size by button');
+        shadow(el, '[part="size-by"]')?.click();
+        await until(() => !!shadow(el, '[part="size-menu"]'), 'the Size by menu');
         await settle(el.parentElement!);
       }
     },
