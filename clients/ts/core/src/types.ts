@@ -1,3 +1,5 @@
+import type {Table} from 'apache-arrow';
+
 /**
  * A viewer session, as {@link TesseraClient.authorise} returns it.
  *
@@ -538,6 +540,14 @@ export type Meta = {
      * compression. A single larger row is sent alone.
      */
     maxPageBytes: number;
+    /** The most groupings one {@link TesseraClient.aggregate} request may carry. */
+    maxAggregateGroupings: number;
+    /** The largest `top` of an aggregate grouping. */
+    maxAggregateTop: number;
+    /** The most `values` or `artifacts` an aggregate grouping may name. */
+    maxAggregateNamed: number;
+    /** The most cells an aggregate grouping's cell level may list: the cells at its `depth` in its `area`. */
+    maxAggregateCells: number;
   };
   /** The most tiles one viewport request may span; over it the request is a `422`. */
   maxTilesPerRequest: number;
@@ -1450,4 +1460,135 @@ export type RecordsTrailer = {
   endedBy: 'end' | 'pages' | 'budget_bytes' | 'budget_time' | 'deadline';
   /** The whole response's wall time on the server, in microseconds, including waits on the client. */
   streamUs: number;
+};
+
+/**
+ * The body of `POST /v1/aggregate`, which {@link TesseraClient.aggregate} sends: how the items this
+ * principal may see in `view` are distributed, as one table of exact counts per grouping. A field
+ * left unset is not sent, and the server's default applies.
+ *
+ * @category Requests and responses
+ */
+export type AggregateRequest = {
+  /** The view the counts are taken in, from `/v1/meta`. An item with no position in it is not counted. */
+  view: string;
+  /** The set every count is taken over, in the viewport's grammar. Unset is every item this principal may see in `view`. */
+  filters?: FilterExpr;
+  /**
+   * The set each count is compared with, in the same grammar and view, drawn from the same visible
+   * set. `{}` is the whole visible set. Unset adds no comparison columns.
+   */
+  reference?: FilterExpr;
+  /** One table each, in this order. At most `meta.selection.maxAggregateGroupings`. */
+  groupings: Grouping[];
+  /** As {@link ItemsRequest.pageRows}. */
+  pageRows?: number;
+  /** As {@link ItemsRequest.pages}. */
+  pages?: number;
+  /** A previous result's {@link AggregateResult.next}, unchanged, under the same request. */
+  cursor?: string;
+  /** As {@link ItemsRequest.compression}. */
+  compression?: 'zstd';
+};
+
+/**
+ * One table of an aggregate. `{}` is the size of the set. `by` picks groups; `cells` divides the
+ * set, or each group, into cells of the view.
+ *
+ * @category Requests and responses
+ */
+export type Grouping = {
+  /** The outer level: the groups. Unset counts the set as one group. */
+  by?: AggregateBy;
+  /** The inner level: the cells each group is divided into. Unset counts each group whole. */
+  cells?: AggregateCells;
+};
+
+/**
+ * A grouping's outer level: the values of a category field or the artifacts of one level of a
+ * layer, as the `top` groups by count or as the groups named.
+ *
+ * A `field` is a category declared with `index` or `render`, or one with a `derived` vocabulary; a
+ * group-scoped field resolves under the request's view as a filter leaf on it does, or is pinned as
+ * `<field>@<key>`. A `layer` is one `/v1/meta` publishes to this principal, and `level` is required
+ * on a layer with several levels and refused on one with a single level. A named value or artifact
+ * this principal would not be listed gets no row.
+ *
+ * @category Requests and responses
+ */
+export type AggregateBy =
+  | {field: string; top: number}
+  | {field: string; values: string[]}
+  | {layer: string; level?: number; top: number}
+  | {layer: string; level?: number; artifacts: bigint[]};
+
+/**
+ * A grouping's inner level: the cells of the view at `depth`, from 0 to 32. Depths 0 to 16 are the
+ * map's tiles at that zoom; 17 to 32 divide them down to the stored position.
+ *
+ * @category Requests and responses
+ */
+export type AggregateCells = {
+  /** From 0 to 32. */
+  depth: number;
+  /**
+   * `[x0, y0, x1, y1]` as the viewport's `bbox` takes it. Only the cells at `depth` that intersect
+   * it are listed, each with all of its items. Unset is the view's whole extent. The cells may
+   * number at most `meta.selection.maxAggregateCells`.
+   */
+  area?: [number, number, number, number];
+};
+
+/**
+ * One grouping's table, as {@link AggregateResult.tables} carries it: the figures of its head and
+ * its rows.
+ *
+ * The columns are, in this order and each only where stated: `group` (`listed`, `rest` or `none`,
+ * with `by`); `key` (a vocabulary key, or an artifact's `tessera_id` as a `bigint`, with `by`; null on
+ * `rest` and `none`); `title` (the value's title, with `by` on a field); `cell` (a `bigint`, the
+ * first `2·depth` bits of the Morton position, with `cells`); `count` (a `bigint`); and with a
+ * reference, `reference_count` (a `bigint`) and `lift` (a number, null where either count it
+ * divides by is 0).
+ *
+ * @category Requests and responses
+ */
+export type AggregateTable = {
+  /** The table's index in the request's `groupings`. */
+  grouping: number;
+  /** Items in the set. */
+  total: number;
+  /** Items in the reference set; `null` where the request carried no `reference`. */
+  referenceTotal: number | null;
+  /**
+   * The groups with an item in the set before the cut to `top` or the named list; `null` where the
+   * grouping has no `by`.
+   */
+  groups: number | null;
+  /** The rows of every page read, joined in order. */
+  rows: Table;
+};
+
+/**
+ * What {@link TesseraClient.aggregate} returns.
+ *
+ * @category Requests and responses
+ */
+export type AggregateResult = {
+  /**
+   * One table per grouping read, in the order of `groupings`. The figures are those of the table's
+   * first head read; a table carried over several responses keeps the groups its first page
+   * listed.
+   */
+  tables: AggregateTable[];
+  /** The `x-tessera-region` verdict, present where `filters` or `reference` carried a `region` leaf. */
+  region: RegionVerdict | null;
+  /**
+   * Whether a page counted a different state of the corpus from the page before it, in any
+   * response read. The tables then mix counts taken before and after a change.
+   */
+  recomposed: boolean;
+  /** The last response's identity key for this principal and view; empty where it carried none. */
+  identityKey: string;
+  /** Where the read continues: `null` once every table is whole. */
+  next: string | null;
 };

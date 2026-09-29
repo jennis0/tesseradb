@@ -1,3 +1,4 @@
+import {Aggregates, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
@@ -61,6 +62,7 @@ export {formatCount, formatMasked} from './counts.js';
 export type {TokenSupplier} from './token.js';
 export {CLUSTER_PREFIX, type LegendProjection} from './legend.js';
 export {REGION_HELD_LIMIT, type RegionProjection, type SelectionShape} from './selectedRegion.js';
+export type {AggregateEntry, AggregateSpec, AggregatesProjection} from './aggregates.js';
 
 /**
  * Where the host's camera looks: a box in the current view's data coordinates, and the pixel size
@@ -187,6 +189,8 @@ export type Projections = {
   legend: LegendProjection;
   /** How much the store's tile cache holds. */
   replica: ReplicaProjection;
+  /** Each aggregate registered with {@link Store.setAggregate}, by its id. */
+  aggregates: AggregatesProjection;
 };
 
 /**
@@ -545,6 +549,16 @@ export interface Store {
    */
   requestFilters(): FilterExpr | null;
   /**
+   * Keep an aggregate of the current view under `id` (`POST /v1/aggregate`), published in the
+   * `aggregates` projection; `null` drops it. The request carries `spec`'s groupings and reference as
+   * given, and {@link Store.requestFilters} as its `filters`, so the counts are over what the map
+   * counts. The store asks again, aborting the request it replaces, when `setAggregate` is called
+   * for the id again, when the filters, the `member_of` clauses or the selected region change, at a
+   * view switch, at {@link Store.refresh}, and once it has read `/v1/meta` again after forgetting
+   * what the server answered. Waits for `/v1/meta`.
+   */
+  setAggregate(id: string, spec: AggregateSpec | null): void;
+  /**
    * Ask a category column's typeahead for `q`, 120 ms after the last call for that column. The page
    * lands in `filters.suggestions[column]`, each value with its count in the current view, and a
    * refusal in `filters.suggestErrors[column]`. A call
@@ -805,6 +819,23 @@ export function createStore(options: StoreOptions): Store {
     trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
   });
 
+  const aggregates = new Aggregates(
+    async (spec, signal) => {
+      const asked = await viewed();
+      const filters = requestFilters();
+      const reference = spec.reference === 'visible' ? {} : spec.reference;
+      const result = await client.aggregate(
+        asked.token,
+        {view: asked.view, groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})},
+        signal
+      );
+      // A response cancelled before its first page carries no key.
+      if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
+      return {result, view: asked.view};
+    },
+    (entries) => replaceProjection('aggregates', entries)
+  );
+
   const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
 
   const projections: Projections = {
@@ -818,7 +849,8 @@ export function createStore(options: StoreOptions): Store {
     region: null,
     filters: {draft: emptyDraft([]), expr: null, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0},
     legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
-    replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
+    replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null},
+    aggregates: new Map()
   };
 
   const all: Set<Listener> = new Set();
@@ -1447,6 +1479,7 @@ export function createStore(options: StoreOptions): Store {
       });
     }
 
+    aggregates.refresh(true);
     onTrace('view-switch', {from, to: id, sameFrame: kept ? 1 : 0});
   }
 
@@ -1564,6 +1597,7 @@ export function createStore(options: StoreOptions): Store {
     }
     contentKeyAtFrame = '';
     if (lastView) setView(lastView.input);
+    aggregates.refresh(false);
   }
 
   async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
@@ -1737,6 +1771,8 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('status', {...NO_STATUS});
     publishReplica(null);
     void ready().catch(() => {});
+    // Each asks under the meta and token the read above brings.
+    aggregates.refresh(true);
   }
 
   function refresh(): void {
@@ -1744,6 +1780,7 @@ export function createStore(options: StoreOptions): Store {
     views.current?.channel.reset();
     region.loading(projections.marks);
     if (lastView) setView(lastView.input);
+    aggregates.refresh(false);
   }
 
   /** Thrown into an answer {@link admit} refused, so nothing in it is held. */
@@ -1761,6 +1798,7 @@ export function createStore(options: StoreOptions): Store {
     shapes.dispose();
     records.dispose();
     legend.dispose();
+    aggregates.dispose();
     for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.cancel();
@@ -1791,6 +1829,7 @@ export function createStore(options: StoreOptions): Store {
     setView,
     browse,
     requestFilters,
+    setAggregate: (id, spec) => aggregates.set(id, spec),
     setFilters,
     setMembers,
     suggest: (column, q) => suggestions.suggest(column, q),

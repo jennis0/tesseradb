@@ -10,8 +10,9 @@ import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
+import {readAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -352,7 +353,11 @@ export class TesseraClient {
         maxSuggestionWalk: m.selection.max_suggestion_walk,
         maxSuggestSetEntities: m.selection.max_suggest_set_entities,
         maxPageRows: m.selection.max_page_rows,
-        maxPageBytes: m.selection.max_page_bytes
+        maxPageBytes: m.selection.max_page_bytes,
+        maxAggregateGroupings: m.selection.max_aggregate_groupings,
+        maxAggregateTop: m.selection.max_aggregate_top,
+        maxAggregateNamed: m.selection.max_aggregate_named,
+        maxAggregateCells: m.selection.max_aggregate_cells
       },
       maxTilesPerRequest: m.selection.max_tiles_per_request,
       filterOperands: m.filter_operands.map((f) => ({
@@ -939,24 +944,58 @@ export class TesseraClient {
     signal: AbortSignal | undefined,
     parseHead: (raw: unknown) => Head
   ): Promise<RecordsRead<Head>> {
-    const request = async (cursor?: string) => {
-      const given = cursor === undefined ? req : {...req, cursor, count: undefined};
-      // Each field that is set, under its wire name. A `tessera_id` travels as a decimal string.
-      const body: Record<string, unknown> = {};
-      for (const [name, value] of Object.entries(given)) {
-        if (value === undefined) continue;
-        body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = typeof value === 'bigint' ? value.toString() : value;
-      }
-      const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
-        method: 'POST',
-        headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-        body: jsonBody(body),
-        signal
-      });
-      if (!response.ok) await fail(response);
-      return response;
-    };
+    const request = (cursor?: string) => this.post(route, token, cursor === undefined ? req : {...req, cursor, count: undefined}, signal);
     return openRecords(req, request, signal, parseHead);
+  }
+
+  /**
+   * `POST /v1/aggregate`: how the items this principal may see in a view are distributed, as one
+   * table of exact counts per grouping. Every page of every table is read, response after response,
+   * each requested from the cursor the one before it ended with, and each table's pages are joined
+   * into one Arrow table. {@link AggregateTable} lists the columns.
+   *
+   * Each response composes the visible set again, so a deletion or suppression accepted during the
+   * read applies from the next response, and {@link AggregateResult.recomposed} says where a page
+   * counted a different state of the corpus.
+   *
+   * ```ts
+   * const {tables} = await client.aggregate(token, {
+   *   view: 'papers',
+   *   filters: {year: {range: {gte: 2020}}},
+   *   groupings: [{}, {by: {field: 'venue', top: 10}}]
+   * });
+   * console.log(tables[0]!.total, tables[1]!.rows.toArray());
+   * ```
+   *
+   * @param follow - Read the responses after the first. Defaults to `true`. With `false` the result
+   *   holds the first response's pages, and {@link AggregateResult.next} is where the read
+   *   continues, to be passed back as `cursor`.
+   * @throws {@link TesseraError} when the server refuses a request: `404` for an unknown view,
+   *   `422` for a request the contract refuses, naming the limit where one is exceeded, and `429`
+   *   under load.
+   * @throws `Error` for a body cut or ended without its trailer, and the signal's reason once it
+   *   aborts.
+   */
+  aggregate(token: string, req: AggregateRequest, signal?: AbortSignal, follow = true): Promise<AggregateResult> {
+    const request = (cursor?: string) => this.post('aggregate', token, cursor === undefined ? req : {...req, cursor}, signal);
+    return readAggregate(req, request, signal, follow);
+  }
+
+  /** One bulk read's request: each field of `given` that is set, under its wire name. */
+  private async post(route: string, token: string, given: object, signal: AbortSignal | undefined): Promise<Response> {
+    const body: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(given)) {
+      if (value !== undefined) body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = value;
+    }
+    const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      // A `tessera_id` travels as a decimal string.
+      body: jsonBody(body),
+      signal
+    });
+    if (!response.ok) await fail(response);
+    return response;
   }
 }
 
@@ -1021,7 +1060,11 @@ const SELECTION_FIELDS = [
   'max_suggest_set_entities',
   'max_browse_rows',
   'max_page_rows',
-  'max_page_bytes'
+  'max_page_bytes',
+  'max_aggregate_groupings',
+  'max_aggregate_top',
+  'max_aggregate_named',
+  'max_aggregate_cells'
 ] as const;
 
 /** Throws where `body` is not an object or lacks one of `fields`. */
@@ -1108,6 +1151,10 @@ type RawMeta = {
     max_browse_rows: number;
     max_page_rows: number;
     max_page_bytes: number;
+    max_aggregate_groupings: number;
+    max_aggregate_top: number;
+    max_aggregate_named: number;
+    max_aggregate_cells: number;
   };
 };
 

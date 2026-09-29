@@ -1,6 +1,6 @@
 import {compressionRegistry, CompressionType, tableFromIPC, type Table} from 'apache-arrow';
 import {decompress} from 'fzstd';
-import {FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
+import {FRAME_PAGE_END, FRAME_RECORDS, FRAME_TRAILER, FrameReader, type Frame, type FrameGrammar} from './frame.js';
 import {parseRegionVerdict} from './region.js';
 import type {PageEnd, RecordsTrailer, RegionVerdict, Timings} from './types.js';
 
@@ -212,16 +212,19 @@ async function open<Head>(response: Response, signal: AbortSignal | undefined, p
 }
 
 /** The frames of one body, read from the network as they are asked for. */
-class Frames {
-  private readonly grammar = new FrameReader('records');
+export class Frames {
+  private readonly grammar: FrameReader;
   private ready: Frame[] = [];
   /** `released` once the caller has stopped the read, `ended` once the body has been read to its end. */
   private state: 'reading' | 'ended' | 'released' = 'reading';
 
   constructor(
     private readonly reader: ReadableStreamDefaultReader<Uint8Array> | undefined,
-    private readonly signal: AbortSignal | undefined
-  ) {}
+    private readonly signal: AbortSignal | undefined,
+    grammar: FrameGrammar = 'records'
+  ) {
+    this.grammar = new FrameReader(grammar);
+  }
 
   /**
    * The next whole frame, or `null` at the end of a complete body or once the read is released.
@@ -267,7 +270,7 @@ class Frames {
  * Give Arrow's shared codec registry a zstd decoder. A decoder the host registered is kept, and so
  * is the host's encoder where it registered only that.
  */
-function registerZstd(): void {
+export function registerZstd(): void {
   const registered = compressionRegistry.get(CompressionType.ZSTD);
   if (registered?.decode) return;
   compressionRegistry.set(CompressionType.ZSTD, {encode: registered?.encode?.bind(registered), decode: zstdDecode});
@@ -284,13 +287,13 @@ type RawTrailer = {pages?: unknown; rows?: unknown; next?: unknown; ended_by: Re
 
 const isCursor = (value: unknown): value is string | null => value === null || typeof value === 'string';
 
-function pageEndOf(payload: Uint8Array): PageEnd {
+export function pageEndOf(payload: Uint8Array): PageEnd {
   const raw = (JSON.parse(new TextDecoder().decode(payload)) ?? {}) as RawPageEnd;
   if (!isCursor(raw.next)) throw new Error('a page end has no `next`, which must be a cursor or null');
   return {next: raw.next, endedBy: raw.ended_by};
 }
 
-function trailerOf(payload: Uint8Array): RecordsTrailer {
+export function trailerOf(payload: Uint8Array): RecordsTrailer {
   const raw = (JSON.parse(new TextDecoder().decode(payload)) ?? {}) as RawTrailer;
   if (!isCursor(raw.next)) throw new Error('the trailer has no `next`, which must be a cursor or null');
   if (!Number.isInteger(raw.pages) || !Number.isInteger(raw.rows)) throw new Error('the trailer does not count its pages and rows');

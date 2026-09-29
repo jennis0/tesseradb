@@ -106,6 +106,7 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
   artifact: (c, signal) => c.artifact('tok', 7n, {view: 's0', signal}),
   browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal),
   items: (c, signal) => c.items('tok', {view: 's0', fields: []}, signal),
+  aggregate: (c, signal) => c.aggregate('tok', {view: 's0', groupings: [{}]}, signal),
   artifacts: (c, signal) => c.artifacts('tok', {view: 's0', layer: 'l', fields: []}, signal)
 };
 

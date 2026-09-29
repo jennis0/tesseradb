@@ -109,7 +109,11 @@ describe('/v1/meta', () => {
     max_suggest_set_entities: 10_000_000,
     max_browse_rows: 200,
     max_page_rows: 65_536,
-    max_page_bytes: 16_777_216
+    max_page_bytes: 16_777_216,
+    max_aggregate_groupings: 16,
+    max_aggregate_top: 1000,
+    max_aggregate_named: 1000,
+    max_aggregate_cells: 1_048_576
   };
   const body = {
     api_version: 1,
@@ -172,7 +176,11 @@ describe('/v1/meta', () => {
         maxSuggestSetEntities: 10_000_000,
         maxBrowseRows: 200,
         maxPageRows: 65_536,
-        maxPageBytes: 16_777_216
+        maxPageBytes: 16_777_216,
+        maxAggregateGroupings: 16,
+        maxAggregateTop: 1000,
+        maxAggregateNamed: 1000,
+        maxAggregateCells: 1_048_576
       },
       maxTilesPerRequest: 4096,
       layers: [

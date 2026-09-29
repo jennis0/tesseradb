@@ -8,6 +8,9 @@
  */
 export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
 export type {
+  AggregateEntry,
+  AggregateSpec,
+  AggregatesProjection,
   ArtifactsProjection,
   FiltersProjection,
   LegendProjection,
