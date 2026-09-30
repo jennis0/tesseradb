@@ -226,60 +226,81 @@ struct Segment {
     each: bool,
 }
 
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
 fn parse_path(raw: &str) -> Result<Vec<Segment>, Error> {
-    let bad = |why: &str| {
+    let mut segments = Vec::new();
+    let mut chars = raw.chars().peekable();
+    let result = loop {
+        match segment(&mut chars) {
+            Ok(seg) => segments.push(seg),
+            Err(why) => break Err(why),
+        }
+        match chars.next() {
+            None => break Ok(segments),
+            Some('.') => continue,
+            Some(_) => break Err("has text after [*] that is not a dot"),
+        }
+    };
+    result.map_err(|why| {
         Error::Invalid(format!(
             "the claim path `{raw}` {why}; write keys separated by dots, each optionally \
              followed by [*], quoting a key that holds a dot or a bracket"
         ))
+    })
+}
+
+/// One key, quoted or bare, and the `[*]` after it if there is one.
+fn segment(chars: &mut Chars<'_>) -> Result<Segment, &'static str> {
+    let key = if chars.peek() == Some(&'"') {
+        chars.next();
+        quoted_key(chars)?
+    } else {
+        bare_key(chars)?
     };
-    let mut segments = Vec::new();
-    let mut chars = raw.chars().peekable();
-    loop {
-        let mut key = String::new();
-        if chars.peek() == Some(&'"') {
-            chars.next();
-            loop {
-                match chars.next() {
-                    None => return Err(bad("has an unclosed quote")),
-                    Some('"') => break,
-                    Some('\\') => match chars.next() {
-                        Some(c @ ('"' | '\\')) => key.push(c),
-                        _ => return Err(bad("has an escape other than \\\" or \\\\")),
-                    },
-                    Some(c) => key.push(c),
-                }
-            }
-        } else {
-            while let Some(&c) = chars.peek() {
-                if c == '.' || c == '[' {
-                    break;
-                }
-                if c == ']' || c == '"' {
-                    return Err(bad("has a bracket or quote inside an unquoted key"));
-                }
-                key.push(c);
-                chars.next();
-            }
-        }
-        if key.is_empty() {
-            return Err(bad("has an empty key"));
-        }
-        let mut each = false;
-        if chars.peek() == Some(&'[') {
-            chars.next();
-            if chars.next() != Some('*') || chars.next() != Some(']') {
-                return Err(bad("has a bracket other than [*]"));
-            }
-            each = true;
-        }
-        segments.push(Segment { key, each });
-        match chars.next() {
-            None => return Ok(segments),
-            Some('.') => continue,
-            Some(_) => return Err(bad("has text after [*] that is not a dot")),
+    if key.is_empty() {
+        return Err("has an empty key");
+    }
+    let each = chars.peek() == Some(&'[');
+    if each {
+        chars.next();
+        if chars.next() != Some('*') || chars.next() != Some(']') {
+            return Err("has a bracket other than [*]");
         }
     }
+    Ok(Segment { key, each })
+}
+
+/// The key after an opening quote, up to and consuming the closing one.
+fn quoted_key(chars: &mut Chars<'_>) -> Result<String, &'static str> {
+    let mut key = String::new();
+    loop {
+        match chars.next() {
+            None => return Err("has an unclosed quote"),
+            Some('"') => return Ok(key),
+            Some('\\') => match chars.next() {
+                Some(c @ ('"' | '\\')) => key.push(c),
+                _ => return Err("has an escape other than \\\" or \\\\"),
+            },
+            Some(c) => key.push(c),
+        }
+    }
+}
+
+/// An unquoted key, up to a dot or an opening bracket.
+fn bare_key(chars: &mut Chars<'_>) -> Result<String, &'static str> {
+    let mut key = String::new();
+    while let Some(&c) = chars.peek() {
+        if c == '.' || c == '[' {
+            break;
+        }
+        if c == ']' || c == '"' {
+            return Err("has a bracket or quote inside an unquoted key");
+        }
+        key.push(c);
+        chars.next();
+    }
+    Ok(key)
 }
 
 fn walk(value: &Value, path: &[Segment], out: &mut Vec<String>) {
