@@ -1,6 +1,6 @@
 //! The identity catalogue: local principals and their credentials, groups, the terms and
-//! permissions granted to each, and the OIDC providers whose claims map to terms, some of which
-//! carry a local group's grants.
+//! permissions granted to each, and the OIDC providers whose claims map to terms and to local
+//! groups.
 //!
 //! The catalogue is a SQLite database in a directory the caller names, independent of any
 //! bundle, so principals and grants carry across a rebuild. The whole of it is held in memory

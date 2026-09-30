@@ -25,7 +25,7 @@ use crate::permission::PermissionSet;
 use crate::provider::{ClaimRule, Provider, RoleMapping};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+pub(crate) const SCHEMA_VERSION: i64 = 5;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
 const LOCK_NAME: &str = "catalogue.lock";
 
@@ -83,7 +83,8 @@ CREATE TABLE claim_rule (
 CREATE TABLE role_mapping (
     provider TEXT NOT NULL REFERENCES provider (name) ON DELETE CASCADE,
     position INTEGER NOT NULL,
-    term TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    value TEXT NOT NULL,
     local_group TEXT NOT NULL,
     PRIMARY KEY (provider, position)
 ) WITHOUT ROWID;
@@ -429,15 +430,16 @@ fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
 
 fn load_role_mappings(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare(
-        "SELECT provider, position, term, local_group FROM role_mapping \
+        "SELECT provider, position, claim, value, local_group FROM role_mapping \
          ORDER BY provider, position",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let (provider, row) = provider_row(r, "role_mapping")?;
         let mapping = RoleMapping {
-            term: text(r, 2, &row)?,
-            group: text(r, 3, &row)?,
+            claim: text(r, 2, &row)?,
+            value: text(r, 3, &row)?,
+            group: text(r, 4, &row)?,
         };
         provider_mut(st, &provider).role_mappings.push(mapping);
     }
@@ -611,12 +613,15 @@ mod tests {
             "claim_rule VALUES ('corp', 0, 'groups[*]', ' {value}')",
             "claim_rule VALUES ('corp', 0, 'a..b', '{value}')",
             "claim_rule VALUES ('corp', 0, 'groups[*]', x'7b76616c75657d')",
-            "role_mapping VALUES ('corp', 0, 'PUBLIC', 'admins')",
-            "role_mapping VALUES ('corp', 0, 'tessera-admins', ' admins')",
-            "role_mapping VALUES ('corp', 0, 'tessera' || char(7), 'admins')",
-            "role_mapping VALUES ('corp', 0, 'tessera-admins', 'ad' || char(8238) || 'mins')",
-            "role_mapping VALUES ('corp', 0, 'tessera-admins', '')",
-            "role_mapping VALUES ('corp', 0, x'61', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', ' tessera-admins', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', ' admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera' || char(7), 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', '', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'a..b', 'tessera-admins', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', \
+             'ad' || char(8238) || 'mins')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', 'tessera-admins', '')",
+            "role_mapping VALUES ('corp', 0, 'groups[*]', x'61', 'admins')",
         ] {
             let fx = Fixture::new();
             drop(fx.open());
@@ -745,11 +750,13 @@ mod tests {
             ],
             role_mappings: vec![
                 RoleMapping {
-                    term: "tessera-admins".into(),
+                    claim: "groups[*]".into(),
+                    value: "tessera-admins".into(),
                     group: "eu".into(),
                 },
                 RoleMapping {
-                    term: "analysts".into(),
+                    claim: "tid".into(),
+                    value: "7f3a".into(),
                     group: "eu".into(),
                 },
             ],

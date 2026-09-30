@@ -1,5 +1,6 @@
 //! OIDC providers as stored data: the claim rules that turn a token's claims into terms, and the
-//! role mappings that give an identity holding an exact term the grants of a local group.
+//! role mappings that give an identity whose named claim holds an exact value the grants of a
+//! local group.
 //! Validating a token's signature, issuer, audience and lifetime happens elsewhere; this module
 //! sees claims that have already been accepted.
 //!
@@ -25,7 +26,7 @@ use crate::Error;
 const PLACEHOLDER: &str = "{value}";
 
 /// An OIDC provider: where its tokens come from, who they are for, where its signing keys are
-/// published, how its claims map to terms, and which terms carry a local group's grants.
+/// published, how its claims map to terms, and which claim values carry a local group's grants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Provider {
     pub name: String,
@@ -43,11 +44,14 @@ pub struct ClaimRule {
     pub template: String,
 }
 
-/// An identity whose claim rules produce exactly `term` receives the terms and permissions
-/// granted to the local group `group`. It never receives `bypass`.
+/// An identity whose claim at the path `claim` holds exactly `value` receives the terms and
+/// permissions granted to the local group `group`. It never receives `bypass`. The claim is
+/// read as a claim rule reads it and each value there is trimmed; a value of the same text in
+/// another claim does not match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleMapping {
-    pub term: String,
+    pub claim: String,
+    pub value: String,
     pub group: String,
 }
 
@@ -98,9 +102,9 @@ impl Provider {
         })
     }
 
-    /// Applies every claim rule to `claims`, a JSON object, and then every role mapping to the
-    /// terms produced. A produced term that a grant could not hold is dropped. That includes
-    /// `public` in any case, which every session holds anyway.
+    /// Applies every claim rule and every role mapping to `claims`, a JSON object. A produced
+    /// term that a grant could not hold is dropped. That includes `public` in any case, which
+    /// every session holds anyway.
     pub fn apply(&self, claims: &Value) -> ClaimMapping {
         let mut terms = BTreeSet::new();
         for rule in &self.rules {
@@ -109,7 +113,7 @@ impl Provider {
         let groups = self
             .role_mappings
             .iter()
-            .filter(|m| terms.contains(&m.term))
+            .filter(|m| m.matches(claims))
             .map(|m| m.group.clone())
             .collect();
         ClaimMapping { terms, groups }
@@ -136,15 +140,8 @@ impl ClaimRule {
     }
 
     fn produce(&self, claims: &Value, out: &mut BTreeSet<String>) {
-        // A stored rule's path has been parsed once already; one that fails here was not
-        // validated and produces nothing.
-        let Ok(path) = parse_path(&self.claim) else {
-            return;
-        };
-        let mut values = Vec::new();
-        walk(claims, &path, &mut values);
-        for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
-            if let Ok(term) = names::term(&self.template.replacen(PLACEHOLDER, value, 1)) {
+        for value in claim_values(&self.claim, claims) {
+            if let Ok(term) = names::term(&self.template.replacen(PLACEHOLDER, &value, 1)) {
                 out.insert(term);
             }
         }
@@ -153,11 +150,40 @@ impl ClaimRule {
 
 impl RoleMapping {
     fn validated(&self) -> Result<RoleMapping, Error> {
+        let claim = self.claim.trim().to_owned();
+        parse_path(&claim)?;
+        let value = self.value.trim();
+        if value.is_empty() {
+            return Err(Error::Invalid(format!(
+                "the role mapping on `{claim}` has an empty value; write the claim value that \
+                 selects the group"
+            )));
+        }
+        names::no_control("role mapping value", value)?;
         Ok(RoleMapping {
-            term: names::term(&self.term)?,
+            claim,
+            value: value.to_owned(),
             group: names::name("group", &self.group)?,
         })
     }
+
+    fn matches(&self, claims: &Value) -> bool {
+        claim_values(&self.claim, claims).any(|v| v == self.value)
+    }
+}
+
+/// Every non-empty value, trimmed, that the claim path `claim` reaches in `claims`. A stored
+/// path has been parsed once already; one that fails here was not validated and reaches
+/// nothing.
+fn claim_values(claim: &str, claims: &Value) -> impl Iterator<Item = String> {
+    let mut values = Vec::new();
+    if let Ok(path) = parse_path(claim) {
+        walk(claims, &path, &mut values);
+    }
+    values
+        .into_iter()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
 }
 
 /// Refuses a JWKS URL other than `https://`, or `http://` to `localhost`, `127.0.0.1` or
@@ -303,9 +329,10 @@ mod tests {
         }
     }
 
-    fn mapping(term: &str, group: &str) -> RoleMapping {
+    fn mapping(claim: &str, value: &str, group: &str) -> RoleMapping {
         RoleMapping {
-            term: term.into(),
+            claim: claim.into(),
+            value: value.into(),
             group: group.into(),
         }
     }
@@ -382,15 +409,18 @@ mod tests {
     }
 
     #[test]
-    fn a_role_mapping_names_its_group_only_for_its_exact_term() {
+    fn a_role_mapping_names_its_group_only_for_its_exact_value_in_its_own_claim() {
         let mut p = provider(vec![rule("groups[*]", "{value}")]);
-        p.role_mappings = vec![mapping("tessera-admins", "admins")];
+        p.role_mappings = vec![mapping("groups[*]", "tessera-admins", "admins")];
         let m = p.apply(&json!({"groups": ["analysts", " tessera-admins "]}));
         assert_eq!(m.groups, set(&["admins"]));
         assert_eq!(m.terms, set(&["analysts", "tessera-admins"]));
         for other in [
             json!({"groups": ["tessera-admins-x", "Tessera-Admins", "tessera-admin"]}),
             json!({"groups": ["admins"]}),
+            json!({"groups": "tessera-admins"}),
+            json!({"department": "tessera-admins", "groups": ["analysts"]}),
+            json!({"department": ["tessera-admins"]}),
             json!({}),
         ] {
             assert!(p.apply(&other).groups.is_empty(), "{other}");
@@ -398,15 +428,24 @@ mod tests {
     }
 
     #[test]
-    fn a_role_mapping_matches_the_produced_term_and_not_the_claim_value() {
-        let mut p = provider(vec![rule("groups[*]", "group:{value}")]);
+    fn a_role_mapping_reads_its_claim_whatever_the_claim_rules_produce() {
+        let mut p = provider(vec![
+            rule("groups[*]", "group:{value}"),
+            rule("department", "{value}"),
+        ]);
         p.role_mappings = vec![
-            mapping("tessera-admins", "admins"),
-            mapping("group:ops", "ops"),
-            mapping("group:ops", "oncall"),
+            mapping("groups[*]", "group:ops", "never"),
+            mapping("groups[*]", "ops", "ops"),
+            mapping("groups[*]", "ops", "oncall"),
+            mapping("realm_access.roles[*]", "admin", "admins"),
         ];
-        let m = p.apply(&json!({"groups": ["tessera-admins", "ops"]}));
-        assert_eq!(m.groups, set(&["ops", "oncall"]));
+        let m = p.apply(&json!({
+            "groups": ["ops"],
+            "department": "group:ops",
+            "realm_access": {"roles": ["admin"]}
+        }));
+        assert_eq!(m.groups, set(&["ops", "oncall", "admins"]));
+        assert_eq!(m.terms, set(&["group:ops"]));
     }
 
     fn refused(p: Provider) {
@@ -428,19 +467,20 @@ mod tests {
     }
 
     #[test]
-    fn a_role_mapping_to_a_term_or_group_that_cannot_be_stored_is_refused() {
+    fn a_role_mapping_with_a_claim_value_or_group_that_cannot_be_stored_is_refused() {
         let bad = [
-            (" ", "admins"),
-            ("public", "admins"),
-            ("Public", "admins"),
-            ("a\u{7}b", "admins"),
-            ("tessera-admins", ""),
-            ("tessera-admins", "ad\tmins"),
-            ("tessera-admins", "ad\u{202E}mins"),
+            ("", "tessera-admins", "admins"),
+            ("a..b", "tessera-admins", "admins"),
+            ("groups[0]", "tessera-admins", "admins"),
+            ("groups[*]", " ", "admins"),
+            ("groups[*]", "a\u{7}b", "admins"),
+            ("groups[*]", "tessera-admins", ""),
+            ("groups[*]", "tessera-admins", "ad\tmins"),
+            ("groups[*]", "tessera-admins", "ad\u{202E}mins"),
         ];
-        for (term, group) in bad {
+        for (claim, value, group) in bad {
             let mut p = provider(vec![]);
-            p.role_mappings = vec![mapping(term, group)];
+            p.role_mappings = vec![mapping(claim, value, group)];
             refused(p);
         }
     }
@@ -448,10 +488,13 @@ mod tests {
     #[test]
     fn rules_and_role_mappings_are_stored_trimmed() {
         let mut p = provider(vec![rule(" groups[*] ", " group:{value} ")]);
-        p.role_mappings = vec![mapping(" tessera-admins ", " admins ")];
+        p.role_mappings = vec![mapping(" groups[*] ", " tessera-admins ", " admins ")];
         let v = p.validated(false).unwrap();
         assert_eq!(v.rules, vec![rule("groups[*]", "group:{value}")]);
-        assert_eq!(v.role_mappings, vec![mapping("tessera-admins", "admins")]);
+        assert_eq!(
+            v.role_mappings,
+            vec![mapping("groups[*]", "tessera-admins", "admins")]
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ fn is_display_format(c: char) -> bool {
     )
 }
 
-fn no_control(what: &str, value: &str) -> Result<(), Error> {
+pub(crate) fn no_control(what: &str, value: &str) -> Result<(), Error> {
     match value.chars().find(|c| c.is_control()) {
         Some(c) => Err(Error::Invalid(format!(
             "the {what} {value:?} holds the control character {c:?}; remove it"

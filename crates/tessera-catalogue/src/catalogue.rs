@@ -948,8 +948,8 @@ impl Catalogue {
 
     /// The terms and permissions a session for an OIDC identity holds, from `claims` as accepted
     /// from a token of `provider`: the terms its claim rules produce, and the terms and
-    /// permissions granted to each existing local group a role mapping names for one of those
-    /// terms. It never holds `bypass`. `None` when the provider is unknown.
+    /// permissions granted to each existing local group whose role mapping's claim holds its
+    /// value. It never holds `bypass`. `None` when the provider is unknown.
     pub fn resolve_claims(&self, provider: &str, claims: &Value) -> Option<Resolution> {
         let st = self.state.read();
         let (p, _) = st.providers.get(provider.trim())?;
@@ -997,9 +997,9 @@ fn write_provider(tx: &Transaction<'_>, p: &Provider) -> Result<(), Error> {
     }
     for (i, m) in p.role_mappings.iter().enumerate() {
         tx.execute(
-            "INSERT INTO role_mapping (provider, position, term, local_group) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params![p.name, i as i64, m.term, m.group],
+            "INSERT INTO role_mapping (provider, position, claim, value, local_group) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![p.name, i as i64, m.claim, m.value, m.group],
         )?;
     }
     Ok(())
@@ -1105,14 +1105,16 @@ mod tests {
         }
     }
 
-    fn mapping(term: &str, group: &str) -> RoleMapping {
+    /// A role mapping on the `groups` claim.
+    fn mapping(value: &str, group: &str) -> RoleMapping {
         RoleMapping {
-            term: term.into(),
+            claim: "groups[*]".into(),
+            value: value.into(),
             group: group.into(),
         }
     }
 
-    /// `corp` with `groups_rule` and the role mapping `tessera-admins -> admins`.
+    /// `corp` with `groups_rule` and the role mapping `groups[*]: tessera-admins -> admins`.
     fn corp_with_admins() -> Provider {
         Provider {
             role_mappings: vec![mapping("tessera-admins", "admins")],
@@ -1255,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_term_that_does_not_exactly_match_a_role_mapping_passes_on_nothing() {
+    fn a_claim_value_that_does_not_exactly_match_a_role_mapping_passes_on_nothing() {
         let fx = Fixture::new();
         let cat = fx.open();
         cat.create_provider(&corp_with_admins()).unwrap();
