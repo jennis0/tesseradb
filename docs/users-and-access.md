@@ -307,7 +307,8 @@ every principal it affects. This includes changes that widen access. The affecte
 - a password set or cleared;
 - an API key revoked, which ends every session authorised with that key, including the sessions an
   integrator minted for other principals through `authorise-as` with it;
-- a change to an OIDC provider's configuration or claim rules, which ends every session authorised
+- a change to an OIDC provider's configuration, claim rules or role mappings, or to the terms or
+  permissions of a local group one of its role mappings names, which ends every session authorised
   through that provider.
 
 A session never outlives what authorised it. A session authorised with an API key that has an
