@@ -1046,15 +1046,22 @@ pub struct RouteCosts {
     pub complement_ns_per_entity: f64,
 }
 
-/// ⊘ **Modelled 2026-09-16** from the eleven rung-6 principals in the evidence memo §3, not
-/// measured as a rule. The walk rate predates the projection walk's bucket pool, which made the
-/// walk 15 to 29% faster, so the walk is priced high.
+/// **Measured 2026-09-18** on the whole GBIF corpus, 3,495,729,729 rows at bundle format 14, from
+/// the warm forced-route arms of eleven principals under a 24 GiB cap
+/// (`probes/2026-09-17-term-images-rung6/`, `gbif-terms/results.json`). The walk and complement
+/// rates are least squares through the origin against held and outside entities; the three split
+/// rates are one non-negative least squares over containers and residual entities. `all` is left
+/// out of the walk fit: the whole-grant short-circuit answers it before the walk runs.
+///
+/// The previous constants were modelled (6.5, 350, 1,000, 11, 11). They and these pick the same
+/// route for every principal at both rungs, so the re-derivation confirms the decision rather than
+/// moving it.
 pub const ROUTE_COSTS: RouteCosts = RouteCosts {
-    walk_ns_per_entity: 6.5,
-    split_ns_per_array_or_run: 350.0,
-    split_ns_per_bitset: 1000.0,
-    residual_ns_per_entity: 11.0,
-    complement_ns_per_entity: 11.0,
+    walk_ns_per_entity: 13.8,
+    split_ns_per_array_or_run: 430.0,
+    split_ns_per_bitset: 12_000.0,
+    residual_ns_per_entity: 24.0,
+    complement_ns_per_entity: 14.1,
 };
 
 /// What [`choose`] prices a session's three routes from.

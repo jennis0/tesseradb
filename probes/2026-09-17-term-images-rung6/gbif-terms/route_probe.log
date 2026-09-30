@@ -1,0 +1,58 @@
+Running scope as unit: run-r30bd35c7e22a4ead82dde8d89f9ec12d.scope
+bundle /home/joe/code/tessera/data/ladder/gbif-terms/bundle view geo: bound 3495729729, base_rows 3495729729, total_rows 3495729729, 0 extents, 1399206 terms, images 3495729729 terms, seed 20260917
+principal p1: 5 terms
+  walk        cold    0.505 s  warm    0.364 s  route walk  34956939 rows
+  chooser     cold    0.042 s  warm    0.002 s  route split  34956939 rows
+  split       cold    0.002 s  warm    0.019 s  route split  34956939 rows
+  complement  cold   52.962 s  warm   66.599 s  route complement  34956939 rows
+principal p5: 6 terms
+  walk        cold    1.528 s  warm    0.991 s  route walk  174787222 rows
+  chooser     cold    0.033 s  warm    0.003 s  route split  174787222 rows
+  split       cold    0.005 s  warm    0.003 s  route split  174787222 rows
+  complement  cold   45.486 s  warm   41.749 s  route complement  174787222 rows
+principal p10: 7 terms
+  walk        cold    1.995 s  warm    2.025 s  route walk  349571416 rows
+  chooser     cold    0.045 s  warm    0.010 s  route split  349571416 rows
+  split       cold    0.009 s  warm    0.007 s  route split  349571416 rows
+  complement  cold   38.825 s  warm   39.340 s  route complement  349571416 rows
+principal p25: 7 terms
+  walk        cold    7.454 s  warm    7.400 s  route walk  873932430 rows
+  chooser     cold    0.052 s  warm    0.021 s  route split  873932430 rows
+  split       cold    0.027 s  warm    0.021 s  route split  873932430 rows
+  complement  cold   31.279 s  warm   30.670 s  route complement  873932430 rows
+principal p50: 8 terms
+  walk        cold   19.254 s  warm   19.155 s  route walk  1747866322 rows
+  chooser     cold    0.052 s  warm    0.030 s  route split  1747866322 rows
+  split       cold    0.038 s  warm    0.032 s  route split  1747866322 rows
+  complement  cold   20.959 s  warm   20.662 s  route complement  1747866322 rows
+principal all: 253 terms
+  walk        cold    0.022 s  warm    0.016 s  route walk  3495729729 rows
+  chooser     cold    0.015 s  warm    0.015 s  route whole_domain  3495729729 rows
+  split       cold    0.606 s  warm    0.245 s  route split  3495729729 rows
+  complement  cold    0.055 s  warm    0.058 s  route complement  3495729729 rows
+principal year300: 300 terms
+  walk        cold   21.719 s  warm   21.640 s  route walk  1644090695 rows
+  chooser     cold    3.449 s  warm    2.118 s  route split  1644090695 rows
+  split       cold    2.143 s  warm    2.126 s  route split  1644090695 rows
+  complement  cold   24.632 s  warm   25.452 s  route complement  1644090695 rows
+principal species1000: 1000 terms
+  walk        cold   25.889 s  warm   31.280 s  route walk  1746278029 rows
+  chooser     cold   11.899 s  warm    5.069 s  route split  1746278029 rows
+  split       cold    5.363 s  warm    5.213 s  route split  1746278029 rows
+  complement  cold   24.429 s  warm   23.397 s  route complement  1746278029 rows
+principal species3000: 3000 terms
+  walk        cold   30.615 s  warm   30.047 s  route walk  2295931789 rows
+  chooser     cold   10.491 s  warm    8.098 s  route split  2295931789 rows
+  split       cold    8.319 s  warm    8.633 s  route split  2295931789 rows
+  complement  cold   16.240 s  warm   16.462 s  route complement  2295931789 rows
+principal species10000: 10000 terms
+  walk        cold   35.690 s  warm   36.825 s  route walk  2748732030 rows
+  chooser     cold   10.814 s  warm   11.097 s  route complement  2748732030 rows
+  split       cold   12.499 s  warm   12.560 s  route split  2748732030 rows
+  complement  cold   10.844 s  warm   10.719 s  route complement  2748732030 rows
+principal species100000: 100000 terms
+  walk        cold   41.359 s  warm   46.735 s  route walk  3138677058 rows
+  chooser     cold    5.702 s  warm    5.357 s  route complement  3138677058 rows
+  split       cold   23.461 s  warm   21.899 s  route split  3138677058 rows
+  complement  cold    5.461 s  warm    5.209 s  route complement  3138677058 rows
+wrote probes/2026-09-17-term-images-rung6/gbif-terms/results.json

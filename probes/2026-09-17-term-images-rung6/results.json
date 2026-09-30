@@ -1,7 +1,7 @@
 {
   "probe": "term images at rung 6, Part A",
-  "date": "2026-09-17",
-  "status": "Part A only: corpus prepared, gbif-64p-terms built and measured, rung 6 modelled and not built",
+  "date": "2026-09-18",
+  "status": "complete: Parts A, B and C. Both rungs built at bundle format 14, routes measured at rung 6, constants re-derived",
   "box": {
     "host": "WSL2, 12 cores, 47 GiB in the VM, local NVMe",
     "commit": "032b8296",
@@ -987,5 +987,1749 @@
     "finding": "a window is now the postings that will be projected, so a term too small to be kept never enters the parallel work; 180,663 of 186,179 terms are in that class at this rung, and the stage was paying dispatch for them. Bytes identical.",
     "against_the_fold_pass_2b_s": 1.377,
     "ratio_build_to_fold": 2.65
+  },
+  "rung6": {
+    "box": {
+      "host": "WSL2, 12 cores, 47 GiB in the VM, local NVMe",
+      "commit": "34c174b5",
+      "cap": "systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G, nice -n 10, setsid",
+      "build_command": "tessera build --memory-budget 24g --no-oracle-pairs --stage-timings"
+    },
+    "build": {
+      "measured": true,
+      "unit": "seconds",
+      "bundle_format": 14,
+      "rows": 3495729729,
+      "terms": 1399206,
+      "pairs": 10124084726,
+      "stages": {
+        "source_ids": 89.62,
+        "dictionary": 1276.29,
+        "geometry_read": 1281.58,
+        "pairs_pack": 0.28,
+        "batch_loop_sorts": 623.12,
+        "batch_loop_assignments": 1526.34,
+        "postings_write": 194.51,
+        "attribute_tail": 1491.55,
+        "layers": 1842.68,
+        "filter_postings": 1019.28,
+        "record_blob": 755.04,
+        "column_release": 0.02,
+        "tiler_sort": 257.65,
+        "segment_write": 619.85,
+        "artifact_pass": 1717.55,
+        "term_images": 251.22,
+        "manifests": 62.92
+      },
+      "batches": 15,
+      "stage_sum_s": 13009.5,
+      "untimed_s": 592.35,
+      "wall_s": 13601.85,
+      "wall_human": "3 h 46 m 42 s",
+      "preflight_bracket_human": "3 h 45 m to 4 h 07 m",
+      "vmhwm_peak_mib": 24190,
+      "anon_peak": {
+        "measured": false,
+        "note": "not sampled; the build's own entity-order forecast is 20,094 MiB against a 24,576 MiB budget and is a lower bound by its own statement"
+      },
+      "bundle_bytes": 226569780565,
+      "files": {
+        "entities/terms/terms.u32": 40496338904,
+        "entities/terms/offsets.u32": 13982918920,
+        "entities/terms/bases.u64": 426728,
+        "entities/terms/hasrow.roaring": 753446,
+        "term-images/term-images-000000-000.timg": 10314190823,
+        "terms/postings.arrow": 912644914,
+        "dictionary/terms-0.dict": 18329973
+      },
+      "term_images_report": {
+        "terms": 1399206,
+        "kept": 21894,
+        "payload_bytes": 10260000000,
+        "table_bytes": 55970000,
+        "largest_bytes": 345230000,
+        "wall_s": 251.0,
+        "timg_bytes": 10314190823,
+        "note": "payload, table and largest are the build report line to 4 significant figures; timg is the file on disk"
+      },
+      "disk_gb_free": {
+        "start": 321,
+        "end": 186
+      }
+    },
+    "preflight_against_measured": {
+      "bundle_modelled_bytes": [
+        247600000000,
+        250200000000
+      ],
+      "bundle_measured_bytes": 226569780565,
+      "timg_modelled_bytes": 11260000000,
+      "timg_measured_bytes": 10314190823,
+      "table_modelled_bytes": 56000000,
+      "table_measured_bytes": 55970000,
+      "kept_modelled": 89224,
+      "kept_measured": 21894,
+      "stages_untouched_modelled_s": 7763,
+      "stages_untouched_measured_s": 7766.52
+    },
+    "open": {
+      "measured": true,
+      "wall_s": 99.731107899,
+      "cpu_s": 227.523397246,
+      "read_bytes": 225106968576,
+      "majflt": 306,
+      "images_share_s": {
+        "modelled": 3.4,
+        "note": "10.31 GB at the digest pass's measured 3.04 GB/s"
+      },
+      "note": "no bare open_bundle figure exists in ingest-campaign \u00a74d to compare with; its 197 s and 202 s are tessera serve to /readyz"
+    },
+    "seed": 20260917,
+    "draws": [
+      {
+        "kind": "country ladder",
+        "name": "p1",
+        "rule": "fill",
+        "target": 0.01,
+        "target_pairs": 34956939,
+        "terms": [
+          "AI",
+          "MC",
+          "MX",
+          "SM",
+          "XZ"
+        ]
+      },
+      {
+        "kind": "country ladder",
+        "name": "p5",
+        "rule": "fill+smallest-overshoot",
+        "target": 0.05,
+        "target_pairs": 174787222,
+        "terms": [
+          "EC",
+          "GW",
+          "IS",
+          "SE",
+          "SM",
+          "XZ"
+        ]
+      },
+      {
+        "kind": "country ladder",
+        "name": "p10",
+        "rule": "fill",
+        "target": 0.1,
+        "target_pairs": 349571416,
+        "terms": [
+          "AU",
+          "ES",
+          "RU",
+          "SH",
+          "VA",
+          "XZ",
+          "ZM"
+        ]
+      },
+      {
+        "kind": "country ladder",
+        "name": "p25",
+        "rule": "fill",
+        "target": 0.25,
+        "target_pairs": 873932430,
+        "terms": [
+          "AU",
+          "CA",
+          "CZ",
+          "FR",
+          "GB",
+          "PF",
+          "VA"
+        ]
+      },
+      {
+        "kind": "country ladder",
+        "name": "p50",
+        "rule": "fill+smallest-overshoot",
+        "target": 0.5,
+        "target_pairs": 1747866322,
+        "terms": [
+          "AU",
+          "ES",
+          "GB",
+          "HT",
+          "LU",
+          "SM",
+          "US",
+          "XZ"
+        ]
+      },
+      {
+        "asked": 300,
+        "candidates": 527,
+        "drawn": 300,
+        "kind": "year, uniform",
+        "name": "year300"
+      },
+      {
+        "asked": 1000,
+        "candidates": 1398425,
+        "drawn": 1000,
+        "kind": "species, size-weighted",
+        "name": "species1000"
+      },
+      {
+        "asked": 3000,
+        "candidates": 1398425,
+        "drawn": 3000,
+        "kind": "species, size-weighted",
+        "name": "species3000"
+      },
+      {
+        "asked": 10000,
+        "candidates": 1398425,
+        "drawn": 10000,
+        "kind": "species, size-weighted",
+        "name": "species10000"
+      },
+      {
+        "asked": 100000,
+        "candidates": 1398425,
+        "drawn": 100000,
+        "kind": "species, size-weighted",
+        "name": "species100000"
+      }
+    ],
+    "principals": {
+      "p1": {
+        "measured": true,
+        "terms": 5,
+        "held": 34956939,
+        "coverage": 0.009999897506378417,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 34956939,
+          "kept_arrays_and_runs": 1912,
+          "kept_bitsets": 2,
+          "kept_terms": 4,
+          "residual_entities": 137
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.504817668,
+            "warm": 0.364190119
+          },
+          "chooser": {
+            "cold": 0.041669523,
+            "warm": 0.001678267
+          },
+          "split": {
+            "cold": 0.00197499,
+            "warm": 0.018843199
+          },
+          "complement": {
+            "cold": 52.962373543,
+            "warm": 66.598660669
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 123449344,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 33554432,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 525144064,
+            "warm": 574046208
+          }
+        },
+        "majflt_cold": {
+          "walk": 28,
+          "chooser": 4,
+          "split": 0,
+          "complement": 293
+        },
+        "anon_peak_bytes": {
+          "walk": 324186112,
+          "chooser": 231706624,
+          "split": 231710720,
+          "complement": 867307520
+        },
+        "cardinality": 34956939,
+        "portable_bytes": 266473,
+        "rows_equal_walk": true
+      },
+      "p5": {
+        "measured": true,
+        "terms": 6,
+        "held": 174787222,
+        "coverage": 0.050000210413864064,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 174787222,
+          "kept_arrays_and_runs": 4819,
+          "kept_bitsets": 10,
+          "kept_terms": 5,
+          "residual_entities": 137
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 1.528458488,
+            "warm": 0.991152039
+          },
+          "chooser": {
+            "cold": 0.033028447,
+            "warm": 0.003442148
+          },
+          "split": {
+            "cold": 0.004526731,
+            "warm": 0.003209541
+          },
+          "complement": {
+            "cold": 45.485571201,
+            "warm": 41.748606428
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 687165440,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 41943040,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 1327333376,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 232,
+          "chooser": 5,
+          "split": 0,
+          "complement": 572
+        },
+        "anon_peak_bytes": {
+          "walk": 369012736,
+          "chooser": 234098688,
+          "split": 234033152,
+          "complement": 850165760
+        },
+        "cardinality": 174787222,
+        "portable_bytes": 259823,
+        "rows_equal_walk": true
+      },
+      "p10": {
+        "measured": true,
+        "terms": 7,
+        "held": 349571416,
+        "coverage": 0.09999955462804029,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 349571416,
+          "kept_arrays_and_runs": 8115,
+          "kept_bitsets": 24,
+          "kept_terms": 6,
+          "residual_entities": 137
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 1.9946719160000002,
+            "warm": 2.0253505
+          },
+          "chooser": {
+            "cold": 0.044746011,
+            "warm": 0.009601475
+          },
+          "split": {
+            "cold": 0.009216668,
+            "warm": 0.006941555
+          },
+          "complement": {
+            "cold": 38.825487538,
+            "warm": 39.339617184
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 50069504,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 72851456,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 6,
+          "split": 0,
+          "complement": 235
+        },
+        "anon_peak_bytes": {
+          "walk": 397344768,
+          "chooser": 237064192,
+          "split": 236916736,
+          "complement": 827703296
+        },
+        "cardinality": 349571416,
+        "portable_bytes": 754380,
+        "rows_equal_walk": true
+      },
+      "p25": {
+        "measured": true,
+        "terms": 7,
+        "held": 873932430,
+        "coverage": 0.24999999935635756,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 873932430,
+          "kept_arrays_and_runs": 18221,
+          "kept_bitsets": 4,
+          "kept_terms": 7,
+          "residual_entities": 0
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 7.453948594,
+            "warm": 7.400181204
+          },
+          "chooser": {
+            "cold": 0.051842115,
+            "warm": 0.020942107
+          },
+          "split": {
+            "cold": 0.026817198,
+            "warm": 0.021186754
+          },
+          "complement": {
+            "cold": 31.279224474,
+            "warm": 30.66992994
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 22659072,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 41156608,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 798720,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 31,
+          "chooser": 5,
+          "split": 0,
+          "complement": 32
+        },
+        "anon_peak_bytes": {
+          "walk": 473620480,
+          "chooser": 243605504,
+          "split": 243392512,
+          "complement": 763297792
+        },
+        "cardinality": 873932430,
+        "portable_bytes": 1150495,
+        "rows_equal_walk": true
+      },
+      "p50": {
+        "measured": true,
+        "terms": 8,
+        "held": 1747866322,
+        "coverage": 0.5000004169372672,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 1747866322,
+          "kept_arrays_and_runs": 32359,
+          "kept_bitsets": 34,
+          "kept_terms": 7,
+          "residual_entities": 137
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 19.254174468,
+            "warm": 19.155258307
+          },
+          "chooser": {
+            "cold": 0.052001915,
+            "warm": 0.029849048
+          },
+          "split": {
+            "cold": 0.038070895,
+            "warm": 0.032423006
+          },
+          "complement": {
+            "cold": 20.958685071,
+            "warm": 20.662222225
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 25165824,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 8753152,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 3,
+          "split": 0,
+          "complement": 146
+        },
+        "anon_peak_bytes": {
+          "walk": 614662144,
+          "chooser": 249827328,
+          "split": 249692160,
+          "complement": 643203072
+        },
+        "cardinality": 1747866322,
+        "portable_bytes": 1780915,
+        "rows_equal_walk": true
+      },
+      "all": {
+        "measured": true,
+        "terms": 253,
+        "held": 3495729729,
+        "coverage": 1.0,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 3495729729,
+          "kept_arrays_and_runs": 110311,
+          "kept_bitsets": 158,
+          "kept_terms": 252,
+          "residual_entities": 137
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "whole_domain",
+        "wall_s": {
+          "walk": {
+            "cold": 0.021674819,
+            "warm": 0.015929365
+          },
+          "chooser": {
+            "cold": 0.015316037,
+            "warm": 0.014968676
+          },
+          "split": {
+            "cold": 0.606178156,
+            "warm": 0.244864008
+          },
+          "complement": {
+            "cold": 0.055138394,
+            "warm": 0.057524742
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 0,
+            "warm": 0
+          },
+          "split": {
+            "cold": 597417984,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 0,
+          "split": 77,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 234479616,
+          "chooser": 235065344,
+          "split": 402153472,
+          "complement": 236003328
+        },
+        "cardinality": 3495729729,
+        "portable_bytes": 753446,
+        "rows_equal_walk": true
+      },
+      "year300": {
+        "measured": true,
+        "terms": 300,
+        "held": 1644090695,
+        "coverage": 0.47031401808924,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 1644090695,
+          "kept_arrays_and_runs": 1973023,
+          "kept_bitsets": 87062,
+          "kept_terms": 52,
+          "residual_entities": 10841016
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 21.718909506,
+            "warm": 21.639805712
+          },
+          "chooser": {
+            "cold": 3.44935675,
+            "warm": 2.117606099
+          },
+          "split": {
+            "cold": 2.142567755,
+            "warm": 2.125723785
+          },
+          "complement": {
+            "cold": 24.63163733,
+            "warm": 25.452349111
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 2852618240,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 4685824,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 87,
+          "split": 0,
+          "complement": 21
+        },
+        "anon_peak_bytes": {
+          "walk": 1290768384,
+          "chooser": 1644695552,
+          "split": 1643962368,
+          "complement": 2139729920
+        },
+        "cardinality": 1644090695,
+        "portable_bytes": 426705627,
+        "rows_equal_walk": true
+      },
+      "species1000": {
+        "measured": true,
+        "terms": 1000,
+        "held": 1746278029,
+        "coverage": 0.4995460645922264,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 1746278029,
+          "kept_arrays_and_runs": 7925857,
+          "kept_bitsets": 8268,
+          "kept_terms": 683,
+          "residual_entities": 29685986
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 25.888771107,
+            "warm": 31.280164504
+          },
+          "chooser": {
+            "cold": 11.899006461,
+            "warm": 5.069236975
+          },
+          "split": {
+            "cold": 5.362994508,
+            "warm": 5.212573709
+          },
+          "complement": {
+            "cold": 24.429174561,
+            "warm": 23.396943795
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 5177344,
+            "warm": 20340736
+          },
+          "chooser": {
+            "cold": 5095870464,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 242720768,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 25,
+          "chooser": 976,
+          "split": 0,
+          "complement": 1292
+        },
+        "anon_peak_bytes": {
+          "walk": 1259057152,
+          "chooser": 1789386752,
+          "split": 1789349888,
+          "complement": 2104201216
+        },
+        "cardinality": 1746278029,
+        "portable_bytes": 415494824,
+        "rows_equal_walk": true
+      },
+      "species3000": {
+        "measured": true,
+        "terms": 3000,
+        "held": 2295931789,
+        "coverage": 0.6567818358362567,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 2295931789,
+          "kept_arrays_and_runs": 12952816,
+          "kept_bitsets": 11067,
+          "kept_terms": 1697,
+          "residual_entities": 106602064
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 30.61505588,
+            "warm": 30.04746306
+          },
+          "chooser": {
+            "cold": 10.490521592,
+            "warm": 8.098173109
+          },
+          "split": {
+            "cold": 8.319252357,
+            "warm": 8.633058453
+          },
+          "complement": {
+            "cold": 16.240099203,
+            "warm": 16.461598346
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 24678400,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 1870077952,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 192512,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 551,
+          "chooser": 529,
+          "split": 0,
+          "complement": 24
+        },
+        "anon_peak_bytes": {
+          "walk": 1255936000,
+          "chooser": 1894584320,
+          "split": 1895112704,
+          "complement": 2059653120
+        },
+        "cardinality": 2295931789,
+        "portable_bytes": 407513902,
+        "rows_equal_walk": true
+      },
+      "species10000": {
+        "measured": true,
+        "terms": 10000,
+        "held": 2748732030,
+        "coverage": 0.786311369324971,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 2748732030,
+          "kept_arrays_and_runs": 16413057,
+          "kept_bitsets": 12033,
+          "kept_terms": 4045,
+          "residual_entities": 281493005
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "complement",
+        "wall_s": {
+          "walk": {
+            "cold": 35.690268642,
+            "warm": 36.825018937
+          },
+          "chooser": {
+            "cold": 10.813791401,
+            "warm": 11.097194802
+          },
+          "split": {
+            "cold": 12.498749708,
+            "warm": 12.560095199
+          },
+          "complement": {
+            "cold": 10.843741882,
+            "warm": 10.719100733
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 0,
+            "warm": 0
+          },
+          "split": {
+            "cold": 721162240,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 65536,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 0,
+          "split": 350,
+          "complement": 1
+        },
+        "anon_peak_bytes": {
+          "walk": 1219862528,
+          "chooser": 1936846848,
+          "split": 1973661696,
+          "complement": 1936842752
+        },
+        "cardinality": 2748732030,
+        "portable_bytes": 368999631,
+        "rows_equal_walk": true
+      },
+      "species100000": {
+        "measured": true,
+        "terms": 100000,
+        "held": 3138677058,
+        "coverage": 0.8978603328403939,
+        "chooser_inputs": {
+          "bound": 3495729729,
+          "complement_valid": true,
+          "held": 3138677058,
+          "kept_arrays_and_runs": 18211902,
+          "kept_bitsets": 12403,
+          "kept_terms": 13259,
+          "residual_entities": 547043460
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "complement",
+        "wall_s": {
+          "walk": {
+            "cold": 41.35897579,
+            "warm": 46.734741849
+          },
+          "chooser": {
+            "cold": 5.702436535,
+            "warm": 5.356525059
+          },
+          "split": {
+            "cold": 23.461009675,
+            "warm": 21.899211619
+          },
+          "complement": {
+            "cold": 5.461398948,
+            "warm": 5.208697182
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 409600,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 491520,
+            "warm": 0
+          },
+          "split": {
+            "cold": 165511168,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 3,
+          "chooser": 4,
+          "split": 301,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 1155837952,
+          "chooser": 1669365760,
+          "split": 2526736384,
+          "complement": 1668608000
+        },
+        "cardinality": 3138677058,
+        "portable_bytes": 288351362,
+        "rows_equal_walk": true
+      }
+    },
+    "eleventh_principal": {
+      "name": "species3000",
+      "why": "the ten of the memo leave a decade between species1000 and species10000, and the split gives way to the complement inside it; species3000 covers 65.7% and takes the split, putting the crossover above it"
+    }
+  },
+  "rung_64p_format14": {
+    "build": {
+      "measured": true,
+      "bundle_bytes": 1662298604,
+      "bundle_bytes_format13": 1662295444,
+      "delta_bytes": 3160,
+      "delta_is": "entities/terms/bases.u64 exactly",
+      "term_images_stage_s": 3.28,
+      "term_images_stage_s_format13": 3.65,
+      "kept": 5516,
+      "terms": 186179,
+      "payload_bytes": 76605165,
+      "table_bytes": 7447160,
+      "timg_bytes": 84052461
+    },
+    "open": {
+      "measured": true,
+      "wall_s": 0.437109287,
+      "read_bytes": 0
+    },
+    "principals": {
+      "p1": {
+        "measured": true,
+        "terms": 4,
+        "held": 258459,
+        "coverage": 0.009999958600955266,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 258459,
+          "kept_arrays_and_runs": 53,
+          "kept_bitsets": 0,
+          "kept_terms": 4,
+          "residual_entities": 0
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.002639816,
+            "warm": 0.00237368
+          },
+          "chooser": {
+            "cold": 0.012970558,
+            "warm": 0.000298643
+          },
+          "split": {
+            "cold": 0.000352779,
+            "warm": 0.000328452
+          },
+          "complement": {
+            "cold": 0.171082494,
+            "warm": 0.185414853
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 14651392,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 131072,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 2,
+          "split": 0,
+          "complement": 1
+        },
+        "anon_peak_bytes": {
+          "walk": 41385984,
+          "chooser": 39727104,
+          "split": 39739392,
+          "complement": 116428800
+        },
+        "cardinality": 258459,
+        "portable_bytes": 3949,
+        "rows_equal_walk": true
+      },
+      "p5": {
+        "measured": true,
+        "terms": 6,
+        "held": 1292304,
+        "coverage": 0.05000014122104045,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 1292304,
+          "kept_arrays_and_runs": 34,
+          "kept_bitsets": 0,
+          "kept_terms": 4,
+          "residual_entities": 14
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.008043637,
+            "warm": 0.008428962
+          },
+          "chooser": {
+            "cold": 0.010994605,
+            "warm": 0.000363796
+          },
+          "split": {
+            "cold": 0.000343748,
+            "warm": 0.000289493
+          },
+          "complement": {
+            "cold": 0.1612179,
+            "warm": 0.140756745
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 16711680,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 2,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 45953024,
+          "chooser": 39825408,
+          "split": 39817216,
+          "complement": 115761152
+        },
+        "cardinality": 1292304,
+        "portable_bytes": 2881,
+        "rows_equal_walk": true
+      },
+      "p10": {
+        "measured": true,
+        "terms": 5,
+        "held": 2584596,
+        "coverage": 0.09999981815372874,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 2584596,
+          "kept_arrays_and_runs": 53,
+          "kept_bitsets": 0,
+          "kept_terms": 2,
+          "residual_entities": 1670
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.016624456,
+            "warm": 0.015583903
+          },
+          "chooser": {
+            "cold": 0.004269958,
+            "warm": 0.000470754
+          },
+          "split": {
+            "cold": 0.000409188,
+            "warm": 0.000424256
+          },
+          "complement": {
+            "cold": 0.135568906,
+            "warm": 0.132096773
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 8192000,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 1,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 51920896,
+          "chooser": 39923712,
+          "split": 39915520,
+          "complement": 115912704
+        },
+        "cardinality": 2584596,
+        "portable_bytes": 4157,
+        "rows_equal_walk": true
+      },
+      "p25": {
+        "measured": true,
+        "terms": 7,
+        "held": 6461499,
+        "coverage": 0.24999989360058597,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 6461499,
+          "kept_arrays_and_runs": 159,
+          "kept_bitsets": 0,
+          "kept_terms": 6,
+          "residual_entities": 3
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.04067219,
+            "warm": 0.039517953
+          },
+          "chooser": {
+            "cold": 0.01431576,
+            "warm": 0.000363598
+          },
+          "split": {
+            "cold": 0.000456802,
+            "warm": 0.000415363
+          },
+          "complement": {
+            "cold": 0.12352368,
+            "warm": 0.121194592
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 24076288,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 3,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 69459968,
+          "chooser": 40030208,
+          "split": 40038400,
+          "complement": 114442240
+        },
+        "cardinality": 6461499,
+        "portable_bytes": 7183,
+        "rows_equal_walk": true
+      },
+      "p50": {
+        "measured": true,
+        "terms": 7,
+        "held": 12923003,
+        "coverage": 0.499999980654652,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 12923003,
+          "kept_arrays_and_runs": 278,
+          "kept_bitsets": 0,
+          "kept_terms": 6,
+          "residual_entities": 3
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.094386793,
+            "warm": 0.078394461
+          },
+          "chooser": {
+            "cold": 0.012217198,
+            "warm": 0.000732463
+          },
+          "split": {
+            "cold": 0.000695776,
+            "warm": 0.000778645
+          },
+          "complement": {
+            "cold": 0.081973424,
+            "warm": 0.0846704
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 24969216,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 3,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 96600064,
+          "chooser": 40402944,
+          "split": 40402944,
+          "complement": 96722944
+        },
+        "cardinality": 12923003,
+        "portable_bytes": 7107,
+        "rows_equal_walk": true
+      },
+      "all": {
+        "measured": true,
+        "terms": 252,
+        "held": 25846007,
+        "coverage": 1.0,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 25846007,
+          "kept_arrays_and_runs": 1252,
+          "kept_bitsets": 0,
+          "kept_terms": 246,
+          "residual_entities": 1716
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "whole_domain",
+        "wall_s": {
+          "walk": {
+            "cold": 0.000238262,
+            "warm": 0.000151263
+          },
+          "chooser": {
+            "cold": 0.000140018,
+            "warm": 0.000128231
+          },
+          "split": {
+            "cold": 0.034905216,
+            "warm": 0.001987366
+          },
+          "complement": {
+            "cold": 0.000644288,
+            "warm": 0.00045788
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 0,
+            "warm": 0
+          },
+          "split": {
+            "cold": 52064256,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 0,
+          "split": 9,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 39518208,
+          "chooser": 39518208,
+          "split": 41807872,
+          "complement": 40087552
+        },
+        "cardinality": 25846007,
+        "portable_bytes": 5584,
+        "rows_equal_walk": true
+      },
+      "year300": {
+        "measured": true,
+        "terms": 300,
+        "held": 12186941,
+        "coverage": 0.47152122956555725,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 12186941,
+          "kept_arrays_and_runs": 21368,
+          "kept_bitsets": 333,
+          "kept_terms": 64,
+          "residual_entities": 53155
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.084578174,
+            "warm": 0.074365218
+          },
+          "chooser": {
+            "cold": 0.041125042,
+            "warm": 0.013448042
+          },
+          "split": {
+            "cold": 0.013731249,
+            "warm": 0.012932083
+          },
+          "complement": {
+            "cold": 0.087422806,
+            "warm": 0.07790199
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 38330368,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 6,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 97505280,
+          "chooser": 50618368,
+          "split": 50634752,
+          "complement": 107651072
+        },
+        "cardinality": 12186941,
+        "portable_bytes": 3223234,
+        "rows_equal_walk": true
+      },
+      "species1000": {
+        "measured": true,
+        "terms": 1000,
+        "held": 13355838,
+        "coverage": 0.5167466680636588,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 13355838,
+          "kept_arrays_and_runs": 68488,
+          "kept_bitsets": 48,
+          "kept_terms": 642,
+          "residual_entities": 343917
+        },
+        "chooser_route_offline": "split",
+        "route_taken": "split",
+        "wall_s": {
+          "walk": {
+            "cold": 0.096453668,
+            "warm": 0.07785061
+          },
+          "chooser": {
+            "cold": 0.051289197,
+            "warm": 0.025834484
+          },
+          "split": {
+            "cold": 0.027603152,
+            "warm": 0.027271952
+          },
+          "complement": {
+            "cold": 0.09212348,
+            "warm": 0.093224135
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 33468416,
+            "warm": 0
+          },
+          "split": {
+            "cold": 0,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 9,
+          "split": 0,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 102789120,
+          "chooser": 54943744,
+          "split": 54984704,
+          "complement": 104980480
+        },
+        "cardinality": 13355838,
+        "portable_bytes": 3209838,
+        "rows_equal_walk": true
+      },
+      "species10000": {
+        "measured": true,
+        "terms": 10000,
+        "held": 21017298,
+        "coverage": 0.8131738879433098,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 21017298,
+          "kept_arrays_and_runs": 136501,
+          "kept_bitsets": 58,
+          "kept_terms": 3095,
+          "residual_entities": 2711579
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "complement",
+        "wall_s": {
+          "walk": {
+            "cold": 0.121649863,
+            "warm": 0.12562159
+          },
+          "chooser": {
+            "cold": 0.042637841,
+            "warm": 0.039959016
+          },
+          "split": {
+            "cold": 0.076028973,
+            "warm": 0.066994365
+          },
+          "complement": {
+            "cold": 0.042502464,
+            "warm": 0.04061517
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 0,
+            "warm": 0
+          },
+          "split": {
+            "cold": 12603392,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 0,
+          "split": 10,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 119132160,
+          "chooser": 73199616,
+          "split": 71892992,
+          "complement": 74944512
+        },
+        "cardinality": 21017298,
+        "portable_bytes": 2985346,
+        "rows_equal_walk": true
+      },
+      "species100000": {
+        "measured": true,
+        "terms": 100000,
+        "held": 23786088,
+        "coverage": 0.9203003001585506,
+        "chooser_inputs": {
+          "bound": 25846007,
+          "complement_valid": true,
+          "held": 23786088,
+          "kept_arrays_and_runs": 145633,
+          "kept_bitsets": 58,
+          "kept_terms": 5162,
+          "residual_entities": 4981644
+        },
+        "chooser_route_offline": "complement",
+        "route_taken": "complement",
+        "wall_s": {
+          "walk": {
+            "cold": 0.130927169,
+            "warm": 0.133593653
+          },
+          "chooser": {
+            "cold": 0.023153576,
+            "warm": 0.022222512
+          },
+          "split": {
+            "cold": 0.121713109,
+            "warm": 0.120168138
+          },
+          "complement": {
+            "cold": 0.026361864,
+            "warm": 0.023650582
+          }
+        },
+        "read_bytes": {
+          "walk": {
+            "cold": 0,
+            "warm": 0
+          },
+          "chooser": {
+            "cold": 0,
+            "warm": 0
+          },
+          "split": {
+            "cold": 3072000,
+            "warm": 0
+          },
+          "complement": {
+            "cold": 0,
+            "warm": 0
+          }
+        },
+        "majflt_cold": {
+          "walk": 0,
+          "chooser": 0,
+          "split": 1,
+          "complement": 0
+        },
+        "anon_peak_bytes": {
+          "walk": 120598528,
+          "chooser": 61358080,
+          "split": 96571392,
+          "complement": 61693952
+        },
+        "cardinality": 23786088,
+        "portable_bytes": 1986568,
+        "rows_equal_walk": true
+      }
+    },
+    "fold": {
+      "measured": true,
+      "fold_secs": 60,
+      "staircase_rss_bytes": 1660018688,
+      "passes_ms": {
+        "1 row space": 8385,
+        "2 postings": 2708,
+        "2b term images": 2382,
+        "4a attributes": 8622,
+        "4c entity terms": 23456,
+        "5 digests + fsync": 863,
+        "7 memberships": 582,
+        "8 derived": 10873,
+        "12 retire": 297,
+        "13 open": 87,
+        "14 adopt": 182,
+        "15 warm": 2092,
+        "17 reclaim": 125
+      },
+      "image_write": {
+        "kept": 5516,
+        "terms": 186179,
+        "payload_bytes": 76605165,
+        "table_bytes": 7447160,
+        "wall_s": 2.280278462
+      },
+      "reproduced_build_bytes": true,
+      "entity_terms_bytes": {
+        "terms.u32": 300093416,
+        "offsets.u32": 103384032,
+        "bases.u64": 3160
+      },
+      "note": "other sessions shared the box; the format 13 fold was 54 s with pass 2b at 1.377 s and was not"
+    }
+  },
+  "route_costs": {
+    "before": {
+      "modelled": "2026-09-16",
+      "walk_ns_per_entity": 6.5,
+      "split_ns_per_array_or_run": 350.0,
+      "split_ns_per_bitset": 1000.0,
+      "residual_ns_per_entity": 11.0,
+      "complement_ns_per_entity": 11.0
+    },
+    "after": {
+      "measured": "2026-09-18, gbif-terms/results.json warm forced arms",
+      "walk_ns_per_entity": 13.8,
+      "split_ns_per_array_or_run": 430.0,
+      "split_ns_per_bitset": 12000.0,
+      "residual_ns_per_entity": 24.0,
+      "complement_ns_per_entity": 14.1
+    },
+    "fit": {
+      "walk": "least squares through the origin over held entities, all but `all`; raw 13.82",
+      "complement": "least squares through the origin over outside entities; raw 14.13",
+      "split": "one non-negative least squares over (arrays+runs, bitsets, residual entities); raw 427.7, 12015.8, 24.37",
+      "caveat": "split_ns_per_bitset is carried by year300 alone; bitset and array counts are otherwise strongly correlated"
+    },
+    "verdicts": {
+      "changed_at_rung6": 0,
+      "changed_at_64p": 0,
+      "chosen_is_fastest_forced": "every principal at both rungs",
+      "margin_on_choice_pct": 0.0,
+      "margin_on_wall_pct": {
+        "fastest_arm_over_100ms": [
+          -6.2,
+          3.5
+        ],
+        "fastest_arm_under_35ms": [
+          -91,
+          38
+        ]
+      }
+    }
   }
 }

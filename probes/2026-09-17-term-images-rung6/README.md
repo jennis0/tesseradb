@@ -1,8 +1,11 @@
 # Term images at rung 6
 
-Status: Part A only, 2026-09-17. The corpus is prepared and the 64-part rung is built and
-measured; rung 6 itself is modelled from those measurements and from earlier rung 6 runs, and is
-not built. Not normative; re-take a figure before relying on it.
+Status: complete, 2026-09-18. Parts A, B and C. The corpus is prepared, both rungs are built at
+bundle format 14, the four routes are measured over the whole 3,495,729,729-row corpus under a
+24 GiB cap, and the chooser's five constants are re-derived from those figures. The sections below
+are in the order they were run, so the Part A pre-flight and the refused build of 2026-09-17 stand
+where they were written and the measurements that answer them follow. Not normative; re-take a
+figure before relying on it.
 
 Box: WSL2, 12 cores, 47 GiB in the VM, local NVMe. Commit `032b8296` for the two builds below
 (`tessera build --memory-budget 24g --no-oracle-pairs --stage-timings`, `nice -n 10`, under
@@ -480,6 +483,10 @@ forecast overstating by more than twice.
 
 ### This needs an owner ruling
 
+**Resolved 2026-09-18 by option (a), and at a twentieth of the cost priced below**: the offsets are
+paged rather than widened, so `offsets.u32` stays 14.0 GB and `bases.u64` is 426,728 B. The build
+is measured under "Rung 6 built", further down.
+
 Ruling D's corpus cannot be built at rung 6 as it stands. The options, with what each costs:
 
 - **a. Widen the transpose's offsets to `u64`.** A bundle format bump and a reader change in
@@ -496,3 +503,324 @@ Ruling D's corpus cannot be built at rung 6 as it stands. The options, with what
 
 The 64-part rung's Part B and pass 2b figures above stand: they were taken on a built bundle and
 nothing here changes them.
+
+---
+
+## The ceiling is lifted, and rung 6 is built
+
+Status: measured 2026-09-18, this branch at `34c174b5` (main `0dc6b4cb` merged). The transpose's
+offsets are paged — one `u32` offset a row against a `u64` base a page, `entities/terms/bases.u64`
+— so a partition's pairs are no longer capped at 2^32 (main `5e0853ad`, **bundle format 14**).
+Option (a) of the table above, at a twentieth of the cost it was priced at: `bases.u64` is
+**426,728 B** at rung 6, not the 14.0 GB a `u64` offset a row would have cost. Everything below is
+at format 14.
+
+### The 64-part rung, rebuilt
+
+`data/ladder/gbif-64p-terms` rebuilt from scratch at format 14 (`bundle`, `.tessera` cleared;
+`tessera build --memory-budget 24g --no-oracle-pairs --stage-timings`, `nice -n 10`, uncapped).
+Measured. The bundle is **1,662,298,604 B** against format 13's 1,662,295,444 — **+3,160 B, which
+is `bases.u64` exactly** and nothing else. The images are byte-identical: 5,516 kept of 186,179,
+76,605,165 B of payload, 7,447,160 B of table, an 84,052,461-byte `.timg`. The `term_images` stage
+took **3.28 s** against format 13's 3.65 s, inside this box's spread.
+
+The route probe re-run on it takes the same route for every principal as at format 13 — the split
+from 1% to 52% coverage, the complement at 81% and 92%, the whole-domain short-circuit for `all` —
+and every arm's rows equal the walk's. Milliseconds, cold / warm, measured:
+
+| principal | terms | coverage | walk | split | complement | chooser | route taken |
+|---|---|---|---|---|---|---|---|
+| `p1` | 4 | 1.0% | 2.6 / 2.4 | 0.4 / 0.3 | 171.1 / 185.4 | 13.0 / 0.3 | `split` |
+| `p5` | 6 | 5.0% | 8.0 / 8.4 | 0.3 / 0.3 | 161.2 / 140.8 | 11.0 / 0.4 | `split` |
+| `p10` | 5 | 10.0% | 16.6 / 15.6 | 0.4 / 0.4 | 135.6 / 132.1 | 4.3 / 0.5 | `split` |
+| `p25` | 7 | 25.0% | 40.7 / 39.5 | 0.5 / 0.4 | 123.5 / 121.2 | 14.3 / 0.4 | `split` |
+| `p50` | 7 | 50.0% | 94.4 / 78.4 | 0.7 / 0.8 | 82.0 / 84.7 | 12.2 / 0.7 | `split` |
+| `all` | 252 | 100.0% | 0.2 / 0.2 | 34.9 / 2.0 | 0.6 / 0.5 | 0.1 / 0.1 | `whole_domain` |
+| `year300` | 300 | 47.2% | 84.6 / 74.4 | 13.7 / 12.9 | 87.4 / 77.9 | 41.1 / 13.4 | `split` |
+| `species1000` | 1,000 | 51.7% | 96.5 / 77.9 | 27.6 / 27.3 | 92.1 / 93.2 | 51.3 / 25.8 | `split` |
+| `species10000` | 10,000 | 81.3% | 121.6 / 125.6 | 76.0 / 67.0 | 42.5 / 40.6 | 42.6 / 40.0 | `complement` |
+| `species100000` | 100,000 | 92.0% | 130.9 / 133.6 | 121.7 / 120.2 | 26.4 / 23.7 | 23.2 / 22.2 | `complement` |
+
+Results in `gbif-64p-terms-f14/`.
+
+### The fold at format 14
+
+One fold requested through `POST /control/compact`, the staircase read from `/control/status`,
+the server stopped by pid. Measured, seconds: `1 row space` 8.39, `2 postings` 2.71,
+**`2b term images` 2.38**, `4a attributes` 8.62, `4c entity terms` 23.46, `5 digests + fsync` 0.86,
+`7 memberships` 0.58, `8 derived` 10.87, `12 retire` 0.30, `13 open` 0.09, `14 adopt` 0.18,
+`15 warm` 2.09, `17 reclaim` 0.13; whole fold **60 s**, staircase max RSS 1.66 GB.
+
+**The fold reproduced the build's files exactly again**, now including the paged transpose:
+kept 5,516, payload 76,605,165 B, table 7,447,160 B, `.timg` 84,052,461 B, and `terms.u32`,
+`offsets.u32` and `bases.u64` at the same 300,093,416 / 103,384,032 / 3,160 bytes the build wrote.
+That is decision 0139's one implementation holding across the format change.
+
+⊘ Pass 2b reads 2.38 s here against format 13's 1.38 s and the whole fold 60 s against 54 s. Other
+sessions' cargo runs shared the box during this fold and did not during that one; the ratio between
+the two passes is unchanged, so this is read as the box, not as the format. Not isolated.
+
+## Rung 6 built: the whole corpus with three term classes a row
+
+Measured 2026-09-18. `tessera build --memory-budget 24g --no-oracle-pairs --stage-timings` under
+`systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G`, `nice -n 10`, under
+`setsid`, on `34c174b5`. 3,495,729,729 rows, 1,399,206 terms, **10,124,084,726 pairs** — 2.36× the
+ceiling that refused this build the day before. Exit 0 in **3 h 46 m 42 s**, at the bottom of the
+pre-flight's 3 h 45 m to 4 h 07 m bracket. Log `build-rung6-f14.log`.
+
+| stage | §4d third build, country only | the pre-flight's model | **measured, terms** |
+|---|---|---|---|
+| `source_ids` | 81 s | 149 s | **89.6 s** |
+| `dictionary` | 156 s | 1,760 to 2,470 s | **1,276.3 s** |
+| `geometry_read` | 354 s | 940 to 1,330 s | **1,281.6 s** |
+| `pairs_pack` | — | — | **0.3 s** |
+| batch loop, sorts | 180 s (10 batches) | 260 to 400 s | **623.1 s** (15 batches) |
+| batch loop, assignments | 1,075 s | 1,490 s | **1,526.3 s** |
+| `postings_write` | 59 s | 210 to 240 s | **194.5 s** |
+| `attribute_tail` | 1,331 s | carried | **1,491.6 s** |
+| `layers` | 1,881 s | carried | **1,842.7 s** |
+| `filter_postings` | 1,076 s | carried | **1,019.3 s** |
+| `record_blob` | 806 s | carried | **755.0 s** |
+| `tiler_sort` | 208 s | carried | **257.7 s** |
+| `segment_write` | 577 s | carried | **619.9 s** |
+| `artifact_pass` (two passes) | 1,815 s | carried | **1,717.6 s** |
+| `term_images` | — | 160 to 270 s | **251.2 s** |
+| `manifests` | 69 s | ~81 s | **62.9 s** |
+| sum of stages | 9,668 s | — | **13,009.5 s** |
+| untimed, wall less stages | 685 s | 685 s | **592.4 s** |
+| **wall** | **2 h 52 m 33 s** | **3 h 45 m to 4 h 07 m** | **3 h 46 m 42 s** |
+
+**The eight stages the access column does not touch cost 7,766.5 s against §4d's 7,763 s** — the
+pre-flight carried them across unchanged and was right to within 0.05%. The whole of the difference
+between the two builds is in the six stages the column does touch, plus the new one.
+
+Where the pre-flight was wrong, and by how much: it **over**-forecast `dictionary` by 38 to 94%
+(1,276 s measured against 1,760 to 2,470 s modelled) and **under**-forecast the batch loop's sorts
+by 56 to 140% (623 s against 260 to 400 s). `geometry_read`, `postings_write`, `term_images` and
+the assignments all landed inside their brackets, the assignments to 2.4%. The refused build of
+2026-09-17 had already measured `dictionary` at 1,481 s and `geometry_read` at 1,359 s on a busier
+box; both came in lower here. The wall landed inside its bracket, which is what the pre-flight was
+for.
+
+Peak: the stage timings print `VmHWM`, which includes mapped file pages, and it ended at
+**24,190 MiB** — the cap itself, reached in `tiler_sort`. The largest *anonymous* figure the build
+prints is its own entity-order forecast, **20,094 MiB against the 24,576 MiB budget**, and that
+figure is a lower bound by its own statement. No anonymous peak was sampled for this run; the
+comparable §4d figure is 12.1 GB and is not comparable here, because the term images hold up to
+5,000 MiB of it by the same forecast. Assumed inside the cap because `oom_kill` never fired and the
+build completed; not measured.
+
+### The images
+
+From the build report line (ruling G), one view `geo`, measured:
+
+| | modelled in the pre-flight | **measured** |
+|---|---|---|
+| terms | 1,399,205 | **1,399,206** |
+| kept | 89,224 | **21,894 (1.6%)** |
+| payload | 11.21 GB | **10.26 GB** |
+| table | 56.0 MB | **55.97 MB** |
+| largest image | — | **345.23 MB** |
+| derivation wall | 160 to 270 s | **251.2 s** |
+| `.timg` on disk | 11.26 GB | **10,314,190,823 B** |
+
+The table is 40 bytes a term whatever is kept, and 40 × 1,399,206 = 55,968,240 — the model was
+arithmetic and the measurement matches it. **The kept count is a quarter of the model's**: the
+pre-flight took it from the projection-build probe's rung 6 derivation of every year and species
+term at the same keep rule, and this build keeps 21,894 where that predicted 89,224. The payload is
+nonetheless within 9% of the model, so the terms that were dropped are the small ones; that is the
+keep rule working as designed and the discrepancy is in the count, not the bytes. ⊘ Not run down:
+the two derivations are at different commits and the probe's own figure was never re-taken.
+
+### The bundle
+
+**226,569,780,565 B (211.0 GiB)**, measured, against the pre-flight's 247.6 to 250.2 GB. The model
+was **21.0 GB high**, and it said it would be: it assumed the record blob does not shrink, where
+the 64-part rung had measured it shrinking by 92 MB on the same change.
+
+| file | rung 6, country only (§4d) | **terms** | change |
+|---|---|---|---|
+| `entities/terms/terms.u32` | 13,982,918,916 | **40,496,338,904** | +26.51 GB |
+| `entities/terms/offsets.u32` | 13,982,918,920 | **13,982,918,920** | — |
+| `entities/terms/bases.u64` | — | **426,728** | +0.43 MB |
+| `term-images/….timg` | ~102 kB | **10,314,190,823** | +10.31 GB |
+| `terms/postings.arrow` | 792,946 | **912,644,914** | +0.91 GB |
+| `dictionary/terms-0.dict` | ~13 kB | **18,329,973** | +0.02 GB |
+| **the whole bundle** | 209,848,836,527 | **226,569,780,565** | **+16.72 GB, +8.0%** |
+
+The additions above sum to **+37.75 GB** and the bundle grew by **16.72 GB**, so about **21.0 GB
+of the rest of it shrank**. That is the size the pre-flight left out, and it is the same sign and
+about 230× the size of the 64-part rung's 92 MB — measured by difference, not attributed to a file,
+because §4d's bundle was released to make room for this one and cannot be diffed against.
+
+`terms.u32` is 4 bytes a pair exactly: 4 × 10,124,084,726 = 40,496,338,904. `postings.arrow` landed
+at 0.91 GB, inside the pre-flight's 0.15 to 2.8 GB bracket and near its 0.090 B-a-pair midpoint.
+`terms-0.dict` was modelled at 18 MB and measured 18.33 MB.
+
+**Disk**: 321 GB free at the start, **186 GB free** at the end. The build's own forecast printed
+597.8 GB at peak against 343.6 GB available and went on, as it is designed to; the transient never
+exceeded the finished bundle, as §4d also found. The forecast overstated by more than three times.
+
+## Part B at rung 6: the four routes over 3.5 billion rows
+
+Measured 2026-09-18 on `data/ladder/gbif-terms/bundle` at format 14, commit `34c174b5`, under
+`systemd-run --user --scope --collect -p MemoryMax=24G -p MemorySwapMax=2G` and `nice -n 10`, under
+`setsid`. 3,495,729,729 rows, one segment, no extents, 1,399,206 dictionary terms, a
+10,314,190,823-byte image file. Seed **20260917**, the same one the 64-part run used, and the same
+`run.sh` line with one principal added. Results in `gbif-terms/`.
+
+### Open
+
+`open_bundle` with digests verified: **99.73 s wall, 227.52 s CPU, 225,106,968,576 bytes read** —
+99.4% of the bundle, which is what verifying every file's digest at open means. Measured.
+
+⊘ §4d has no bare `open_bundle` figure to compare with: its open figures are `tessera serve` to
+`/readyz`, 197 s and 202 s, which builds the artifact row forms as well. The images' share of the
+99.73 s is **not separable here**: a rung 6 bundle at format 11 cannot be opened at 14, so the only
+way to take the difference would be to rebuild without the access column. Modelled from the file
+sizes at the digest pass's measured 3.04 GB/s (§4d): the `.timg` is 10.31 GB, so about **3.4 s**,
+3.4% of the open.
+
+### The eleven principals
+
+The eleventh is **`species3000`**, size-weighted like the others. The ten of the memo leave a decade
+between `species1000` and `species10000`, and that decade is where the split gives way to the
+complement — at 64 parts the crossover is between 51.7% and 81.3% coverage and nothing was measured
+inside it. `species3000` lands at **65.7%** coverage and is the only principal in the table whose
+route is not obvious from either neighbour. It takes the split, and the split is 2.0× faster than
+the complement there, which puts the crossover above it.
+
+Seconds, cold / warm. All measured.
+
+| principal | terms | coverage | walk | split | complement | chooser | route taken | fastest forced |
+|---|---|---|---|---|---|---|---|---|
+| `p1` | 5 | 1.0% | 0.505 / 0.364 | 0.002 / 0.019 | 52.96 / 66.60 | 0.042 / 0.002 | `split` | `split` |
+| `p5` | 6 | 5.0% | 1.528 / 0.991 | 0.005 / 0.003 | 45.49 / 41.75 | 0.033 / 0.003 | `split` | `split` |
+| `p10` | 7 | 10.0% | 1.995 / 2.025 | 0.009 / 0.007 | 38.83 / 39.34 | 0.045 / 0.010 | `split` | `split` |
+| `p25` | 7 | 25.0% | 7.454 / 7.400 | 0.027 / 0.021 | 31.28 / 30.67 | 0.052 / 0.021 | `split` | `split` |
+| `p50` | 8 | 50.0% | 19.25 / 19.16 | 0.038 / 0.032 | 20.96 / 20.66 | 0.052 / 0.030 | `split` | `split` |
+| `all` | 253 | 100.0% | 0.022 / 0.016 | 0.606 / 0.245 | 0.055 / 0.058 | 0.015 / 0.015 | `whole_domain` | `walk` |
+| `year300` | 300 | 47.0% | 21.72 / 21.64 | 2.143 / 2.126 | 24.63 / 25.45 | 3.449 / 2.118 | `split` | `split` |
+| `species1000` | 1,000 | 50.0% | 25.89 / 31.28 | 5.363 / 5.213 | 24.43 / 23.40 | 11.90 / 5.069 | `split` | `split` |
+| `species3000` | 3,000 | 65.7% | 30.62 / 30.05 | 8.319 / 8.633 | 16.24 / 16.46 | 10.49 / 8.098 | `split` | `split` |
+| `species10000` | 10,000 | 78.6% | 35.69 / 36.83 | 12.50 / 12.56 | 10.84 / 10.72 | 10.81 / 11.10 | `complement` | `complement` |
+| `species100000` | 100,000 | 89.8% | 41.36 / 46.74 | 23.46 / 21.90 | 5.461 / 5.209 | 5.702 / 5.357 | `complement` | `complement` |
+
+**Every arm's rows equal the walk's, for all eleven principals** — checked by symmetric difference
+per arm, cold against warm as well, and the probe exits non-zero if any differ. It exited 0.
+
+**The chooser takes the fastest forced route for every principal.** The split holds from 1% to
+65.7% coverage, the complement from 78.6%, and `all` never reaches the chooser: `RowProjection::new`
+answers a grant covering the domain from the whole-domain short-circuit before it prices anything.
+The offline verdict recorded beside `all` is `complement`, and that is not a miss.
+
+**The split is worth 2.1 to 591× the walk at this rung**, warm. At `p50` it is **591× faster**:
+32 ms against 19.2 s, because a country's rows are long runs in Morton order and the split unions
+32,359 containers where the walk crosses 1.75 billion entities. The ratio falls as the term set
+widens — 10.2× at `year300`, 2.1× at `species100000` — and it is where it falls below the
+complement's that the chooser changes route. At `species100000` the complement is **9.0× the
+walk**, 5.2 s against 46.7 s.
+
+The chooser arm against the fastest forced arm of the same route, warm: **−6.2% to +3.5%** on the
+five principals whose fastest arm is over 100 ms, and −91% to +38% on the six whose fastest arm is
+2 to 32 ms, where a few milliseconds of scheduling is tens of per cent. The chosen route and the fastest route are the same route in every row, which is the
+statement that does not depend on the noise.
+
+### The cold arms are cold at this rung
+
+Unlike at 64 parts, `posix_fadvise(POSIX_FADV_DONTNEED)` takes here: the permutation is 13.98 GB,
+the images 10.31 GB and the postings 0.91 GB against a 24 GiB cap, so the pages are not all
+resident to begin with. Measured, cold run against warm run of the same arm: `p5`'s walk read
+**687 MB** cold and 0 warm with 232 major faults against 0; `species1000`'s chooser read **5.10 GB**
+cold and 0 warm, 976 major faults against 0; `year300`'s chooser **2.85 GB** against 0. Seventeen
+of the 44 cold runs still read 0 bytes.
+
+⊘ **A cold arm is only cold for the file no earlier arm has touched.** The arms run walk, chooser,
+split, complement, and the chooser and split take the same route at nine of the eleven principals,
+so the split arm finds the images the chooser arm just read: every split arm's cold `read_bytes` is
+0 except `all`'s. The cold column is a first touch, not a cold start, and the honest cold figure
+for a route is the first arm that takes it. The eviction is best effort by construction and
+`read_bytes` is what says whether it took.
+
+Anonymous peak over both runs of an arm, measured: 232 MB at `p1`'s split, 2,527 MB at
+`species100000`'s split, and the complement between 643 MB and 2,140 MB. The largest figure in the
+table is the split's at 100,000 terms; the whole probe stayed inside the 24 GiB cap.
+
+### Pass 2b at rung 6, modelled
+
+Not measured: no fold was run on the rung 6 bundle. Scaling the 64-part fold's pass 2b by rows
+(135.25×) gives **322 s** from this format 14 fold, or 186 s from the format 13 one. The build's own
+`term_images` stage at rung 6 is **251.2 s measured**, between the two, and the build's stage is the
+figure to use — it did the work at this rung, where both of those are extrapolations of a rung 135
+times smaller. The whole fold is not modelled at rung 6: `4c entity terms` and `8 derived` are two
+thirds of the 64-part fold and neither is linear in rows.
+
+## Part C: the chooser's constants, re-derived from rung 6
+
+The five rates were modelled on 2026-09-16 from the memo's principals. They are now least squares
+over the eleven warm forced-route arms above: the walk and complement through the origin against
+held and outside entities, and the three split rates as one non-negative least squares over array
+and run containers, bitset containers and residual entities. `all` is left out of the walk fit —
+the whole-grant short-circuit answers it in 16 ms without walking.
+
+| rate | before (modelled 2026-09-16) | **after (measured 2026-09-18)** | |
+|---|---|---|---|
+| `walk_ns_per_entity` | 6.5 | **13.8** | 2.1× |
+| `split_ns_per_array_or_run` | 350 | **430** | 1.2× |
+| `split_ns_per_bitset` | 1,000 | **12,000** | 12× |
+| `residual_ns_per_entity` | 11 | **24** | 2.2× |
+| `complement_ns_per_entity` | 11 | **14.1** | 1.3× |
+
+Per-principal rates behind the two single-rate fits, ns, measured: the walk runs 5.7 to 17.9 (5.7
+to 11.0 over the compartment ladder, 13.1 to 17.9 over the term-set principals) and the complement
+12.5 to 14.6, with `p1`'s 19.2 the one outlier — its complement arm reads 66.6 s warm against 53.0 s
+cold, and it is the noisiest cell in the table. A rung whose permutation does not fit the cap prices
+the walk at twice the rate the 10⁷-row model assumed, which is the whole of the walk's 2.1×.
+
+**The new constants change no verdict, at either rung.**
+
+| principal | old constants | new constants | route run | fastest forced | margin |
+|---|---|---|---|---|---|
+| `p1` | `split` | `split` | `split` | `split` | −91% |
+| `p5` | `split` | `split` | `split` | `split` | +7% |
+| `p10` | `split` | `split` | `split` | `split` | +38% |
+| `p25` | `split` | `split` | `split` | `split` | −1% |
+| `p50` | `split` | `split` | `split` | `split` | −8% |
+| `all` | `complement` | `complement` | `whole_domain` | `walk` | −6% |
+| `year300` | `split` | `split` | `split` | `split` | −0.4% |
+| `species1000` | `split` | `split` | `split` | `split` | −3% |
+| `species3000` | `split` | `split` | `split` | `split` | −6% |
+| `species10000` | `complement` | `complement` | `complement` | `complement` | +3.5% |
+| `species100000` | `complement` | `complement` | `complement` | `complement` | +2.8% |
+
+The same re-run over the 64-part rung's recorded inputs changes no verdict there either. The margin
+column is the chooser arm's warm wall against the fastest forced arm's, so it measures the arms'
+own scatter, not the choice: **the chosen route is the fastest forced route in every row of both
+tables, so the margin on the choice is 0%**, and the stated margin on the wall is **−6.2% to +3.5%
+where the fastest arm is over 100 ms**.
+
+That the constants moved by up to 12× and moved no decision is the finding. The three routes are
+separated by an order of magnitude or more wherever the chooser has to decide — the closest call in
+the table is `species10000`, where the complement is 10.72 s and the split 12.56 s, 17% apart — so
+the chooser is not sensitive to rates of this accuracy. The re-derivation is worth having because
+the next route, or a rung with extents, may land in a place where it is.
+
+⊘ `split_ns_per_bitset`'s 12,000 is the least trustworthy of the five. Bitset containers and
+array-or-run containers are strongly correlated across these principals and only `year300` has a
+bitset count out of proportion to its array count (87,062 against 1,973,023), so one principal
+carries that rate. It is reported as fitted rather than as measured per container.
+
+## What was run, and what it cost
+
+| | wall |
+|---|---|
+| release build | 1 m 09 s |
+| `gbif-64p-terms` rebuilt at format 14 | 99 s of stages |
+| its route probe | 3 m |
+| its fold | 60 s |
+| **the rung 6 build** | **3 h 46 m 42 s** |
+| its route probe, including a 99.7 s open | **18 m** |
+
+Files added by this part: `build-gbif-64p-terms-f14.log`, `serve-gbif-64p-terms-f14.log`,
+`build-rung6-f14.log`, `gbif-64p-terms-f14/` and `gbif-terms/` (each a `results.json` and a
+`route_probe.log`), and `results.json` beside this file, which carries every figure above.
