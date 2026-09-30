@@ -1297,21 +1297,44 @@ mod tests {
         ));
     }
 
+    /// Strips the generation, which the tests below do not compare.
+    fn who(a: Affected) -> Affected {
+        Affected { generation: 0, ..a }
+    }
+
+    fn principals(ps: &[&str]) -> Affected {
+        Affected {
+            principals: set(ps),
+            ..Affected::default()
+        }
+    }
+
+    fn providers(ps: &[&str]) -> Affected {
+        Affected {
+            providers: set(ps),
+            ..Affected::default()
+        }
+    }
+
+    /// A catalogue holding `ada`, `bob` and `cy`, with `ada` and `bob` in `eu` and nobody yet in
+    /// `tenant-7f3a`.
+    fn three_principals(fx: &Fixture) -> Catalogue {
+        let cat = fx.open();
+        for name in ["ada", "bob", "cy"] {
+            cat.create_principal(name, PrincipalKind::Person).unwrap();
+        }
+        cat.create_group("eu").unwrap();
+        cat.create_group("tenant-7f3a").unwrap();
+        cat.add_member("eu", "ada").unwrap();
+        cat.add_member("eu", "bob").unwrap();
+        cat
+    }
+
     #[test]
-    fn each_change_reports_whom_it_affects() {
+    fn creating_and_membership_changes_report_whom_they_affect() {
         let fx = Fixture::new();
         let cat = fx.open();
         let none = Affected::default();
-        let who = |a: Affected| Affected { generation: 0, ..a };
-        let principals = |ps: &[&str]| Affected {
-            principals: set(ps),
-            ..Affected::default()
-        };
-        let providers = |ps: &[&str]| Affected {
-            providers: set(ps),
-            ..Affected::default()
-        };
-
         assert_eq!(
             who(cat.create_principal("ada", PrincipalKind::Person).unwrap()),
             none
@@ -1320,15 +1343,9 @@ mod tests {
             who(cat.create_principal("bob", PrincipalKind::Person).unwrap()),
             none
         );
-        assert_eq!(
-            who(cat.create_principal("cy", PrincipalKind::Person).unwrap()),
-            none
-        );
         assert_eq!(who(cat.set_password("ada", "pw").unwrap()), none);
         assert_eq!(who(cat.clear_password("ada").unwrap()), none);
         assert_eq!(who(cat.create_group("eu").unwrap()), none);
-        assert_eq!(who(cat.create_group("tenant-7f3a").unwrap()), none);
-
         assert_eq!(
             who(cat.add_member("eu", "ada").unwrap()),
             principals(&["ada"])
@@ -1343,8 +1360,13 @@ mod tests {
             principals(&["bob"])
         );
         assert_eq!(who(cat.remove_member("eu", "bob").unwrap()), none);
-        cat.add_member("eu", "bob").unwrap();
+    }
 
+    #[test]
+    fn grants_and_principal_flags_report_whom_they_affect() {
+        let fx = Fixture::new();
+        let cat = three_principals(&fx);
+        let none = Affected::default();
         let ada = Grantee::Principal("ada");
         let eu = Grantee::Group("eu");
         assert_eq!(who(cat.grant_term(ada, "x").unwrap()), principals(&["ada"]));
@@ -1392,11 +1414,15 @@ mod tests {
             who(cat.enable_principal("cy").unwrap()),
             principals(&["cy"])
         );
+    }
 
-        // A provider change names the provider.
+    #[test]
+    fn provider_changes_and_grants_to_groups_they_name_report_the_provider() {
+        let fx = Fixture::new();
+        let cat = three_principals(&fx);
         assert_eq!(
             who(cat.create_provider(&corp(vec![groups_rule()])).unwrap()),
-            none
+            Affected::default()
         );
         assert_eq!(
             who(cat
@@ -1404,37 +1430,38 @@ mod tests {
                 .unwrap()),
             providers(&["corp"])
         );
-        // A grant to a group a provider's rules can name also affects that provider.
         let tenant = Grantee::Group("tenant-7f3a");
         assert_eq!(
             who(cat.grant_term(tenant, "t").unwrap()),
             providers(&["corp"])
         );
         cat.add_member("tenant-7f3a", "cy").unwrap();
+        let cy_and_corp = Affected {
+            principals: set(&["cy"]),
+            providers: set(&["corp"]),
+            ..Affected::default()
+        };
         assert_eq!(
             who(cat.grant_permission(tenant, Permission::Read).unwrap()),
-            Affected {
-                principals: set(&["cy"]),
-                providers: set(&["corp"]),
-                ..Affected::default()
-            }
+            cy_and_corp
         );
-        assert_eq!(
-            who(cat.delete_group("tenant-7f3a").unwrap()),
-            Affected {
-                principals: set(&["cy"]),
-                providers: set(&["corp"]),
-                ..Affected::default()
-            }
-        );
+        assert_eq!(who(cat.delete_group("tenant-7f3a").unwrap()), cy_and_corp);
         assert_eq!(
             who(cat.delete_group("eu").unwrap()),
             principals(&["ada", "bob"])
         );
+        assert_eq!(
+            who(cat.drop_provider("corp").unwrap()),
+            providers(&["corp"])
+        );
+    }
 
-        // A key's revocation names the key; a principal's deletion names it and its keys.
+    #[test]
+    fn revoking_a_key_names_it_and_deleting_a_principal_names_it_and_its_keys() {
+        let fx = Fixture::new();
+        let cat = three_principals(&fx);
         let (k1, created) = cat.create_api_key("bob", None, None).unwrap();
-        assert_eq!(who(created), none);
+        assert_eq!(who(created), Affected::default());
         let (k2, _) = cat.create_api_key("bob", None, None).unwrap();
         let (k3, _) = cat.create_api_key("ada", None, None).unwrap();
         assert_eq!(
@@ -1451,10 +1478,6 @@ mod tests {
                 api_keys: set(&[&k1.prefix, &k2.prefix]),
                 ..Affected::default()
             }
-        );
-        assert_eq!(
-            who(cat.drop_provider("corp").unwrap()),
-            providers(&["corp"])
         );
     }
 

@@ -363,13 +363,18 @@ fn load_keys(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> 
                 hash: hash
                     .try_into()
                     .map_err(|_| corrupt("an API key hash that is not 32 bytes".into()))?,
-                created_at: r.get::<_, i64>(3)? as u64,
-                expires_at: r.get::<_, Option<i64>>(4)?.map(|t| t as u64),
+                created_at: time(r.get(3)?)?,
+                expires_at: r.get::<_, Option<i64>>(4)?.map(time).transpose()?,
                 permissions: permissions.map(perms).transpose()?,
             },
         );
     }
     Ok(())
+}
+
+/// A stored time in seconds since the epoch, which a write never stores negative.
+fn time(t: i64) -> Result<u64, Error> {
+    u64::try_from(t).map_err(|_| corrupt(format!("an API key time {t} before 1970")))
 }
 
 fn load_providers(conn: &Connection, st: &mut State) -> Result<(), Error> {
@@ -521,6 +526,11 @@ mod tests {
              'https://login.example.org/keys'); \
              INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'term', 'public')",
             "DELETE FROM generation",
+            "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
+             INSERT INTO api_key VALUES ('abcd', 7, zeroblob(32), -1, NULL, NULL)",
+            "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
+             INSERT INTO api_key VALUES ('abcd', 7, zeroblob(32), 0, -1, NULL)",
+            "PRAGMA foreign_keys = OFF; INSERT INTO member VALUES (7, 8)",
         ];
         for row in rows {
             let fx = Fixture::new();
@@ -534,6 +544,21 @@ mod tests {
                 "{row}"
             );
         }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_sound_sqlite_database_is_refused() {
+        let fx = Fixture::new();
+        drop(fx.open());
+        let file = fx.path().join(FILE_NAME);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let half = bytes.len() / 2;
+        bytes[half..].fill(0xa5);
+        std::fs::write(&file, bytes).unwrap();
+        assert!(matches!(
+            Catalogue::open(&fx.path(), fx.options()),
+            Err(Error::Corrupt(_))
+        ));
     }
 
     #[test]
