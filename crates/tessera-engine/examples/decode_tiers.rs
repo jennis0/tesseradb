@@ -35,7 +35,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
@@ -343,7 +344,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
 
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
+        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -364,6 +365,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
         &perm,
         // Nothing denied — this example measures decode tiers.
         &croaring::Bitmap::new(),
+        Some(&[]),
     );
     (temp, mask)
 }

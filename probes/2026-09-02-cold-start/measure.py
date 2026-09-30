@@ -4,12 +4,12 @@ import base64, json, os, subprocess, sys, time, signal, requests
 # The working directory the deployment copy, its `.env`, its cache and its WAL live in — never
 # the rung's own directory, whose ports and cache a running demo already holds.
 S = os.environ.get("COLD_START_WORK", os.getcwd())
-BIN = os.environ.get("TESSERA_BIN", "/home/joe/code/tessera/target/release/tessera")
+BIN = os.environ.get("TESSERA_BIN", "/home/user/code/tessera/target/release/tessera")
 TOML = os.path.join(S, "tessera.toml")
 VIEWER = "http://127.0.0.1:8211"
 SESSION = "http://127.0.0.1:8212"
 CRED = os.environ["TESSERA_MEDCPT_SESSION_CRED"]
-TERMS = open("/home/joe/code/tessera/data/ladder/medcpt/branch-terms.txt").read().strip().split(",")
+TERMS = open("/home/user/code/tessera/data/ladder/medcpt/branch-terms.txt").read().strip().split(",")
 BBOX = [-17.894932670593263, -20.08621828079224, 20.183564109802248, 17.992278499603273]
 
 def start(logname):

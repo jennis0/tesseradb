@@ -1,13 +1,11 @@
-//! The configuration file: one TOML document declaring the corpus, its views, its vocabularies,
+//! The corpus declaration: one TOML document declaring the corpus, its views, its vocabularies,
 //! its attributes and its layers.
 //!
-//! [`configuration.md`](../../../docs/design/configuration.md) is the design and its §1 is the
-//! contract — the whole surface in one table. **The set is closed**, and that is a property rather
-//! than an accident: every block parses under `deny_unknown_fields`, and every value that is a word
-//! rather than a caller's string is drawn from an enumerated set. Closure is what the leak register
-//! rests on, the register being exhaustive *because* the surface is enumerable, so a key this
-//! module accepts without an entry in §1 is a disclosure control nobody has reasoned about.
-//! [`the_accepted_key_set_is_configuration_ms_table`] is the assertion that keeps the two in step.
+//! The doc comments on the blocks under "The file, as written" are the reference page
+//! `docs/reference/corpus-toml.md`, which `config/reference.rs` renders and holds to the parser.
+//! Every block parses under `deny_unknown_fields`, and every value that is a word rather than a
+//! caller's string is drawn from an enumerated set, so the page names the whole surface: a key
+//! added here without a doc comment fails that test.
 //!
 //! ## Two axes, and only two
 //!
@@ -50,20 +48,13 @@
 //!   otherwise takes a caller's label, so a layer gated on a real term called `inherited` and one
 //!   declaring *the container's gate is the whole of it* would be the same eight characters.
 //!
-//! ## Codes are pinned or assigned, and both are recorded
+//! ## Codes are pinned or drawn, and both are recorded
 //!
-//! A value set is *inline or sourced*, and its codes are *pinned or assigned* — two independent
-//! choices. `values = ["low", "high"]` assigns in the order given; `[vocabulary.values]` with
-//! `low = 1` pins. **A caller who does not care which integer a value gets should not have to
-//! invent one**: pinning exists so a rebuild preserves codes, not because choosing them is part of
-//! declaring a vocabulary. Assigned codes are recorded in the compiled vocabulary exactly as
-//! pinned ones are, so `MANIFEST.json` is the record either way.
-//!
-//! ⊘ **The carry rule is not built.** `configuration.md` §1 states that a rebuild replays the
-//! recorded codes — a value keeps its code, a new value takes the next free one, a removed value's
-//! code moves to `reserved` — so that reordering a list cannot recolour stored rows. Nothing reads
-//! a previous build's manifest yet, so **reordering a bare key list today reassigns its codes**.
-//! Pin the codes to hold them still.
+//! A value set is *inline or sourced*, and its codes are *pinned or drawn*: two independent
+//! choices. `values = ["low", "high"]` draws each value a code at random over the width, as a
+//! running service does; `[vocabulary.values]` with `low = 1` pins. A drawn code is recorded in
+//! `MANIFEST.json` exactly as a pinned one is. Every build draws afresh, so a rebuild gives an
+//! unpinned value a new code; pin the codes to hold them still.
 //!
 //! ## Acquisition: sources, defaults, fields and the override
 //!
@@ -77,11 +68,10 @@
 //! exist, because reading it as a relative path would turn a typo into a missing file rather than
 //! a declaration that does not resolve.
 //!
-//! **`[defaults]` is what `[corpus]` was, with the constraint removed** ([`Defaults`]). It carries
-//! a `source` and an `entity_id_field`, and any block that reads either may write its own — so an
-//! attribute may name its own file and its own identity column, because a file that carries entity
-//! ids can be joined whatever it calls them. What `[corpus]` guaranteed, that every attribute lands
-//! in one entity space, is guaranteed by the entity id and never was by the file.
+//! **`[defaults]` carries a `source`** ([`Defaults`]). A block may name its own file, and its
+//! `fields` may say where that file keeps each field declared `unique`, because a row names the
+//! item it belongs to by those values whatever the file calls the columns. What puts every
+//! attribute in one entity space is the rule a row names an item by (`crate::ids`), not the file.
 //!
 //! **`--file` is an override, never a binding.** Its key is the *source's own name*, so one
 //! override moves every block reading that file at once — where the previous object-keyed form
@@ -138,7 +128,7 @@
 //!
 //! A view says where each point's access terms are and what a point carrying none gets
 //! ([`AccessInput`]): a `list<string>` field of its own source, a separate exploded
-//! `(entity_id, term_id)` relation, or neither — every point taking the default, which is the
+//! `(unique value, term_id)` relation, or neither — every point taking the default, which is the
 //! corpus with no permission model. `default` is optional (decision 0133): where a view declares
 //! one, a point carrying no label takes it at the build and on `/control/ingest` alike; where it
 //! declares none, both entry points refuse such a point naming the count. A view declaring neither
@@ -154,11 +144,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tessera_plugin::Plugin;
 use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{cell, Bounds, Projection};
-use tessera_store::vocabulary::VocabularyMinter;
+use tessera_store::coordinates::{axis_names, other_axis_names};
+use tessera_store::declaration::{
+    check_attribute, check_value_keys, check_vocabulary, AttributeSpec, DECLARABLE_TYPES,
+};
+pub use tessera_store::manifest::VocabularyKind;
+pub use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
@@ -182,470 +176,809 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 /// first value.
 pub const ABSENT_CODE: u32 = 0;
 
-/// The word that reaches every principal, wherever an access label may be written.
-const PUBLIC: &str = "public";
-/// The word that means *the container's gate is the whole of it*. It occupies a slot that otherwise
-/// takes a caller's label, so a label spelled this way is refused (§4).
-const INHERITED: &str = "inherited";
-/// **The canonical identity field** (`configuration.md` §8), which
-/// `[defaults].entity_id_field` moves for this declaration and each reader of one may move again.
-/// It is entity-space and shared: a point has one identity across every view it appears in, and it
-/// is what a member row names. Not `entity`, which names the object rather than the value, and not
-/// `id`, which collides with `tessera_id` and with an external id.
-pub const ENTITY_ID: &str = "entity_id";
+use tessera_types::label::{is_inherited, INHERITED};
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
 // ---------------------------------------------------------------------------------------------
 
+// The blocks' doc comments are the reference page `docs/reference/corpus-toml.md`, rendered by
+// `config/reference.rs`. They are written for someone declaring a corpus.
+
+/// `corpus.toml` declares a corpus: the files a build reads, the views that place each item on a
+/// map, the vocabularies and attributes each item carries, and the annotation layers drawn over
+/// the items. `tessera build` and `tessera check` read the file that `[build] schema` in
+/// `tessera.toml` names, `schema.toml` by default, or the one `--config` names. `tessera check
+/// --payloads` prints the same declaration as the request bodies that declare it on a running
+/// service.
+///
+/// Every table refuses a key it does not know. Where a key is refused beside another, or needs
+/// another, its description says so.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    /// `[sources]` — the caller's own names for the files this declaration reads.
+    /// The files the declaration reads, as `name = "path"`, each path relative to the directory
+    /// the declaration is in. Every `source` key elsewhere names one of these. An empty name, an
+    /// empty path and an absolute path are refused; `--file NAME=PATH` replaces a path from the
+    /// command line.
+    ///
+    /// Default: not set.
     #[serde(default)]
     sources: Option<BTreeMap<String, String>>,
-    /// `[defaults]` — what a block takes when it names neither of these itself.
+    /// The source a block takes when it names none, and the view that orders internal ids.
+    ///
+    /// Default: not set.
     #[serde(default)]
     defaults: Option<DefaultsBlock>,
+    /// Coordinate systems, each giving the items it holds a position on a map.
     #[serde(default)]
     view: Vec<ViewBlock>,
-    /// `[[view_group]]` — a set of views that share every setting and differ by a key
-    /// (`views.md` §3.1). Beside `[[view]]` rather than inside it: a group is not a view, it
-    /// cannot be named on a viewer verb, and its roster is a key set a plain view has no shape
-    /// for.
+    /// Sets of views that share every setting and differ by a key.
     #[serde(default)]
     view_group: Vec<ViewGroupBlock>,
+    /// Named value sets, which `category` attributes draw on.
     #[serde(default)]
     vocabulary: Vec<VocabularyBlock>,
+    /// The columns each item carries.
     #[serde(default)]
     attribute: Vec<AttributeBlock>,
+    /// Annotation layers: named sets of artifacts, such as clusters or regions, drawn over views.
     #[serde(default)]
     layer: Vec<LayerBlock>,
 }
 
-/// `[defaults]` — the source and the identity column a block takes when it names neither.
-///
-/// **This is what `[corpus]` was, minus the constraint that made it a block.** `[corpus]` named
-/// the one file every attribute was read from and the one column its identity sat in, and nothing
-/// could say otherwise; here both are defaults and any block that reads a source or an entity id
-/// may write its own. What `[corpus]` guaranteed — that every attribute lands in one entity space
-/// — is guaranteed by the entity id and never was by the file.
+/// What a block takes when it names no source of its own. `source` reaches a `[[view]]` and an
+/// entity-scoped `[[attribute]]`, and nothing else: a vocabulary, a layer, a view group and
+/// `point_visibility` with no source of their own read no file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DefaultsBlock {
-    /// A name in `[sources]`, taken by a `[[view]]` or an `[[attribute]]` that names none.
+    /// A name in `[sources]`, read by a `[[view]]` and an entity-scoped `[[attribute]]` that name
+    /// no `source`. A name `[sources]` does not have is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
-    /// The column an entity id is read from, wherever one is read under the canonical name.
-    #[serde(default)]
-    entity_id_field: Option<String>,
-    /// The view whose Morton code breaks entity-id ties within a signature group
-    /// ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    /// The view whose map positions order the entity ids a build assigns to items with the same
+    /// access labels. A build of more than one view, counting each view of a group, is refused
+    /// without it. A view of a group is named `<group>:<key>`, and a name that is not one of the
+    /// build's views is refused.
     ///
-    /// Required when the declaration carries more than one view, and **explicit rather than
-    /// positional**: reordering declaration blocks must not silently re-key a rebuild, the ids
-    /// being permanent (I9). A group name is not a view — the anchor is one coordinate system,
-    /// so a group's view is named `<group>:<key>`.
+    /// Default: not set.
     #[serde(default)]
     allocation_view: Option<String>,
 }
 
-/// `[[view]]` — one named coordinate system.
+/// One coordinate system: a position for each item it holds, the frame those positions are stored
+/// across, and who may see the view and each of its points.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewBlock {
+    /// The view's name, which a request names it by. ASCII letters, digits, `_` and `-`, unique
+    /// among views and view groups.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
-    /// The function that turns a place on the Earth into a coordinate in this view's frame
-    /// (`projections.md` §5), from the closed set and defaulting to `none`. Held as a string and
-    /// resolved by [`Projection::from_name`] so a name outside the set is refused listing the
-    /// ones inside it, rather than reported as *no variant matched*.
+    /// How a longitude and latitude become a position on the map: `web_mercator`,
+    /// `equirectangular` (also written `plate_carree`), `gall_isographic`, or `none` for
+    /// coordinates that are not places on the Earth. It decides which spellings `extent` and
+    /// `fields` take. Any other name is refused.
+    ///
+    /// Default: `"none"`.
+    // A string resolved by `Projection::from_name`, so a refusal can list the names.
     #[serde(default)]
     projection: Option<String>,
+    /// A name in `[sources]`: the file holding the view's points, one row per item. A build
+    /// refuses a view with no source; `tessera check` accepts one.
+    ///
+    /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
+    /// Where the points file keeps each field, as `field = "column"`. The fields are either `x`
+    /// and `y` or `morton` and `residual`, or on a projected view `lon` and `lat`, and each
+    /// attribute declared `unique`, whose column is its `field` or its name where this map does
+    /// not move it. A field not named here is read from the column of its own name. A field the
+    /// view does not have, both kinds of position, `residual` without `morton`, and `fields`
+    /// where the view has no source are refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// The quantisation frame, in any of §1's four spellings. Held as a `toml::Value` and
-    /// resolved by [`compile_extent`] rather than typed here, because an untagged enum over a
-    /// string and a table reports every mistake inside the table as *matched no variant* — and
-    /// this key's mistakes (a `margin` beside a `min`, an `x` without a `y`) are exactly the ones
-    /// worth naming. The table form is still a `deny_unknown_fields` struct, so its key set is
-    /// closed and readable out of serde's own message.
+    /// The frame positions are stored across, as a 32-bit position on each axis. A point outside
+    /// it is stored on its edge, and a build refuses a frame that more than half the points fall
+    /// outside. The spellings are under `[view.extent]`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    // A `toml::Value` resolved by `compile_extent`, which names the mistake in a table where an
+    // untagged enum would say only that no variant matched.
     #[serde(default)]
     extent: Option<toml::Value>,
+    /// Where each point's access label comes from: keys under `[view.point_visibility]`.
+    ///
+    /// Required.
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
-    /// One label, or a list of labels (`views.md` §6, decision 0132).
+    /// The access label a viewer must hold to reach the view, or a list of labels of which they
+    /// must hold one. `public` alone admits every viewer. An empty list, an empty label,
+    /// `inherited`, `public` beside another label, and a label the plugin maps to no term are
+    /// refused.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: `"public"`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
 }
 
-/// `[[view_group]]` — a set of views sharing every setting, differing by a key and per-view
-/// metadata (`views.md` §3.1, [decision 0108](../../../docs/decisions/0108-a-view-group-grows-by-its-roster.md)).
+/// A set of views that share every setting and differ by a key, and by the metadata each view
+/// carries. A view of the group is addressed `<group>:<key>`. The roster, which says what the
+/// views are, takes one of three forms:
 ///
-/// **Every `[[view]]` key, with the same meaning, plus the roster.** The roster is the whole of
-/// what a group has and a view does not, and it decides where the points come from: under
-/// `[[view_group.view]]` (form A) each view names its own file and the group names none, exactly
-/// as a layer's file is the layer; under `[view_group.views]` (form B) the group's own `source`
-/// holds every view's points with `fields.view` saying which view each row lands in. Declaring
-/// both is refused, as `source` beside inline `artifacts` is; declaring neither mints the views
-/// from the discriminator's distinct values and carries no metadata.
+/// - `[[view_group.view]]` blocks, one per view, each naming its own points file. The group
+///   names no `source`.
+/// - A `[view_group.views]` file with one row per view, beside a group `source` holding every
+///   view's points in rows that name their view in a `view` column.
+/// - Neither: the group's `source` holds every view's points, and the views are the distinct
+///   values of its `view` column. They carry no metadata.
 ///
-/// **`view` is held as `toml::Value` and not as a struct**, because a `[[view_group.view]]` block
-/// mixes a closed key set with the group's declared metadata names — so no derive knows its field
-/// list, and `deny_unknown_fields` cannot be the thing that closes it. `configuration.md` §1's
-/// guarantee is kept by hand in [`compile_roster_view`], against the closed set plus the declared
-/// names, which is the same manual route `extent`'s four spellings already take.
+/// Writing both rosters is refused. `[defaults].source` does not reach a group, so a build
+/// refuses a group with neither a `source` nor `[[view_group.view]]` blocks.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewGroupBlock {
+    /// The group's name, the first half of each of its views' ids. ASCII letters, digits, `_` and
+    /// `-`, unique among views and view groups.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// As on `[[view]]`.
+    ///
+    /// Default: `"none"`.
     #[serde(default)]
     projection: Option<String>,
-    /// Form B's points file, one row per `(entity, view)`. **Form A declares none** — the file is
-    /// the view — and `[defaults].source` deliberately does not reach here: a defaulted group
-    /// source would turn a form A declaration into a form B one, or mint views from a
-    /// discriminator column nobody named.
+    /// A name in `[sources]`: the file holding every view's points, one row per item and view.
+    /// Required with `[view_group.views]` and refused beside `[[view_group.view]]` blocks.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the group's `source` keeps each field: as on `[[view]]`, and `view`, the column
+    /// naming each row's view. Refused on a group with no `source`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
+    /// As on `[[view]]`: one frame for every view of the group.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     extent: Option<toml::Value>,
+    /// As on `[[view]]`, for every view of the group.
+    ///
+    /// Required.
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
-    /// One label, or a list of labels (`views.md` §6, decision 0132).
+    /// As on `[[view]]`, for every view of the group. A view of the group may narrow it with a
+    /// `visibility` of its own.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: `"public"`.
     #[serde(default)]
     visibility: Option<tessera_types::view::DeclaredGate>,
-    /// Another group's name: this group's views are that group's (`views.md` §3.3). Chains are
-    /// refused, so the owner of a key set is always one hop away.
+    /// Another group's name: this group's views are that group's, and its own `source` holds
+    /// their points. The group named may not itself name `members`, and a roster or `metadata`
+    /// beside `members` is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     members: Option<String>,
-    /// The per-view values a view carries, `name = type` over the `[[attribute]]` types; a
-    /// category is `{ type = "category", vocabulary = … }`.
+    /// The values each view carries, served with it on `/v1/meta`: `name = "type"` over the
+    /// `[[attribute]]` types, or `name = { type = "category", vocabulary = "<name>" }`. Every view
+    /// must carry every name. `key`, `source`, `visibility` and the group's `view` column are
+    /// refused as names, and so is `metadata` on a group with no roster or one that names
+    /// `members`.
+    ///
+    /// Type: table.
+    ///
+    /// Default: not set.
     #[serde(default)]
     metadata: Option<BTreeMap<String, toml::Value>>,
-    /// `[[view_group.view]]` — form A's roster, one block per view.
+    /// The roster as one block per view: keys under `[[view_group.view]]`.
+    ///
+    /// Type: array of tables.
+    // Each block mixes fixed keys with the group's metadata names, so `compile_roster_view` reads
+    // it by hand and refuses an unknown key itself.
     #[serde(default)]
     view: Vec<toml::Value>,
-    /// `[view_group.views]` — form B's roster, as a table.
+    /// The roster as a file: keys under `[view_group.views]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     views: Option<RosterTableBlock>,
 }
 
-/// `[view_group.views]` — the roster as a table beside the group's own points file.
-///
-/// Two keys, and no more: what the table carries is fixed by the group's own declaration — the
-/// canonical `key`, `visibility` and the declared metadata names — so `fields` locates them and
-/// nothing here asserts one into existence (`configuration.md` §8).
+/// The roster as a file of one row per view, beside the group's `source`. Its columns are `key`,
+/// `visibility`, and one for each `metadata` name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RosterTableBlock {
+    /// A name in `[sources]`: the roster file.
+    ///
+    /// Required.
     #[serde(default)]
     source: Option<String>,
+    /// Where the roster file keeps `key`, `visibility` and each metadata name, as
+    /// `field = "column"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
 }
 
-/// `{ field, default }` or `{ source, default }` — where each point's own label is, and what one
-/// carrying none gets.
-///
-/// **A point's label comes from a field or from a source, never both** (`configuration.md` §1).
-/// `field` names a column of the view's own source; `source` names a separate exploded
-/// `(entity_id, term_id)` relation, which is the shape the probe generators produce natively at
-/// 10⁹ and the one the build writes as oracle output regardless. `default` alone is legal and is
-/// the corpus with no permission model.
+/// Where each point's access label comes from. A viewer sees a point when they hold one of its
+/// labels. Write `field` or `source`, not both, and at least one of the three keys.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PointVisibilityBlock {
+    /// A column of the view's points file holding each point's access label, as a string or a
+    /// list of strings. A null or an empty list is no label. An empty name is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     field: Option<String>,
+    /// A name in `[sources]`: a file of an integer `term_id` beside the column of at least one
+    /// attribute declared `unique`, which names the point, one row per point and access term. If
+    /// one view of a build reads labels this way, every view must, from the same file.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// The label a point with none of its own takes: `public` for every viewer, or an access
+    /// label the plugin maps to a term. `inherited` is refused. Without it, a point with no label
+    /// is refused, at a build and at `/control/ingest` alike.
+    ///
+    /// Default: not set.
     #[serde(default)]
     default: Option<String>,
 }
 
-/// `extent`'s table form, in one struct with every key optional and the combinations checked by
-/// hand ([`compile_extent`]).
+/// `extent` is the word `"auto"` or a table. A view with no projection takes four spellings, in
+/// the units of its own coordinates:
 ///
-/// One struct rather than three, because the three shapes overlap in exactly the ways a caller
-/// gets wrong — `margin` beside `min`, an `x` without a `y`, `auto` beside a stated box — and
-/// three variants would report each of those as *no variant matched*. The key set stays closed
-/// under `deny_unknown_fields`, which is what `configuration.md` §1's table is asserted against.
+/// ```toml
+/// extent = "auto"                           # the same as { auto = true, margin = 0.01 }
+/// extent = { auto = true, margin = 0.25 }   # a square fitted to the data, plus margin each side
+/// extent = { min = -25.0, max = 25.0 }      # one range for both axes
+/// extent = { x = [-18, 19], y = [-22, 24] } # a range for each axis
+/// ```
+///
+/// A projected view takes two, in degrees, and widens the box to the smallest aligned square that
+/// contains it:
+///
+/// ```toml
+/// extent = "auto"                                     # the data's own longitude and latitude
+/// extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }  # a box
+/// ```
+///
+/// `auto` reads the view's points to fit the frame, so it is refused where the points source
+/// holds no rows. Any other word, an empty table, half a box, a number that is not finite, and a
+/// spelling of the other kind of view are refused.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExtentTable {
+    /// `true` fits the frame to the points the build reads. `false` is refused, and so is `auto`
+    /// beside `min`, `max`, `x` or `y`. A projected view writes `extent = "auto"` instead.
+    ///
+    /// Default: not set.
     #[serde(default)]
     auto: Option<bool>,
+    /// Space added to each side of an `auto` frame, as a fraction of the data's span. Finite and
+    /// at least 0. Refused without `auto = true`.
+    ///
+    /// Default: `0.01`.
     #[serde(default)]
     margin: Option<f64>,
+    /// The low end of both axes, beside `max`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     min: Option<f64>,
+    /// The high end of both axes, beside `min`. It must be above `min`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     max: Option<f64>,
+    /// The x axis as `[low, high]`, beside `y`, with `high` above `low`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     x: Option<[f64; 2]>,
+    /// The y axis as `[low, high]`, beside `x`, with `high` above `low`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     y: Option<[f64; 2]>,
-    /// The projected view's spelling, and the only one it takes (`projections.md` §4.2).
+    /// A projected view's longitudes as `[west, east]`, in degrees within ±180, beside `lat`. A
+    /// box crossing the antimeridian, with `west` above `east`, is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     lon: Option<[f64; 2]>,
+    /// A projected view's latitudes as `[south, north]`, in degrees within ±90, beside `lon`,
+    /// with `north` not below `south`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     lat: Option<[f64; 2]>,
 }
 
-/// `{ field, default }` — where each artifact's own label is, and what one carrying none gets.
-///
-/// **The presence of `field` is the declaration that artifacts carry their own labels** (C27),
-/// which is why it is one table rather than a flag beside a fallback: the two cannot be declared
-/// apart. It takes no `source`: an artifact's label rides its own row, there being one row per
-/// artifact, where a point's label is one of many terms and needs a relation of its own.
+/// What gates each artifact beyond the layer's own `visibility`. Written as
+/// `artifact_visibility = { default = "inherited" }`, or with a `field` naming each artifact's own
+/// labels.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactVisibilityBlock {
+    /// The field holding each artifact's own access labels: a column of the artifacts file, or
+    /// `access` on a `[[layer.artifacts]]` row. Naming it declares that artifacts carry labels of
+    /// their own. An empty name is refused, and so is `field` on an attribute membership.
+    ///
+    /// Default: not set.
     #[serde(default)]
     field: Option<String>,
+    /// The label an artifact with none of its own takes: an access label, `public` for every
+    /// viewer, or `inherited`, which leaves the layer's `visibility` as the artifact's only
+    /// gate. An empty label is refused.
+    ///
+    /// Required.
     #[serde(default)]
     default: Option<String>,
 }
 
-/// `[[vocabulary]]` — a named value set.
+/// A named set of values that `category` attributes and category metadata draw on. Each value is
+/// stored as an integer code: pinned where the declaration or its file writes one, and otherwise
+/// drawn at random, which a rebuild does again.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VocabularyBlock {
+    /// The vocabulary's name. ASCII letters, digits, `_` and `-`, unique among vocabularies.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The width codes are stored at: `u8`, `u16` or `u32`, whose largest codes are 255, 65,535
+    /// and 4,294,967,295.
+    ///
+    /// Required.
     #[serde(default)]
     width: Option<String>,
+    /// `closed` refuses a value the vocabulary does not hold, at a build and at ingest. `open`
+    /// gives such a value a new code.
+    ///
+    /// Required.
     #[serde(default)]
     value_set: Option<String>,
+    /// `public` shows every viewer every value. `derived` shows each viewer only the values
+    /// carried by points they can see.
+    ///
+    /// Required.
     #[serde(default)]
     visibility: Option<String>,
+    /// A name in `[sources]`: a file of values, with a `key` column and optional `code` and
+    /// `title` columns. A value with no code is drawn one. Refused beside `values`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the values file keeps `key`, `code` and `title`, as `field = "column"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// Inline values: an array of keys, or a `key = code` table. One type for both, because which
-    /// one was written decides only whether the codes are pinned.
+    /// The values written here: an array of keys, each drawn a code, or a table of
+    /// `key = code`, which pins them. A code is from 1 to the width's largest, since 0 means no
+    /// value. Two values at one code, a code also `reserved`, an empty key and a key given twice
+    /// are refused, and so is `values` beside `source`.
+    ///
+    /// Type: array of strings, or table of integers.
+    ///
+    /// Default: not set.
+    // One `toml::Value` for both spellings, because which one was written decides only whether
+    // the codes are pinned.
     #[serde(default)]
     values: Option<toml::Value>,
+    /// Retired codes, from 1 to the width's largest, which no value may hold and no draw picks.
+    ///
+    /// Default: not set.
     #[serde(default)]
     reserved: Option<Vec<i64>>,
 }
 
-/// `[[attribute]]` — one per-point column, read from the source it names or from
-/// `[defaults].source`.
-///
-/// `deny_unknown_fields` throughout: a mistyped key in a disclosure control is the one class of
-/// typo that must not read as a default. `vocabluary = "severity"` under a serde that ignores
-/// unknown fields is a category with no value set, declared by someone who believed they had said
-/// otherwise.
+/// A column each item carries. `render` and `index` decide where its value is kept, and may be
+/// set together. `render = true` stores the value beside each point's position, so it travels
+/// with every point a viewport returns and can colour the map. `index = true` builds an index that
+/// filters and searches by it. With neither, the value is kept in the item's record and read when
+/// the item is opened.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AttributeBlock {
+    /// The column's name, which filters and `/v1/categories/{column}` use. ASCII letters, digits,
+    /// `_` and `-`, unique among attributes. `tessera_id`, `residual`, `x`, `y`,
+    /// `access`, `node_id`, `record`, `all_of`, `any_of`, `none_of`, `region`, `member_of` and
+    /// `highlighted` are refused.
     name: String,
+    /// A display title. Not built yet: the title is accepted and not published.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The column of the source file holding the values. An empty name is refused.
+    ///
+    /// Default: the attribute's `name`.
     #[serde(default)]
     field: Option<String>,
-    /// The `[sources]` name this column is read from. Absent takes `[defaults].source`, and a
-    /// declaration with neither is refused: a column has to be read from somewhere.
+    /// A name in `[sources]`: the file the values are read from. A file other than a view's
+    /// points names the item each row belongs to by the columns of the attributes declared
+    /// `unique`. A build refuses an entity-scoped attribute with no source here or in
+    /// `[defaults]`. A group-scoped attribute with none reads each view's own points file, and
+    /// `[defaults]` does not reach it.
+    ///
+    /// Default: the value of `[defaults].source`.
     #[serde(default)]
     source: Option<String>,
-    /// The column this source spells the entity id in. Absent takes `[defaults].entity_id_field`,
-    /// which defaults to `entity_id` — a file carrying entity ids joins whatever it calls them.
-    #[serde(default)]
-    entity_id_field: Option<String>,
+    /// The type of value the column holds, one of the types below.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
+    /// The `[[vocabulary]]` a `category` draws on. Required on a `category`, refused on every
+    /// other type, and a name no `[[vocabulary]]` declares is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     vocabulary: Option<String>,
-    /// The two placement booleans (records §2), each defaulting `false` — the cheapest placement,
-    /// made more expensive only by an explicit word.
+    /// Store the value beside each point's position. Refused on `keyword` and `text`.
     #[serde(default)]
     render: bool,
+    /// Build an index that filters and searches by the value. A group-scoped `text` column needs
+    /// it.
     #[serde(default)]
     index: bool,
+    /// No two items may hold one value, and a row carrying a value names the item holding it.
+    /// Every file the build reads names items by the columns of these attributes where it carries
+    /// them. A points row naming no item creates one, and a row of any other file naming none is
+    /// refused. A later row naming an item an earlier row of its file names, or giving a second
+    /// item a value, is refused. A build reports the rows it refuses; an ingest giving an item a
+    /// value another item holds is refused. `eq` and `in` filters on the column are answered from
+    /// its index, with or without `index = true`; without it, they are the only filters it takes.
+    /// Applies to `keyword`, integer and `timestamp_us` columns scoped to the entity. A null is no
+    /// value, so any number of items may hold one.
     #[serde(default)]
-    multi: bool,
-    #[serde(default)]
-    render_in: Option<Vec<String>>,
-    /// `"entity"` (the default) or `{ group = "<view_group>" }` — whether this column is one
-    /// value per entity or one per `(entity, view of the group)` (`views.md` §5,
-    /// [decision 0109](../../../docs/decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)).
-    /// Held as a `toml::Value` because the two spellings are a word and a table, and a hand-written
-    /// match names them rather than reporting *no variant matched* ([`compile_scope`]).
+    unique: bool,
+    /// `"entity"`: one value per item, the same under every view. `{ group = "<name>" }`: one value
+    /// per item and view of that group, which must own its views rather than name `members`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Default: `"entity"`.
+    // A `toml::Value` matched by `compile_scope`, which names the mistake in either spelling.
     #[serde(default)]
     scope: Option<toml::Value>,
-    /// Where this column's own `source` spells the fields it is read by. **One key, `view`**, and
-    /// only a group-scoped column with a `source` of its own has anything to name with it: that
-    /// file carries one row per `(entity, view)`, and the discriminator says which view each row's
-    /// value is for (`views.md` §5). Absent is the column `view`, the same default a scoped
-    /// layer's `fields.view` takes. The entity id is `entity_id_field` beside it rather than a key
-    /// here, which is the spelling every attribute already had.
+    /// Where this attribute's `source` keeps the fields that name each row's item, as
+    /// `field = "column"`: each attribute declared `unique`, under its own name, where the source
+    /// calls its column something else; and on a group-scoped attribute, `view`, the column saying
+    /// which view each row's value is for, `view` if absent. Any other field, and `fields` on an
+    /// attribute with no `source`, is refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// Which analyser a `text` column's terms are produced by, by name (decision 0070). Absent
-    /// means [`tessera_analyse::UNICODE`]; present on a non-`text` column is refused, because an
-    /// analyser a column does not use is a setting its author believes is in effect.
+    /// The analyser that turns a `text` column into search terms. This build has `unicode`, and
+    /// refuses any other name. Refused on every other type.
+    ///
+    /// Default: `"unicode"`.
     #[serde(default)]
     analyser: Option<String>,
 }
 
-/// `[[layer]]` — one annotation layer. Artifact-side semantics are `annotation-write-cycle.md`
-/// §6.1's; this is the declaration.
+/// An annotation layer: a named set of artifacts, such as clusters or regions, drawn over one or
+/// more views. An artifact's members are the items it contains. Three keys decide who may learn
+/// that an artifact exists, and none has a default: `visibility`, `artifact_visibility` and
+/// `require_member_visibility`.
+///
+/// A layer's artifacts come from its own `source` file, from `[[layer.artifacts]]` blocks, or
+/// from neither, in which case the layer is declared empty and filled through the control plane.
+/// `[defaults].source` does not reach a layer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LayerBlock {
+    /// The layer's name. Unique among layers, not empty, and not `all` in any case, which a
+    /// viewport request writes for every layer.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
-    /// `[layer.members]` — membership as its own source, one row per `(artifact, entity)`, for a
-    /// membership no single cell should hold.
-    #[serde(default)]
-    members: Option<MembersBlock>,
-    /// `[layer.labels]` — sugar, expanded to a layer of its own before anything here compiles
-    /// ([`expand_labels`]).
-    #[serde(default)]
-    labels: Option<LabelsBlock>,
+    /// The views the layer is drawn on. A view group's name draws it on every view of the group.
+    /// A name no `[[view]]` or `[[view_group]]` declares, and a name given twice, are refused.
+    ///
+    /// Required.
     #[serde(default)]
     views: Option<Vec<String>>,
-    /// `"entity"` (the default) or `{ group = "<view_group>" }` — one artifact set drawn on every
-    /// view the layer names, or a different set per view of the group (`views.md` §3.5,
-    /// decision 0109). The same key an attribute takes, with the same meaning.
+    /// `"entity"`: one set of artifacts drawn on every view the layer names.
+    /// `{ group = "<name>" }`: a set for each view of that group, each artifact naming its view in
+    /// the `view` field, and `views` may name only that group's views.
+    ///
+    /// Type: string or table.
+    ///
+    /// Default: `"entity"`.
     #[serde(default)]
     scope: Option<toml::Value>,
+    /// A name in `[sources]`: the artifacts file, one row per artifact. Refused beside
+    /// `[[layer.artifacts]]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the artifacts file keeps each field, as `field = "column"`. The fields are `key`;
+    /// `members` or `excluding`, on an `enumerated` layer; `contents`, where the layer supplies
+    /// content; `parent`, under a `nested`, `dag` or `tiered` hierarchy; `attached_layer` and
+    /// `attached_key`, where it has `depends_on`; `view`, on a group-scoped layer; `space`, where
+    /// it has a shape or `polygon` content; and the shape's own fields: `min_x`, `min_y`, `max_x`
+    /// and `max_y` for a `bbox`, `cx`, `cy` and `r` for a `circle`, `cx`, `cy`, `a`, `b` and
+    /// `angle` for an `ellipse`, and `geometry`, as WKB, for a `polygon`. `level` and
+    /// `attached_level` are read under their own names. A `members` or `excluding` column is a list
+    /// of structs, each struct one member, with a field for each attribute declared `unique` that
+    /// names it, under the attribute's column. A field the layer does not declare, both `members`
+    /// and `excluding`, and `fields` beside `[[layer.artifacts]]` are refused.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// The artifacts written out in the document itself, instead of `source`
-    /// (`configuration.md` §1). Typed here rather than held as a `toml::Value`, so the inline
-    /// row's own key set is closed by the same `deny_unknown_fields` rule every block is under.
+    /// Artifacts written in the declaration: keys under `[[layer.artifacts]]`. Refused beside
+    /// `source`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     artifacts: Option<Vec<InlineArtifact>>,
-    /// `"enumerated"`, `"spatial"` or `{ attribute = "<field>" }`. Held as a `toml::Value`
-    /// because the third spelling is a table naming the field the predicate reads, and a
-    /// hand-written match reports the three shapes as three shapes rather than as *no variant
-    /// matched* ([`compile_membership`]).
+    /// How an artifact's members are found. `"enumerated"`: a stored set per artifact.
+    /// `"spatial"`: the points inside the artifact's shape. `{ attribute = "<name>" }`: one
+    /// artifact per value of that attribute, which must have `index = true` and a `category`,
+    /// `u8`, `u16` or `u32` type.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    // A `toml::Value` matched by `compile_membership`, which names the mistake in each spelling.
     #[serde(default)]
     membership: Option<toml::Value>,
-    /// `"closed"` (the default) or `"open"` — whether a member key no artifact declares is refused
-    /// or creates one (`artifacts-from-points.md` §3).
+    /// Members as a file of their own, one row per artifact and member: keys under
+    /// `[layer.members]`. Only on an `enumerated` layer, and refused beside a `members` or
+    /// `excluding` field.
+    ///
+    /// Default: not set.
+    #[serde(default)]
+    members: Option<MembersBlock>,
+    /// `"closed"`: the layer's artifacts are the ones its `source` or `[[layer.artifacts]]`
+    /// declare, and a member row naming another is refused. `"open"`: a member row naming a new
+    /// key creates an artifact with that key. Any other value is refused.
+    ///
+    /// Default: `"closed"`.
     #[serde(default)]
     value_set: Option<String>,
+    /// How the layer's artifacts relate to each other: keys under `[layer.hierarchy]`.
+    ///
+    /// Required.
     #[serde(default)]
     hierarchy: Option<HierarchyBlock>,
-    /// `layout` — the serving-layout pin, `"rows"`, `"column"` or `"list"`. Absent, the pick is
-    /// automatic and re-evaluated at every fold (decision 0094).
-    #[serde(default)]
-    layout: Option<String>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    artifact_visibility: Option<ArtifactVisibilityBlock>,
-    #[serde(default)]
-    require_member_visibility: Option<toml::Value>,
-    #[serde(default)]
-    withdraw_on_member_deletion: Option<bool>,
-    #[serde(default)]
-    depends_on: Vec<String>,
+    /// The layer's levels: keys under `[[layer.levels]]`. Required under a `stacked` or `tiered`
+    /// hierarchy, and refused under `nested` and `dag` and on an attribute membership.
     #[serde(default)]
     levels: Vec<LevelBlock>,
+    /// How the layer is stored for serving. `"rows"`: a set of rows per artifact. `"column"`: one
+    /// artifact per row, for a level whose artifacts do not overlap. `"list"`: a list of
+    /// artifacts per row. Refused on an attribute membership.
+    ///
+    /// Default: chosen by the server, again at each compaction.
+    #[serde(default)]
+    layout: Option<String>,
+    /// The access label a viewer must hold to learn that the layer exists, or `public` for every
+    /// viewer. An empty label and `inherited` are refused.
+    ///
+    /// Required.
+    #[serde(default)]
+    visibility: Option<String>,
+    /// What gates each artifact beyond `visibility`: keys under `[layer.artifact_visibility]`.
+    ///
+    /// Required.
+    #[serde(default)]
+    artifact_visibility: Option<ArtifactVisibilityBlock>,
+    /// How much of an artifact's membership a viewer must see for the artifact to be served:
+    /// `"all"`, `"any"`, `{ count = n }` with n at least 1, `{ fraction = p }` with p a float
+    /// above 0 and at most 1, or `"none"` for no such rule. `"all"` and `fraction` are refused on
+    /// a `spatial` or attribute membership.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
+    #[serde(default)]
+    require_member_visibility: Option<toml::Value>,
+    /// Only `false` is accepted. Not built yet: withdrawing an artifact when one of its members
+    /// is deleted. A deleted member leaves the artifact, and its computed content is recomputed
+    /// from the members left.
+    ///
+    /// Default: `false`.
+    // Parsed rather than left unknown, so `true` is refused with a message saying it is not built.
+    #[serde(default)]
+    withdraw_on_member_deletion: Option<bool>,
+    /// Layers whose artifacts this layer's artifacts attach to, through `attached_layer` and
+    /// `attached_key`. Each must be declared before this one. Naming the layer itself is refused,
+    /// and so is `depends_on` on an attribute membership.
+    #[serde(default)]
+    depends_on: Vec<String>,
+    /// What each artifact carries besides its members: keys under `[layer.content]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     content: Option<ContentBlock>,
-    /// `[layer.shape]` — what kind of shape a `membership = "spatial"` layer's artifacts carry
-    /// ([`compile_shape`]).
+    /// The kind of shape each artifact of a `spatial` layer carries: keys under `[layer.shape]`.
+    /// Refused on any other membership. A `spatial` layer without one holds no artifacts.
+    ///
+    /// Default: not set.
     #[serde(default)]
     shape: Option<ShapeBlock>,
-    /// The space the layer's artifact table writes its geometry in, where a row carries no `space`
-    /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
-    /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
-    /// register those two are. Declarable on a layer carrying either kind of geometry: a
-    /// membership shape, or an authored shape content, which is read in the same space (§6.1).
+    /// The space a row of the `source` file writes its geometry in when it names none: `"view"`,
+    /// the view's own coordinates, or `"wgs84"`, longitude and latitude in degrees, which every
+    /// view the layer is drawn on must have a projection to take. Refused on a layer with neither
+    /// a shape nor `polygon` content. A `[[layer.artifacts]]` row without a `space` is in
+    /// `"view"` whatever this says.
+    ///
+    /// Default: `"view"`.
     #[serde(default)]
     default_space: Option<String>,
+    /// A layer of labels for this layer's artifacts, written here: keys under `[layer.labels]`.
+    ///
+    /// Default: not set.
+    #[serde(default)]
+    labels: Option<LabelsBlock>,
 }
 
-/// `[layer.shape]` as written. `kind` is optional *here* and not in the compiled form: absence is
-/// what makes the message name the key rather than reporting *no variant matched*, which is the
-/// same reason `membership` is held as a `toml::Value`. `depth` is held so that one written is
-/// refused naming where it went (`polygon-membership.md` §6.1) rather than as an unknown key.
+/// The kind of shape each artifact of a `spatial` layer carries. An artifact's members are the
+/// points inside its shape.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeBlock {
+    /// `bbox`, `circle`, `ellipse` or `polygon`.
+    ///
+    /// Required.
+    // Optional here so that its absence is refused naming the key.
     #[serde(default)]
     kind: Option<String>,
+    /// Refused: every shape kind is exact, so a shape has no depth.
+    ///
+    /// Type: any.
+    ///
+    /// Default: not set.
     #[serde(default)]
     depth: Option<toml::Value>,
 }
 
-/// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
-///
-/// **For what a person authors**, a dozen curated regions rather than a corpus
-/// (`annotation-write-cycle.md` §6.1). Its keys are the artifact grain's canonical field names and
-/// nothing else: an inline row *is* the canonical spelling, so there is no `fields` map to move one
-/// — which is why declaring both is refused.
+/// One artifact written in the declaration, for a layer a person authors rather than a pipeline
+/// produces. Its keys are the artifacts file's fields under their own names, and a layer written
+/// this way builds the same bundle as the same rows in a file. A shape is written in the key its
+/// layer's `[layer.shape]` kind names.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InlineArtifact {
-    /// The caller's own name for the artifact, which is what an edge into it names.
+    /// The artifact's key, which `parent` and `attached_key` name it by.
     pub key: String,
-    /// The resolution this artifact sits at. `0` for a layer with no levels.
+    /// The level the artifact is at: 0 on a layer with no levels.
     #[serde(default)]
     pub level: u32,
-    /// The membership, by inclusion.
+    /// The members, as a table of columns keyed by the names of attributes declared `unique`, each
+    /// an array of one length, the entries at one position naming one member:
+    /// `members = { geonameid = [2643743, 2988507] }`. A value is a string for a `keyword` field,
+    /// and an integer or a string of its decimal digits for an integer one, the string holding a
+    /// value TOML cannot write as an integer, such as a `u64` from 2^63. A member naming no item
+    /// is refused and reported, and the artifact holds the rest. Only on an `enumerated` layer,
+    /// and refused beside `excluding`.
+    ///
+    /// Type: table of arrays of strings or integers.
+    ///
+    /// Default: not set.
     #[serde(default)]
-    pub members: Option<Vec<u64>>,
-    /// The membership, by exclusion — the entities it leaves out. Complemented once at build
-    /// against the view's entity set, so the published artifact is the one `members` would have
-    /// produced (`annotation-write-cycle.md` §6.1). Declaring both is refused.
+    pub members: Option<MemberTable>,
+    /// The members by exclusion: the items the artifact leaves out, written as `members` is,
+    /// which the build turns into `members`. Only on an `enumerated` layer, and refused beside
+    /// `members`.
+    ///
+    /// Type: table of arrays of strings or integers.
+    ///
+    /// Default: not set.
     #[serde(default)]
-    pub excluding: Option<Vec<u64>>,
-    /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
+    pub excluding: Option<MemberTable>,
+    /// The artifact's content, best first: one array per rank, holding a value for each
+    /// `[[layer.content.supplied]]` entry in order.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,
-    /// The artifact's shape, in its layer's kind's field and no other (`polygon-membership.md`
-    /// §6.1): `bbox = [min_x, min_y, max_x, max_y]`, `circle = [cx, cy, r]`,
-    /// `ellipse = [cx, cy, a, b, angle]` or `wkt = "POLYGON ((…))"`. Refused on a layer whose
-    /// membership is not `spatial`.
+    /// A `bbox` layer's shape: `[min_x, min_y, max_x, max_y]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub bbox: Option<Vec<f64>>,
+    /// A `circle` layer's shape: `[cx, cy, r]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub circle: Option<Vec<f64>>,
+    /// An `ellipse` layer's shape: `[cx, cy, a, b, angle]`, with `a` and `b` its semi-axes and
+    /// `angle` its rotation in degrees.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub ellipse: Option<Vec<f64>>,
+    /// A `polygon` layer's shape, as well-known text: `"POLYGON ((…))"`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub wkt: Option<String>,
-    /// The space the row's geometry is written in — `"view"` if absent, or `"wgs84"`, which a
-    /// view declaring a projection honours by putting the coordinates through it
-    /// (`polygon-membership.md` §4.3). It governs **every** geometry the row declares: the shape
-    /// above, and the authored shape content in a `contents` cell, which is read in the same
-    /// space as the same producer's membership polygon (§6.1).
+    /// The space the row's geometry is written in: `"view"` or `"wgs84"`, which every view the
+    /// layer is drawn on must have a projection to take. It governs the shape and any `polygon`
+    /// content.
+    ///
+    /// Default: `"view"`.
     #[serde(default)]
     pub space: Option<String>,
-    /// The parent artifacts in a hierarchy, by key — one under `nested` or `tiered`, and under
-    /// `dag` as many as the artifact sits beneath (`dag-hierarchies.md` §4). Written as one string
-    /// or as a list; a scalar is a list of one, exactly as the artifact table's `parent` column is
-    /// read.
+    /// The artifact's parents, by key: one under a `nested` or `tiered` hierarchy, and any number
+    /// under `dag`.
+    ///
+    /// Type: string or array of strings.
     #[serde(default, deserialize_with = "one_or_many")]
     pub parent: Vec<String>,
+    /// The layer this artifact attaches to, one that `depends_on` names.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub attached_layer: Option<String>,
+    /// The level of the artifact this one attaches to.
     #[serde(default)]
     pub attached_level: u32,
+    /// The key of the artifact this one attaches to.
+    ///
+    /// Default: not set.
     #[serde(default)]
     pub attached_key: Option<String>,
+    /// The artifact's own access labels, on a layer whose `artifact_visibility` names a `field`:
+    /// one label, a list, or `[]` for none of its own. Such a layer refuses a row without it.
+    ///
+    /// Type: string or array of strings.
+    ///
+    /// Default: not set.
+    #[serde(default, deserialize_with = "stated_one_or_many")]
+    pub access: Option<Vec<String>>,
 }
 
-/// A key written as one string or as a list of them — the two spellings of an artifact row's
-/// `parent` cell, which under `dag` may name several (`dag-hierarchies.md` §4).
+/// [`one_or_many`], for a cell whose absence means something different from an empty list.
+fn stated_one_or_many<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error> {
+    one_or_many(deserializer).map(Some)
+}
+
+/// A key written as one string or as a list of them, as an artifact row's `parent` is.
 fn one_or_many<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Vec<String>, D::Error> {
@@ -661,119 +994,185 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-/// `[layer.labels]` — a label layer, written where it is used.
-///
-/// **Sugar, and sugar exactly**: it carries no key that is not a `[[layer]]` key, and it expands
-/// to a `[[layer]]` block before anything compiles, so a declaration written this way and the
-/// same one written out as a second layer build a byte-identical bundle
-/// (`annotation-write-cycle.md` §6.1). What the expansion supplies is mechanical — the parent's
-/// views, a flat hierarchy, `depends_on` the parent, and the content wrapper around `type`. What
-/// it never supplies is the gate, the membership requirement or the existence of membership data,
-/// each of which is written out here.
+/// A layer of labels for the artifacts of the layer it is written in, such as a name for each
+/// cluster. It builds the same bundle as a second `[[layer]]` written after this one, with the
+/// same `views` and `scope`, `hierarchy = { kind = "flat" }`, `depends_on` naming this layer, and
+/// one `[[layer.content.supplied]]` entry named for the label layer, of type `type`, at the
+/// requirement `[layer.labels.content]` states. Each label names the artifact it labels with
+/// `attached_layer` and `attached_key`. A label layer that needs any other key is written out as a
+/// `[[layer]]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LabelsBlock {
+    /// The label layer's name, as on `[[layer]]`.
     name: String,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// As on `[[layer]]`: the labels file, one row per label.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// As on `[[layer]]`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
-    /// `[layer.labels.members]` — the same block a `[[layer]]` takes, and here for the same
-    /// reason: a label's ranked contents each name the generating set they were drawn from, and a
-    /// `(artifact, rank, entity)` row is the only shape that carries one. Without it the sugar
-    /// could declare content it could never serve.
+    /// As `[layer.members]`: the members each label was made from.
+    ///
+    /// Default: not set.
     #[serde(default)]
     members: Option<MembersBlock>,
+    /// The kind of content each label is: `text`, `polygon`, `extent` or `point`.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
-    /// Written out, never derived: a label's members **are** its generating set, and no build can
-    /// work out from the parent which entities a synthesis was drawn from.
+    /// As on `[[layer]]`.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     membership: Option<toml::Value>,
-    /// A **threshold**: how much of a label's membership a viewer must already see for the label
-    /// to appear at all. `[layer.labels.content]`'s key is not the same dial at a second grain —
-    /// it is a provenance declaration — which is why neither can carry the other.
+    /// As on `[[layer]]`: how much of a label's membership a viewer must see for the label to be
+    /// served.
+    ///
+    /// Type: string or table.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<toml::Value>,
-    /// `[layer.labels.content]` — where the text came from, declared and never supplied. `all`
-    /// says it is a synthesis of the members, so it is read only where every document behind it
-    /// can be; `inherited` says it is true whether or not any of them exists — a name a person
-    /// wrote — and adds no requirement beyond the artifact's gate. Only the caller knows which,
-    /// and the expansion fixing it at `all` decided a disclosure control on their behalf.
+    /// The requirement on each label's content: keys under `[layer.labels.content]`.
+    ///
+    /// Required.
     #[serde(default)]
     content: Option<LabelsContentBlock>,
-    /// Declared, never supplied. It is a disclosure control, so it has no default: the value an
-    /// expansion could pick for a caller who wrote nothing is a value the caller never chose.
+    /// As on `[[layer]]`.
+    ///
+    /// Required.
     #[serde(default)]
     artifact_visibility: Option<ArtifactVisibilityBlock>,
-    /// The one defaulted disclosure control in the surface: absent, this layer takes its parent's
-    /// gate. Admissible only because the value it defaults to is the parent's own and never the
-    /// widest one there is ([`expand_labels`]).
+    /// As on `[[layer]]`.
+    ///
+    /// Default: the `visibility` of the layer it is written in.
     #[serde(default)]
     visibility: Option<String>,
 }
 
-/// `[layer.labels.content]` — the label content's own member requirement. One key, because the
-/// rest of `[layer.content]` has no meaning here: a label layer's content is the label, supplied
-/// by the caller, so there is nothing to compute and the wrapper the expansion writes is the
-/// caller's `type` at the caller's requirement.
+/// The requirement on each label's content, which becomes its content entry's
+/// `require_member_visibility`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LabelsContentBlock {
+    /// `"all"` where the label was made from the items it names, so a viewer reads it only when
+    /// they can see all of them. `"inherited"` where it is true whatever they are, such as a name
+    /// a person wrote.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<String>,
 }
 
-/// `[layer.members]` — membership as its own source, instead of a list field on the artifact row.
-/// Declaring both is refused (`configuration.md` §7).
+/// An `enumerated` layer's members as a file of their own, one row per artifact and member, for
+/// a membership too large for one field of the artifacts file. Under `value_set = "closed"`, a
+/// members file needs the layer's own `source` or `[[layer.artifacts]]` for its rows to name.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembersBlock {
+    /// A name in `[sources]`: the members file.
+    ///
+    /// Default: not set.
     #[serde(default)]
     source: Option<String>,
+    /// Where the members file keeps each field, as `field = "column"`: `key`, the artifact's key;
+    /// each attribute declared `unique`, under its own name, whose values name the member, such
+    /// as `fields = { id = "entity" }`; and `rank`, where the layer supplies content, the rank in
+    /// `contents` whose content was made from this member.
+    ///
+    /// Default: not set.
     #[serde(default)]
     fields: Option<BTreeMap<String, String>>,
 }
 
+/// How a layer's artifacts relate to each other, written as `hierarchy = { kind = "flat" }`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HierarchyBlock {
+    /// `flat`: one population. `nested`: a tree, each artifact naming its `parent`, every artifact
+    /// at level 0. `dag`: the same with any number of parents. `stacked`: independent analyses,
+    /// one per level. `tiered`: levels, each artifact naming a `parent` at a coarser level. An
+    /// attribute membership takes `flat` alone.
+    ///
+    /// Required.
     #[serde(default)]
     kind: Option<String>,
-    /// A rendering default and the one key here carrying no disclosure argument in either
-    /// direction: every artifact served has passed its own test independently.
+    /// Serve only the deepest artifact that passes along each branch.
     #[serde(default)]
     prune_children: bool,
 }
 
+/// One level of a `stacked` or `tiered` layer. Levels are numbered from 0 with none repeated or
+/// missing.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LevelBlock {
+    /// The level's number, which an artifact names in its `level`.
+    ///
+    /// Required.
     #[serde(default)]
     level: Option<u32>,
+    /// A display title, served on `/v1/meta`.
+    ///
+    /// Default: not set.
     #[serde(default)]
     title: Option<String>,
+    /// The zoom levels the level is served at, `[low, high]` inclusive. A request naming no
+    /// levels is answered with the levels whose range covers its zoom. A range with `low` above
+    /// `high`, or starting past 16, is refused.
+    ///
+    /// Default: every zoom.
     #[serde(default)]
     zoom: Option<(u32, u32)>,
 }
 
+/// What each artifact carries besides its members.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContentBlock {
+    /// Properties the server computes from the members each viewer can see: `centroid`, `box`
+    /// and `hull`. Any other name, a name given twice, and `computed` on an attribute membership
+    /// are refused, and so is `hull` beside a shape or `polygon` content, since an artifact draws
+    /// one shape.
     #[serde(default)]
     computed: Vec<String>,
+    /// Content the artifacts carry, one entry per kind: keys under `[[layer.content.supplied]]`.
     #[serde(default)]
     supplied: Vec<SuppliedBlock>,
 }
 
+/// One kind of content each artifact carries, in its `contents`. Refused on an attribute
+/// membership.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppliedBlock {
+    /// The content's name, unique within the layer.
     name: String,
+    /// `text`, `polygon`, `extent` or `point`, published on `/v1/meta` so a client knows how to
+    /// draw it. `polygon` content is the artifact's drawn shape, so it is refused beside a `hull`
+    /// or a `[layer.shape]`.
+    ///
+    /// Required.
     #[serde(rename = "type", default)]
     ty: Option<String>,
+    /// `"all"`: content made from the members, served only to a viewer who can see every member
+    /// it was made from. `"inherited"`: content true whatever the members, such as a name a
+    /// person wrote, gated by the artifact alone.
+    ///
+    /// Required.
     #[serde(default)]
     require_member_visibility: Option<String>,
 }
@@ -851,11 +1250,10 @@ pub struct Config {
 
 /// One file the attribute pass reads, and which declared columns it carries.
 ///
-/// **The grouping is the join.** Every attribute naming one source is read in one merge sweep
-/// over that file against this build's assigned ordinals, so a declaration whose columns sit in
-/// three files pays three passes rather than one impossible one. Two attributes sharing a file but
-/// joining on different identity columns are two groups, because the join key is half of what a
-/// group is.
+/// **A group is a pass.** Every attribute naming one source is read in one sweep over that file,
+/// so a declaration whose columns sit in three files pays three passes rather than one impossible
+/// one. Two attributes sharing a file but locating a unique field in different columns are two
+/// groups, because the columns a row names its item by are half of what a group is.
 #[derive(Debug, Clone)]
 pub struct AttributeSource {
     /// The caller's own name for the file, from `[sources]` — what a refusal and the coverage
@@ -863,8 +1261,8 @@ pub struct AttributeSource {
     pub name: String,
     /// The file itself, resolved against the declaring document and after any `--file` override.
     pub path: PathBuf,
-    /// Where this source's identity field sits. Canonical is `entity_id`; `[defaults]` and each
-    /// attribute's own `entity_id_field` move it.
+    /// Where this source keeps the unique fields its rows name their items by, where the
+    /// attribute's `fields` moved one.
     pub fields: Fields,
     /// Which of [`Schema::attributes`] this file carries, by index, in declaration order. Indices
     /// rather than names because the scalar tail is stored positionally: the declaration's order
@@ -945,12 +1343,12 @@ pub struct View {
     /// (`projections.md` §5). [`Projection::None`] — the default — transforms nothing, and the
     /// coordinates keep exactly the meaning they have in the file.
     pub projection: Projection,
-    /// This view's geometry: `entity_id` with either `x`/`y` or `morton`/`residual`. `None` when
-    /// the view declares no source, which is legal to *declare* and refused at a build that would
-    /// have to read it.
+    /// This view's points: either `x`/`y` or `morton`/`residual` per row. `None` when the view
+    /// declares no source, which is legal to *declare* and refused at a build that would have to
+    /// read it.
     pub source: Option<PathBuf>,
-    /// Where the identity and geometry fields sit in that file. Canonical is `entity_id` with
-    /// either `x`/`y` or `morton`/`residual`.
+    /// Where the geometry and unique fields sit in that file: either `x`/`y` or
+    /// `morton`/`residual`, and the columns of the unique fields.
     ///
     /// **A projected view's coordinate columns are `lon` and `lat`** (`projections.md` §2), and
     /// they resolve onto the canonical `x`/`y` here: what differs is the axis's *meaning* before
@@ -1042,7 +1440,14 @@ impl ViewMetadata {
             | (false, ScalarType::Text)
             | (false, ScalarType::Keyword) => ViewMetadataType::Text,
             (false, ScalarType::TimestampUs) => ViewMetadataType::TimestampUs,
-            (false, _) => ViewMetadataType::Int,
+            (false, ScalarType::U8) => ViewMetadataType::U8,
+            (false, ScalarType::U16) => ViewMetadataType::U16,
+            (false, ScalarType::U32) => ViewMetadataType::U32,
+            (false, ScalarType::U64) => ViewMetadataType::U64,
+            (false, ScalarType::I8) => ViewMetadataType::I8,
+            (false, ScalarType::I16) => ViewMetadataType::I16,
+            (false, ScalarType::I32) => ViewMetadataType::I32,
+            (false, ScalarType::I64) => ViewMetadataType::I64,
         }
     }
 }
@@ -1146,8 +1551,8 @@ pub struct ScopedAttribute {
 pub struct ScopedAttributeFile {
     /// The resolved path of the `[sources]` entry the column named.
     pub path: PathBuf,
-    /// The column that file spells the entity id in — `entity_id_field`, or the default.
-    pub entity_id: String,
+    /// Where that file keeps the unique fields its rows name their items by.
+    pub fields: Fields,
     /// The discriminator column — the attribute's `fields.view`, resolved; `view` by default.
     pub view_field: String,
 }
@@ -1272,18 +1677,6 @@ impl LonLatBox {
 /// boundary point is inside it. A corpus that will *grow* needs a real margin, and says so.
 pub const DEFAULT_AUTO_MARGIN: f64 = 0.01;
 
-/// The share of a view's points that may sit on the frame's boundary before the build refuses
-/// rather than reports.
-///
-/// **Half, and the argument is what a clamped point *is*.** A clamped point's stored position is
-/// not its own — it is the frame's — so a frame that misplaces the majority of a corpus is not
-/// that corpus's frame; it describes some other data. Below half a clamp is a tail (outliers, a
-/// margin left for growth, a deliberately generous box) and the caller may well mean it, which is
-/// why the report is unconditional and only this is a refusal. There is no escape flag: the extent
-/// quantises, it never filters, so a frame chosen to *crop* piles the rest of the corpus onto the
-/// border instead of excluding it — filtering the source is what that caller wants.
-pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
-
 /// The frame a view is quantised against, beside what the data actually does inside it.
 ///
 /// **The two travel together because neither is readable alone.** An extent is four numbers that
@@ -1342,8 +1735,8 @@ impl Frame {
     /// projection clipped at its own domain (`projections.md` §8).
     ///
     /// Reported rather than merely available: the whole defect this closes was a build that had
-    /// every one of these numbers and printed none of them. **It never refuses** — the refusal
-    /// this frame may earn is [`Frame::refusal`], and clipping is not among its causes (§7).
+    /// every one of these numbers and printed none of them. Neither a clamp nor a clip refuses a
+    /// build, as neither refuses an ingest.
     pub fn report(&self) -> String {
         let e = &self.extent;
         // **The projection is named beside the frame, and only where there is one.** Under
@@ -1487,37 +1880,6 @@ impl Frame {
             snap.square.z, snap.square.x, snap.square.y
         )
     }
-
-    /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
-    /// this corpus's frame, and building would write a bundle that is well-formed with the
-    /// geometry wrong.
-    pub fn refusal(&self) -> Option<String> {
-        let survey = self.coordinates()?;
-        if survey.clamped_fraction() <= CLAMP_REFUSAL_FRACTION {
-            return None;
-        }
-        let data = survey.bounds?;
-        Some(format!(
-            "{}: {} of {} point(s) ({:.1}%) would be stored on the frame's edge rather \
-             than where they were written. The frame is x [{}, {}], y [{}, {}]; the data spans x \
-             [{}, {}], y [{}, {}]. Past half the corpus this is not a tail, it is the wrong frame \
-             — quantisation clamps rather than filters, so a bundle built here is well-formed \
-             with the geometry wrong. Write `extent = \"auto\"` to fit the data, or state the box \
-             the data is actually in; filter the source if the intent was to crop",
-            self.subject,
-            survey.clamped,
-            survey.rows,
-            survey.clamped_fraction() * 100.0,
-            self.extent.x_min,
-            self.extent.x_max,
-            self.extent.y_min,
-            self.extent.y_max,
-            data.x_min,
-            data.x_max,
-            data.y_min,
-            data.y_max,
-        ))
-    }
 }
 
 /// Resolve a view's declared [`Extent`] into the frame this build quantises against, **and survey
@@ -1536,13 +1898,15 @@ impl Frame {
 /// The refusals here are the ones `auto` cannot answer for itself: an empty selection frames
 /// nothing, and a Morton points file carries no coordinates to frame (that one is refused by
 /// [`crate::input::survey_points`], naming the extent to write instead).
+///
+/// The frame is fitted over every row of the view's points. Under `--limit` the build fits it
+/// after the identity pass, over the rows that pass kept ([`crate::Framing`]).
 pub fn frame_view(
     view: &str,
     projection: Projection,
     extent: &Extent,
     points: &Path,
     fields: &Fields,
-    limit: Option<u64>,
 ) -> Result<Frame> {
     frame_of(
         &format!("view '{view}'"),
@@ -1552,8 +1916,8 @@ pub fn frame_view(
             points,
             fields,
             select: None,
+            kept: None,
         }],
-        limit,
     )
 }
 
@@ -1564,6 +1928,8 @@ pub struct FrameSource<'a> {
     pub points: &'a Path,
     pub fields: &'a Fields,
     pub select: Option<&'a ViewSelector>,
+    /// The rows the identity pass kept, where the frame is fitted after it.
+    pub kept: Option<crate::input::KeptRows<'a>>,
 }
 
 /// [`frame_view`] over **several** sources, which is what a group's one frame is fitted to.
@@ -1579,7 +1945,6 @@ pub fn frame_of(
     projection: Projection,
     extent: &Extent,
     sources: &[FrameSource],
-    limit: Option<u64>,
 ) -> Result<Frame> {
     let survey_all = |against: Option<&Bounds>| -> Result<PointSurvey> {
         let mut surveys = Vec::with_capacity(sources.len());
@@ -1588,13 +1953,14 @@ pub fn frame_of(
                 source.points,
                 source.fields,
                 projection,
-                limit,
+                source.kept,
                 source.select,
                 against,
             )?);
         }
         union_surveys(name, surveys)
     };
+
     let margin = match extent {
         Extent::Fixed(bounds) => {
             let survey = survey_all(Some(bounds))?;
@@ -2032,7 +2398,7 @@ pub struct AccessInput {
 /// The acquisition half of [`AccessInput`].
 #[derive(Debug, Clone)]
 pub enum AccessSource {
-    /// `point_visibility.source`: a separate exploded `(entity_id, term_id)` relation, one row per
+    /// `point_visibility.source`: a separate exploded `(unique value, term_id)` relation, one row per
     /// `(point, term)`. The shape the probe generators produce natively at 10⁹.
     Relation(PathBuf),
     /// `point_visibility.field`: a `list<string>` — or a plain `string`, where a point carries one
@@ -2061,7 +2427,7 @@ impl AccessInput {
 pub struct PointVisibility {
     /// A column of the view's own source, carrying one label or a list per point.
     pub field: Option<String>,
-    /// The exploded `(entity_id, term_id)` relation, bound.
+    /// The exploded `(unique value, term_id)` relation, bound.
     pub source: Option<PathBuf>,
     /// **Never `inherited`.** A point carrying no terms is in no posting list and so in no
     /// principal's mask, and a gate narrows rather than widens — so there is nothing for a point to
@@ -2127,6 +2493,8 @@ pub struct Attribute {
     /// tail would put a per-row string in the hot column by the back door, at 0.93 GiB per byte
     /// per row per 10⁹.
     pub render: bool,
+    /// Declared `unique`: the build writes the column's index and refuses a value held twice.
+    pub unique: bool,
 }
 
 /// Whether an unknown key is refused or minted — [`tessera_types::layer::ValueSet`], one type for
@@ -2134,7 +2502,7 @@ pub struct Attribute {
 ///
 /// On a **vocabulary** open means an unknown key is minted a fresh code, drawn at random from the
 /// declared width's unused space by [`tessera_store::vocabulary::VocabularyMinter`] — the same
-/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or assign codes
+/// routine ingest uses, so exhaustion is one predicate. Declared values still pin or draw codes
 /// exactly as a closed vocabulary's do; the build mints only for keys the declaration does not
 /// carry, and an open vocabulary given no values at all is legal and starts empty. On a **layer**
 /// it means an unknown member key mints an artifact (`artifacts-from-points.md` §3).
@@ -2148,19 +2516,13 @@ pub struct Vocabulary {
     /// as `MANIFEST.vocabularies[..].values[..].title`.
     pub title: Option<String>,
     pub value_set: ValueSet,
-    /// `public` or `derived` (`per-point-attributes.md` §3.8). Recorded and published; **not yet
-    /// enforced anywhere**, there being no `/v1/categories` to filter.
-    pub visibility: Visibility,
     /// The **code space's** width, which is why it lives here and not on a column
     /// (`per-point-attributes.md` §3.9).
     pub width: ScalarType,
-    /// Value key → code, pinned by the caller or assigned by the build — the compiled form does
-    /// not distinguish them, because `MANIFEST.json` is the record either way. For an open
-    /// vocabulary this is what the declaration carried *before* the build; the codes minted during
-    /// the run live in the minter [`Schema::open_minters`] returns.
-    pub codes: BTreeMap<String, u32>,
-    /// Per-value presentation, keyed as `codes` is. Absent for a value the author gave no title.
-    pub titles: BTreeMap<String, String>,
+    /// Each value's code, pinned by the caller or drawn by the build, with its title and the
+    /// vocabulary's visibility. For an open vocabulary this is what the declaration carried; the
+    /// codes minted during the run live in the minter [`Schema::open_minters`] returns.
+    pub values: VocabularyMinter,
     /// Retired codes, never reassigned (Protobuf's `reserved`).
     pub reserved: Vec<u32>,
 }
@@ -2172,9 +2534,9 @@ pub struct Vocabulary {
 /// converge, so no spelling can acquire a rule the others lack.
 #[derive(Debug, Clone, Default)]
 pub struct DeclaredValues {
-    /// Value key → code, where the caller pinned one. A key with no entry here is assigned.
+    /// Value key → code, where the caller pinned one. A key with no entry here is drawn a code.
     pub codes: BTreeMap<String, u32>,
-    /// Declaration order, which is assignment order for the keys that pinned nothing.
+    /// Declaration order, in which the keys that pinned nothing are drawn codes.
     pub order: Vec<String>,
     /// Per-value presentation, keyed as `codes` is; absent for a value given no title.
     pub titles: BTreeMap<String, String>,
@@ -2208,7 +2570,12 @@ impl Vocabulary {
     /// *absent*: the declare-then-use rule exists because a category carries properties and,
     /// through its postings, a visibility consequence, so a typo must not create one.
     pub fn code_of(&self, key: &str) -> Option<u32> {
-        self.codes.get(key).copied()
+        self.values.code_of(key)
+    }
+
+    /// `public` or `derived` (`per-point-attributes.md` §3.8).
+    pub fn visibility(&self) -> Visibility {
+        self.values.visibility()
     }
 }
 
@@ -2235,7 +2602,7 @@ impl Config {
     /// the names that exist, an override naming no key is a refusal too, and an override never
     /// *creates* a source — so a closed vocabulary cannot be opened from the command line.
     pub fn parse(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
-        Config::parse_as(path, overrides, Strictness::Build)
+        Config::parse_with(path, overrides, Strictness::Build)
     }
 
     /// Parse `path` for `tessera check`: a block that names no file compiles as declared and
@@ -2243,10 +2610,15 @@ impl Config {
     ///
     /// [`parse`]: Config::parse
     pub fn parse_declared(path: &Path, overrides: &HashMap<String, PathBuf>) -> Result<Config> {
-        Config::parse_as(path, overrides, Strictness::Declared)
+        Config::parse_with(path, overrides, Strictness::Declared)
     }
 
-    fn parse_as(
+    /// [`parse`] or [`parse_declared`], chosen by `strictness` — for a caller that holds the
+    /// strictness as a value rather than knowing which reader it is.
+    ///
+    /// [`parse`]: Config::parse
+    /// [`parse_declared`]: Config::parse_declared
+    pub fn parse_with(
         path: &Path,
         overrides: &HashMap<String, PathBuf>,
         strictness: Strictness,
@@ -2259,7 +2631,7 @@ impl Config {
         // the working directory — which is what `Path::new("")` joins to.
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
         let sources = Sources::compile(&base, file.sources.as_ref(), overrides)?;
-        let defaults = Defaults::compile(file.defaults.as_ref(), &sources)?;
+        let defaults = Defaults::compile(file.defaults.as_ref(), &file.attribute, &sources)?;
         let views = compile_views(&file.view, &sources, &defaults)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         // Groups after the vocabularies a category's metadata draws on, and after the views whose
@@ -2327,38 +2699,37 @@ impl Config {
     /// view owns everything downstream of the permutation and nothing upstream of it
     /// (`views.md` §1).
     pub fn acquire(&self) -> Result<Acquisition> {
-        // **Every declared column must have a file by now.** Declaring one with no source is
-        // legal (§2) and is the write-path deployment's normal state; a build that would have to
-        // read it is where the absence becomes a refusal, naming the columns rather than the block
-        // — which is what `[corpus]` could not do, there being one file for all of them.
-        let mut carried: Vec<usize> = self
-            .attribute_sources
-            .iter()
-            .flat_map(|s| s.attributes.iter().copied())
-            .collect();
-        carried.sort_unstable();
-        let unsourced: Vec<&str> = (0..self.schema.attributes.len())
-            .filter(|i| carried.binary_search(i).is_err())
-            .map(|i| self.schema.attributes[i].name.as_str())
-            .collect();
-        if !unsourced.is_empty() {
-            return Err(declaration_error(format!(
-                "{} attribute(s) name no `source` and `[defaults]` declares none: {}. The \
-                 attribute pass reads each column from the file its source names, joined to the \
-                 view's geometry by the entity id, so there is no file for these to be read from. \
-                 Name a `[sources]` key on each, or write `[defaults]` with `source = \"<name>\"` \
-                 for every column that does not. ⊘ Declaring a column with no source is legal and \
-                 means the schema is declared and empty, which is a bundle with no rows in it (§2) \
-                 and is not built",
-                unsourced.len(),
-                names(unsourced.iter().copied())
-            )));
-        }
+        require_sources(&self.schema, &self.attribute_sources)?;
         Ok(Acquisition {
             attribute_sources: self.attribute_sources.clone(),
             layers: self.layer_sources.clone(),
         })
     }
+}
+
+/// Refuse a declared attribute no source reads, naming the columns. A unique attribute is the
+/// exception: its values come from every file that carries its column, so it needs no source of
+/// its own.
+pub fn require_sources(schema: &Schema, sources: &[AttributeSource]) -> Result<()> {
+    let mut carried: Vec<usize> = sources
+        .iter()
+        .flat_map(|s| s.attributes.iter().copied())
+        .collect();
+    carried.sort_unstable();
+    let unsourced: Vec<&str> = (0..schema.attributes.len())
+        .filter(|&i| !schema.attributes[i].unique && carried.binary_search(&i).is_err())
+        .map(|i| schema.attributes[i].name.as_str())
+        .collect();
+    if unsourced.is_empty() {
+        return Ok(());
+    }
+    Err(declaration_error(format!(
+        "{} attribute(s) name no `source` and `[defaults]` declares none: {}, so no file holds \
+         their values. Name a `[sources]` key on each, or write `[defaults]` with \
+         `source = \"<name>\"`",
+        unsourced.len(),
+        names(unsourced.iter().copied())
+    )))
 }
 
 /// One view's own inputs: its geometry source and where its points' labels come from.
@@ -2371,8 +2742,8 @@ pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
     let points = view.source.clone().ok_or_else(|| {
         declaration_error(format!(
             "view '{}': `source` is required to build from a file (configuration.md §1). \
-             It is the path — relative to this config — of this view's geometry: `entity_id` \
-             with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
+             It is the path — relative to this config — of this view's points, each carrying \
+             either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
              means the view is declared and empty, which is a bundle with no rows in it (§2) \
              and is not built",
             view.id
@@ -2415,9 +2786,8 @@ pub struct ViewAcquisition {
 /// frame it quantises against.
 #[derive(Debug, Clone)]
 pub struct Acquisition {
-    /// The declared attributes grouped by the file each is read from — one pass per group, joined
-    /// to entity space by the identity column each group names. Empty for an empty schema; an
-    /// attribute with no file to read it from is refused at parse.
+    /// The declared attributes grouped by the file each is read from — one pass per group. Empty
+    /// for an empty schema; an attribute with no file to read it from is refused at parse.
     pub attribute_sources: Vec<AttributeSource>,
     /// Each layer's own artifacts and members, in declaration order. **One source per layer**, so
     /// no row anywhere names the layer it belongs to.
@@ -2461,7 +2831,7 @@ impl Schema {
     }
 
     /// One live [`VocabularyMinter`] per **open** vocabulary, seeded from whatever it already
-    /// carries — the declaration's codes, pinned or assigned, plus `reserved`. A closed vocabulary
+    /// carries — the declaration's codes, pinned or drawn, plus `reserved`. A closed vocabulary
     /// mints nothing and has no entry here at all, so `input::scan_attributes`'s batch-level mint
     /// pre-pass can never reach one.
     ///
@@ -2474,21 +2844,7 @@ impl Schema {
             if vocabulary.value_set != ValueSet::Open {
                 continue;
             }
-            let mut minter = VocabularyMinter::new(
-                vocabulary.name.clone(),
-                tessera_store::manifest::VocabularyKind::Discovered,
-                vocabulary.visibility,
-                vocabulary.width,
-            );
-            for (key, &code) in &vocabulary.codes {
-                minter
-                    .seed_value(key, code)
-                    .expect("check_codes already proved this vocabulary's codes are consistent");
-            }
-            for &code in &vocabulary.reserved {
-                minter.seed_reserved(code);
-            }
-            minters.insert(vocabulary.name.clone(), minter);
+            minters.insert(vocabulary.name.clone(), vocabulary.values.clone());
         }
         minters
     }
@@ -2606,34 +2962,92 @@ impl Sources {
     }
 }
 
-/// `[defaults]` — the source and the identity column a block takes when it names neither.
+/// `[defaults]`: the source a block takes when it names none, and the view that orders ids.
 ///
-/// **Two defaults, and they reach different blocks on purpose.** `entity_id_field` reaches every
-/// source read under the canonical `entity_id`: it says how this caller spells identity, and a
-/// corpus does not spell it three ways across three files. `source` reaches only the two blocks
-/// whose absent source is *nothing at all* — a `[[view]]`'s geometry and an `[[attribute]]`'s
-/// column, each of which a build has to read from somewhere. It deliberately does **not** reach a
-/// vocabulary, a layer, a `[layer.members]` block or a `point_visibility`, because there an absent
-/// source is itself a declaration: a vocabulary that mints rather than reads, a layer declared and
-/// empty, a membership that is not stored, labels that ride the points' own column. Filling one of
-/// those in would turn a declaration into an acquisition nobody wrote.
+/// **`source` reaches only the two blocks whose absent source is *nothing at all*** — a
+/// `[[view]]`'s geometry and an `[[attribute]]`'s column, each of which a build has to read from
+/// somewhere. It does not reach a vocabulary, a layer, a `[layer.members]` block or a
+/// `point_visibility`, because there an absent source is itself a declaration: a vocabulary that
+/// mints rather than reads, a layer declared and empty, a membership that is not stored, labels
+/// that ride the points' own column. Filling one of those in would turn a declaration into an
+/// acquisition nobody wrote.
 #[derive(Debug, Clone)]
 struct Defaults {
     /// The `[sources]` name, already checked to exist.
     source: Option<String>,
-    /// The column an entity id is read from. `entity_id` where the declaration says nothing.
-    entity_id_field: String,
+    /// The attributes declared `unique`, by name: the fields a block's `fields` may locate beside
+    /// its own, because a row names its item by them.
+    unique: Vec<String>,
     /// `[defaults].allocation_view` as written. Resolved against the built view registry by
     /// [`Config::anchor_view`], not here: the groups are compiled after `[defaults]` is.
     allocation_view: Option<String>,
 }
 
+/// A value of a unique field as a declaration writes it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum MemberValue {
+    Integer(i64),
+    Text(String),
+}
+
+/// A membership written in the declaration: a column of values per unique field, by name, each of
+/// one length, the entries at one position naming one member.
+pub type MemberTable = BTreeMap<String, Vec<MemberValue>>;
+
+/// An inline membership's columns: each named by an attribute declared `unique`, and all of one
+/// length, since the entries at one position name one member.
+fn check_member_table(object: &str, key: &str, table: &MemberTable, unique: &[String]) -> Result<()> {
+    if table.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: artifact '{key}': a membership table with no column. Write the members as \
+             `{{ <unique field> = [ … ] }}`"
+        )));
+    }
+    let mut length: Option<usize> = None;
+    for (field, values) in table {
+        if !unique.contains(field) {
+            return Err(declaration_error(format!(
+                "{object}: artifact '{key}': the membership column '{field}' is not an attribute \
+                 declared `unique`, and a member is named by those: {}",
+                names(unique.iter().map(String::as_str))
+            )));
+        }
+        match length {
+            Some(first) if first != values.len() => {
+                return Err(declaration_error(format!(
+                    "{object}: artifact '{key}': the membership columns have {first} and {} \
+                     entries. The entries at one position name one member, so write every column \
+                     at one length",
+                    values.len()
+                )));
+            }
+            _ => length = Some(values.len()),
+        }
+    }
+    Ok(())
+}
+
+/// The names of the attributes declared `unique`, in declaration order.
+fn unique_names(attributes: &[AttributeBlock]) -> Vec<String> {
+    attributes
+        .iter()
+        .filter(|a| a.unique)
+        .map(|a| a.name.clone())
+        .collect()
+}
+
 impl Defaults {
-    fn compile(block: Option<&DefaultsBlock>, sources: &Sources) -> Result<Defaults> {
+    fn compile(
+        block: Option<&DefaultsBlock>,
+        attributes: &[AttributeBlock],
+        sources: &Sources,
+    ) -> Result<Defaults> {
+        let unique = unique_names(attributes);
         let Some(block) = block else {
             return Ok(Defaults {
                 source: None,
-                entity_id_field: ENTITY_ID.to_string(),
+                unique,
                 allocation_view: None,
             });
         };
@@ -2643,18 +3057,9 @@ impl Defaults {
             // took it.
             sources.path("[defaults]", source)?;
         }
-        let entity_id_field =
-            match block.entity_id_field.as_deref() {
-                None => ENTITY_ID.to_string(),
-                Some(field) if field.trim().is_empty() => return Err(declaration_error(
-                    "[defaults]: `entity_id_field` is empty, so it names no column. Omit it to \
-                     read the entity id under its own name, `entity_id`",
-                )),
-                Some(field) => field.to_string(),
-            };
         Ok(Defaults {
             source: block.source.clone(),
-            entity_id_field,
+            unique,
             allocation_view: block.allocation_view.clone(),
         })
     }
@@ -2704,10 +3109,13 @@ impl KnownField {
 /// The object is carried with the names because it is half of the refusal: *which declaration*
 /// asked for a column the file does not carry is the part a caller acts on, and a reader deep in a
 /// Parquet decode has no other way to know it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Fields {
     object: String,
     map: BTreeMap<String, String>,
+    /// The columns the map moved an attribute declared `unique` to, by the attribute's name. An
+    /// attribute not here is read from its own column (`Attribute::column`).
+    unique: BTreeMap<String, String>,
 }
 
 impl Fields {
@@ -2715,7 +3123,7 @@ impl Fields {
     pub fn canonical(object: impl Into<String>) -> Fields {
         Fields {
             object: object.into(),
-            map: BTreeMap::new(),
+            ..Fields::default()
         }
     }
 
@@ -2731,7 +3139,19 @@ impl Fields {
                 .into_iter()
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
+            unique: BTreeMap::new(),
         }
+    }
+
+    /// These names, with the attribute declared `unique` named `attribute` read from `column`.
+    pub fn moving_unique(mut self, attribute: impl Into<String>, column: impl Into<String>) -> Fields {
+        self.unique.insert(attribute.into(), column.into());
+        self
+    }
+
+    /// The column the map moved the unique attribute `attribute` to, or `None` where it did not.
+    pub fn unique_column(&self, attribute: &str) -> Option<&str> {
+        self.unique.get(attribute).map(String::as_str)
     }
 
     /// The declaration these names came from, for a refusal to name.
@@ -2764,70 +3184,82 @@ impl Fields {
 
 /// Check one object's `fields` map — every name known, every name declared — and resolve it.
 ///
-/// `entity_id` is where this declaration spells the identity column — `[defaults]`'s, or the
-/// canonical name. **Folded into the resolved map rather than consulted by the reader**, so an
-/// object whose own map moves `entity_id` keeps its own answer and every reader below this asks
-/// one question instead of two.
+/// `unique` is the attributes declared `unique` where the object's file names items, and empty
+/// where it does not: a row names the item it belongs to by those columns, so the map may locate
+/// each of them beside the object's own fields.
 fn check_fields(
     object: &str,
     source: Option<&PathBuf>,
     known: &[KnownField],
     map: Option<&BTreeMap<String, String>>,
-    entity_id: &str,
+    unique: &[String],
 ) -> Result<Fields> {
-    let takes_entity_id = known.iter().any(|f| f.name == ENTITY_ID);
-    let Some(map) = map else {
-        let mut fields = Fields::canonical(object);
-        if takes_entity_id && entity_id != ENTITY_ID {
-            fields
-                .map
-                .insert(ENTITY_ID.to_string(), entity_id.to_string());
-        }
-        return Ok(fields);
+    let written = || {
+        names(
+            known
+                .iter()
+                .map(|f| f.name.as_str())
+                .chain(unique.iter().map(String::as_str)),
+        )
     };
+    let empty = BTreeMap::new();
+    let declared = map.unwrap_or(&empty);
     // A map with no source names the fields of nothing. Refused rather than kept for a source that
     // may arrive later: the object reads no file at all, so every entry in it is inert.
-    if source.is_none() {
+    if map.is_some() && source.is_none() {
         return Err(declaration_error(format!(
             "{object}: `fields` without a `source`. The map locates this object's fields in the \
              file its source names, and this object names none — so there is no file for the names \
              to be read out of"
         )));
     }
-    for (canonical, actual) in map {
-        let Some(field) = known.iter().find(|f| f.name == *canonical) else {
+    let mut resolved = BTreeMap::new();
+    let mut moved_unique = BTreeMap::new();
+    for (name, actual) in declared {
+        let field = known.iter().find(|f| f.name == *name);
+        if unique.contains(name) {
+            if field.is_some() {
+                return Err(declaration_error(format!(
+                    "{object}: `fields.{name}` could locate this object's own field `{name}` or \
+                     the unique attribute of that name. Rename the attribute"
+                )));
+            }
+            if actual.trim().is_empty() {
+                return Err(declaration_error(format!(
+                    "{object}: `fields.{name}` is empty, so it names no column. Omit the entry \
+                     to read `{name}` from its own column"
+                )));
+            }
+            moved_unique.insert(name.clone(), actual.clone());
+            continue;
+        }
+        let Some(field) = field else {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` is not one of this object's fields. They are: {}. \
+                "{object}: `fields.{name}` is not one of this object's fields. They are: {}. \
                  The map says where a field is and never whether there is one, so a name outside \
                  the set is refused rather than passed to the reader",
-                names(known.iter().map(|f| f.name.as_str()))
+                written()
             )));
         };
         if let Some(why) = &field.undeclared {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` names a field this object never declared — {why}. \
+                "{object}: `fields.{name}` names a field this object never declared — {why}. \
                  `fields` says *where* a field is, never *whether* there is one, so locating one \
                  nothing declared is refused rather than read as the declaration"
             )));
         }
         if actual.trim().is_empty() {
             return Err(declaration_error(format!(
-                "{object}: `fields.{canonical}` is empty, so it names no column. Omit the entry to \
-                 read `{canonical}` under its own name"
+                "{object}: `fields.{name}` is empty, so it names no column. Omit the entry to \
+                 read `{name}` under its own name"
             )));
         }
-    }
-    let mut resolved = map.clone();
-    if takes_entity_id && entity_id != ENTITY_ID {
-        // The object's own map wins: `[defaults]` says how this declaration usually spells
-        // identity, and a block naming its own column has said otherwise.
-        resolved
-            .entry(ENTITY_ID.to_string())
-            .or_insert_with(|| entity_id.to_string());
+        resolved.insert(name.clone(), actual.clone());
     }
     Ok(Fields {
         object: object.to_string(),
         map: resolved,
+        unique: moved_unique,
     })
 }
 
@@ -2980,13 +3412,11 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
 // Attribute sources
 // ---------------------------------------------------------------------------------------------
 
-/// Group the declared attributes by the file each is read from, and the column each joins on.
+/// Group the declared attributes by the file each is read from, and the columns its rows name
+/// their items by.
 ///
-/// **The grouping is what replaced `[corpus]`.** That block named one file every attribute was
-/// read from, and the constraint was arbitrary: what it guaranteed — that every attribute lands in
-/// one entity space — is guaranteed by the entity id and never was by the file. So a column may
-/// name its own `source` and its own `entity_id_field`, and the build runs the attribute pass once
-/// per `(source, identity column)` pair rather than once over one file.
+/// A column may name its own `source`, and its `fields` may move a unique field's column in that
+/// file, so the build reads the file once per `(source, unique columns)` pair.
 ///
 /// Groups come out in the order each group's **first** attribute was declared, and each group's
 /// indices ascend. That order is not cosmetic anywhere it is read: the scalar tail is stored
@@ -3022,35 +3452,33 @@ fn compile_attribute_sources(
         // and the empty bundle is what carries the schema. A build that has to read the column is
         // where that becomes a refusal ([`Config::acquire`]), naming the columns with nowhere to
         // read from.
-        let name = match (&block.source, &defaults.source) {
-            (Some(declared), _) => declared.clone(),
-            (None, Some(fallback)) => fallback.clone(),
-            (None, None) => continue,
+        let name = block.source.as_ref().or(defaults.source.as_ref());
+        let path = match name {
+            Some(name) => Some(sources.path(&object, name)?),
+            None => None,
         };
-        let path = sources.path(&object, &name)?;
-        let entity_id = match block.entity_id_field.as_deref() {
-            None => defaults.entity_id_field.clone(),
-            Some(field) if field.trim().is_empty() => {
-                return Err(declaration_error(format!(
-                    "{object}: `entity_id_field` is empty, so it names no column. Omit it to join \
-                     on '{}', which is what this declaration spells the entity id",
-                    defaults.entity_id_field
-                )))
-            }
-            Some(field) => field.to_string(),
+        let fields = check_fields(
+            &object,
+            path.as_ref(),
+            &[],
+            block.fields.as_ref(),
+            &defaults.unique,
+        )?;
+        let (Some(name), Some(path)) = (name, path) else {
+            continue;
         };
         match groups
             .iter_mut()
-            .find(|g| g.name == name && g.fields.of(ENTITY_ID) == entity_id)
+            .find(|g| g.name == *name && g.fields.unique == fields.unique)
         {
             Some(group) => group.attributes.push(index),
             None => groups.push(AttributeSource {
                 name: name.clone(),
                 path,
-                fields: Fields::moved(
-                    format!("source '{name}'"),
-                    [(ENTITY_ID.to_string(), entity_id)],
-                ),
+                fields: Fields {
+                    object: format!("source '{name}'"),
+                    ..fields
+                },
                 attributes: vec![index],
             }),
         }
@@ -3108,6 +3536,7 @@ fn compile_views(
         } else {
             compile_projected_fields(
                 &object,
+                projection,
                 source.as_ref(),
                 block.fields.as_ref(),
                 defaults,
@@ -3151,18 +3580,14 @@ fn compile_projection(object: &str, declared: Option<&str>) -> Result<Projection
     };
     Projection::from_name(name).ok_or_else(|| {
         declaration_error(format!(
-            "{object}: `projection = \"{name}\"` is not one of the projections this service \
-             transforms with. They are: web_mercator, equirectangular, plate_carree, \
-             gall_isographic, none (projections.md §5). The set is closed and stays cylindrical — \
-             a conic or azimuthal entry would stop a longitude/latitude rectangle being a \
-             rectangle, which is what lets an extent be written in degrees — and no datum shift, \
-             national grid or caller-supplied projection is accepted"
+            "{object}: no projection named '{name}'. They are web_mercator, equirectangular, \
+             plate_carree, gall_isographic and none"
         ))
     })
 }
 
-/// An unprojected view's or group's `fields`: `entity_id` with either `x`/`y` or
-/// `morton`/`residual` (`configuration.md` §1), plus whatever `extra` its own block declares.
+/// An unprojected view's or group's `fields`: either `x`/`y` or `morton`/`residual`
+/// (`configuration.md` §1), the unique fields, and whatever `extra` its own block declares.
 ///
 /// **The two geometry shapes are mutually exclusive**: a row carries coordinates or a code, so a
 /// map naming one of each says the file has two geometries and leaves the reader to pick. The
@@ -3177,7 +3602,7 @@ fn compile_unprojected_fields(
     extra: Vec<KnownField>,
 ) -> Result<Fields> {
     if let Some(declared) = declared_fields {
-        for (geographic, axis) in [("lon", "x"), ("lat", "y")] {
+        for (geographic, axis) in other_axis_names(Projection::None) {
             if declared.contains_key(geographic) {
                 return Err(declaration_error(format!(
                     "{object}: `fields.{geographic}` on a view that declares no projection. There \
@@ -3189,10 +3614,10 @@ fn compile_unprojected_fields(
             }
         }
     }
+    let (x, y) = axis_names(Projection::None);
     let mut known = vec![
-        KnownField::always(ENTITY_ID),
-        KnownField::always("x"),
-        KnownField::always("y"),
+        KnownField::always(x),
+        KnownField::always(y),
         KnownField::always("morton"),
         KnownField::always("residual"),
     ];
@@ -3202,7 +3627,7 @@ fn compile_unprojected_fields(
         source,
         &known,
         declared_fields,
-        &defaults.entity_id_field,
+        &defaults.unique,
     )?;
     if let Some(declared) = declared_fields {
         let quantised = declared.contains_key("x") || declared.contains_key("y");
@@ -3225,8 +3650,7 @@ fn compile_unprojected_fields(
     Ok(fields)
 }
 
-/// A projected view's `fields`: `entity_id` with `lon` and `lat`, and nothing else
-/// (`projections.md` §2).
+/// A projected view's `fields`: `lon` and `lat`, and the unique fields (`projections.md` §2).
 ///
 /// **The resolved map keys the coordinates on the canonical `x`/`y`**, so every reader below this
 /// point sees a coordinate pair and the axis names are a property of the declaration alone. What
@@ -3236,13 +3660,14 @@ fn compile_unprojected_fields(
 /// the ambiguity rather than documenting it.
 fn compile_projected_fields(
     object: &str,
+    projection: Projection,
     source: Option<&PathBuf>,
     declared_fields: Option<&BTreeMap<String, String>>,
     defaults: &Defaults,
     extra: Vec<KnownField>,
 ) -> Result<Fields> {
     if let Some(declared) = declared_fields {
-        for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+        for (axis, geographic) in other_axis_names(projection) {
             if declared.contains_key(axis) {
                 return Err(declaration_error(format!(
                     "{object}: `fields.{axis}` on a projected view. A projected view's \
@@ -3265,10 +3690,10 @@ fn compile_projected_fields(
             }
         }
     }
+    let (lon, lat) = axis_names(projection);
     let mut known = vec![
-        KnownField::always(ENTITY_ID),
-        KnownField::always("lon"),
-        KnownField::always("lat"),
+        KnownField::always(lon),
+        KnownField::always(lat),
     ];
     known.extend(extra);
     let fields = check_fields(
@@ -3276,45 +3701,18 @@ fn compile_projected_fields(
         source,
         &known,
         declared_fields,
-        &defaults.entity_id_field,
+        &defaults.unique,
     )?;
     // `lon` and `lat` become the canonical `x` and `y`, defaulting to their own names — which is
     // what makes `lon`/`lat` the columns a projected view reads with no `fields` map at all.
-    let mut map = fields.map;
-    for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+    let mut map = fields.map.clone();
+    for (axis, geographic) in other_axis_names(projection) {
         let column = map
             .remove(geographic)
             .unwrap_or_else(|| geographic.to_string());
         map.insert(axis.to_string(), column);
     }
-    Ok(Fields {
-        object: fields.object,
-        map,
-    })
-}
-
-/// A word written where an access label goes. `public` is a label and is fine; `inherited` is the
-/// one reserved word occupying such a slot (§4), so it is refused rather than interned.
-///
-/// `object` is the declaration quoted as its own block names it — `view 's0'`, `layer
-/// 'clusters/a'`, `view group 'quarter'` — because the same key is written on four kinds of block
-/// and *which one* is half of the refusal.
-fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
-    if label.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `{key}` is empty. An access label is a term a principal either holds or \
-             does not; write `public` for the one every principal holds"
-        )));
-    }
-    if label == INHERITED {
-        return Err(declaration_error(format!(
-            "{object}: an access label may not be spelled `inherited` — it is reserved for *the \
-             container's gate is the whole of it*, and it is the one reserved word occupying a \
-             slot that otherwise takes a label (configuration.md §4). `public` is not reserved in \
-             this sense: it *is* a label, held by every principal"
-        )));
-    }
-    Ok(())
+    Ok(Fields { map, ..fields })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3340,7 +3738,7 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 }
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6):
-/// a list of labels, each one term taken verbatim (decision 0132). A declaration spells one
+/// a list of labels, each one term, stored trimmed. A declaration spells one
 /// label as a string and several as a list; both arrive here as the list.
 ///
 /// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
@@ -3362,56 +3760,8 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 /// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
 /// mismatch the gate fails closed on rather than one this check could anticipate.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    let Some(labels) = declared else {
-        return Ok(None);
-    };
-    if labels == [PUBLIC] {
-        return Ok(None);
-    }
-    if labels.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = []` names no terms. A gate is satisfied where its term set \
-             meets the principal's, so an empty one is satisfied by nobody and the view would be \
-             reachable by no principal at all — including this build's author. Write `public`, \
-             or the labels the gate names, one per element"
-        )));
-    }
-    if labels.iter().any(|l| l == PUBLIC) {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` lists `public` beside another label. `public` \
-             is the label every principal holds, so a gate naming it is satisfied by everybody; \
-             write `public` alone, or leave it out of the list"
-        )));
-    }
-    for (i, label) in labels.iter().enumerate() {
-        if label.is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: element {i} of `visibility = {labels:?}` is empty. Each element is \
-                 one label a principal holds, taken as written, and an empty one is no label. \
-                 Write `public`, or the labels the gate names, one per element"
-            )));
-        }
-        check_label(object, "visibility", label)?;
-    }
-    let descriptors: Vec<Vec<u8>> = labels.iter().map(|l| l.as_bytes().to_vec()).collect();
-    let descriptors = tessera_plugin::Passthrough::new()
-        .terms_of_labels(&descriptors)
-        .map_err(|e| {
-            declaration_error(format!(
-                "{object}: `visibility = {labels:?}` is not a label list the plugin can read \
-                 ({e}). A view's gate is satisfied by the item-visibility predicate (views §6), \
-                 so a label the plugin cannot turn into a term is one no principal could satisfy"
-            ))
-        })?;
-    if descriptors.is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: `visibility = {labels:?}` names no terms. A gate is satisfied where its \
-             term set meets the principal's, so an empty one is satisfied by nobody and the view \
-             would be reachable by no principal at all — including this build's author. Write \
-             `public`, or labels naming terms"
-        )));
-    }
-    Ok(Some(labels.to_vec()))
+    tessera_plugin::check_visibility(&tessera_plugin::Passthrough::new(), declared)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
 /// Compile every `[[view_group]]` (`views.md` §3, decision 0108).
@@ -3610,6 +3960,7 @@ fn compile_view_group(
     } else {
         compile_projected_fields(
             &object,
+            projection,
             source.as_ref(),
             block.fields.as_ref(),
             defaults,
@@ -3652,7 +4003,7 @@ fn compile_view_group(
         Roster::Inline(roster)
     } else if let Some(table) = &block.views {
         Roster::Table(compile_roster_table(
-            &object, table, &metadata, sources, defaults,
+            &object, table, &metadata, sources,
         )?)
     } else {
         // **A group declaring neither form carries no metadata**: its views are minted from the
@@ -3722,7 +4073,7 @@ fn compile_point_visibility(
             "{object}: `point_visibility` declares both a `field` and a `source`, and a point's \
              label comes from one or the other (configuration.md §1). `field` is a column of this \
              view's own source, one value or a list per point; `source` is a separate exploded \
-             `(entity_id, term_id)` relation. Declaring both leaves which one carries a point's \
+             `(unique value, term_id)` relation. Declaring both leaves which one carries a point's \
              terms to the reader"
         )));
     }
@@ -3748,25 +4099,17 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    if default == INHERITED {
-        return Err(declaration_error(format!(
-            "{object}: `point_visibility.default = \"inherited\"` is refused. A container's gate \
-             narrows rather than widens, and a point carrying no terms is already in no \
-             principal's mask — so inheriting would have to *add* a term to the point, which can \
-             only widen it (configuration.md §4). Name the label such a point should carry, or \
-             `public`"
-        )));
-    }
-    check_label(object, "point_visibility.default", default)?;
+    let default = tessera_plugin::check_point_default(&tessera_plugin::Passthrough::new(), default)
+        .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),
         source: labels,
-        default: Some(default.to_string()),
+        default: Some(default),
     })
 }
 
 /// The roster's own key set, which no metadata name may take (`views.md` §3.2).
-const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+use tessera_types::view::ROSTER_KEYS;
 
 /// The keys a group declares and a view of it may not (`views.md` §3.1).
 const GROUP_LEVEL_KEYS: [&str; 8] = [
@@ -3798,16 +4141,8 @@ fn compile_metadata_types(
     };
     let mut metadata = Vec::with_capacity(declared.len());
     for (name, value) in declared {
-        check_metadata_name(object, name)?;
-        if ROSTER_KEYS.contains(&name.as_str()) {
-            return Err(declaration_error(format!(
-                "{object}: `metadata.{name}` takes a name the roster already uses. `key`, `source` \
-                 and `visibility` are the roster's own keys (views §3.2), and a \
-                 `[[view_group.view]]` block mixes them with the metadata names — so a name in \
-                 both is a key with two readings, on the block and as a column of \
-                 `[view_group.views]`"
-            )));
-        }
+        tessera_types::view::check_metadata_name(name)
+            .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
         if discriminator == Some(name.as_str()) {
             return Err(declaration_error(format!(
                 "{object}: `metadata.{name}` takes the name of this group's discriminator column, \
@@ -3820,26 +4155,6 @@ fn compile_metadata_types(
     Ok(metadata)
 }
 
-/// A metadata name is a field name on the wire — `/v1/meta` serves it inside each roster entry —
-/// so it takes the column charset, on [`check_column_name`]'s argument.
-fn check_metadata_name(object: &str, name: &str) -> Result<()> {
-    if name.trim().is_empty() {
-        return Err(declaration_error(format!(
-            "{object}: a metadata name is empty. It is the name a view's value is served under"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "{object}: `metadata.{name}` is limited to ASCII letters, digits, `_` and `-`. It is a \
-             field name on the wire — `/v1/meta` serves it inside the roster entry for each view — \
-             on the same argument a column name is (contracts §3.2)"
-        )));
-    }
-    Ok(())
-}
 
 /// One metadata declaration: `name = "<type>"`, or `name = { type = "category", vocabulary = … }`.
 fn compile_metadata_type(
@@ -3894,11 +4209,7 @@ fn compile_metadata_type(
         })?;
         let declared = vocabularies.get(vocabulary).ok_or_else(|| {
             declaration_error(format!(
-                "{object}: `metadata.{name}` names vocabulary '{vocabulary}', which no \
-                 `[[vocabulary]]` block declares. Declared: {}. A missing block is refused rather \
-                 than minted as an open vocabulary — a typo would otherwise create a value set \
-                 nobody authored, at whatever width and visibility the fall-through picked",
-                declared_names(vocabularies)
+                "{object}: `metadata.{name}`: no vocabulary named '{vocabulary}'"
             ))
         })?;
         return Ok(ViewMetadata {
@@ -4110,17 +4421,20 @@ fn compile_metadata_value(
                 .ok_or_else(|| wrong("write a string"))?
                 .to_string(),
         ),
-        integer => {
+        _ => {
             let held = value
                 .as_integer()
                 .ok_or_else(|| wrong("write an integer"))?;
-            let (min, max) = integer_range(integer);
+            let (min, max) = declared
+                .declared_type()
+                .integer_range()
+                .unwrap_or((i64::MIN, i64::MAX));
             if held < min || held > max {
                 return Err(declaration_error(format!(
                     "{object}: `{name}` is {held}, and this group declares it '{}', which holds \
                      {min} to {max}. The width is part of the declaration, so the value is refused \
                      rather than narrowed",
-                    integer.arrow_type_name()
+                    declared.ty.arrow_type_name()
                 )));
             }
             MetadataValue::Int(held)
@@ -4146,21 +4460,6 @@ fn timestamp_us(object: &str, name: &str, when: &toml::value::Datetime) -> Resul
     Ok(parsed.timestamp_micros())
 }
 
-/// The inclusive range an integer type holds, for a metadata value to be checked against.
-fn integer_range(ty: ScalarType) -> (i64, i64) {
-    match ty {
-        ScalarType::U8 => (0, u8::MAX as i64),
-        ScalarType::U16 => (0, u16::MAX as i64),
-        ScalarType::U32 => (0, u32::MAX as i64),
-        // `u64`'s upper half is not expressible in TOML's own signed integer, which is where this
-        // value is read from — so the ceiling is the reader's, stated rather than silently wrapped.
-        ScalarType::U64 => (0, i64::MAX),
-        ScalarType::I8 => (i8::MIN as i64, i8::MAX as i64),
-        ScalarType::I16 => (i16::MIN as i64, i16::MAX as i64),
-        ScalarType::I32 => (i32::MIN as i64, i32::MAX as i64),
-        _ => (i64::MIN, i64::MAX),
-    }
-}
 
 /// `[view_group.views]` — form B's roster table (`views.md` §3.1).
 ///
@@ -4172,7 +4471,6 @@ fn compile_roster_table(
     table: &RosterTableBlock,
     metadata: &[ViewMetadata],
     sources: &Sources,
-    defaults: &Defaults,
 ) -> Result<RosterTable> {
     let object = format!("{group} `[view_group.views]`");
     let source = table.source.as_ref().ok_or_else(|| {
@@ -4189,13 +4487,7 @@ fn compile_roster_table(
             .iter()
             .map(|declared| KnownField::always(declared.name.clone())),
     );
-    let fields = check_fields(
-        &object,
-        Some(&path),
-        &known,
-        table.fields.as_ref(),
-        &defaults.entity_id_field,
-    )?;
+    let fields = check_fields(&object, Some(&path), &known, table.fields.as_ref(), &[])?;
     Ok(RosterTable {
         source: path,
         fields,
@@ -4277,16 +4569,6 @@ fn compile_scope(object: &str, value: Option<&toml::Value>, groups: &[ViewGroup]
     Ok(Scope::Group(named.to_string()))
 }
 
-/// Every group that draws on `group`'s key set: the group itself, and every group declaring
-/// `members = "<group>"` (`views.md` §3.3).
-fn groups_sharing<'a>(groups: &'a [ViewGroup], group: &str) -> Vec<&'a str> {
-    groups
-        .iter()
-        .filter(|g| g.name == group || g.members.as_deref() == Some(group))
-        .map(|g| g.name.as_str())
-        .collect()
-}
-
 /// Which attributes are bound to a group's views, by name (`views.md` §5).
 fn compile_attribute_scopes(
     blocks: &[AttributeBlock],
@@ -4314,28 +4596,45 @@ fn compile_vocabularies(
 ) -> Result<HashMap<String, Vocabulary>> {
     let mut compiled: HashMap<String, Vocabulary> = HashMap::new();
     for block in blocks {
-        if block.name.is_empty() {
-            return Err(declaration_error("a vocabulary with an empty name"));
-        }
-        if compiled.contains_key(&block.name) {
+        let name = &block.name;
+        if compiled.contains_key(name) {
             return Err(declaration_error(format!(
-                "vocabulary '{}' is declared twice. A vocabulary is an object named by every \
-                 attribute that shares it, so two blocks of one name is not a last-one-wins \
-                 question — it is two code spaces read back under one name, and which one a stored \
-                 code meant would depend on parse order",
-                block.name
+                "vocabulary '{name}' is declared twice"
             )));
         }
-        let object = format!("vocabulary '{}'", block.name);
-        // **No `[defaults].source` here**: a vocabulary with no source is one that mints rather
-        // than reads, and supplying it a file would open a value set nobody opened.
+        let required = |key: &str, choices: &str| {
+            declaration_error(format!(
+                "vocabulary '{name}': `{key}` is required: {choices}"
+            ))
+        };
+        let width_name = block
+            .width
+            .as_deref()
+            .ok_or_else(|| required("width", "`u8`, `u16` or `u32`"))?;
+        let reserved = compile_reserved(block)?;
+        let width = check_vocabulary(name, width_name, &reserved).map_err(declaration_error)?;
+
+        // `closed` refuses a key it does not hold at ingest; `open` gives it a new code.
+        let value_set = match block.value_set.as_deref() {
+            Some("closed") => ValueSet::Closed,
+            Some("open") => ValueSet::Open,
+            _ => return Err(required("value_set", "`closed` or `open`")),
+        };
+        // `public` publishes the value set; `derived` shows a viewer only the values carried by
+        // points they can see.
+        let visibility = match block.visibility.as_deref() {
+            Some("public") => Visibility::Public,
+            Some("derived") => Visibility::Derived,
+            _ => return Err(required("visibility", "`public` or `derived`")),
+        };
+
+        let object = format!("vocabulary '{name}'");
+        // A vocabulary does not take `[defaults].source`: with no source it has no values file.
         let source = match &block.source {
             Some(declared) => Some(sources.path(&object, declared)?),
             None => None,
         };
-        // A `code` field pins the codes and its absence assigns them, which is why it is *always*
-        // available rather than asserted by another key: which of the two a file does is the file's
-        // to say, and §1 makes that the one difference between the two spellings.
+        // A `code` field pins the codes; without one the build draws them.
         let fields = check_fields(
             &object,
             source.as_ref(),
@@ -4345,151 +4644,47 @@ fn compile_vocabularies(
                 KnownField::always("title"),
             ],
             block.fields.as_ref(),
-            ENTITY_ID,
+            &[],
         )?;
-
-        let width_name = block.width.as_deref().ok_or_else(|| {
-            declaration_error(format!(
-                "vocabulary '{}': `width` is required and has no default (configuration.md §6). \
-                 The three are u8 (255 usable values), u16 and u32 — it is the code space's width, \
-                 baked into every row that carries a value from this vocabulary, so changing it \
-                 rewrites the corpus. That is a migration, not a default worth guessing",
-                block.name
-            ))
-        })?;
-        let width = ScalarType::parse(width_name)
-            .filter(|t| t.is_category_width())
-            .ok_or_else(|| {
-                declaration_error(format!(
-                    "vocabulary '{}': `width = \"{width_name}\"` is not a category width. The \
-                     three are u8 (255 usable values), u16 and u32 — per-point-attributes §3.6. \
-                     Code 0 is the reserved *absent* sentinel, which is why each carries one fewer \
-                     value than its range",
-                    block.name
-                ))
-            })?;
-
-        let value_set = match block.value_set.as_deref() {
-            Some("closed") => ValueSet::Closed,
-            Some("open") => ValueSet::Open,
-            Some(other) => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set = \"{other}\"` is neither \"closed\" nor \
-                     \"open\". `closed` refuses an unknown key at ingest; `open` mints it a fresh \
-                     code",
-                    block.name
-                )));
-            }
-            None => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set` is required and has no default \
-                     (configuration.md §6). `closed` means the set is authored and an unknown key \
-                     at ingest is refused; `open` means an unknown key is minted a fresh code. \
-                     There is no default because either answer decides what a typo in a data file \
-                     does — create a category, or fail the batch",
-                    block.name
-                )));
-            }
-        };
-
-        let visibility = match block.visibility.as_deref() {
-            Some("public") => Visibility::Public,
-            Some("derived") => Visibility::Derived,
-            Some(other) => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `visibility = \"{other}\"` is neither \"public\" nor \
-                     \"derived\", and this slot takes no access label — only a layer's does. \
-                     `public` publishes the value set; `derived` makes a value's existence follow \
-                     from the viewer being able to see a point carrying it. A word outside the two \
-                     is refused rather than read as a label, because reading it as one would gate \
-                     the set on a term nobody holds — or publish it",
-                    block.name
-                )));
-            }
-            None => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `visibility` is required and has no default \
-                     (configuration.md §6). It is a disclosure control — whether the *existence* \
-                     of a value is sensitive — with exactly two settings: `public` publishes the \
-                     value set, `derived` makes a value's existence follow from the viewer being \
-                     able to see a point carrying it. A bundle built without one would have to be \
-                     rebuilt to acquire it",
-                    block.name
-                )));
-            }
-        };
-
-        // §3.8's original refusal, relaxed to a warning by owner ruling (2026-08-07): an open
-        // vocabulary's values are inferred from whatever is in the corpus, so publishing them
-        // discloses data-derived names on nobody's authority — but the operator may have a reason,
-        // and there is still no `/v1/categories` for the disclosure to reach.
-        if visibility == Visibility::Public && value_set == ValueSet::Open {
-            eprintln!(
-                "warning: vocabulary '{}': `visibility = \"public\"` with `value_set = \"open\"` \
-                 publishes data-derived value names on nobody's authority (per-point-attributes \
-                 §3.8, relaxed from a refusal to a warning by owner ruling 2026-08-07). Confirm \
-                 this is intended",
-                block.name
-            );
-        }
-
-        let reserved = compile_reserved(block)?;
-        let mut declared = match (&block.values, source.as_ref()) {
+        let declared = match (&block.values, source.as_ref()) {
             (Some(_), Some(_)) => {
                 return Err(declaration_error(format!(
-                    "vocabulary '{}' declares values inline and names a `source`. They are \
-                     spellings of one thing — a value set is inline *or* sourced — so declaring \
-                     both is a parse error rather than a precedence question",
-                    block.name
+                    "vocabulary '{name}' gives `values` and a `source`; give one"
                 )));
             }
-            (Some(inline), None) => parse_inline_values(inline, &block.name)?,
-            (None, Some(path)) => crate::input::read_vocabulary_file(path, &block.name, &fields)?,
-            (None, None) if value_set == ValueSet::Closed => {
-                return Err(declaration_error(format!(
-                    "vocabulary '{}': `value_set = \"closed\"` with no value source. A closed set \
-                     is authored, and an authored set of nothing refuses every ingest and costs \
-                     its width in every row for ever. Declare `values = [\"a\", \"b\"]` (codes \
-                     assigned in the order given), or a `[vocabulary.values]` table pinning them, \
-                     or name a `source` and bind it with `--file`. An unbound source is never a \
-                     silent fall-through to minting, which would open the set with nobody deciding \
-                     to",
-                    block.name
-                )));
-            }
-            // Open, and no values given: starts empty rather than closing the set, and the build
-            // mints every code it will ever carry.
+            (Some(inline), None) => parse_inline_values(inline, name)?,
+            (None, Some(path)) => crate::input::read_vocabulary_file(path, name, &fields)?,
             (None, None) => DeclaredValues::default(),
         };
-
-        assign_codes(&mut declared, &reserved, width, &block.name)?;
-        check_codes(&declared.codes, &reserved, width, &block.name)?;
-
-        // **Applied here, after the three spellings converge**, and not at the source: an inline
-        // table, a bare key array and a bound Parquet each reach this point as one `codes` map, so
-        // no spelling can acquire a rule another lacks. Refusing only *the absence of a source*
-        // would admit a source that declares nothing, which is the same column with the same cost
-        // and none of the message.
-        if value_set == ValueSet::Closed && declared.codes.is_empty() {
-            return Err(declaration_error(format!(
-                "vocabulary '{}': `value_set = \"closed\"` with no values. A closed set is the \
-                 authority on what may be ingested, so an empty one refuses every value for ever \
-                 while its column costs its width in every row. Author the values, or write \
-                 `value_set = \"open\"` to have them minted as they arrive",
-                block.name
-            )));
+        check_value_keys(name, declared.order.iter().map(String::as_str))
+            .map_err(declaration_error)?;
+        check_codes(&declared.codes, &reserved, width, name)?;
+        let kind = match value_set {
+            ValueSet::Closed => tessera_store::manifest::VocabularyKind::Declared,
+            ValueSet::Open => tessera_store::manifest::VocabularyKind::Discovered,
+        };
+        let mut values = VocabularyMinter::declared(
+            name.clone(),
+            kind,
+            visibility,
+            width,
+            &reserved,
+            declared.codes.iter().map(|(key, &code)| (key.as_str(), code)),
+            declared.order.iter().map(String::as_str),
+        )
+        .map_err(|e| declaration_error(e.to_string()))?;
+        for (key, title) in declared.titles {
+            values.set_title(&key, title);
         }
 
         compiled.insert(
-            block.name.clone(),
+            name.clone(),
             Vocabulary {
-                name: block.name.clone(),
+                name: name.clone(),
                 title: block.title.clone(),
                 value_set,
-                visibility,
                 width,
-                codes: declared.codes,
-                titles: declared.titles,
+                values,
                 reserved,
             },
         );
@@ -4510,8 +4705,8 @@ fn compile_reserved(block: &VocabularyBlock) -> Result<Vec<u32>> {
     Ok(reserved)
 }
 
-/// An inline value set: either an array of keys, whose codes the build assigns in the order given,
-/// or a `key = code` table pinning them.
+/// An inline value set: either an array of keys, each drawn a code, or a `key = code` table
+/// pinning them.
 ///
 /// **Which one was written is the whole of the difference**, and it is not a mode: a caller who
 /// does not care which integer a value gets should not have to invent one.
@@ -4527,12 +4722,6 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
                          `[vocabulary.values]` with `key = code` to pin the codes instead"
                     ))
                 })?;
-                if set.order.iter().any(|seen| seen == key) {
-                    return Err(declaration_error(format!(
-                        "vocabulary '{vocabulary}': value '{key}' is listed twice. Which code it \
-                         would take is decided by position, so it is refused"
-                    )));
-                }
                 set.order.push(key.to_string());
             }
         }
@@ -4541,8 +4730,7 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
                 let raw = value.as_integer().ok_or_else(|| {
                     declaration_error(format!(
                         "vocabulary '{vocabulary}': value '{key}' must be an integer code, not \
-                         {value}. Write `values = [\"{key}\", …]` to have the build assign codes \
-                         in the order given"
+                         {value}. Write `values = [\"{key}\", …]` to have the build draw the codes"
                     ))
                 })?;
                 let code = u32::try_from(raw).map_err(|_| {
@@ -4558,54 +4746,12 @@ fn parse_inline_values(values: &toml::Value, vocabulary: &str) -> Result<Declare
         other => {
             return Err(declaration_error(format!(
                 "vocabulary '{vocabulary}': `values` is {other}, and it must be either an array of \
-                 keys — codes assigned by the build, in the order given — or a \
-                 `[vocabulary.values]` table of `key = code`"
+                 keys, each drawn a code, or a `[vocabulary.values]` table of \
+                 `key = code`"
             )));
         }
     }
     Ok(set)
-}
-
-/// Give a code to every declared value that pinned none: the lowest free one, in declaration
-/// order, skipping `reserved` and the *absent* sentinel.
-///
-/// **Assignment starts at 1 and never reaches 0**, which is the sentinel — see [`ABSENT_CODE`].
-///
-/// ⊘ It assigns from an empty slate every build. `configuration.md` §1's carry rule — a rebuild
-/// replays the recorded codes, a new value takes the next free one, a removed value's code moves
-/// to `reserved` — needs the previous manifest, which nothing reads here yet. So **reordering a
-/// bare key list reorders its codes today**; pinning is what holds them still.
-fn assign_codes(
-    declared: &mut DeclaredValues,
-    reserved: &[u32],
-    width: ScalarType,
-    vocabulary: &str,
-) -> Result<()> {
-    let max = width
-        .max_code()
-        .expect("a category width always has a maximum code");
-    let mut taken: BTreeSet<u32> = declared.codes.values().copied().collect();
-    taken.extend(reserved.iter().copied());
-    let mut next = ABSENT_CODE + 1;
-    for key in &declared.order {
-        if declared.codes.contains_key(key) {
-            continue;
-        }
-        while taken.contains(&next) {
-            next += 1;
-        }
-        if next > max {
-            return Err(declaration_error(format!(
-                "vocabulary '{vocabulary}': assigning a code to '{key}' would need {next}, past \
-                 `{}`'s maximum of {max}. Never widen and never wrap — the remedy is a rebuild at \
-                 a wider declared width (per-point-attributes §3.6)",
-                width.arrow_type_name()
-            )));
-        }
-        declared.codes.insert(key.clone(), next);
-        taken.insert(next);
-    }
-    Ok(())
 }
 
 /// The rules a compiled code set must satisfy, whatever spelling it arrived in.
@@ -4671,304 +4817,59 @@ fn compile_attributes(
     let mut seen_names: HashSet<&str> = HashSet::new();
 
     for decl in blocks {
-        if !seen_names.insert(decl.name.as_str()) {
+        let name = decl.name.as_str();
+        if !seen_names.insert(name) {
             return Err(declaration_error(format!(
-                "attribute '{}' is declared twice. The scalar tail is stored positionally, so two \
-                 columns of one name is not a last-one-wins config question — it is two columns \
-                 whose values are read back under one name",
-                decl.name
+                "attribute '{name}' is declared twice"
             )));
         }
-        check_column_name(&decl.name)?;
-        // **Column names and filter combinators share one namespace** (decision 0062). A leaf in a
-        // filter expression is a column name directly — there is no wrapper object — so a column
-        // called `any_of` would be ambiguous with the combinator at request time. Refused at the
-        // build instead, where it is one error against one declaration rather than a request that
-        // means two things.
-        if matches!(decl.name.as_str(), "all_of" | "any_of" | "none_of") {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
-                 expression names columns directly, so a column may not take one. Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // The two reserved *leaves*, on the same argument: `region` is the spatial one
-        // (selection-operand §2) and `member_of` names one artifact's membership
-        // (`highlight-and-hierarchy.md` §3). A column of either name would make a request mean two
-        // things.
-        if matches!(decl.name.as_str(), "region" | "member_of") {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is a filter leaf of the request surface \
-                 (`selection-operand.md` §2, `highlight-and-hierarchy.md` §3), and a filter \
-                 expression names columns directly, so a column may not take it. Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // **The frames' own reserved name.** `highlighted` is a column of the *tiles*, *points* and
-        // *artifacts* frames (`highlight-and-hierarchy.md` §2), so a render column of that name
-        // would put two columns of one name on the points frame and a by-name reader would take
-        // the wrong one.
-        if decl.name == "highlighted" {
-            return Err(declaration_error(format!(
-                "attribute '{}': that name is the *points* frame's highlight column \
-                 (`highlight-and-hierarchy.md` §2), so a render column of it would put two \
-                 columns of one name on one frame and a by-name reader would take the wrong one. \
-                 Reserved: {}",
-                decl.name,
-                RESERVED_COLUMN_NAMES.join(", ")
-            )));
-        }
-        // The attribute's own one-field map: `field` locates the column when it differs from the
-        // served name, and the attribute pass reads it (`Attribute::field`). Empty is refused
-        // rather than read as *the same as the name*: it names no column at all.
         if decl.field.as_deref().is_some_and(|f| f.trim().is_empty()) {
             return Err(declaration_error(format!(
-                "attribute '{}': `field` is empty, so it names no column. Omit it to read the \
-                 column named '{}'",
-                decl.name, decl.name
+                "attribute '{name}': `field` is empty; omit it to read the column named '{name}'"
             )));
         }
-        // `render` + `multi` before bare `multi`: the first is a permanent fence (0039) and the
-        // second an unbuilt stage, and a caller who set both must hear the fence — it survives the
-        // epic that lifts the other refusal.
-        if decl.render && decl.multi {
-            return Err(declaration_error(format!(
-                "attribute '{}': `render` with `multi = true` is never admissible (decision 0039) \
-                 — a rendered mark has one colour, and no projection or summary of a list earns a \
-                 hot column. Declare an ordinary single-valued attribute carrying the value to \
-                 colour by",
-                decl.name
-            )));
-        }
-        if decl.multi {
-            return Err(declaration_error(format!(
-                "attribute '{}': `multi = true` is specified and not built (records §5 — the list \
-                 addressing lands with the multi-value epic, records §13). Refused rather than \
-                 read as single-valued: accepting it would store one value per item under a \
-                 declaration promising several",
-                decl.name
-            )));
-        }
-        if decl.render_in.is_some() {
-            return Err(declaration_error(format!(
-                "attribute '{}': `render_in` is specified and not built (per-point-attributes \
-                 §3.9). A per-view hot column needs contracts §2.6 to enumerate columns per view, \
-                 which views §3 permits and the format does not yet carry — \
-                 `MANIFEST.declared_scalars` is one flat bundle-wide list. Accepting it would put \
-                 the column in every view anyway, silently, which is the opposite of what it asks \
-                 for. Omit it: every view is the current behaviour and the documented default",
-                decl.name
-            )));
-        }
-        // Neither `render` nor `index` is not a refusal: the declaration is blob-resident (records
-        // §3) — no hot-column slot, no entity-space structure, no `/v1/meta` operand; the record
-        // blob holds its values and drill-down returns them.
-
-        let ty_name = decl.ty.as_deref().ok_or_else(|| {
+        let ty = decl.ty.as_deref().ok_or_else(|| {
             declaration_error(format!(
-                "attribute '{}': `type` is required and has no default (configuration.md §6). The \
-                 declarable types are bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, \
-                 timestamp_us, keyword, text and category",
-                decl.name
+                "attribute '{name}': `type` is required. The types are {DECLARABLE_TYPES}"
             ))
         })?;
-
-        let attribute = match ty_name {
-            "category" => {
-                let name = decl.vocabulary.as_deref().ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': `vocabulary` is required for a category and has no \
-                         default (configuration.md §6). It names a `[[vocabulary]]` block, which \
-                         is where the width, the value set and the visibility live — every one of \
-                         them a decision nobody can make on the author's behalf",
-                        decl.name
-                    ))
-                })?;
-                // **Refused here, before a data file is opened**, and never an implicitly minted
-                // open vocabulary: the fall-through §7 forbids, arriving through a typo. An
-                // implicit vocabulary would take whatever width, value set and visibility the
-                // fall-through picked, none of which anyone declared.
-                let vocabulary = vocabularies.get(name).ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': `vocabulary = \"{name}\"` names no `[[vocabulary]]` \
-                         block. Declared: {}. A missing block is refused rather than minted as an \
-                         open vocabulary — a typo would otherwise create a value set nobody \
-                         authored, at whatever width and visibility the fall-through picked",
-                        decl.name,
-                        declared_names(vocabularies)
-                    ))
-                })?;
-                if let Some(analyser) = &decl.analyser {
-                    return Err(declaration_error(format!(
-                        "attribute '{}' is a category, not `text`, so `analyser = \"{analyser}\"` \
-                         has no meaning for it. Refused rather than ignored: an ignored analyser is \
-                         a pipeline its author believes is in use",
-                        decl.name
-                    )));
-                }
-                Attribute {
-                    name: decl.name.clone(),
-                    title: decl.title.clone(),
-                    field: decl.field.clone(),
-                    ty: vocabulary.width,
-                    analyser: None,
-                    vocabulary: Some(vocabulary.name.clone()),
-                    value_set: Some(vocabulary.value_set),
-                    // Every flag combination is legal for a category — a rendered category stays
-                    // filterable because its entity-space structures are the constant floor, not a
-                    // placement (records §4.2).
-                    index: decl.index,
-                    render: decl.render,
-                }
-            }
-            // **`utf8` is retired as a declared type, and the refusal names its two successors**
-            // (records §4.3, §4.4; decision 0048 makes this a refusal rather than an alias, because
-            // a silent rename would give a schema a storage layout its author did not choose). It
-            // remains the *wire* type of a keyword's value and of a category's key.
-            "utf8" => {
-                return Err(declaration_error(format!(
-                    "attribute '{}': `utf8` is retired as a declared type. A short string matched \
-                     whole — an identifier, an order number, a hostname — is `keyword`, which \
-                     stores a per-layer sorted dictionary and a `u32` ordinal and keeps `eq`, \
-                     `in`, `prefix` and `contains` byte-exact. Prose searched by word is `text` \
-                     (records-and-search §4.4), whose values live in the record blob and whose \
-                     terms come from a named analyser",
-                    decl.name
-                )));
-            }
-            other => {
-                // A plain scalar: the type *is* the width, and none of the vocabulary machinery
-                // applies. Refused rather than ignored if any of it is present.
-                let ty = ScalarType::parse(other).ok_or_else(|| {
-                    declaration_error(format!(
-                        "attribute '{}': unknown type '{other}'. Declarable types are bool, u8, \
-                         u16, u32, u64, i8, i16, i32, i64, f32, f64, timestamp_us, keyword, text \
-                         and category",
-                        decl.name
-                    ))
-                })?;
-                if decl.vocabulary.is_some() {
-                    return Err(declaration_error(format!(
-                        "attribute '{}' is type '{other}', not a category, so `vocabulary` has no \
-                         meaning for it. Refused rather than ignored: a value set on a column that \
-                         has none is a disclosure control its author believes is set",
-                        decl.name
-                    )));
-                }
-                // **The analyser is resolved here** (decision 0070): a `text` column's terms are
-                // whatever its named analyser produces, so a name this binary does not carry must
-                // be refused at the declaration rather than defaulted — indexing a column with a
-                // pipeline its author did not ask for is the silent mismatch the named shape
-                // exists to prevent.
-                let analyser = match (ty, decl.analyser.as_deref()) {
-                    (ScalarType::Text, name) => {
-                        let name = name.unwrap_or(tessera_analyse::UNICODE);
-                        let resolved = tessera_analyse::analyser(name).ok_or_else(|| {
-                            declaration_error(format!(
-                                "attribute '{}': '{name}' is not an analyser this build carries. \
-                                 Available: {}",
-                                decl.name,
-                                tessera_analyse::ANALYSER_NAMES.join(", ")
-                            ))
-                        })?;
-                        Some(resolved.identity())
-                    }
-                    (_, Some(name)) => {
-                        return Err(declaration_error(format!(
-                            "attribute '{}' is type '{other}', not `text`, so `analyser = \
-                             \"{name}\"` has no meaning for it. Refused rather than ignored: an \
-                             ignored analyser is a pipeline its author believes is in use",
-                            decl.name
-                        )));
-                    }
-                    (_, None) => None,
-                };
-                // **`render` on `text` is refused for the reason `keyword`'s is, and one more.**
-                // Prose is not a fixed-width slot, and a text column's value does not live in
-                // entity space at all — it lives in the record blob, which no scan reads.
-                if ty == ScalarType::Text && decl.render {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': `render` on `text` is refused — the hot column is a \
-                         fixed-width slot in every row and prose is not one, and a text column's \
-                         value lives in the record blob, which no scan reads (records-and-search \
-                         §3, §4.4). `index = true` gives it a token index and costs the hot column \
-                         nothing",
-                        decl.name
-                    )));
-                }
-                if ty == ScalarType::Keyword && decl.render {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': `render` on `keyword` is refused (configuration.md §6 — \
-                         the hot column is a fixed-width slot in every row, and a keyword's value \
-                         is not one). Its ordinal is fixed-width but is a per-layer index internal \
-                         that never leaves the server (records §4.3). Declare a category, whose \
-                         row cost is its width. `index = true` is available and costs the hot \
-                         column nothing",
-                        decl.name
-                    )));
-                }
-                Attribute {
-                    name: decl.name.clone(),
-                    title: decl.title.clone(),
-                    field: decl.field.clone(),
-                    ty,
-                    analyser,
-                    vocabulary: None,
-                    value_set: None,
-                    index: decl.index,
-                    render: decl.render,
-                }
-            }
+        let column = check_attribute(
+            &AttributeSpec {
+                name,
+                ty,
+                vocabulary: decl.vocabulary.as_deref(),
+                analyser: decl.analyser.as_deref(),
+                index: decl.index,
+                render: decl.render,
+                group_scoped: scopes.contains_key(name),
+                unique: decl.unique,
+            },
+            |vocabulary| vocabularies.get(vocabulary).map(|v| v.width),
+        )
+        .map_err(declaration_error)?;
+        let attribute = Attribute {
+            name: decl.name.clone(),
+            title: decl.title.clone(),
+            field: decl.field.clone(),
+            ty: column.ty,
+            analyser: column.analyser,
+            value_set: column
+                .vocabulary
+                .as_deref()
+                .and_then(|v| vocabularies.get(v))
+                .map(|v| v.value_set),
+            vocabulary: column.vocabulary,
+            index: decl.index,
+            render: decl.render,
+            unique: column.unique,
         };
-        // **A group-scoped column is not one of `MANIFEST.declared_scalars`** (`views.md` §5):
-        // it is a *family* — one entity-space column per view of the group — and the manifest's
-        // list is one flat set of bundle-wide columns. Held apart here rather than filtered at
-        // each consumer, so no pass can forget: a scoped column in the schema would take a slot
-        // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
-        // absent for every entity, and both served as if the attribute were entity-scoped.
-        match scopes.get(&decl.name) {
-            None => {
-                // **`fields` names the view discriminator and nothing else**, so an entity-scoped
-                // column has nothing to say with it: its values are one per entity and no column
-                // of its file decides which view they are for. Refused rather than ignored, on
-                // this module's rule for every disclosure-adjacent key — a `fields` map that reads
-                // as a default is a routing its author believes is in effect.
-                if decl.fields.is_some() {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': `fields` names the view discriminator on a group-scoped \
-                         column's own source (views §5), and this column is entity scope — one \
-                         value per entity, under every view — so there is nothing for it to \
-                         choose between. The entity id is `entity_id_field`",
-                        decl.name
-                    )));
-                }
-                attributes.push(attribute)
-            }
+        // A group-scoped column is one column per view of its group, so it is kept apart from
+        // the bundle-wide columns.
+        match scopes.get(name) {
+            None => attributes.push(attribute),
             Some(group) => {
-                // **A scoped attribute's own `source` carries the discriminator** (`views.md`
-                // §5): one row per `(entity, view)`, `fields.view` saying which view each row's
-                // value is for, and the row routed to that view's column. Without the
-                // discriminator the file would be read as entity space, which would take one
-                // arbitrary view's values as every view's — so the column is resolved here, where
-                // the source name and the field spellings are both in hand.
-                // **A scoped `text` column must be indexed, because the index is its only
-                // home.** An entity-scoped text column has two — a token index answering `match`
-                // and a record-blob row answering `entity → value` — and the blob is bundle-wide,
-                // addressed by a column's position in `declared_scalars`, which a family has none
-                // of. So an unindexed scoped text column would be a declared field stored nowhere
-                // at all: acknowledged and then lost. Refused rather than reported, on the rule
-                // that separates a config a build can honour from one it cannot.
-                if attribute.ty == ScalarType::Text && !attribute.index {
-                    return Err(declaration_error(format!(
-                        "attribute '{}': a `text` column scoped to group '{group}' needs \
-                         `index = true`. Its terms are its only home — the record blob is one \
-                         bundle-wide list with no slot for a column family (views §5) — so \
-                         without the index the prose would be read and stored nowhere",
-                        decl.name
-                    )));
-                }
+                // Its own source holds one row per (entity, view); `fields.view` names the column
+                // saying which view a row is for.
                 let source = compile_scoped_attribute_source(decl, sources, defaults)?;
                 scoped.push(ScopedAttribute {
                     attribute,
@@ -4978,6 +4879,10 @@ fn compile_attributes(
             }
         }
     }
+    tessera_store::declaration::check_unique_fields(
+        attributes.iter().filter(|a| a.unique).count(),
+    )
+    .map_err(declaration_error)?;
     Ok((attributes, scoped))
 }
 
@@ -4991,136 +4896,29 @@ fn compile_attributes(
 ///
 /// The discriminator column is `fields.view`, defaulting to `view` — the same key and the same
 /// default a scoped layer's artifacts source takes, so one word means one thing across the
-/// declaration. Every other key in the map is refused: `view` is the only field this source
-/// resolves, the entity id being `entity_id_field` beside it.
+/// declaration. The map may also move a unique field's column; any other key is refused.
 fn compile_scoped_attribute_source(
     decl: &AttributeBlock,
     sources: &Sources,
     defaults: &Defaults,
 ) -> Result<Option<ScopedAttributeFile>> {
     let object = format!("attribute '{}'", decl.name);
-    let Some(name) = decl.source.as_deref() else {
-        if decl.fields.is_some() {
-            return Err(declaration_error(format!(
-                "{object}: `fields` names the view discriminator on this column's own `source` \
-                 (views §5), and there is no `source` here — the column is read from each view's \
-                 own points file, where the view is the file rather than a column of it"
-            )));
-        }
-        return Ok(None);
+    let path = match decl.source.as_deref() {
+        Some(name) => Some(sources.path(&object, name)?),
+        None => None,
     };
-    let path = sources.path(&object, name)?;
-    let entity_id = match decl.entity_id_field.as_deref() {
-        None => defaults.entity_id_field.clone(),
-        Some(field) if field.trim().is_empty() => {
-            return Err(declaration_error(format!(
-                "{object}: `entity_id_field` is empty, so it names no column. Omit it to join on \
-                 '{}', which is what this declaration spells the entity id",
-                defaults.entity_id_field
-            )))
-        }
-        Some(field) => field.to_string(),
-    };
-    let mut view_field = "view".to_string();
-    for (key, value) in decl.fields.iter().flatten() {
-        if key != "view" {
-            return Err(declaration_error(format!(
-                "{object}: `fields.{key}` is not a field of a group-scoped attribute's source, \
-                 which resolves `view` alone — the column saying which view each row's value is \
-                 for. The entity id is `entity_id_field`"
-            )));
-        }
-        if value.trim().is_empty() {
-            return Err(declaration_error(format!(
-                "{object}: `fields.view` is empty, so it names no column. Omit it to read the \
-                 discriminator from 'view'"
-            )));
-        }
-        view_field = value.clone();
-    }
-    Ok(Some(ScopedAttributeFile {
+    let fields = check_fields(
+        &object,
+        path.as_ref(),
+        &[KnownField::always("view")],
+        decl.fields.as_ref(),
+        &defaults.unique,
+    )?;
+    Ok(path.map(|path| ScopedAttributeFile {
         path,
-        entity_id,
-        view_field,
+        view_field: fields.of("view").to_string(),
+        fields,
     }))
-}
-
-fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {
-    if vocabularies.is_empty() {
-        return "none".to_string();
-    }
-    let mut names: Vec<&str> = vocabularies.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    names.join(", ")
-}
-
-/// The names an attribute may not take, in the order the refusals list them.
-///
-/// **One list, read by the three refusals above**, so a name added to the request surface is added
-/// here and every message says the same set. `all_of`/`any_of`/`none_of` are the combinators
-/// (decision 0062); `region` is the spatial leaf (`selection-operand.md` §2); `member_of` names
-/// one artifact's membership (`highlight-and-hierarchy.md` §3). A filter expression names columns
-/// directly — there is no wrapper object — so a column of any of these names would make a request
-/// mean two things. `highlighted` is not a leaf but a **frame column**
-/// (`highlight-and-hierarchy.md` §2): a render column of that name would put two columns of one
-/// name on the points frame, and a by-name reader would take the wrong one.
-pub const RESERVED_COLUMN_NAMES: [&str; 6] = [
-    "all_of",
-    "any_of",
-    "none_of",
-    "region",
-    "member_of",
-    "highlighted",
-];
-
-/// A column name that can be written into `columns.arrow`'s schema without colliding with the
-/// fixed columns or with the ingest batch's reserved names.
-///
-/// The reserved set is transcribed rather than imported: `tessera-server`'s `RESERVED_COLUMNS`
-/// belongs to a crate this one must not depend on, and the two are checked against each other in
-/// this module's tests instead.
-fn check_column_name(name: &str) -> Result<()> {
-    const FIXED: [&str; 2] = ["tessera_id", "residual"];
-    const INGEST_RESERVED: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
-    if name.is_empty() {
-        return Err(declaration_error("an attribute with an empty name"));
-    }
-    // The name is the column's **identifier**, not merely its display label: it addresses the
-    // column in `/v1/categories/{column}` (contracts §3.2), and the duplicate check above is what
-    // makes it unique bundle-wide. A path segment is therefore what it has to survive, so the
-    // character set is closed here rather than escaped at every use site — one refusal at build
-    // beats a percent-encoding convention that two readers can spell differently.
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(declaration_error(format!(
-            "attribute '{name}': a column name is its identifier on the wire \
-             (`/v1/categories/{{column}}`, contracts §3.2), so it is limited to ASCII letters, \
-             digits, `_` and `-`"
-        )));
-    }
-    if FIXED.contains(&name) {
-        return Err(declaration_error(format!(
-            "attribute '{name}' shadows a fixed column of `columns.arrow` (contracts §2.6). The \
-             reader refuses such a segment at load"
-        )));
-    }
-    if name == "record" {
-        return Err(declaration_error(
-            "attribute 'record': the name is reserved — `attrs/record/` is the record blob's \
-             namespace (records §2, review N10), so a column of that name would address the \
-             blob's files as its own",
-        ));
-    }
-    if INGEST_RESERVED.contains(&name) {
-        return Err(declaration_error(format!(
-            "attribute '{name}' shadows a reserved `/control/ingest` column (contracts §3.4), so \
-             no batch could ever carry a value for it — the handler would read the reserved \
-             column's meaning instead"
-        )));
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5147,6 +4945,12 @@ fn compile_layers(
 ) -> Result<CompiledLayers> {
     // Sugar first, so nothing below this line knows a label layer from a layer.
     let (blocks, from_labels) = expand_labels(declared)?;
+    // A stored membership names each member by the attributes declared `unique`.
+    let unique: Vec<String> = attributes
+        .iter()
+        .filter(|a| a.unique)
+        .map(|a| a.name.clone())
+        .collect();
     let mut layers = Vec::with_capacity(blocks.len());
     let mut per_layer = Vec::with_capacity(blocks.len());
     let mut scopes: BTreeMap<String, String> = BTreeMap::new();
@@ -5175,54 +4979,52 @@ fn compile_layers(
         // **A name in `views` is a plain view or a whole group** (`views.md` §2): naming a group
         // draws the layer on every view of it, present and future, which is what lets a layer
         // follow a group that grows at ingest rather than being redeclared per quarter.
-        for view in declared_views {
-            if !views.iter().any(|v| &v.name == view) && !groups.iter().any(|g| &g.name == view) {
-                return Err(declaration_error(format!(
-                    "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` \
-                     block declares. Declared: {}. A layer in a view that does not exist is \
-                     registered, reachable and empty, which no client can tell from one whose \
-                     artifacts were all withheld",
-                    block.name,
-                    names(
-                        views
-                            .iter()
-                            .map(|v| v.name.as_str())
-                            .chain(groups.iter().map(|g| g.name.as_str()))
-                    )
-                )));
-            }
+        if let Err(view) = tessera_types::layer::expand_views(
+            declared_views,
+            |name| groups.iter().any(|g| g.name == name).then(Vec::new),
+            |name| views.iter().any(|v| v.name == name),
+        ) {
+            return Err(declaration_error(format!(
+                "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` block \
+                 declares. Declared: {}. A layer in a view that does not exist is registered, \
+                 reachable and empty, which no client can tell from one whose artifacts were all \
+                 withheld",
+                block.name,
+                names(
+                    views
+                        .iter()
+                        .map(|v| v.name.as_str())
+                        .chain(groups.iter().map(|g| g.name.as_str()))
+                )
+            )));
         }
 
-        // **A scoped layer is a different artifact set per view of one group** (`views.md` §3.5),
-        // so the views it is drawn on can only be that group's: an artifact belongs to one view,
-        // and a plain view is not one of them. The groups sharing the key set are admitted with
-        // it, since their views *are* the same views.
+        // A scoped layer's artifacts are a set per view of one group's key set, so it is drawn on
+        // that key set's views alone. A build names a group's views by the group's name only.
         let scope = compile_scope(&object, block.scope.as_ref(), groups)?;
         if let Scope::Group(group) = &scope {
-            let sharing = groups_sharing(groups, group);
-            for view in declared_views {
-                if !sharing.contains(&view.as_str()) {
-                    return Err(declaration_error(format!(
-                        "{object}: `scope = {{ group = \"{group}\" }}` with `views` naming \
-                         '{view}'. A scoped layer's artifacts belong to one view each and are \
-                         keyed per `(layer, view)`, so the views it is drawn on are that group's \
-                         and no others (views §3.5). Nameable here: {}. Drop the scope for one \
-                         artifact set drawn on every view named, which is the default",
-                        names(sharing.iter().copied())
-                    )));
-                }
-            }
+            tessera_types::layer::check_scoped_views(
+                declared_views,
+                group,
+                groups.iter().map(|g| (g.name.as_str(), g.members.as_deref())),
+                |_| None,
+            )
+            .map_err(|outside| {
+                declaration_error(format!(
+                    "{object}: `scope = {{ group = \"{group}\" }}` with `views` naming '{}', \
+                     which holds no key of that group. Nameable here: {}. Drop the scope for one \
+                     artifact set drawn on every view named",
+                    outside.view,
+                    names(outside.sharing.iter().map(String::as_str))
+                ))
+            })?;
         }
 
         let membership = compile_membership(block, attributes)?;
 
         let hierarchy = compile_hierarchy(block)?;
         let visibility = match block.visibility.as_deref() {
-            Some(PUBLIC) => None,
-            Some(label) => {
-                check_label(&object, "visibility", label)?;
-                Some(label.to_string())
-            }
+            Some(label) => Some(label.to_string()),
             None => {
                 return Err(declaration_error(format!(
                     "layer '{}': `visibility` is required and has no default \
@@ -5269,10 +5071,9 @@ fn compile_layers(
         })?;
         let artifact_visibility = ArtifactVisibility {
             field: artifact.field.clone(),
-            default: if default == INHERITED {
+            default: if is_inherited(default) {
                 MemberDefault::Inherited
             } else {
-                check_label(&object, "artifact_visibility.default", default)?;
                 MemberDefault::Label(default.to_string())
             },
         };
@@ -5398,6 +5199,9 @@ fn compile_layers(
                      predicate, so a stored set here is one nothing would read",
                     artifact.key
                 )));
+            }
+            for table in [&artifact.members, &artifact.excluding].into_iter().flatten() {
+                check_member_table(&object, &artifact.key, table, &unique)?;
             }
         }
         let shape = compile_shape(block, &membership)?;
@@ -5609,7 +5413,11 @@ fn compile_layers(
                 ),
             ],
             block.fields.as_ref(),
-            ENTITY_ID,
+            // A stored membership names its members by the unique fields, as a struct per member.
+            match enumerated {
+                true => &unique,
+                false => &[],
+            },
         )?;
 
         let members = match members_block {
@@ -5651,7 +5459,6 @@ fn compile_layers(
                     path.as_ref(),
                     &[
                         KnownField::always("key"),
-                        KnownField::always("entity"),
                         KnownField::asserted_by(
                             "rank",
                             !content.supplied.is_empty(),
@@ -5660,7 +5467,7 @@ fn compile_layers(
                         ),
                     ],
                     members.fields.as_ref(),
-                    ENTITY_ID,
+                    &unique,
                 )?;
                 path.map(|path| MemberSource { path, fields })
             }
@@ -5682,11 +5489,8 @@ fn compile_layers(
             members,
         });
 
-        // **The layout pin, refused rather than ignored where the word is not one of the three.**
-        // An ignored pin is the silent case: the operator declared a layout, got another, and has
-        // nothing to look at (selection memo §4.1). The one *combination* refused here rather than
-        // in `validate` is a shape with a row-major pin, and that one is `validate`'s — see
-        // `DeclarationError::LayoutWithoutRowSource`.
+        // A word outside the three is refused rather than ignored: an ignored pin serves a layout
+        // the operator did not declare.
         let layout = match block.layout.as_deref() {
             None => None,
             Some(word) => Some(ServingLayout::parse_pin(word).ok_or_else(|| {
@@ -5702,7 +5506,7 @@ fn compile_layers(
             })?),
         };
 
-        let declaration = LayerDeclaration {
+        let mut declaration = LayerDeclaration {
             // **The scope reaches the manifest on the declaration** (contracts §2.3): it was
             // compiled into `Scopes` alone, which is a build-time structure, so a bundle carried
             // no record of which of its layers were per-view (`views.md` §11).
@@ -6134,6 +5938,8 @@ fn compile_criterion(
 }
 
 #[cfg(test)]
+mod reference;
+#[cfg(test)]
 mod tests;
 
 // ---------------------------------------------------------------------------------------------
@@ -6443,19 +6249,19 @@ impl Config {
     /// ⊘ *Present and future* is the ingest half: a view created later gets the layer's artifacts
     /// at the fold that writes them (spec §3.5).
     pub fn expand_layer_views(registry: &[BuildView], declared: &[String]) -> Vec<String> {
-        let mut expanded = Vec::with_capacity(declared.len());
-        for name in declared {
-            let of_group: Vec<String> = registry
-                .iter()
-                .filter(|view| view.group.as_ref().is_some_and(|g| &g.group == name))
-                .map(|view| view.id.clone())
-                .collect();
-            match of_group.is_empty() {
-                true => expanded.push(name.clone()),
-                false => expanded.extend(of_group),
-            }
-        }
-        expanded
+        tessera_types::layer::expand_views(
+            declared,
+            |name| {
+                let of_group: Vec<String> = registry
+                    .iter()
+                    .filter(|view| view.group.as_ref().is_some_and(|g| g.group == name))
+                    .map(|view| view.id.clone())
+                    .collect();
+                (!of_group.is_empty()).then_some(of_group)
+            },
+            |_| true,
+        )
+        .expect("every name that is no group is kept as a view")
     }
 
     /// The group registry the manifest publishes, derived from a [`Config::build_views`]
@@ -6665,7 +6471,7 @@ fn insert_some<T: serde::Serialize>(
 /// One `PUT /control/attributes` body per declared column, entity-scoped and group-scoped alike,
 /// in declaration order.
 ///
-/// **`field`, `source`, `entity_id_field` and `fields` are the acquisition half** — where a build
+/// **`field`, `source` and `fields` are the acquisition half** — where a build
 /// reads the column from — and are gone by this point: an [`Attribute`] carries `field` because a
 /// build needs it, and nothing else here does.
 fn attribute_payloads(config: &Config) -> Vec<serde_json::Value> {
@@ -6708,7 +6514,6 @@ fn attribute_payload(
         Some(vocabulary) => {
             body.insert("type".to_string(), "category".into());
             body.insert("vocabulary".to_string(), vocabulary.clone().into());
-            body.insert("width".to_string(), attribute.ty.arrow_type_name().into());
         }
         None => {
             body.insert("type".to_string(), attribute.ty.arrow_type_name().into());
@@ -6723,11 +6528,11 @@ fn attribute_payload(
         attribute
             .analyser
             .as_deref()
-            .and_then(|identity| identity.split('/').next())
-            .map(str::to_string),
+            .map(|identity| tessera_analyse::declared_name(identity).to_string()),
     );
     body.insert("index".to_string(), attribute.index.into());
     body.insert("render".to_string(), attribute.render.into());
+    body.insert("unique".to_string(), attribute.unique.into());
     body.insert(
         "scope".to_string(),
         serde_json::to_value(scope).unwrap_or_default(),
@@ -6755,7 +6560,7 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
         );
         body.insert(
             "visibility".to_string(),
-            serde_json::to_value(vocabulary.visibility).unwrap_or_default(),
+            serde_json::to_value(vocabulary.visibility()).unwrap_or_default(),
         );
         body.insert(
             "width".to_string(),
@@ -6777,18 +6582,19 @@ fn vocabulary_payloads(config: &Config) -> Vec<serde_json::Value> {
             Some(source) => {
                 entry.insert("values_source".to_string(), source.clone().into());
             }
-            None if !vocabulary.codes.is_empty() => {
+            None if vocabulary.values.bindings().next().is_some() => {
                 // **No `code` anywhere.** Codes are the server's to assign
                 // (`per-point-attributes.md` §3.1), and the route refuses a body that names one —
                 // so an inline `key = code` table reaches the wire as its keys and titles, and the
                 // running service draws the codes.
                 let values: Vec<serde_json::Value> = vocabulary
-                    .codes
-                    .keys()
-                    .map(|key| {
+                    .values
+                    .bindings()
+                    .map(|(key, _)| {
                         let mut row = serde_json::Map::new();
-                        row.insert("key".to_string(), key.clone().into());
-                        insert_some(&mut row, "title", vocabulary.titles.get(key).cloned());
+                        row.insert("key".to_string(), key.into());
+                        let title = vocabulary.values.title_of(key).map(str::to_string);
+                        insert_some(&mut row, "title", title);
                         serde_json::Value::Object(row)
                     })
                     .collect();
@@ -6978,7 +6784,6 @@ clusters = "clusters.parquet"
 
 [defaults]
 source          = "points"
-entity_id_field = "id"
 allocation_view = "world"
 
 [[view]]
@@ -7033,7 +6838,7 @@ name            = "importance"
 title           = "Importance"
 field           = "pop"
 source          = "extra"
-entity_id_field = "row_id"
+fields          = { id = "row_id" }
 type            = "u32"
 index           = true
 render          = true
@@ -7055,9 +6860,13 @@ index    = true
 name            = "coverage"
 type            = "f32"
 source          = "quarters"
-entity_id_field = "id"
 fields          = { view = "quarter" }
 scope           = { group = "quarter" }
+
+[[attribute]]
+name   = "id"
+type   = "keyword"
+unique = true
 
 [[layer]]
 name       = "clusters/a"
@@ -7072,6 +6881,7 @@ require_member_visibility = "any"
 
 [layer.members]
 source = "members"
+fields = { id = "entity" }
 "#;
 
     fn every_key() -> (tempfile::TempDir, serde_json::Value) {
@@ -7096,7 +6906,7 @@ source = "members"
         // an acquisition key of this one.
         for kind in ["attributes", "vocabularies", "views", "view_groups"] {
             let text = serde_json::to_string(&payloads[kind]).unwrap();
-            for key in ["field", "entity_id_field", "fields", "source"] {
+            for key in ["field", "fields", "source"] {
                 assert!(
                     !text.contains(&format!("\"{key}\"")),
                     "the acquisition key `{key}` reached a {kind} payload: {text}"
@@ -7130,7 +6940,7 @@ source = "members"
             .collect();
         assert_eq!(
             names,
-            vec!["importance", "feature", "note", "coverage"],
+            vec!["importance", "feature", "note", "coverage", "id"],
             "declaration order, the group-scoped column in its own place"
         );
 
@@ -7140,11 +6950,11 @@ source = "members"
         // **Emitted although the route refuses it** (decision 0136's amendment): the emitter
         // states the declaration and the route decides.
         assert_eq!(attributes[0]["render"], true);
+        assert_eq!(attributes[0]["unique"], false);
         assert_eq!(attributes[0]["scope"], "entity");
 
         assert_eq!(attributes[1]["type"], "category");
         assert_eq!(attributes[1]["vocabulary"], "kind");
-        assert_eq!(attributes[1]["width"], "u8");
 
         assert_eq!(attributes[2]["type"], "text");
         assert_eq!(

@@ -1,28 +1,17 @@
 /**
- * Arrow decoding, off the render thread.
+ * Arrow decoding off the render thread. Decoding a large response takes far longer than the server
+ * takes to answer it, and on the render thread it holds up every gesture.
  *
- * **Decode is the client's throughput limit, and it was competing with drawing.** The server answers
- * a wide viewport in single-digit milliseconds; turning that answer into typed arrays takes orders
- * longer, and doing it on the render thread means every anticipatory fetch queues behind it the
- * gestures the user is making. Measured on the demo corpus: a background fetch of 2.3 × 10^6 points
- * spent ~2.8 s decoding and absorbing, during which a pan whose own server time was 9 ms and whose
- * own response was 212 KB measured 8.8 s to paint. Nothing was slow but the thread.
+ * Three request shapes: a whole body, from a batch caller; and a head (the tile, sub-cell and
+ * artifact frames) followed by one points frame at a time, from the streaming client. Each frame
+ * is an independent Arrow stream, so they decode separately.
  *
- * **Three request shapes, one worker.** A whole body is what a batch caller sends; a *head* (the
- * tiles, sub-cells and artifacts frames) and then one *points* frame at a time is what the
- * streaming client sends, so that each frame is typed arrays by the time the next has landed. The
- * frames are independent Arrow streams by contract (`streamed-serving.md` §2), which is exactly
- * what makes decoding them separately legal.
+ * A plain worker without `SharedArrayBuffer`: shared memory needs a cross-origin isolated page,
+ * which breaks resources without a CORP header and cannot be set on some static hosts. Typed arrays
+ * transfer without a copy.
  *
- * **A plain worker, deliberately — no `SharedArrayBuffer`.** Shared memory would require the page to
- * be cross-origin isolated (`COOP: same-origin`, `COEP: require-corp`), which breaks third-party
- * resources that send no CORP header, interferes with OAuth popups, and cannot be set at all on
- * some static hosts. None of that is needed here: the boundary is bytes in, typed arrays out, and
- * typed arrays transfer at zero copy. So this costs nothing to deploy.
- *
- * **No authorisation happens here**, which is what keeps the worker outside the trust boundary: it
- * parses a response the server has already gated, and `tessera_id` crosses it opaque either way
- * (I10). Moving decode does not move a decision.
+ * No authorisation happens here. The worker parses a response the server has already restricted,
+ * and `tessera_id` is opaque on either side.
  */
 import {decodeHead, decodePoints, decodeViewport} from './decode.js';
 import type {MembershipColumn, ScalarColumn} from './types.js';
@@ -46,6 +35,7 @@ function transferables(result: {
   for (const column of Object.values(result.scalars)) {
     const values = column.values as unknown;
     if (ArrayBuffer.isView(values)) out.push((values as ArrayBufferView).buffer);
+    if (column.present) out.push(column.present.buffer);
   }
   for (const column of Object.values(result.membership)) out.push(column.index.buffer, column.ids.buffer);
   // A buffer listed twice is a `DataCloneError`, and Arrow columns can share one.
@@ -63,27 +53,26 @@ self.onmessage = (event: MessageEvent<DecodeRequest>) => {
         subCells: request.subCells ? new Uint8Array(request.subCells) : null,
         artifacts: request.artifacts ? new Uint8Array(request.artifacts) : null
       });
-      // Nothing here is a typed array the main thread reads twice — the head is objects — so it
-      // crosses by structured clone like the batch reply's tiles and artifacts always have.
+      // The head is plain objects, so it crosses by structured clone.
       self.postMessage({id, result, ms: performance.now() - started});
       return;
     }
     if (request.kind === 'points') {
       const decoded = decodePoints([new Uint8Array(request.bytes)]);
-      // **Cell space and the codes stay in the worker.** Nothing downstream reads them — a band
-      // holds world positions and the region queries work there — so shipping them would double
-      // the bytes crossing the boundary for no reader.
+      // Cell-space positions and codes stay in the worker: bands use world positions only.
       const result = {...decoded, positions: new Float64Array(0), codes: new BigUint64Array(0)};
       self.postMessage({id, result, ms: performance.now() - started}, {transfer: transferables(result)});
       return;
     }
     const decoded = decodeViewport(new Uint8Array(request.bytes));
     const result = {...decoded, positions: new Float64Array(0), codes: new BigUint64Array(0)};
-    // The worker's own time, bytes in to arrays out — so the main thread can tell decode from
-    // the time a response spent queued behind another in this lane (design §5.10's measurement).
+    // The worker's own time, so the main thread can tell decode time from time queued in the lane.
     const ms = performance.now() - started;
     self.postMessage({id, result, ms}, {transfer: transferables(result)});
   } catch (error) {
     self.postMessage({id, error: error instanceof Error ? error.message : String(error)});
   }
 };
+
+// The module has evaluated, so the decoder may send requests and their buffers.
+self.postMessage({ready: true});

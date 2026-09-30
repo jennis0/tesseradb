@@ -1,16 +1,14 @@
 #!/usr/bin/env node
-// Shoot the drawn shapes under two principals: a predicate shape at the overview and at a city
-// zoom, and a derived hull — the evidence for `polygon-membership.md` §7 (stage 3).
+// Screenshot the drawn shapes under two principals: a predicate shape at the overview and at a
+// city zoom, and a derived hull.
 //
 //   node clients/ts/viewer/smoke-shapes.mjs [--url http://localhost:5173] [--shots DIR]
 //     [--headed] [--executable /path/to/chrome]
 //
-// **This is the instrument for the one-drawn-geometry claim**, which is not "a polygon draws"
-// but: a layer's drawn geometry is of one declared kind, published in `/v1/meta`; a **predicate**
-// shape is the same bytes for every principal served the artifact and is generalised to the
-// pixel at the zoom it was asked at; a **derived** hull is this principal's own; both draw through
-// the one outline path — one shape for the opened artifact, nothing at rest — and the picture is
-// the wire's, read off the map's probe and the explorer's store rather than eyeballed.
+// A layer's drawn geometry is of one kind, published in `/v1/meta`. A predicate shape is the same
+// bytes for every principal served the artifact, generalised to the pixel at the zoom asked. A
+// derived hull is each principal's own. Both draw through one outline path: one shape for the
+// opened artifact, nothing at rest. Figures come from the map's probe and the explorer's store.
 //
 // It reports, per principal and per kind: the kind `/v1/meta` published, how many outlines drew
 // after an artifact was opened, the vertex count of the served shape at each zoom, and whether
@@ -18,11 +16,10 @@
 // from the meta, if opening an artifact draws other than one shape, if a predicate shape differed
 // between principals, or if the city-zoom shape is not finer than the overview's.
 //
-// Everything is read through the components' parts and the store; never through an id the shadow
-// DOM hides. Requires a running `tessera serve` over a bundle with a `spatial` layer and a layer
-// declaring `hull` (the Overture one-part ladder with the taxonomy declaring a hull is the one the
-// evidence note used), and a running `vite dev`. Without a predicate layer the boundary half is
-// skipped and said so; without a derived layer the hull half is.
+// Requires a running `tessera serve` over a bundle with a `spatial` layer and a layer declaring
+// `hull` (such as the Overture one-part ladder with a hull on the taxonomy), and a running
+// `vite dev`. Without a predicate layer the boundary half is skipped, and said so; likewise the
+// hull half without a derived layer.
 import {mkdir, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
@@ -33,8 +30,15 @@ const shots = args.shots ?? '/tmp/tessera-shapes';
 await mkdir(shots, {recursive: true});
 
 const browser = await launchBrowser(args);
-// Wide, so the map's middle third is not the only part of it the demo's panels leave visible.
+// Wide, so the viewer's panels leave more of the map visible.
 const page = await browser.newPage({viewport: {width: 1920, height: 1080}});
+
+/** The layer picker sits in the explorer's Layers popover, which a press on the map closes; open it. */
+async function openLayers() {
+  const toggle = page.locator('[part="layers-toggle"]').first();
+  await toggle.waitFor({timeout: 60_000});
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
 const consoleErrors = [];
 page.on('console', (m) => {
   if (m.type() === 'error') consoleErrors.push(m.text());
@@ -43,7 +47,7 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
 await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 
-/** Wait until the mark count stops moving — every figure below is only meaningful once it has. */
+/** Wait until the mark count stops changing. */
 const settled = async (limitMs = 60_000) => {
   const started = Date.now();
   let last = -1;
@@ -90,6 +94,7 @@ const drawn = async () =>
 
 /** Tick exactly one layer in the picker. */
 const only = async (layerName) => {
+  await openLayers();
   const entries = page.locator('tessera-layer-picker [part="entry"]');
   const n = await entries.count();
   for (let o = 0; o < n; o++) {
@@ -102,12 +107,13 @@ const only = async (layerName) => {
 
 const principal = async (index) => {
   await page.selectOption('#principal', String(index));
+  await openLayers();
   await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 };
 
 /**
- * Open an artifact through the store — the two calls a click on its contour makes (`map.ts`'s
- * `onClick`): ask for the shape that draws, then open the card — and let it draw.
+ * Open an artifact through the store with the two calls a click on its contour makes (ask for its
+ * shape, then open the card), and let it draw.
  */
 const open = async (id) => {
   await page.evaluate((id) => {
@@ -115,8 +121,7 @@ const open = async (id) => {
     explorer?.store?.needShape(BigInt(id));
     void explorer?.store?.openArtifact(BigInt(id));
   }, id);
-  // The shape is fetched by identifier when the artifact opens; give the round trip its beat,
-  // and then the paint that draws it.
+  // The shape is fetched by identifier when the artifact opens; wait for it and the paint.
   let d = await drawn();
   for (let i = 0; i < 20 && !d.shapes[id]; i++) {
     await page.waitForTimeout(500);
@@ -129,7 +134,7 @@ const open = async (id) => {
   return d;
 };
 
-/** Ask for one artifact's shape by identifier alone — what a hover does — and read it back. */
+/** Ask for one artifact's shape by identifier, as a hover does, and read it back. */
 const fetchShape = async (id) => {
   await page.evaluate((id) => {
     const explorer = /** @type {{store: {needShape(id: bigint): void} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
@@ -147,6 +152,7 @@ const vertices = (parts) => (parts ?? []).flat().reduce((n, ring) => n + ring.le
 const partsOf = (parts) => (parts ?? []).length;
 const holesOf = (parts) => (parts ?? []).reduce((n, rings) => n + Math.max(0, rings.length - 1), 0);
 
+await openLayers();
 await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
@@ -157,9 +163,8 @@ const principals = await page.locator('#principal option').count();
 const labels = [];
 for (let i = 0; i < principals; i++) labels.push((await page.locator('#principal option').nth(i).innerText()).trim());
 console.log(`--- principals: ${labels.join(' | ')} ---`);
-// The two broadest by default, the broadest first so the artifacts the pictures are of are the
-// busiest it is served — a country, a city's busiest borough — and the narrower principal is then
-// asked for the same ones; `--principals i,j` picks others.
+// The two broadest principals by default, broadest first, so the artifacts chosen are the busiest
+// it is served; the narrower one is asked for the same. `--principals i,j` picks others.
 const pair = args.principals ? args.principals.split(',').map(Number) : [principals - 1, Math.max(0, principals - 2)];
 const failures = [];
 const results = [];
@@ -172,12 +177,11 @@ if (!predicateLayer && !derivedLayer) failures.push('no layer draws a shape at a
 
 const shapeBytes = {};
 /**
- * The artifacts the pictures are of, chosen under the first principal and held for the second, so
- * that "the same shape across principals" compares one artifact and not two. Under the second
- * principal an artifact may simply not be served, which is the disclosure control and is said.
+ * The artifacts pictured, chosen under the first principal and kept for the second so both compare
+ * one artifact. The second principal may not be served one, and the report says so.
  */
 const chosen = {overview: null, city: null, hull: null};
-/** A served artifact on the frontier — one no served artifact names as its parent — of a layer. */
+/** A served artifact of a layer on the frontier: one no served artifact names as its parent. */
 const frontierOf = (served, layer) => {
   const parents = new Set(served.flatMap((a) => a.parents));
   return served.filter((a) => a.layer === layer && !parents.has(a.id));
@@ -204,9 +208,8 @@ const fitAll = async () => {
 };
 
 /**
- * Open `id` (or the fallback picked from what is served), shoot it, record what drew. With `fit`
- * the map is first fitted to the artifact, so its outline is what the picture is of; the shape is
- * then asked for at that depth.
+ * Open `id` (or one picked from what is served), screenshot it and record what drew. With `fit`,
+ * the map is first fitted to the artifact and its shape asked for at that depth.
  */
 const shoot = async (label, kind, where, pick, file, fit = false) => {
   const rest = await drawn();
@@ -245,8 +248,7 @@ for (const p of pair) {
   if (predicateLayer) {
     await only(predicateLayer);
     await fitAll();
-    // The overview: the division with the most visible members — a country — held across
-    // principals once chosen.
+    // The overview: the division with the most visible members, kept across principals.
     chosen.overview = await shoot(label, 'predicate', 'at the overview', (served) => {
       const mine = frontierOf(served, predicateLayer).filter((a) => a.box);
       if (chosen.overview && mine.some((a) => a.id === chosen.overview)) return chosen.overview;
@@ -273,10 +275,9 @@ for (const p of pair) {
   }
 }
 
-// One artifact, two masks, one depth: each shape the pictures are of, asked for by identifier
-// under each principal — the route a hover takes, which does not need the artifact in the served
-// set — with the map fitted to a fixed box first, so the vertex rule reads the same zoom for both.
-// A predicate shape must come back byte-identical; a derived one is each principal's own.
+// Each pictured shape, asked for by identifier under each principal with the map fitted to the
+// same box, so the vertex rule sees the same zoom. A predicate shape must come back
+// byte-identical; a derived one is each principal's own.
 const REGION = [0.15, 0.35, 0.35, 0.55];
 for (const p of pair) {
   await principal(p);
@@ -299,8 +300,7 @@ for (const r of results) {
   console.log(`  ${r.principal.padEnd(26)} ${r.kind.padEnd(9)} ${r.where.padEnd(8)} served=${String(r.served).padStart(5)} drawn=${r.outlinesDrawn} parts=${String(r.parts).padStart(3)} holes=${String(r.holes).padStart(3)} vertices=${String(r.vertices).padStart(5)}  ${r.file}`);
 }
 console.log('--- the same shape, across principals ---');
-// The vertex rule is a function of the zoom, so two fetches are compared only where the map was
-// at one depth for both; where it was not, that is said and nothing is concluded.
+// The vertex rule depends on the zoom, so two fetches are compared only at the same depth.
 for (const [key, byPrincipal] of Object.entries(shapeBytes)) {
   const entries = Object.values(byPrincipal);
   const [kind, where, id] = key.split(':');
@@ -318,12 +318,8 @@ await writeFile(join(shots, 'shapes.json'), JSON.stringify({layers, results}, nu
 
 console.log('--- console errors (a superseded request’s abort excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
-// A viewport stream cut off by this script's own principal switch reports as an incomplete
-// chunked body: the page moved on before the server finished, which is the same event as the
-// superseded abort and not a defect.
-// `decoder closed` is the store's decode worker rejecting the decodes still pending when a
-// principal switch closed it (`core/src/decoder.ts`) — the same superseded event, seen only
-// headless, where the switch outruns the software-rendered decode.
+// A principal switch cuts off streams in flight (an incomplete chunked body) and closes the decode
+// worker with decodes pending (`decoder closed`); neither is a fault.
 const unexplained = consoleErrors.filter((e) => !isSupersededAbort(e) && !e.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') && !e.includes('decoder closed'));
 if (unexplained.length) failures.push(`${unexplained.length} console error(s)`);
 

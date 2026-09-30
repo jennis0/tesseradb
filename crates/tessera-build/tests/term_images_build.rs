@@ -11,6 +11,8 @@
 //! image of the right posting, and the only way to know is to project the posting again and
 //! compare.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -159,6 +161,7 @@ fn write_pairs(path: &Path) {
 }
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    let (schema, attribute_sources) = common::id_attributes(points);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -173,22 +176,20 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out,
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     }
 }
 
@@ -215,8 +216,8 @@ fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
         None => None,
         Some(PostingRef::Array(bytes)) => {
             let mut bitmap = Bitmap::new();
-            for chunk in bytes.chunks_exact(4) {
-                bitmap.add(u32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in bytes.as_chunks::<4>().0 {
+                bitmap.add(u32::from_le_bytes(*chunk));
             }
             Some(bitmap)
         }

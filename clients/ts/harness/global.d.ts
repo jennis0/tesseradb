@@ -1,7 +1,7 @@
 /**
- * The map's probe (design §5.9): the demo publishes its first map's on `window` with the lanes it
- * keeps itself; `__tesseraProbeOf` is the harness's own accessor, installed before any page
- * script, which falls back to the explorer's map's probe on a page that publishes none.
+ * The map's probe. The viewer publishes its first map's on `window` with its timing lanes.
+ * `__tesseraProbeOf` is the harness's accessor, installed before any page script, which falls
+ * back to the explorer's map's probe on a page that publishes none.
  */
 interface Window {
   __tesseraProbeOf: () => Window['__tesseraProbe'] | null;
@@ -15,7 +15,7 @@ interface Window {
     region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
     timings: {
       slabMs: number;
-      washMs: number;
+      densityMs: number;
       lutMs: number;
       outlinesMs: number;
       labelsMs: number;
@@ -32,14 +32,14 @@ interface Window {
       coverage: {current: number; stale: number};
       servedIds: string[];
       sample: {ordinal: number; resolvedId: string | null}[];
-      /** How many of the sampled ordinals the lookup texture draws in a colour (§5.10). */
+      /** How many of the sampled ordinals the lookup texture colours. */
       coloured: number;
     };
-    /** The three lanes' timings, kept by the demo (design §5.10's measurement); absent on any other page. */
+    /** Decode, absorb and region timings, kept by the viewer; absent on any other page. */
     lanes?: {
       decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
       absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
-      /** `region` and `coverage` are emitted with numbers only; the trace at large is not. */
+      /** `region` and `coverage` carry numeric fields only. */
       region: Record<string, number> | null;
       coverage: Record<string, number> | null;
       longTasks: {ms: number; at: number}[];

@@ -24,15 +24,18 @@
 //! **The equivalence is between two whole tests, not two halves**, and it holds in three parts:
 //!
 //! 1. **Projection loss is checked first and is not in the expression.** A generating set holding a
-//!    member this view has not folded in projects to fewer rows than the record declares, and can
+//!    member still in the commit buffer projects to fewer rows than the record declares, and can
 //!    never be contained — see [`crate::artifacts::ArtifactRecords`]. That test is per view, so it
-//!    stays on the row form; the expression is view-independent and says nothing about it. Every
-//!    member of a set that clears it has a base row.
-//! 2. **The fragment is exactly the terms.** `M_auth`'s base is `⋃ postings(t)` over the satisfied
-//!    terms, so a base-row entity is in it precisely when its signature meets the principal's
-//!    term set. Delta tiers are deliberately not read here: a tier carries the postings of
-//!    **flushed** entities, which own extent rows and never base rows, so restricted to the base
-//!    rows a generating set projects to they contribute nothing at all.
+//!    stays on the row form; the expression is view-independent and says nothing about it.
+//! 2. **The fragment is exactly the terms, over the base rows.** `M_auth`'s base is `⋃ postings(t)`
+//!    over the satisfied terms, so a base-row entity is in it precisely when its signature meets
+//!    the principal's term set. The composer reads the build's postings and no delta tier, so it
+//!    knows the signature of an entity the build read and not of one that arrived by ingest. A
+//!    generating set is projected over the whole row space, and an ordinal one of whose sets holds
+//!    a row at or above `base_rows` therefore **declines** here: the row form checks it before
+//!    asking an expression ([`crate::artifacts::ArtifactRows::satisfied_rank_via`]) and the exact
+//!    masked-count route answers. Composing over the delta tiers would make the partition cover
+//!    those ordinals too; that is unmeasured and not built.
 //! 3. **The deny correction is the acceptance test, not a refinement** (`design/artifact-serving-at-scale.md`
 //!    §4.2; the review's finding 2). A deletion or a suppression removes a member from `M_auth`
 //!    whatever the terms say, so an expression consulted alone is **fail-open for exactly the case

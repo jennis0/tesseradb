@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::scalar::ScalarType;
+
 /// What joins a group's name to one of its keys in a view id — `<group>:<key>` (`views.md` §3.2).
 ///
 /// Here rather than beside the manifest's copy because the WAL's roster records travel through
@@ -81,11 +83,18 @@ impl ViewMetadataValue {
 #[serde(rename_all = "snake_case")]
 pub enum ViewMetadataType {
     Bool,
-    Int,
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
     Float,
     Text,
     TimestampUs,
-    /// A category: the value is a key resolved to its vocabulary's code (`views.md` §3.1).
+    /// A category: the value is a key resolved to its vocabulary's code.
     Category,
 }
 
@@ -93,7 +102,14 @@ impl ViewMetadataType {
     pub fn name(self) -> &'static str {
         match self {
             ViewMetadataType::Bool => "bool",
-            ViewMetadataType::Int => "integer",
+            ViewMetadataType::U8 => "u8",
+            ViewMetadataType::U16 => "u16",
+            ViewMetadataType::U32 => "u32",
+            ViewMetadataType::U64 => "u64",
+            ViewMetadataType::I8 => "i8",
+            ViewMetadataType::I16 => "i16",
+            ViewMetadataType::I32 => "i32",
+            ViewMetadataType::I64 => "i64",
             ViewMetadataType::Float => "float",
             ViewMetadataType::Text => "text",
             ViewMetadataType::TimestampUs => "timestamp_us",
@@ -101,24 +117,41 @@ impl ViewMetadataType {
         }
     }
 
-    /// Does `value` belong under this declaration?
-    ///
-    /// An integer is **not** accepted where a float is declared, and vice versa: the roster is
-    /// served typed and a client reading `starts` as a float because one record happened to carry
-    /// one is a client the declaration cannot help.
+    /// The values an integer type holds, or `None` for a type that is not an integer. A roster
+    /// value is stored as an `i64`, so the range is the declared type's cut to an `i64`'s, which
+    /// stops a `u64` at `i64::MAX`.
+    pub fn integer_range(self) -> Option<(i64, i64)> {
+        let declared = match self {
+            ViewMetadataType::U8 => ScalarType::U8,
+            ViewMetadataType::U16 => ScalarType::U16,
+            ViewMetadataType::U32 => ScalarType::U32,
+            ViewMetadataType::U64 => ScalarType::U64,
+            ViewMetadataType::I8 => ScalarType::I8,
+            ViewMetadataType::I16 => ScalarType::I16,
+            ViewMetadataType::I32 => ScalarType::I32,
+            ViewMetadataType::I64 => ScalarType::I64,
+            _ => return None,
+        };
+        let (min, max) = declared.integer_range()?;
+        let stored = |v: i128| v.clamp(i64::MIN.into(), i64::MAX.into()) as i64;
+        Some((stored(min), stored(max)))
+    }
+
+    /// Does `value` belong under this declaration? An integer must fit the declared width. An
+    /// integer is not accepted where a float is declared, because the roster is served typed.
     pub fn admits(self, value: &ViewMetadataValue) -> bool {
-        matches!(
-            (self, value),
+        match (self, value) {
             (ViewMetadataType::Bool, ViewMetadataValue::Bool(_))
-                | (ViewMetadataType::Int, ViewMetadataValue::Int(_))
-                | (ViewMetadataType::Float, ViewMetadataValue::Float(_))
-                | (ViewMetadataType::Text, ViewMetadataValue::Text(_))
-                | (ViewMetadataType::TimestampUs, ViewMetadataValue::TimestampUs(_))
-                // A category's stored form is its code, which is how a *build* writes one. The
-                // create operation refuses the type outright rather than accepting a code from
-                // the wire — see `ViewRoster::prepare_create`.
-                | (ViewMetadataType::Category, ViewMetadataValue::Int(_))
-        )
+            | (ViewMetadataType::Float, ViewMetadataValue::Float(_))
+            | (ViewMetadataType::Text, ViewMetadataValue::Text(_))
+            | (ViewMetadataType::TimestampUs, ViewMetadataValue::TimestampUs(_))
+            // A category is stored as its code, which is how a build writes one.
+            | (ViewMetadataType::Category, ViewMetadataValue::Int(_)) => true,
+            (ty, ViewMetadataValue::Int(v)) => ty
+                .integer_range()
+                .is_some_and(|(min, max)| (min..=max).contains(v)),
+            _ => false,
+        }
     }
 }
 
@@ -129,6 +162,29 @@ pub struct GroupMetadataField {
     pub ty: ViewMetadataType,
     /// The vocabulary a category's keys are drawn from; `None` for every other type.
     pub vocabulary: Option<String>,
+}
+
+/// The keys a roster record has of its own, which a metadata name may not take.
+pub const ROSTER_KEYS: [&str; 3] = ["key", "source", "visibility"];
+
+/// A metadata name is a field of each view's entry on `/v1/meta`.
+pub fn check_metadata_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "metadata '{name}': a name is ASCII letters, digits, `_` and `-`"
+        ));
+    }
+    if ROSTER_KEYS.contains(&name) {
+        return Err(format!(
+            "metadata '{name}': that name is one of the roster's own keys ({})",
+            ROSTER_KEYS.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// One view created while the service runs — the roster record `PUT /control/views/{group}/{key}`
@@ -159,15 +215,15 @@ pub struct CreatedView {
     /// `LayerCreate` already follow. A build-declared view is incarnation 0, so a key first used
     /// at a build and dropped comes back at 1 or above.
     pub incarnation: ViewIncarnation,
-    /// This view's own gate: the labels a principal must hold one of, each one term verbatim
-    /// (`views.md` §6, decision 0132); `None` takes the group's. Never empty: a gate naming no
+    /// This view's own gate: the labels a principal must hold one of, each one term, stored
+    /// trimmed (`views.md` §6); `None` takes the group's. Never empty: a gate naming no
     /// terms is refused before a record is prepared.
     pub visibility: Option<Vec<String>>,
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
 /// A view gate's `visibility` as a declaration or a request body spells it (`views.md` §6,
-/// decision 0132): one label, or a list of labels. Each element is one label, taken verbatim; a
+/// decision 0132): one label, or a list of labels. Each element is one label, never split; a
 /// comma inside a label is part of the label. One label is the common case, and the list is how a
 /// gate names several terms.
 ///
@@ -251,4 +307,38 @@ pub fn check_view_key(key: &str) -> Result<(), String> {
             .to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_integer_must_fit_the_declared_width() {
+        assert!(ViewMetadataType::U8.admits(&ViewMetadataValue::Int(255)));
+        assert!(!ViewMetadataType::U8.admits(&ViewMetadataValue::Int(256)));
+        assert!(!ViewMetadataType::U8.admits(&ViewMetadataValue::Int(-1)));
+        assert!(ViewMetadataType::I8.admits(&ViewMetadataValue::Int(-128)));
+        assert!(!ViewMetadataType::Float.admits(&ViewMetadataValue::Int(1)));
+        assert!(!ViewMetadataType::I32.admits(&ViewMetadataValue::Text("1".to_string())));
+    }
+
+    #[test]
+    fn a_u64_is_held_up_to_the_largest_value_its_i64_storage_holds() {
+        assert_eq!(ViewMetadataType::U64.integer_range(), Some((0, i64::MAX)));
+        assert!(ViewMetadataType::U64.admits(&ViewMetadataValue::Int(i64::MAX)));
+        assert!(!ViewMetadataType::U64.admits(&ViewMetadataValue::Int(-1)));
+        assert_eq!(
+            ViewMetadataType::I64.integer_range(),
+            Some((i64::MIN, i64::MAX))
+        );
+    }
+
+    #[test]
+    fn a_metadata_name_is_an_identifier_and_not_a_roster_key() {
+        assert!(check_metadata_name("starts").is_ok());
+        for bad in ["", "a b", "a/b", "key", "visibility"] {
+            assert!(check_metadata_name(bad).is_err(), "{bad:?}");
+        }
+    }
 }

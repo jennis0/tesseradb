@@ -19,8 +19,7 @@ kingdom  = "vocab-kingdom.parquet"
 taxonomy = "members-taxonomy.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "entity_id"
+source     = "points"
 
 # ---------------------------------------------------------------------------------------------
 # **One view, and every entity is in it.** A record GBIF publishes without `decimallatitude` and
@@ -128,6 +127,18 @@ name  = "scientificname"
 title = "Scientific name"
 type  = "keyword"
 
+# `gbifid` is GBIF's key for a record, one a row, and it is declared `unique`, so every file names
+# an occurrence by it: the points file as `gbifid`, the member file as `entity`. A points row
+# repeating a value an earlier row holds is refused and counted in the build's report.
+# Neither rendered nor indexed, so its unique index is its only filter structure and it answers
+# `eq` and `in` alone; the value itself is read from the record store.
+
+[[attribute]]
+name   = "gbifid"
+title  = "GBIF occurrence key"
+type   = "u64"
+unique = true
+
 # ---------------------------------------------------------------------------------------------
 # **The taxonomy, three levels, family → genus → species.** It starts at family and that is the
 # rung's one structural concession to the box: `merge_member_runs` holds the largest single
@@ -184,3 +195,4 @@ computed = ["centroid", "box"]
 
 [layer.members]
 source = "taxonomy"
+fields = { gbifid = "entity" }

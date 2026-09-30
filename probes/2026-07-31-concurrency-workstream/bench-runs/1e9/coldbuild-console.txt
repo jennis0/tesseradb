@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.12s
-bundle /home/joe/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
+bundle /home/user/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
 
 criterion 6: cold-build storm (D-G non-blocking single-flight)
   cold_w=47968 (0.7s to authorise) admission_timeout_ms=250 cold_workers=50 warm_workers=16

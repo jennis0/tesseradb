@@ -3,8 +3,8 @@
 **Status:** Measurement. Answers the ingest-campaign plan's §8 item 5 for rung 4 (PaperSeek +
 OpenAlex): "the 67 MB/s figure is sequential; a footer read plus per-column range reads over SMB
 may be nothing like it. ⊘ Measure on 20 files before committing a plan to the projected figure."
-Measured on 2026-09-02 against `/mnt/nas/joe/tessera/datasets/paperseek-openalex/2026-08-27/` and
-`/mnt/nas/joe/tessera/datasets/openalex/2026-08-27/`, read-only, `~/venvs/projection/bin/python`
+Measured on 2026-09-02 against `/mnt/nas/tessera/datasets/paperseek-openalex/2026-08-27/` and
+`/mnt/nas/tessera/datasets/openalex/2026-08-27/`, read-only, `~/venvs/projection/bin/python`
 (pyarrow 23.0.1). Two other measurement tracks (a build, a capped server) shared the box; nothing
 here used more than one Python process at a time.
 
@@ -160,7 +160,7 @@ a capped server) writing to the same filesystem concurrently — this number wil
 time rung 4 starts.
 
 ```
-$ du -sh /home/joe/code/tessera/data/ladder/*
+$ du -sh /home/user/code/tessera/data/ladder/*
 3.1G   arxiv
 10G    geonames
 84G    medcpt

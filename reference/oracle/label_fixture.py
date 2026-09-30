@@ -47,16 +47,19 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from .harness import (
+    CLI_BIN,
+    JOIN_FIELD,
+    REPO_ROOT,
+    ensure_cli_built,
+    join_attribute_toml,
+    write_deployment,
+)
 
 N_ITEMS = 200
 VIEW_ID = "s0"
 EXTENT_MAX = 65536.0
 SEED = 20260820
-
-# One fixed identity key, as the canary fixture uses: `tessera_id` is a keyed permutation, so a
-# minted-per-build key would make every recorded identifier a different number for no reason.
-LABEL_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
 
 # The terms, as the exploded `(entity_id, term_id)` relation carries them. A session names them by
 # their decimal spelling, which is the descriptor the build interns.
@@ -199,21 +202,21 @@ artifacts = [
 
   [layer.members]
   source = "members"
+  fields = {{ {JOIN_FIELD} = "entity" }}
 
   [[layer.content.supplied]]
   name = "topic"
   type = "text"
   require_member_visibility = "all"
-"""
+
+""" + join_attribute_toml("points")
 
 
 def build_label_bundle(work_dir: Path) -> Path:
     """Write the corpus and its declaration under `work_dir` and build the bundle; return its root.
 
-    `--mint-external-ids` is passed because the cache half of §4.4's row addresses one entity over
-    `/control/changes`, which takes an external id. This fixture's items are synthesised here, so
-    saying they have caller-supplied ids is a statement about this corpus and not a manufactured
-    one (contracts §2.4).
+    Every file names its items by source id, which the declaration makes unique, so a test can
+    address one item by it over `/control/changes`.
     """
     ensure_cli_built()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -233,10 +236,8 @@ def build_label_bundle(work_dir: Path) -> Path:
             str(deployment),
             "--out",
             str(bundle),
-            "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
-        env=build_env(LABEL_ID_KEY_HEX),
         check=True,
     )
     return bundle

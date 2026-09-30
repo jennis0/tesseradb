@@ -13,12 +13,14 @@
 
 mod common;
 
+use tessera_engine::SuggestRequest;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -28,7 +30,8 @@ use croaring::Bitmap;
 use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::filter::{
-    candidate, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand, Scalar,
+    candidate, ComposeError, Endpoint, FilterColumns, FilterError, FilterExpr, FilterOperand,
+    OpenedExtent, Scalar, MAX_FILTER_DEPTH,
 };
 use tessera_engine::ViewportRequest;
 use tessera_lifecycle::command::UnallocatedRow;
@@ -107,6 +110,12 @@ index    = true
 name     = "bonus"
 type     = "i32"
 index    = true
+
+[[attribute]]
+name     = "prose"
+type     = "text"
+index    = true
+analyser = "unicode"
 "#;
 
 /// Source id → department key. Every fifth item carries none, so the absent path is exercised
@@ -166,6 +175,12 @@ fn title_of(e: u64) -> String {
     format!("paper-{e:02}")
 }
 
+/// The analysed column: one word every item carries and one only this item does, so a `match`
+/// answer is a set no other item's prose can fake.
+fn prose_of(e: u64) -> String {
+    format!("shared p{e:02}")
+}
+
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -176,6 +191,7 @@ fn write_points(path: &Path) {
         Field::new("title", DataType::Utf8, true),
         Field::new("score", DataType::Int32, false),
         Field::new("bonus", DataType::Int32, true),
+        Field::new("prose", DataType::Utf8, true),
     ]));
     let ids: Vec<u64> = (0..N).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
@@ -191,6 +207,7 @@ fn write_points(path: &Path) {
     let titles: Vec<Option<String>> = ids.iter().map(|&e| Some(title_of(e))).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| score_of(e)).collect();
     let bonuses: Vec<Option<i32>> = ids.iter().map(|&e| bonus_of(e)).collect();
+    let prose: Vec<Option<String>> = ids.iter().map(|&e| Some(prose_of(e))).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -202,34 +219,7 @@ fn write_points(path: &Path) {
             Arc::new(StringArray::from(titles)),
             Arc::new(arrow::array::Int32Array::from(scores)),
             Arc::new(arrow::array::Int32Array::from(bonuses)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// The same term model `common` uses — every item carries `ALL_TERM`, every third also
-/// `SUBSET_TERM` — so `subset_credential()` is a principal seeing one item in three.
-fn write_pairs(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..N {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
+            Arc::new(StringArray::from(prose)),
         ],
     )
     .unwrap();
@@ -254,8 +244,7 @@ struct Fixture {
     /// deliberately corrupted a *file* can still reopen the columns: `open_bundle` verifies every
     /// digest, so it refuses first and the reader under test is never reached.
     phash: String,
-    declared: Vec<tessera_store::manifest::DeclaredScalar>,
-    vocabularies: Vec<tessera_store::manifest::ManifestVocabulary>,
+    manifest: tessera_store::manifest::Manifest,
     extents: Vec<tessera_store::manifest::AttrExtent>,
 }
 
@@ -264,7 +253,7 @@ fn fixture() -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
-    write_pairs(&pairs);
+    write_pairs_n(&pairs, N);
     let bundle = dir.path().join("bundle");
 
     let schema_path = dir.path().join("schema.toml");
@@ -285,22 +274,20 @@ fn fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the fixture builds");
 
@@ -314,16 +301,9 @@ fn fixture() -> Fixture {
     let columns = FilterColumns::open(
         &bundle.join(&prefix),
         &phash,
-        &opened.manifest.declared_scalars,
-        &opened.manifest.scoped_scalars(),
-        &|view: &str| opened.manifest.incarnation_of(view),
-        &opened.manifest.vocabularies,
+        &opened.manifest,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
-        &opened.partitions[&phash].manifest.attr_extents,
-        &opened.partitions[&phash].manifest.record_extents,
-        &opened.partitions[&phash].manifest.artifact_record_extents,
-        &[],
-        &opened.partitions[&phash].manifest.text_extents,
+        tessera_engine::filter::PartitionExtents::of(Some(&opened.partitions[&phash].manifest)),
         &[],
         // Mapped, which is what the engine does at session open — so the round-trip these tests
         // assert is the one a served request actually takes.
@@ -354,8 +334,7 @@ fn fixture() -> Fixture {
         archive_codes,
         prefix,
         phash: phash.clone(),
-        declared: opened.manifest.declared_scalars.clone(),
-        vocabularies: opened.manifest.vocabularies.clone(),
+        manifest: opened.manifest.clone(),
         extents: opened.partitions[&phash].manifest.attr_extents.clone(),
     }
 }
@@ -393,8 +372,8 @@ fn candidate_for(fx: &Fixture, credential: &[u8]) -> (tessera_engine::Engine, Bi
         .expect("the credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        &session.fragment,
-        &session.satisfied,
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
         &generation.overlay,
         &generation.buffer,
     );
@@ -482,36 +461,46 @@ fn a_zero_coverage_principal_matches_nothing() {
     }
 }
 
-/// String predicates over a real mask: equality, prefix and substring, each against the corpus.
+/// One keyword case: what to call it, the operand, and the corpus predicate it must agree with.
+type KeywordCase = (&'static str, FilterOperand, fn(u64) -> bool);
+
+/// Every keyword operand over a real mask, against the corpus: equality, a set, a prefix and a
+/// substring, on the built `title` column. The set names a key nobody carries beside two that are
+/// carried, so a miss inside an `in` is answered rather than refused.
 #[test]
 fn string_filters_agree_with_the_corpus_under_a_real_mask() {
     let fx = fixture();
     let (_engine, cand) = candidate_for(&fx, &subset_credential());
     let terms = [SUBSET_TERM];
 
-    let eq = fx
-        .columns
-        .resolve("title", &FilterOperand::TextEquals(title_of(3)), &cand)
-        .unwrap();
-    assert_eq!(as_vec(&eq), expected(&fx, &terms, |e| e == 3));
-
-    let prefix = fx
-        .columns
-        .resolve("title", &FilterOperand::TextPrefix("paper-1".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&prefix),
-        expected(&fx, &terms, |e| title_of(e).starts_with("paper-1"))
-    );
-
-    let contains = fx
-        .columns
-        .resolve("title", &FilterOperand::TextContains("-2".into()), &cand)
-        .unwrap();
-    assert_eq!(
-        as_vec(&contains),
-        expected(&fx, &terms, |e| title_of(e).contains("-2"))
-    );
+    let cases: [KeywordCase; 4] = [
+        ("eq", FilterOperand::TextEquals(title_of(3)), |e| e == 3),
+        (
+            "in",
+            FilterOperand::TextIn(vec![
+                title_of(3),
+                title_of(9),
+                "paper-no-such-thing".to_string(),
+            ]),
+            |e| e == 3 || e == 9,
+        ),
+        (
+            "prefix",
+            FilterOperand::TextPrefix("paper-1".into()),
+            |e| title_of(e).starts_with("paper-1"),
+        ),
+        (
+            "contains",
+            FilterOperand::TextContains("-2".into()),
+            |e| title_of(e).contains("-2"),
+        ),
+    ];
+    for (label, operand, carries) in cases {
+        let got = fx.columns.resolve("title", &operand, &cand).unwrap();
+        let want = expected(&fx, &terms, carries);
+        assert!(!want.is_empty(), "{label}: the fixture selects nothing");
+        assert_eq!(as_vec(&got), want, "{label}");
+    }
 }
 
 /// **Composition is intersection, and it commutes with the corpus.** Two operands over different
@@ -634,7 +623,6 @@ fn ingest_and_flush_with(
 ) -> u64 {
     let flushes_before = engine.write_executor_stats().flushes;
     let row = UnallocatedRow {
-        external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -651,12 +639,15 @@ fn ingest_and_flush_with(
             // `bonus` is the nullable numeric: the default above passes `WalScalar::Null`, which is
             // how an ingested item says it carries no value for a column (decision 0064).
             bonus,
+            // The analysed column, keyed off the batch name so each flushed item carries a word
+            // no other item holds.
+            WalScalar::Utf8(format!("shared {external}")),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
     };
     let allocated = engine
-        .accept_ingest(vec![row], external.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], external.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0];
     assert!(
         allocated.raw() >= N,
@@ -677,8 +668,8 @@ fn live_candidate(engine: &tessera_engine::Engine) -> (Arc<tessera_engine::Gener
         .expect("credential resolves");
     let generation = engine.generation();
     let cand = candidate(
-        &session.fragment,
-        &session.satisfied,
+        session.fragment_at_authorise_for_test(),
+        session.satisfied_for_test(),
         &generation.overlay,
         &generation.buffer,
     );
@@ -1112,15 +1103,11 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         FilterColumns::open(
             &prefix,
             &phash,
-            &opened.manifest.declared_scalars,
-            &opened.manifest.scoped_scalars(),
-            &|view: &str| opened.manifest.incarnation_of(view),
-            &opened.manifest.vocabularies,
-            extents,
-            &[],
-            &[],
-            &[],
-            &[],
+            &opened.manifest,
+            tessera_engine::filter::PartitionExtents {
+                attrs: extents,
+                ..Default::default()
+            },
             &[],
             true,
         )
@@ -1139,6 +1126,30 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
         std::fs::write(&path, held).unwrap();
     }
     assert!(open(&extents).is_ok(), "restored, it composes again");
+}
+
+/// An extent as a publication hands one over. Only the column name, the values path and the two
+/// readers are composed from; the rest of the entry is what the manifest carries.
+fn opened(
+    column: &str,
+    values_rel: &str,
+    values: Arc<tessera_filter::ValueColumn>,
+    dict: Option<Arc<tessera_filter::SortedDict>>,
+) -> OpenedExtent {
+    OpenedExtent {
+        extent: tessera_store::manifest::AttrExtent {
+            column: column.to_string(),
+            view: None,
+            incarnation: None,
+            values: values_rel.to_string(),
+            presence: format!("{values_rel}.roaring"),
+            dict: dict.is_some().then(|| format!("{values_rel}.dict")),
+            postings: None,
+            offsets: None,
+        },
+        values,
+        dict,
+    }
 }
 
 /// A keyword extent built in this process: the ordinal column and the dictionary that numbers it.
@@ -1196,9 +1207,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let err = fx
         .columns
         .with_extents(
-            &[(
-                "title".to_string(),
-                "attrs/title/extents/overlapping.arrow".to_string(),
+            &[opened(
+                "title",
+                "attrs/title/extents/overlapping.arrow",
                 overlapping,
                 Some(dict),
             )],
@@ -1207,7 +1218,10 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
             &[],
         )
         .expect_err("an extent claiming entity 0 overlaps the base column");
-    assert!(format!("{err}").contains("I9"), "{err}");
+    assert!(
+        matches!(&err, ComposeError::Overlap { column } if column == "title"),
+        "{err:?}"
+    );
 
     // And an extent for a column the schema does not declare filterable is refused too: it would
     // otherwise be silently dropped, which is a value column quietly going missing.
@@ -1215,9 +1229,9 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     assert!(fx
         .columns
         .with_extents(
-            &[(
-                "no_such_column".to_string(),
-                "attrs/no_such_column/extents/stray.arrow".to_string(),
+            &[opened(
+                "no_such_column",
+                "attrs/no_such_column/extents/stray.arrow",
                 stray,
                 Some(stray_dict),
             )],
@@ -1244,18 +1258,19 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
 
     let long = UnallocatedRow {
-        external_id: Some(b"long".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
-        // The schema declares five columns.
+        // The schema declares seven columns, the fixture's `id` last.
         scalars: vec![
             WalScalar::Utf8("eng".to_string()),
             WalScalar::Utf8("xx".to_string()),
             WalScalar::Utf8("paper-97".to_string()),
             WalScalar::I32(43),
+            WalScalar::Null,
+            WalScalar::Utf8("shared p97".to_string()),
             WalScalar::Null,
             WalScalar::I32(1),
         ],
@@ -1263,15 +1278,21 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         scoped: Vec::new(),
     };
     let err = engine
-        .accept_ingest(vec![long], "batch-long".to_string(), [1u8; 32])
+        .ingest_rows(vec![long], "batch-long".to_string(), [1u8; 32])
         .expect_err("a long row is refused");
     assert!(
-        format!("{err}").contains("carries 6 scalars, but the schema declares 5"),
+        matches!(
+            err,
+            tessera_engine::AcceptError::ScalarArity {
+                expected: 7,
+                got: 8,
+                ..
+            }
+        ),
         "{err}"
     );
 
     let short = UnallocatedRow {
-        external_id: Some(b"short".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1283,7 +1304,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     };
     assert!(
         engine
-            .accept_ingest(vec![short], "batch-short".to_string(), [3u8; 32])
+            .ingest_rows(vec![short], "batch-short".to_string(), [3u8; 32])
             .is_ok(),
         "a short row is padded at the close, never indexed past its end"
     );
@@ -1291,7 +1312,6 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
     // The engine is still usable — a refusal before the submit acks nothing, burns no entity id
     // (I9) and leaves the executor running.
     let good = UnallocatedRow {
-        external_id: Some(b"good".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1310,7 +1330,7 @@ fn a_row_longer_than_the_schema_is_refused_and_a_shorter_one_is_padded() {
         scoped: Vec::new(),
     };
     assert!(engine
-        .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
+        .ingest_rows(vec![good], "batch-good".to_string(), [2u8; 32])
         .is_ok());
 }
 
@@ -1786,7 +1806,6 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
 
     // Accepted and acked, deliberately *not* flushed — so it is in the candidate and in no layer.
     let row = UnallocatedRow {
-        external_id: Some(b"buffered".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1803,7 +1822,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
         scoped: Vec::new(),
     };
     let buffered = engine
-        .accept_ingest(vec![row], "batch-buffered".to_string(), [9u8; 32])
+        .ingest_rows(vec![row], "batch-buffered".to_string(), [9u8; 32])
         .expect("ingest is accepted")[0]
         .raw() as u32;
 
@@ -1888,13 +1907,9 @@ fn none_of_every_offered_value_proves_no_unoffered_value_exists() {
     let _ = session;
 }
 
-/// **`count` is the viewer's own `and_cardinality`**, and it agrees with the filter that resolves
-/// the same value under the same candidate — which is the only cross-check available, the two being
-/// different code over the same postings and the same extents.
-///
-/// The property that makes the arithmetic sound is disjointness: the extents sweep counts entities
-/// ingested since the build and the postings cover the build, so the halves add. A test that only
-/// exercised a bundle with no extents would pass with the halves multiplied.
+/// **A value's count is what a filter on that value returns** under the same candidate, the two
+/// being different code over the same postings and the same extents. The fixture has extents, so
+/// a count that multiplied or dropped a half would disagree.
 ///
 /// **Mutations this kills:** counting extent codes as a set rather than per entity; counting the
 /// posting whole instead of against the candidate; adding a half twice.
@@ -1907,6 +1922,16 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
         .filter_columns
         .category_membership("department", &cand)
         .expect("a `derived` category carries membership postings");
+    let codes: Vec<u32> = fx.codes.values().copied().collect();
+    let counts = generation
+        .filter_columns
+        .category_counts(
+            "department",
+            &cand,
+            tessera_engine::filter::CountCodes::All(&|visit| codes.iter().for_each(|&c| visit(c))),
+            &|_| {},
+        )
+        .expect("a declared category counts");
 
     for (key, code) in &fx.codes {
         let resolved = generation
@@ -1917,11 +1942,7 @@ fn a_values_count_is_what_a_filter_on_that_value_returns() {
                 &cand,
             )
             .expect("a declared category resolves");
-        assert_eq!(
-            membership.count(*code).unwrap(),
-            resolved.cardinality(),
-            "{key} (code {code})"
-        );
+        assert_eq!(counts.get(*code), resolved.cardinality(), "{key} (code {code})");
         // And the boolean is the count's own emptiness, so the two gates cannot disagree.
         assert_eq!(
             membership.carries(*code).unwrap(),
@@ -1950,14 +1971,10 @@ fn a_negation_spanning_two_columns_is_refused_and_composes_instead() {
         .columns
         .evaluate(&spanning, &cand)
         .expect_err("a negation over two columns is refused");
-    let text = format!("{err}");
     assert!(
-        text.contains("department") && text.contains("title"),
-        "{text}"
-    );
-    assert!(
-        text.contains("all_of"),
-        "the refusal names the way to say it: {text}"
+        matches!(&err, FilterError::NegationSpansColumns { columns }
+            if columns == &["department".to_string(), "title".to_string()]),
+        "{err:?}"
     );
 
     // And the composition it points at is accepted, and is the intersection of the two negations.
@@ -2072,8 +2089,10 @@ fn an_over_deep_expression_is_refused() {
         expr = FilterExpr::AllOf(vec![expr]);
     }
     let err = fx.columns.evaluate(&expr, &cand).expect_err("too deep");
-    assert!(matches!(err, FilterError::TooDeep { .. }), "{err:?}");
-    assert!(format!("{err}").contains("rather than flattened"));
+    assert!(
+        matches!(err, FilterError::TooDeep { depth, max } if depth == 9 && max == MAX_FILTER_DEPTH),
+        "{err:?}"
+    );
 }
 
 /// A disjunction whose branches a principal cannot see is empty, not an error — and costs the same
@@ -2325,21 +2344,17 @@ fn postings_path(fx: &Fixture, column: &str) -> std::path::PathBuf {
 
 /// Reopen the fixture's columns from disk — used after a test has rewritten a postings file, since
 /// the route is decided and the file mapped at open.
-fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
+fn reopen(fx: &Fixture) -> Result<FilterColumns, tessera_engine::filter::ComposeError> {
     FilterColumns::open(
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
-        &fx.declared,
-        // No group-scoped family: this fixture declares no view group (`views.md` §5), so no
-        // incarnation is ever asked for.
-        &[],
-        &|_view: &str| None,
-        &fx.vocabularies,
-        &fx.extents,
-        &[],
-        &[],
-        &[],
-        &[],
+        // The manifest as it stood at the build: this fixture declares no view group
+        // (`views.md` §5), so no incarnation is ever asked for.
+        &fx.manifest,
+        tessera_engine::filter::PartitionExtents {
+            attrs: &fx.extents,
+            ..Default::default()
+        },
         &[],
         true,
     )
@@ -2801,32 +2816,6 @@ fn a_value_carried_only_since_the_build_is_offered_to_whoever_can_see_it() {
 // doing neither: the bundle then opens cleanly and answers filters short, which is a wrong answer
 // wearing a correct one's clothes.
 
-/// Request a fold and block until it has published, asserting it was not discarded.
-///
-/// `tests/fold.rs`'s helper, duplicated rather than shared: `common` is the fixture module and this
-/// binary's fixture is its own (the one with declared filter columns), so the alternative is
-/// widening `common` for two callers that agree about nothing else.
-fn fold(engine: &tessera_engine::Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// One operand per family and per route, answered against `columns` under `candidate`.
 ///
 /// **Both routes are here on purpose.** `archive` is `visibility = "public"`, so its `eq`/`in` are
@@ -3152,6 +3141,136 @@ fn a_deleted_entitys_value_leaves_the_column_and_every_predicate() {
     assert!(members.contains(survivor as u32));
 }
 
+/// **A session established before a fold is never offered the value only the retired entity
+/// carried**, on any of the three surfaces that derive it: the legend, the suggestion page and a
+/// filtered viewport.
+///
+/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
+/// watermark, so the session's own fragment — frozen at authorise — still names the retired entity
+/// and the overlay no longer denies it. `/v1/categories` and its suggest form derive a `derived`
+/// column's visible values from that fragment **in entity space**, with no row projection between
+/// them and the answer; a filtered viewport crosses into row space. `ops` is declared and carried
+/// by nothing in the build, so the ingested entity is its only member and the value is exactly as
+/// visible as that one entity.
+#[test]
+fn a_session_from_before_a_fold_is_never_offered_the_retired_entitys_only_value() {
+    let fx = fixture();
+    let cache = fx._dir.path().join("cache-fold-derived");
+    let wal = fx._dir.path().join("wal-fold-derived");
+    let engine = open_engine_publishing(&fx.bundle, &cache, &wal);
+    // A refresh pass rebuilds each resident session's fragment, which would make a request path
+    // that failed to notice the rotation indistinguishable from one that noticed.
+    engine.set_background_refresh_for_test(false);
+
+    let doomed = ingest_and_flush_with(
+        &engine,
+        "ops-1",
+        WalScalar::Utf8("ops".to_string()),
+        WalScalar::U8(0),
+        "ops-paper",
+        9,
+        WalScalar::Null,
+    );
+
+    // Authorised after the flush, so nothing but the fold's identity rotation can invalidate this
+    // fragment: its watermark is already the live one.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let ops = AttrLocalId::new(fx.codes["ops"]);
+    let eng = AttrLocalId::new(fx.codes["eng"]);
+    let served = |operand: AttrLocalId| {
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, FULL_VIEWPORT, 10_000)
+                    .filter(leaf("department", FilterOperand::Equals(operand))),
+            )
+            .expect("a filtered viewport answers")
+    };
+    let suggested = || {
+        let page = engine
+            .suggest(
+                &session,
+                SuggestRequest {
+                    column: "department",
+                    view: None,
+                    filter: None,
+                    q: "",
+                    limit: 20,
+                    counts: false,
+                    walk_budget: 100_000,
+                    max_suggest_set_entities: 0,
+                    cancel: None,
+                },
+            )
+            .expect("the column suggests")
+            .expect("the column is a category");
+        page.values
+            .iter()
+            .map(|v| v.key.clone())
+            .collect::<Vec<String>>()
+    };
+
+    assert!(offered(&engine, &session, "department", 4).contains(&"ops".to_string()));
+    assert!(suggested().contains(&"ops".to_string()));
+    let before = served(ops);
+    assert_eq!(
+        before.points.len(),
+        1,
+        "the ingested entity is the value's only member, or the assertions below hold vacuously"
+    );
+
+    engine
+        .accept_change(
+            tessera_types::EntityId::new(doomed),
+            tessera_lifecycle::wal::ChangeOp::Delete,
+        )
+        .expect("a delete is accepted");
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the overlay's tombstone alone withdraws the value while it stands"
+    );
+
+    fold(&engine);
+    assert_eq!(engine.generation().prefix, "v00001");
+    assert_eq!(
+        engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the folded corpus withholds the value now"
+    );
+
+    // The premise, without which every assertion below holds for the wrong reason: the fragment
+    // this session authorised with still names the retired entity, and the overlay no longer
+    // does, so an answer derived from that fragment alone would carry the value.
+    assert!(
+        session.fragment_at_authorise_for_test().view().contains(doomed as u32),
+        "the frozen fragment must still name the retired entity"
+    );
+
+    // The same session, never re-authorised.
+    assert!(
+        !offered(&engine, &session, "department", 4).contains(&"ops".to_string()),
+        "the legend offered a value whose only member the fold retired"
+    );
+    assert!(
+        !suggested().contains(&"ops".to_string()),
+        "the suggestion page offered a value whose only member the fold retired"
+    );
+    let after = served(ops);
+    assert!(after.points.tessera_ids.is_empty(), "and nothing is drawn");
+    assert_eq!(
+        after.tiles.iter().map(|tile| tile.matched).sum::<u64>(),
+        0,
+        "and the count is zero, not one"
+    );
+
+    // A value the fold left alone is still offered and still filters, so "gone" is not satisfied
+    // by an empty answer everywhere.
+    assert!(offered(&engine, &session, "department", 4).contains(&"eng".to_string()));
+    assert!(suggested().contains(&"eng".to_string()));
+    assert!(!served(eng).points.tessera_ids.is_empty());
+}
+
 /// **A suppression changes no attribute artefact at all** (Rule S), and the fold is where that is
 /// most easily got wrong — the two removal rules have been conflated twice in this project's review
 /// history, and giving a suppression any retirement route is fail-open.
@@ -3178,7 +3297,7 @@ fn a_suppression_changes_no_attribute_artefact_across_the_fold() {
     assert_eq!(
         engine.overlay_depth(),
         1,
-        "Rule S: a suppression never retires, and the fold does not execute one"
+        "Rule S: a live item's suppression retires only on unsuppress, and no fold executes it"
     );
 
     assert_eq!(
@@ -3403,7 +3522,6 @@ fn engine_for_coalesce(fx: &Fixture, tag: &str) -> tessera_engine::Engine {
 /// Ingest and flush `COALESCE_WIDTH` rows, then drive the tick the coalesce is selected on and wait
 /// for it to publish. Returns the entities, in ingest order.
 fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Vec<u64> {
-    let coalesces = engine.write_executor_stats().coalesces;
     let entities: Vec<u64> = (from..from + COALESCE_WIDTH)
         .map(|i| {
             ingest_and_flush_with(
@@ -3417,16 +3535,22 @@ fn flush_a_window(engine: &tessera_engine::Engine, tag: &str, from: usize) -> Ve
             )
         })
         .collect();
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().coalesces <= coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    attrs_coalesced(engine);
     entities
+}
+
+/// Drive ticks until every column's live attribute extents are fewer than a window: the pass that
+/// takes them has published.
+fn attrs_coalesced(engine: &tessera_engine::Engine) {
+    tick_until(engine, "the attribute extents to coalesce", std::time::Duration::from_secs(30), || {
+        let generation = engine.generation();
+        let (_, partition) = generation.bundle.partitions.iter().next().unwrap();
+        let mut per_column: BTreeMap<&str, usize> = BTreeMap::new();
+        for extent in &partition.manifest.attr_extents {
+            *per_column.entry(extent.column.as_str()).or_default() += 1;
+        }
+        per_column.values().all(|&n| n < COALESCE_WIDTH)
+    });
 }
 
 /// This partition's live `attr_extents`, per column.
@@ -3639,6 +3763,140 @@ fn a_coalesced_column_reopens_and_answers_over_every_post_build_entity() {
     }
 }
 
+/// Everything one generation's filter columns hold and answer, as one comparable value: per
+/// declared column the layer counts and the placement, one representative operand per family, and
+/// the record stack's depth.
+fn composition_reading(
+    engine: &tessera_engine::Engine,
+    fx: &Fixture,
+) -> BTreeMap<String, String> {
+    let (generation, cand) = live_candidate(engine);
+    let columns = &generation.filter_columns;
+    let mut out = BTreeMap::new();
+    out.insert("candidate".to_string(), cand.cardinality().to_string());
+    out.insert(
+        "record layers".to_string(),
+        columns.record_layers().to_string(),
+    );
+    for column in ["department", "archive", "title", "score", "bonus"] {
+        out.insert(
+            format!("{column}: layers"),
+            format!(
+                "{:?} value, {:?} text",
+                columns.layer_count(column),
+                columns.text_layer_count(column)
+            ),
+        );
+        let placement = columns.placement(column).expect("a filterable column");
+        out.insert(
+            format!("{column}: placement"),
+            format!(
+                "entity={} row={} family={}",
+                placement.entity,
+                placement.row,
+                placement.family.as_str()
+            ),
+        );
+    }
+    // The analysed column, which has no value column and so no placement: what it holds is its
+    // text layers, and what it answers is a `match`.
+    out.insert(
+        "prose: layers".to_string(),
+        format!("{:?} text", columns.text_layer_count("prose")),
+    );
+    for (family, column, operand) in [
+        (
+            "category",
+            "department",
+            FilterOperand::Equals(AttrLocalId::new(fx.codes["eng"])),
+        ),
+        (
+            "category",
+            "archive",
+            FilterOperand::Equals(AttrLocalId::new(fx.archive_codes["xx"])),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextPrefix("differential-title-".into()),
+        ),
+        (
+            "keyword",
+            "title",
+            FilterOperand::TextContains("title-0".into()),
+        ),
+        (
+            "numeric",
+            "score",
+            FilterOperand::Range {
+                lo: Some(Endpoint {
+                    value: Scalar::Int(1_000),
+                    inclusive: true,
+                }),
+                hi: None,
+            },
+        ),
+        // A word of the build's own prose, and one only the flushed items carry: a layer lost at
+        // the reopen shows in one of the two and not the other.
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "p05".to_string(),
+                minimum: None,
+            },
+        ),
+        (
+            "text",
+            "prose",
+            FilterOperand::Match {
+                query: "differential".to_string(),
+                minimum: None,
+            },
+        ),
+    ] {
+        let answer = columns.resolve(column, &operand, &cand).expect("answers");
+        let members = as_vec(&answer);
+        assert!(
+            !members.is_empty(),
+            "{family} {column}: the fixture answers nothing, so the comparison is vacuous"
+        );
+        out.insert(
+            format!("{family} {column} {operand:?}"),
+            format!("{members:?}"),
+        );
+    }
+    out
+}
+
+/// **A build is an ingest into an empty database**, so a live generation's filter columns and a
+/// reopen of the same bundle are the same database — which nothing pinned as a whole.
+///
+/// A window's worth of flushes and the coalesce they trigger make a generation the build alone
+/// cannot: a base, a coalesced layer, and the manifest entries that say so. What is compared is
+/// what each composition *holds* — the value and text layer counts per column, each column's
+/// placement, the record stack's depth — and what it *answers*, one representative operand per
+/// family under a candidate taken the same way from each.
+///
+/// A publication that edited the manifest without replacing the live layers differs in the counts;
+/// one that replaced the live layers without committing the entries differs in them the other way;
+/// a merge that paired values with the wrong entities differs in the answers.
+#[test]
+fn a_live_generation_and_a_reopen_of_the_same_bundle_hold_and_answer_alike() {
+    let fx = fixture();
+    let live = {
+        let engine = engine_for_coalesce(&fx, "differential");
+        flush_a_window(&engine, "differential", 0);
+        assert!(
+            engine.write_executor_stats().coalesces >= 1,
+            "the reading is of a generation a coalesce has published into"
+        );
+        composition_reading(&engine, &fx)
+    };
+    let reopened = engine_for_coalesce(&fx, "differential-reopen");
+    assert_eq!(live, composition_reading(&reopened, &fx));
+}
+
 /// The keys the keyword tests below ingest, one per flush of a window. Repeated across flushes and
 /// out of sorted order, so each flush's dictionary numbers its key 0 and the merged dictionary
 /// numbers five keys another way: a replacement read against any consumed layer's dictionary, or
@@ -3728,13 +3986,8 @@ fn keyword_answers(
 
 /// Drive the tick a coalesce is selected on, with the pass enabled, and wait for it to publish.
 fn coalesce_now(engine: &tessera_engine::Engine) {
-    let coalesces = engine.write_executor_stats().coalesces;
     engine.set_coalesce_for_test(true);
-    engine.request_flush();
-    wait_until("the coalesce to publish", || {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        engine.write_executor_stats().coalesces > coalesces
-    });
+    attrs_coalesced(engine);
 }
 
 /// **A keyword column's window becomes one extent, installed with the dictionary its merge minted,
@@ -3976,18 +4229,8 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
         .columns
         .with_extents(
             &[
-                (
-                    "bonus".to_string(),
-                    first.clone(),
-                    extent(&[100, 101]),
-                    None,
-                ),
-                (
-                    "bonus".to_string(),
-                    second.clone(),
-                    extent(&[200, 201]),
-                    None,
-                ),
+                opened("bonus", &first, extent(&[100, 101]), None),
+                opened("bonus", &second, extent(&[200, 201]), None),
             ],
             &[],
             &[],
@@ -3997,16 +4240,24 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
 
     let window =
         |values: Arc<tessera_filter::ValueColumn>| tessera_engine::filter::CoalescedWindow {
-            column: "bonus".to_string(),
             consumed: vec![first.clone(), second.clone()],
-            values_rel: "coalesced/c-1/attrs/bonus/values.arrow".to_string(),
-            values,
-            dict: None,
+            replacement: opened("bonus", "coalesced/c-1/attrs/bonus/values.arrow", values, None),
         };
     let err = columns
         .with_coalesced(&[window(extent(&[100, 101, 200]))], &[], None, None)
         .expect_err("a coalesced layer short of its window is refused");
-    assert!(format!("{err}").contains("coverage"), "{err}");
+    assert!(
+        matches!(
+            &err,
+            ComposeError::CoverageMismatch {
+                column,
+                replacement: 3,
+                consumed: 2,
+                covered: 4,
+            } if column == "bonus"
+        ),
+        "{err:?}"
+    );
 
     // And one naming a layer this generation does not hold: the plan and the process disagree
     // about what the bundle is, which is a refusal rather than a no-op.
@@ -4144,7 +4395,7 @@ fn suppression_is_a_differential_on(fx: &Fixture, family: &str, predicate: Filte
     );
     assert!(
         engine
-            .item(&session, id, None)
+            .item(&session, id)
             .expect("the drill-down succeeds")
             .is_none(),
         "{family}: a suppressed entity still answers drill-down"

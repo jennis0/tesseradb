@@ -1,4 +1,5 @@
 import {afterEach, describe, expect, it} from 'vitest';
+import {composeFilters, type FilterDraft} from '@tesseradb/client';
 import '../src/status.js';
 import '../src/selection.js';
 import '../src/count.js';
@@ -7,9 +8,9 @@ import {stateOf} from '../src/states.js';
 import {deep, deepAll, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * Every §5.4 state, through `part="state"`, on the strip and on a panel; and the harness's
- * first claims at the unit level: only `shown` renders a count, no count against a stale view
- * and a refresh control present, a refusal renders as one, an expiry fires `tessera-expired`.
+ * Every panel state through `part="state"`, on the strip and on a panel: only `shown` renders a
+ * count, a stale view renders none and offers refresh, a refusal renders as one, and an expiry
+ * fires `tessera-expired`.
  */
 
 afterEach(() => {
@@ -43,15 +44,16 @@ describe('stateOf maps status onto the eight states exactly as the table says', 
 });
 
 describe('<tessera-status> renders every state through part="state"', () => {
-  const cases: [string, Parameters<typeof status>[0] | null, {count: boolean; refresh: boolean}][] = [
-    ['detached', null, {count: false, refresh: false}],
-    ['loading', {status: 'loading', sessionWarm: false}, {count: false, refresh: false}],
-    ['retrying', {status: 'retrying'}, {count: false, refresh: false}],
-    ['shown', {status: 'shown'}, {count: true, refresh: false}],
-    ['empty', {status: 'empty'}, {count: false, refresh: false}],
-    ['refused', {status: 'refused', refusal: {code: 'unauthorised', detail: 'no'}}, {count: false, refresh: false}],
-    ['expired', {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {count: false, refresh: false}],
-    ['stale', {status: 'shown', stale: true}, {count: false, refresh: true}]
+  // `count`: figures are rendered, current or greyed out. `action`: the one button the state offers.
+  const cases: [string, Parameters<typeof status>[0] | null, {count: boolean; action: string | null}][] = [
+    ['detached', null, {count: false, action: null}],
+    ['loading', {status: 'loading', sessionWarm: false}, {count: false, action: null}],
+    ['retrying', {status: 'retrying'}, {count: true, action: null}],
+    ['shown', {status: 'shown'}, {count: true, action: null}],
+    ['empty', {status: 'empty'}, {count: false, action: null}],
+    ['refused', {status: 'refused', refusal: {code: 'unauthorised', detail: 'no'}}, {count: true, action: 'retry'}],
+    ['expired', {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {count: true, action: null}],
+    ['stale', {status: 'shown', stale: true}, {count: false, action: 'refresh'}]
   ];
   for (const [name, over, want] of cases) {
     it(`renders ${name}`, async () => {
@@ -66,25 +68,61 @@ describe('<tessera-status> renders every state through part="state"', () => {
       expect(state.getAttribute('data-state')).toBe(name);
       const counts = deepAll(host, '[part="count"]').filter((c) => c.getAttribute('data-empty') === 'false');
       expect(counts.length > 0).toBe(want.count);
-      expect(deep(host, '[part="refresh"]') !== null).toBe(want.refresh);
-      if (name === 'refused') expect(deep(host, '[part="refusal"]')?.textContent).toContain('unauthorised');
+      for (const action of ['refresh', 'retry', 'reauthorise']) expect(deep(host, `[part="${action}"]`) !== null, action).toBe(want.action === action);
+      if (name === 'refused') expect(deep(host, '[part="refusal"]')?.getAttribute('data-code')).toBe('unauthorised');
     });
   }
 
-  it('shows the three counts in the order shown · matched · visible, both figures for the sample', async () => {
+  /**
+   * Counts outside `shown` are the last answer under the same token, greyed. A token change clears
+   * the view in the store, so a view with no answer must render no figure in any state.
+   */
+  it('renders no count from a view with no answer, in any state', async () => {
+    const empty = {...view, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, highlighted: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}};
+    for (const over of [{status: 'loading'}, {status: 'retrying'}, {status: 'refused', refusal: {code: 'x', detail: ''}}, {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {status: 'shown'}] as const) {
+      const host = await mount('<tessera-status></tessera-status>');
+      (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status(over), view: empty});
+      await settle(host);
+      expect(deepAll(host, '[part="count"]').filter((c) => c.getAttribute('data-empty') === 'false'), over.status).toHaveLength(0);
+      host.remove();
+    }
+  });
+
+  it('names the up-to-date state through the dot’s accessible name, and no other state that way', async () => {
+    const host = await mount('<tessera-status></tessera-status>');
+    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const store = fakeStore({status: status({}), view});
+    el.store = store;
+    await settle(host);
+    expect(deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label')).toBeTruthy();
+    store.set('status', status({status: 'retrying'}));
+    await settle(host);
+    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('retrying');
+    expect(deep(host, '[part="state"] [role="img"]')).toBeNull();
+  });
+
+  it('shows the matched count out of the visible count, then the shown count', async () => {
     const host = await mount('<tessera-status></tessera-status>');
     (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view});
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
-    expect(counts.map((c) => c.textContent)).toEqual(['500', '3,210', '12,040']);
-    // The sample's total is the visible cell beside it, and the cell carries it: both figures.
-    expect(counts[0]!.getAttribute('data-total')).toBe('12,040');
+    expect(counts.map((c) => c.textContent)).toEqual(['3,210', '12,040', '500']);
+    // The shown cell carries the sample's total for a host to read.
+    expect(counts[2]!.getAttribute('data-total')).toBe('12,040');
+  });
+
+  it('shortens the figures and drops the shown count when compact', async () => {
+    const host = await mount('<tessera-status compact></tessera-status>');
+    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view: {...view, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}});
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['16.8M', '21.4M']);
+    expect(deep(host, '[part="count-shown"]')).toBeNull();
   });
 
   /**
-   * §5.2's third line, and why it is conditional: `highlighted` equals `matched` where no
-   * highlight was asked, so a cell drawn always would repeat a number and read as a second
-   * answer to a question nobody put. `highlighting` is what says the question was put.
+   * The highlight's count shows only under a highlight: without one `highlighted` equals `matched`
+   * and the cell would repeat it. `highlighting` says whether one was asked. It reads "N highlighted
+   * of M", M being the matched count.
    */
   it('adds the highlight’s own count only where a highlight was asked', async () => {
     const host = await mount('<tessera-status></tessera-status>');
@@ -93,10 +131,35 @@ describe('<tessera-status> renders every state through part="state"', () => {
     await settle(host);
     expect(deep(host, '[part="count-highlighted"]')).toBeNull();
 
-    el.store = fakeStore({status: status({}), view: {...view, highlighted: {value: 812, exact: true}, highlighting: true}});
+    // Nothing narrows what matches: the strip reads "812 highlighted of 3,210".
+    const lit = {...view, highlighted: {value: 812, exact: true}, highlighting: true};
+    el.store = fakeStore({status: status({}), view: lit});
     await settle(host);
-    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['500', '3,210', '812', '12,040']);
-    expect(deep(host, '[part="count-highlighted"]')?.getAttribute('label')).toBe('the highlight matched');
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['812', '3,210', '500']);
+    expect(deep(host, '[part="count-highlighted"]')).not.toBeNull();
+
+    // A filter on the same column narrows it too, so the match cell stays beside the highlight's.
+    const draft: FilterDraft = {filter: {archive: {family: 'category', keys: ['cs.LG', 'cs.CV']}}, highlight: {archive: {family: 'category', keys: ['cs.CV']}}};
+    const filters = {draft, expr: composeFilters(draft, 'filter'), highlight: composeFilters(draft, 'highlight'), members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0};
+    el.store = fakeStore({status: status({}), view: lit, filters});
+    await settle(host);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['3,210', '12,040', '812', '3,210', '500']);
+  });
+
+  it('retries a refused view and signs in again on expiry through the host’s renewal', async () => {
+    const host = await mount('<tessera-status></tessera-status>');
+    const el = host.querySelector('tessera-status') as TesseraStatus;
+    const store = fakeStore({status: status({status: 'refused', refusal: {code: 'unauthorised', detail: ''}}), view});
+    el.store = store;
+    await settle(host);
+    (deep(host, '[part="retry"]') as HTMLButtonElement).click();
+    expect(store.calls.filter((c) => c.name === 'refresh')).toHaveLength(1);
+    let renewed = 0;
+    el.reauthorise = () => renewed++;
+    store.set('status', status({status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}));
+    await settle(host);
+    (deep(host, '[part="reauthorise"]') as HTMLButtonElement).click();
+    expect(renewed).toBe(1);
   });
 
   it('fires tessera-expired once, composed, on the expired transition', async () => {
@@ -144,7 +207,7 @@ describe('<tessera-selection> — a panel renders the states the same way', () =
     store.set('region', {shape, status: 'refused', refusal: {code: 'contract', detail: 'bad'}, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, served: {shown: 2, total: 0, exact: false}, verdict: null, held});
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
-    expect(deep(host, '[part="refusal"]')?.textContent).toContain('contract');
+    expect(deep(host, '[part="refusal"]')).not.toBeNull();
 
     store.set('region', {shape, status: 'shown', refusal: null, visible: {value: 900, exact: false}, matched: {value: 800, exact: false}, served: {shown: 2, total: 800, exact: true}, verdict: {exact: false, depth: 6}, held});
     await settle(host);

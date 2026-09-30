@@ -30,8 +30,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
-
 /// **No existence criterion**, deliberately, as in the fold's own cases: these assertions are about
 /// what a membership *is*, and a criterion would turn a wrong count into an absence — which is the
 /// weaker assertion of the two and the one this file exists to distinguish from a real absence.
@@ -58,29 +56,6 @@ fn declaration(name: &str) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
     }
 }
 
@@ -133,21 +108,10 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// The one artifact's masked count, for a principal who can see everything — so the number is the
 /// membership's own size, and anything that moves it is the growth.
 fn count(engine: &Engine) -> u64 {
-    let artifacts = artifacts_of(engine);
+    let artifacts = artifacts_of(engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
@@ -210,83 +174,6 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
     tick(engine);
 }
 
-/// Request a flush and block until it has published — what gives an ingested point a base row, and
-/// therefore what makes it count towards any membership it joined.
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn remove_the_whole_log(fx: &Fixture) {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
-    let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-    {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
-            std::fs::remove_file(entry.path()).expect("a log member is removable");
-            removed += 1;
-        }
-    }
-    assert!(
-        removed > 0,
-        "no log member was found to delete — the test would prove nothing"
-    );
-}
-
-/// The log's surviving members, oldest first — `wal-000000.log`, `wal-000001.log`, …
-fn wal_members(fx: &Fixture) -> Vec<String> {
-    let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx
-        .wal
-        .file_stem()
-        .expect("the log has a stem")
-        .to_string_lossy()
-        .to_string();
-    let mut found: Vec<String> = std::fs::read_dir(dir)
-        .expect("the log's directory exists")
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with(&format!("{stem}-")) && n.ends_with(".log"))
-        .collect();
-    found.sort();
-    found
-}
-
 /// Ask for a flush against an empty buffer, which is the deny-only regime's rotation: nothing to
 /// flush, so the tick rotates the log rather than publishing geometry.
 fn rotate(engine: &Engine) {
@@ -332,11 +219,6 @@ fn resampled_gauge(engine: &Engine) -> tessera_engine::WalGauge {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-}
-
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 // ---- I8: what a growth may not touch ------------------------------------------------------------
@@ -502,7 +384,7 @@ fn a_growth_reaches_the_prefix_the_fold_publishes_and_outlives_the_log() {
         assert_eq!(count(&engine), 310, "the fold serves what it stored");
     }
 
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
     assert_eq!(engine.published_artifacts(), 1);
@@ -543,7 +425,7 @@ fn a_later_publication_does_not_release_the_log_from_a_growth_below_it() {
     }
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 2, "both artifacts came back");
     let grown = artifacts
         .iter()
@@ -572,7 +454,7 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         publish(&fx, &engine, 0..300);
         grow(&fx, &engine, 300..310);
         // The growth is in whichever member was active when it was appended, which is the newest.
-        let holding = wal_members(&fx)
+        let holding = wal_members(&fx.wal)
             .pop()
             .expect("the log has at least one member");
 
@@ -582,10 +464,10 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         rotate(&engine);
         rotate(&engine);
         assert!(
-            wal_members(&fx).contains(&holding),
+            wal_members(&fx.wal).contains(&holding),
             "{holding} holds the growth and is still there: rotation may not reclaim past it \
              while the log is the join's only home. Members now: {:?}",
-            wal_members(&fx)
+            wal_members(&fx.wal)
         );
     }
 
@@ -594,6 +476,132 @@ fn a_rotation_may_not_reclaim_the_member_holding_a_growth() {
         count(&engine),
         310,
         "and the join is what the restart reads back"
+    );
+}
+
+/// Every point the whole-map viewport serves a principal who can see everything.
+fn visible(engine: &Engine) -> u64 {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 2 * N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .tiles
+        .iter()
+        .map(|t| t.visible)
+        .sum()
+}
+
+/// **A log the growth holds comes back whole.** Every batch since the growth stays in the log,
+/// flushed or not, across every member the rotations sealed, so the restart replays batches a flush
+/// has already given geometry beside one still buffered. It serves what the stopped process
+/// served, holds the unflushed row for the next flush, and gives no flushed row a second one.
+#[test]
+fn a_log_the_growth_holds_replays_to_what_was_served() {
+    let fx = fixture();
+    let (served, buffered) = {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        grow(&fx, &engine, 300..310);
+        for batch in 0..4 {
+            for row in 0..5 {
+                ingest(&engine, &format!("batch-{batch}-{row}"));
+            }
+            publish_buffered(&engine);
+            rotate(&engine);
+        }
+        let buffered = ingest(&engine, "unflushed");
+        assert!(
+            wal_members(&fx.wal).len() > 2,
+            "the rotations sealed members the growth holds: {:?}",
+            wal_members(&fx.wal)
+        );
+        (visible(&engine), buffered)
+    };
+
+    let engine = fx.open();
+    assert_eq!(count(&engine), 310, "the join replays");
+    assert_eq!(visible(&engine), served, "the restart serves what was served");
+    assert!(
+        engine.generation().buffer.contains(buffered),
+        "the row no flush reached is buffered again"
+    );
+    assert_eq!(
+        engine.generation().buffer.len(),
+        1,
+        "and it is the only one: a flushed row is not buffered again"
+    );
+
+    publish_buffered(&engine);
+    assert_eq!(
+        visible(&engine),
+        N_ITEMS + 21,
+        "the next flush writes the unflushed row once and no flushed row again"
+    );
+}
+
+/// **A suppression accepted while a growth holds the log is still in force after a restart.** The
+/// log is replayed a record at a time, and the suppression's record sits among flushed and
+/// rotated batches: a restricted viewer is still not served the item, and neither the item nor
+/// its artifact counts it.
+#[test]
+fn a_suppression_accepted_while_a_growth_holds_the_log_holds_after_a_restart() {
+    let fx = fixture();
+    let hidden = (0..300u64)
+        .find(|&s| subset_sees(s))
+        .expect("the fixture gives the subset principal something to see");
+    let restricted = |engine: &Engine| {
+        let session = engine.authorise(&subset_credential()).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 4, [0.0, 0.0, 1000.0, 1000.0], 2 * N_ITEMS as usize),
+            )
+            .expect("a viewport over the whole map")
+            .tiles
+            .iter()
+            .map(|t| t.visible)
+            .sum::<u64>()
+    };
+    let before = {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        grow(&fx, &engine, 300..310);
+        let seen = restricted(&engine);
+        engine
+            .accept_change(fx.members(hidden..hidden + 1)[0], ChangeOp::Suppress)
+            .unwrap();
+        for batch in 0..3 {
+            ingest(&engine, &format!("after-{batch}"));
+            publish_buffered(&engine);
+            rotate(&engine);
+        }
+        tick(&engine);
+        assert_eq!(
+            restricted(&engine),
+            seen - 1,
+            "the suppression hides the item"
+        );
+        assert_eq!(
+            count(&engine),
+            309,
+            "and takes it out of its artifact's count"
+        );
+        seen - 1
+    };
+
+    let engine = fx.open();
+    assert_eq!(
+        restricted(&engine),
+        before,
+        "the restart still hides the suppressed item from the restricted viewer"
+    );
+    assert_eq!(
+        count(&engine),
+        309,
+        "and its artifact still does not count it"
     );
 }
 
@@ -667,13 +675,13 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
 
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the suppression is in force at the ack"
     );
 
     grow(&fx, &engine, 300..310);
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and it is still in force: growth is not a route back into service"
     );
 
@@ -812,7 +820,6 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(batch.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -823,7 +830,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         scoped: Vec::new(),
     };
     let (_, minted) = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             batch.to_string(),
             hash,
@@ -831,6 +838,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
                 memberships: vec![tessera_lifecycle::BatchMembership {
                     layer: layer.to_string(),
                     level: 0,
+                    view: None,
                     key: key.to_string(),
                     rows: vec![0],
                 }],
@@ -878,9 +886,9 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
     );
     // A membership is projected through base rows, so the count is only readable once the ingested
     // points have them — which is what makes this the assertion rather than the one above.
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].key.as_deref(), Some("made-by-a-point"));
     assert_eq!(
@@ -903,13 +911,13 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
             .register_layer(open_declaration("clusters/a"))
             .unwrap();
         assert_eq!(ingest_naming(&engine, "b1", "clusters/a", "c9"), 1);
-        flush(&engine);
+        publish_buffered(&engine);
         fold(&engine);
     }
-    remove_the_whole_log(&fx);
+    remove_the_whole_log(&fx.wal);
 
     let engine = fx.open();
-    let artifacts = artifacts_of(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
@@ -930,7 +938,6 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
     let before = engine.allocator_high_water();
     let descriptors = vec![b"0".to_vec()];
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(b"p1".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -941,7 +948,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
         scoped: Vec::new(),
     };
     let refused = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             vec![row],
             "b1".to_string(),
             [1u8; 32],
@@ -949,6 +956,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
                 memberships: vec![tessera_lifecycle::BatchMembership {
                     layer: "clusters/a".to_string(),
                     level: 0,
+                    view: None,
                     key: "never-declared".to_string(),
                     rows: vec![0],
                 }],
@@ -966,5 +974,388 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
         engine.allocator_high_water(),
         before,
         "the batch had no effect at all — not even an entity id"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Restating a membership: the join that names an artifact its entity is already in
+// ---------------------------------------------------------------------------------------------
+
+/// One ingest batch of one point in `view`, adding `item` to it where one is named, and carrying
+/// the artifact the point belongs to. A second view of one item arrives here exactly like this.
+fn ingest_into_view(
+    engine: &Engine,
+    batch: &str,
+    view: &str,
+    item: Option<EntityId>,
+    key: &str,
+) -> EntityId {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        view: view.to_string(),
+        join: item,
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
+    };
+    engine
+        .ingest_rows_joining(
+            vec![row],
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships: vec![tessera_lifecycle::BatchMembership {
+                    layer: "clusters/a".to_string(),
+                    level: 0,
+                    view: None,
+                    key: key.to_string(),
+                    rows: vec![0],
+                }],
+                edges: Vec::new(),
+            },
+        )
+        .expect("a point naming an artifact of an open layer is an ordinary write")
+        .0[0]
+}
+
+/// **A join that restates a membership the artifact already holds appends nothing.**
+///
+/// A second view of one item is a join: it names the item by its `tessera_id`, and its membership
+/// column names the artifact that entity is already in. The growth that would be
+/// written for it adds no member, so it changes nothing — and a record that changes nothing still
+/// pins the log at itself until a fold rewrites the level, which is the one thing a pin costs.
+/// `POST /control/values` subtracts what the artifact already holds for this reason; the question
+/// here is the same one at the ingest door.
+///
+/// The fold before the second batch is what makes the pin the assertion: it releases every growth
+/// pin the first batch left, so anything the gauge names afterwards was written by the join.
+#[test]
+fn a_joining_row_restating_its_membership_appends_no_growth() {
+    let fx = fixture();
+    let engine = fx.open_with_short_tick();
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    engine
+        .register_layer(LayerDeclaration {
+            views: vec!["s0".into(), "s1".into()],
+            ..open_declaration("clusters/a")
+        })
+        .expect("the layer is declared over both views");
+
+    let p1 = ingest_into_view(&engine, "b1", "s0", None, "c9");
+    publish_buffered(&engine);
+    fold(&engine);
+    assert_eq!(
+        resampled_gauge(&engine).pin,
+        None,
+        "the fold rewrote the level whole, so nothing pins the log going in"
+    );
+
+    ingest_into_view(&engine, "b2", "s1", Some(p1), "c9");
+
+    assert_eq!(
+        engine.published_artifacts(),
+        1,
+        "one key, one artifact: the join created nothing"
+    );
+    assert_eq!(
+        resampled_gauge(&engine).pin,
+        None,
+        "the entity is already a member, so the join has nothing to write and nothing to pin the \
+         log with"
+    );
+}
+
+/// **The other half: a join naming a key its entity is not yet in still grows the artifact.** The
+/// subtraction above takes out what the artifact holds and nothing else, so a second view of an
+/// item that names a different cluster enters that cluster exactly as a fresh point would.
+#[test]
+fn a_joining_row_naming_another_artifact_still_grows_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    engine
+        .register_layer(LayerDeclaration {
+            views: vec!["s0".into(), "s1".into()],
+            ..open_declaration("clusters/a")
+        })
+        .expect("the layer is declared over both views");
+
+    let p1 = ingest_into_view(&engine, "b1", "s0", None, "c8");
+    ingest_into_view(&engine, "b2", "s0", None, "c9");
+    publish_buffered(&engine);
+    fold(&engine);
+
+    // A second view of p1, naming the cluster p2 created and p1 is in no part of.
+    ingest_into_view(&engine, "b3", "s1", Some(p1), "c9");
+    publish_buffered(&engine);
+    fold(&engine);
+
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    let count_of = |key: &str| {
+        artifacts
+            .iter()
+            .find(|a| a.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("{key} is one of the artifacts"))
+            .masked_count
+    };
+    assert_eq!(
+        count_of("c9"),
+        2,
+        "the joining row was not already a member, so it joined"
+    );
+    assert_eq!(count_of("c8"), 1, "and the cluster it was in is unchanged");
+}
+
+// ---------------------------------------------------------------------------------------------
+// When a batch's memberships reach a side-manifest
+// ---------------------------------------------------------------------------------------------
+
+/// How long a case here waits for the executor.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The newest side-manifest on disc, read the way a reopen reads it.
+fn newest_side_manifest(root: &std::path::Path) -> tessera_store::manifest::SegmentsManifest {
+    let bundle = tessera_store::open_bundle(root).expect("the bundle opens");
+    bundle
+        .partitions
+        .values()
+        .next()
+        .expect("the fixture has one partition")
+        .manifest
+        .clone()
+}
+
+/// Register the open layer and wait out the side-manifest the registration publishes, so what a
+/// case counts afterwards is its batch's own publication and not the declaration's.
+fn registered(engine: &Engine) -> u64 {
+    engine
+        .register_layer(open_declaration("clusters/a"))
+        .unwrap();
+    wait_until("the registration's side-manifest", WAIT, || {
+        engine.write_executor_stats().overlay_publications >= 1
+    });
+    engine.write_executor_stats().overlay_publications
+}
+
+/// **A batch's memberships are durable at the acknowledgement and reach a side-manifest at the
+/// tick, not behind the batch.**
+///
+/// A manifest write per membership-carrying batch is an extent, a manifest and their syncs on the
+/// write thread while the next batch queues, and it buys nothing the acknowledgement promised: the
+/// records are in the log, the log stays pinned until an extent holds them, and what the manifest
+/// shortens is the restore.
+#[test]
+fn a_batchs_memberships_wait_for_the_tick() {
+    let fx = fixture();
+    let engine = fx.open();
+    let published = registered(&engine);
+
+    assert_eq!(
+        ingest_naming(&engine, "b1", "clusters/a", "c0"),
+        1,
+        "the key named no artifact, so it created one"
+    );
+    assert_eq!(
+        engine.published_artifacts(),
+        1,
+        "and it is held from the acknowledgement, whatever any manifest says"
+    );
+    // A second batch carrying no membership at all, whose acknowledgement is what proves the
+    // executor has been round its loop past the first one: the publication site it passes on the
+    // way is the site this case is about.
+    ingest(&engine, "p-after");
+    assert_eq!(
+        engine.write_executor_stats().overlay_publications,
+        published,
+        "the acknowledged batch left no side-manifest behind it"
+    );
+    assert!(
+        fx.membership_files(&engine).is_empty(),
+        "and no membership extent either"
+    );
+
+    tick(&engine);
+    wait_until("the tick's side-manifest", WAIT, || {
+        engine.write_executor_stats().overlay_publications > published
+    });
+    assert_eq!(
+        fx.membership_files(&engine).len(),
+        1,
+        "the tick published them, in one extent"
+    );
+}
+
+/// **After the tick the prefix holds them: a restore needs no log.**
+///
+/// The flush publishes its own manifest at a higher number in the same tick, so this is also where
+/// a manifest assembled from a clone that predates the extents would drop them — and the log,
+/// released at the publication, would be the only other copy.
+#[test]
+fn a_tick_puts_them_in_the_prefix_and_a_restore_needs_no_log() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        registered(&engine);
+        ingest_naming(&engine, "b1", "clusters/a", "c0");
+        publish_buffered(&engine);
+        wait_until("the tick's membership extent", WAIT, || {
+            !fx.membership_files(&engine).is_empty()
+        });
+        assert!(
+            !newest_side_manifest(&fx.root).membership_extents.is_empty(),
+            "the newest manifest names the extent the tick wrote"
+        );
+    }
+    remove_the_whole_log(&fx.wal);
+
+    let engine = fx.open();
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(artifacts.len(), 1, "recovered from the prefix alone");
+    assert_eq!(artifacts[0].key.as_deref(), Some("c0"));
+    assert_eq!(artifacts[0].masked_count, 1);
+}
+
+/// **No tick after the acknowledged batch: the memberships come back from the log, once.**
+///
+/// The crash case the deferral has to be safe for. Nothing is double-applied: replay unions the
+/// records onto whatever the extents hold, and the tick after the reopen writes one extent.
+#[test]
+fn memberships_no_tick_published_come_back_from_the_log() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        registered(&engine);
+        ingest_naming(&engine, "b1", "clusters/a", "c0");
+        ingest_naming(&engine, "b2", "clusters/a", "c0");
+        assert!(
+            fx.membership_files(&engine).is_empty(),
+            "no tick ran, so the log is the only copy"
+        );
+    }
+
+    let engine = fx.open();
+    assert_eq!(
+        engine.published_artifacts(),
+        1,
+        "the artifact the first batch created is back, and the second batch created none"
+    );
+    publish_buffered(&engine);
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        artifacts[0].masked_count, 2,
+        "both points, each counted once"
+    );
+    assert_eq!(
+        fx.membership_files(&engine).len(),
+        1,
+        "and the tick after the reopen published them in one extent"
+    );
+}
+
+/// **A suppression is published as promptly as ever, and carries the pending memberships with
+/// it.**
+///
+/// A manifest is everything live state holds and no manifest does, so there is no state in which
+/// one names deny state newer than the memberships it omits.
+#[test]
+fn a_suppression_still_publishes_at_once_and_takes_the_memberships_with_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    let published = registered(&engine);
+    ingest_naming(&engine, "b1", "clusters/a", "c0");
+
+    let suppressed = fx.members(7..8)[0];
+    engine
+        .accept_change(suppressed, ChangeOp::Suppress)
+        .expect("the suppression is accepted");
+    wait_until("the suppression's side-manifest", WAIT, || {
+        engine.write_executor_stats().overlay_publications > published
+    });
+
+    let manifest = newest_side_manifest(&fx.root);
+    assert!(
+        manifest
+            .deny
+            .entities()
+            .expect("the field a writer produced decodes")
+            .contains(suppressed.raw() as u32),
+        "the suppression reached the manifest without waiting for a tick"
+    );
+    assert!(
+        !manifest.membership_extents.is_empty(),
+        "and the batch's memberships went with it"
+    );
+    assert_eq!(engine.write_executor_stats().flushes, 0, "no tick was needed");
+}
+
+/// **A fold requested while a batch's memberships are pending produces a correct bundle.**
+///
+/// The fold rewrites every level whole, so the pending growth has to be in what it packs; the
+/// second batch's own rows arrive at the flush after it. The log is then deleted, so whatever comes
+/// back came from the prefix.
+#[test]
+fn a_fold_with_a_batchs_memberships_pending_produces_a_correct_bundle() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        registered(&engine);
+        ingest_naming(&engine, "b1", "clusters/a", "c0");
+        publish_buffered(&engine);
+        // Acknowledged after the last tick, so its growth is pending when the fold is requested.
+        ingest_naming(&engine, "b2", "clusters/a", "c0");
+        fold(&engine);
+        // The fold's own tick dispatches the second batch's rows, and a unit planned against the
+        // prefix the flip superseded re-plans at a later tick, so the wait is on what is served
+        // rather than on a counter.
+        wait_until("the second batch's point to reach the artifact", WAIT, || {
+            engine.request_flush();
+            artifacts_of(&engine, &full_coverage_credential())[0].masked_count == 2
+        });
+    }
+    remove_the_whole_log(&fx.wal);
+
+    let engine = fx.open();
+    let artifacts = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].key.as_deref(), Some("c0"));
+    assert_eq!(
+        artifacts[0].masked_count, 2,
+        "both batches' points, from the prefix alone"
     );
 }

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use tessera_authz::PostingsReader;
-use tessera_engine::compose::RowProjection;
+use tessera_engine::projection::RowProjection;
 use tessera_engine::{compose, EffectiveMask};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{tiles_for_bbox, Bounds};
@@ -100,6 +100,8 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
                 // Nothing denied: this arm measures tile enumeration and counting, and the deny
                 // mask's own cost is one `andnot` regardless of depth.
                 &croaring::Bitmap::new(),
+                // Nothing buffered, so the walk has nothing to visit.
+                Some(&[]),
             );
 
             for &zoom in zooms {
@@ -202,5 +204,5 @@ fn frozen_fragment(
     let cache = tessera_authz::FragmentCache::new(&dir, [0u8; 32], [1u8; 32]);
     // A fresh cache per call under one fixed credential hash, so the memo can hold nothing this
     // caller could contradict: any stamp is as good as any other, and `0` says so.
-    Ok(cache.get_or_build(terms, [2u8; 32], 0, postings, &[], u64::MAX)?)
+    Ok(cache.get_or_build(terms, postings, &[], u64::MAX)?)
 }

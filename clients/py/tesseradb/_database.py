@@ -1,27 +1,12 @@
-"""A Tessera database in a directory: create it, fill it, commit it (python-sdk.md §2, §6).
+"""A Tessera database in a directory: declare it, fill it, commit it and read it.
 
-The directory is everything `tessera build` and `tessera serve` read, so a notebook prototype
-becomes a deployment by copying it: `tessera serve --deployment <dir>/tessera.toml` serves the
-same database from wherever it was copied to.
+The directory holds everything `tessera build` and `tessera serve` read, so copying it moves the
+database: `tessera serve --deployment <dir>/tessera.toml` serves it from wherever it lands.
 
-Three verbs carry the model. `stage` binds a named source to a frame or a file, `declare_*` adds a
-block to the declaration and names the sources it reads, and `commit` makes the staged data part
-of the database. `check` is `commit` with nothing sent.
-
-Beside the declaration the SDK writes, it keeps its own copy of the blocks as JSON under
-`.tessera/`, written at every staging and every declaration, so `open()` reads them back without
-parsing TOML and a database saved before its first commit reopens where it was left.
-
-After the first commit `stage` binds a delta and `commit` pages it through the control plane
-(`_commit`). The verbs that are not stages, `remove`, `suppress`, `unsuppress` and `leave`, address
-rows by the bytes their id column holds, or by their `tessera_id` where the declaration names no id
-column (§3).
-
-**The SDK holds nothing about what the database contains.** There is no id map and no commit log: a
-row is named by its id column or by its `tessera_id`, and what the database already holds is asked
-of the database: `/v1/meta` for the views and layers it carries, and the routes' own answers for
-everything else. A re-run of a cell is a re-run, and the server's refusal is what the report
-carries.
+Beside the declaration file, the package keeps its own copy of the declared blocks and pending
+inserts as JSON under `.tessera/`, written at every declaration and insert, so `open()` restores a
+database saved before its first commit. It keeps nothing about what the database contains: what
+the database holds is always asked of its server.
 """
 
 from __future__ import annotations
@@ -29,294 +14,602 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Any, Hashable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from . import _columns
 from . import _commit as C
 from . import _declaration as D
-from . import _infer, _instance
-from ._auth import authorise
-from ._control import Control, addressed
+from . import _inserts, _instance
+from ._auth import Token, authorise, revoke
+from ._control import Control
+from ._inserts import Insert
 from ._refusal import Refusal
-from ._reports import ChangeReport, CommitReport, Inference, PagedReport, Report, render_columns_of
-from ._sources import StagedSource, is_integer_type, stage_frame, stage_path
-from ._viewer import Viewer
+from ._reports import (
+    ChangeReport,
+    CommitReport,
+    Declared,
+    PagedReport,
+    Report,
+    render_columns_of,
+)
 from ._toml import Inline, dumps
+from ._viewer import Selection, Viewer
 
-#: A temporary database goes here when the platform has a RAM-backed filesystem (§2).
+if TYPE_CHECKING:
+    from .widget import Map
+
+#: The compiled extension that checks a declaration in this process, or `None`, in which case
+#: the check runs `tessera check` instead. Both use the same parser.
+_tessera = _instance.find_extension()
+
+#: A temporary database goes here when the platform has a RAM-backed filesystem.
 RAM_BACKED = Path("/dev/shm")
 
-#: Where a delta's parquet goes. A delta is rows to add to what a source already holds, so it is
-#: not the source's own file: `tessera check` reads `sources/` and would otherwise read a delta as
-#: the whole corpus.
-DELTA_FOLDER = ".tessera/deltas"
+#: The role each kind of target's plain `insert(target, table, …)` is.
+PLAIN_ROLE = {
+    "view": "rows",
+    "view_group": "rows",
+    "attribute": "values",
+    "layer": "key",
+    "labels": "text",
+    "vocabulary": "values",
+}
+
+
+def _accepted(answer, what: str) -> dict:
+    """The body of a control-plane answer, or a refusal naming the status and what it said."""
+    if not answer.ok:
+        raise Refusal(f"{what}: refused ({answer.status}): {answer.detail[:1000]}")
+    return answer.body
+
 
 class Database:
-    """One database directory, and the declaration the SDK is building for it."""
+    """A Tessera database in a directory, which you declare, fill, commit and read.
+
+    Make one with `create()` or reopen one with `open()`. Writing takes three steps. The
+    `declare_*` methods say what exists: views, columns, vocabularies, annotation layers. They
+    take no data. `insert` hands a table to something declared and names the columns it
+    needs. `commit` makes what was inserted part of the database: the first commit builds it
+    and starts a server over it, and each later one sends only what was inserted since.
+
+    Reading goes through that server, as a reader holding every access term the database's
+    rows carry. `view(name)` starts a count, a sample or a map; `viewer(terms)` reads as
+    someone holding only those terms.
+
+        db = tesseradb.create()
+        db.declare_view("papers")
+        db.insert("papers", frame, x="x", y="y", access="labels")
+        db.commit()
+        db.view("papers").count()
+
+    Its attributes:
+
+    - `path`: the database's directory.
+    - `temporary`: `True` for a database `create()` made without a path, which `close()`
+      deletes.
+    - `built`: `True` once the first commit has built the database.
+    - `terms`: the access terms `viewer()` and `token()` hold when given none: every access label
+      the database's rows carry, and each view's default label.
+    - `inserts`: the `Insert` records made before the first commit, which it builds from.
+    - `pending`: the `Insert` records made since the last commit, which the next one sends.
+    - `listening`: the addresses the server listens on, as `serve()` returns them, or `None`
+      while it is not running.
+    """
 
     def __init__(self, path: Path, temporary: bool = False) -> None:
         self.path = Path(path)
         self.temporary = temporary
-        self.sources: dict[str, StagedSource] = {}
-        #: Rows staged since the last commit, to add to what the source already holds (§3).
-        self.deltas: dict[str, StagedSource] = {}
+        if temporary:
+            _instance.temporary.add(self.path)
+        #: The tables inserted before the first commit: what the build reads.
+        self.inserts: list[Insert] = []
+        #: The tables inserted since the last commit, which the next one sends and forgets.
+        self.pending: list[Insert] = []
         self.blocks = D.Declaration()
-        #: Every access label this database has staged, plus each view's default (§8). Computed at
-        #: each commit from the staged access columns and kept in the SDK's JSON declaration copy,
-        #: which is the one thing `map()` needs and no route answers.
+        #: Every access label this database's rows carry, plus each view's default label: the
+        #: terms `viewer()` holds when given none. The server has no route that lists them.
         self.terms: list[str] = []
         self.built = (self.path / "bundle" / "CURRENT").exists()
         self._child: subprocess.Popen | None = None
         self.listening: _instance.Listening | None = None
         self._loaded_text: str | None = None
-        self._inference = Inference()
-        #: The all-terms viewer this database reads itself through, made on first use (§8).
-        self._viewer: Viewer | None = None
-
-    # ------------------------------------------------------------------ sources
-
-    def stage(
-        self,
-        name: str,
-        data: Any,
-        id: str | None = None,
-        default: bool = False,
-    ) -> StagedSource:
-        """Bind `name` in `[sources]` to a frame or a file (§3).
-
-        A frame is written to `sources/<name>.parquet` as it was staged; a path is recorded and
-        read where it lies. `id` names the column that names the rows, which the declaration then
-        points at; without it the SDK reads `id`, `entity_id` or `entity`, and a source carrying
-        none of them names its rows by their `tessera_id`. Staging a name twice before the first
-        commit replaces the earlier data.
-
-        After the first commit the same call binds a **delta**: rows to add to what the source
-        already holds. The declaration says what the source feeds, so a delta on the points source
-        feeds the view, the attributes and every layer minted from one of its columns, and a delta
-        on a members source feeds one layer's memberships. A name the declaration does not know is
-        refused.
-        """
-        if self.built:
-            return self._stage_delta(name, data, id=id, default=default)
-        if isinstance(data, (str, os.PathLike)):
-            staged = stage_path(name, data, self.path, id=id, default=default)
-        else:
-            staged = stage_frame(name, data, self.path, id=id, default=default)
-        if default:
-            for other in self.sources.values():
-                if other.default:
-                    other.default = False
-                    staged.notes.append(f"the default source, replacing '{other.name}'")
-        self.sources[name] = staged
-        self._save_state()
-        return staged
-
-    def _stage_delta(
-        self, name: str, data: Any, id: str | None = None, default: bool = False
-    ) -> StagedSource:
-        """Rows to add to what a source already holds (§3).
-
-        The delta's parquet goes under `.tessera/deltas/` rather than over the source's own file:
-        `tessera check` reads `[sources]` at every commit, and a delta written there would be read
-        as the whole corpus. The rows are sent as they were staged: a row the database already
-        holds is refused by the server, whole page, and the report says so (§3).
-        """
-        if default:
-            raise Refusal(
-                f"stage: '{name}' cannot become the default source after the first commit. "
-                f"`[defaults].source` is what a block that names no source reads, and every block "
-                f"of a built declaration has already been read"
-            )
-        if name not in self.sources and not self._declaration_reads(name):
-            raise Refusal(
-                f"stage: no block of this declaration reads a source named {name!r}. A delta names "
-                f"a source the declaration knows; declare the block that reads it first"
-            )
-        if isinstance(data, (str, os.PathLike)):
-            staged = stage_path(name, data, self.path, id=id, folder=DELTA_FOLDER)
-        else:
-            staged = stage_frame(name, data, self.path, id=id, folder=DELTA_FOLDER)
-        held = self.sources.get(name)
-        if held is not None and held.id_column and staged.id_column != held.id_column:
-            raise Refusal(
-                f"stage: '{name}' names its rows by '{held.id_column}', which this delta does not "
-                f"carry. The declaration reads identity from that column, and a row this delta "
-                f"does not name is a row no member table and no value can reach. Name the id "
-                f"column with id="
-            )
-        if held is not None and held.id_column is None and staged.id_column is not None:
-            raise Refusal(
-                f"stage: '{name}' names its rows by nothing, so every row of this database is "
-                f"addressed by the tessera_id the server hands back, and the bundle carries no "
-                f"external id for '{staged.id_column}' to match. Drop the column from the frame, "
-                f"or rebuild the database with an id column"
-            )
-        self.deltas[name] = staged
-        self._save_state()
-        return staged
-
-    def _declaration_reads(self, name: str) -> bool:
-        """Whether any block names this source, the label sets' own blocks included."""
-        for kind in D.KINDS:
-            for block in self.blocks.blocks[kind]:
-                if _names_source(block, name):
-                    return True
-        return False
+        #: Category keys looked up by `sample()`, per reader: by server address and terms.
+        self._keys: dict = {}
 
     @property
-    def default_source(self) -> str | None:
-        for staged in self.sources.values():
-            if staged.default:
-                return staged.name
-        return None
+    def binary(self) -> str:
+        """The `tessera` program this database runs.
+
+        `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the one the
+        `tesseradb-native` wheel installed, else a checkout's own build. Where there is none, the
+        refusal says where it looked.
+        """
+        return _instance.find_binary()[0]
+
+    def __repr__(self) -> str:
+        kind = "a temporary database" if self.temporary else "a database"
+        state = "committed" if self.built else "not yet committed"
+        return f"{kind} at {self.path}, {state}"
 
     # ------------------------------------------------------------------ declarations
 
     def declare(self, kind: str, block: dict) -> dict:
-        """One block of the declaration, spelled with configuration.md's own keys (§4.1).
+        """Declare one block written with the declaration file's own keys, and return it.
 
-        Every block is expressible this way; the typed verbs below build the dict and call here,
-        and this is the way to write a key no typed verb has a parameter for.
+        - `kind`: `"view"`, `"view_group"`, `"vocabulary"`, `"attribute"` or `"layer"`.
+        - `block`: the block as a dictionary, with the keys `schema.toml` uses.
+
+        The `declare_*` methods build these dictionaries for you. Use this for a key none of them
+        takes. A kind not listed, and a name already declared for that kind, are refused. The
+        block itself is checked at `check()` and `commit()`.
+
+            db.declare("attribute", {"name": "score", "type": "f64", "index": True})
         """
         if kind == "attribute":
             self._refuse_a_render_column(block.get("name"), block.get("render"))
             self._mark_a_filled_column(block)
         return self._declared(self.blocks.add(kind, block))
 
-    def declare_view(self, name: str, source: str | None = None, **kwargs) -> dict:
-        """One `[[view]]` block, at any commit (§4.2).
+    def declare_view(
+        self,
+        name: str,
+        *,
+        extent: Any = None,
+        projection: str = "none",
+        default_label: str | None = "public",
+        visibility: Any = "public",
+        anchor: bool = False,
+        title: str | None = None,
+    ) -> dict:
+        """Declare a view, and return its block.
 
-        A view declared after the first commit is sent as `PUT /control/views/{name}` at the next
-        commit, with the body `tessera check --payloads` emits over this declaration. A frame is
-        fixed for the life of a view and the route has no rows to fit one against, so such a view
-        declares `extent=`; an `auto` frame reaches the route as written and is refused there.
+        A view is one layout of the items: a map with its own x and y coordinates. One set of items
+        can have several views, such as two projections of the same embedding. Its rows come from
+        `insert(name, table, x=, y=, access=)`.
+
+        - `name`: the view's name.
+        - `extent`: the coordinate range the view covers, as `{"x": [min, max], "y": [min, max]}`,
+          or `{"lon": [...], "lat": [...]}` under a projection. By default it is fitted to the rows
+          of the first commit with room around them. It cannot change later, so a view declared
+          after the first commit must give one.
+        - `projection`: `"none"` (the default) for plain x and y, or a map projection such as
+          `"web_mercator"` for longitude and latitude.
+        - `default_label`: the access label of a row whose access column is empty. It is
+          `"public"` unless you say otherwise; `None` gives such rows no label.
+        - `visibility`: who may see the view at all: `"public"` (the default), or the access
+          label, or list of labels, that decides it.
+        - `anchor`: `True` makes this the view whose layout orders the items on disk. The first
+          view declared is the anchor otherwise.
+        - `title`: a display name. By default there is none.
+
+        A name already declared for a view or a view group is refused.
+
+            db.declare_view("papers", extent={"x": [0, 100], "y": [0, 100]})
         """
-        return self._declared(self.blocks.add("view", D.view_block(name, source, **kwargs)))
+        block = D.view_block(
+            name,
+            extent=extent,
+            projection=projection,
+            default_label=default_label,
+            visibility=visibility,
+            anchor=anchor,
+            title=title,
+        )
+        return self._declared(self.blocks.add("view", block))
 
-    def declare_view_group(self, name: str, **kwargs) -> dict:
-        """One `[[view_group]]` block, at any commit (§4.3).
+    def declare_view_group(
+        self,
+        name: str,
+        *,
+        metadata: dict | None = None,
+        members: str | None = None,
+        extent: Any = None,
+        projection: str = "none",
+        default_label: str | None = "public",
+        visibility: Any = "public",
+        title: str | None = None,
+    ) -> dict:
+        """Declare a view group, and return its block.
 
-        A group declared after the first commit is sent as `PUT /control/view_groups/{name}`, and
-        each view of its roster as `PUT /control/views/{group}/{key}`, the group first, since a
-        create resolves its group. `add_view` adds a key to a group that already exists.
+        A view group is a set of views that share every setting and differ by a key, such as one
+        view per year. Each view is named `"<group>:<key>"`. The views and their metadata come from
+        `insert(name, roster=table, key=, ...)`, and their rows from `insert(name, table, ...)` with
+        `view=` naming the column that says which view each row is in.
+
+        - `name`: the group's name.
+        - `metadata`: the metadata each view carries, as `{name: type}`, filled from the roster.
+          By default there is none.
+        - `members`: the name of another group whose views this group shares. Such a group has no
+          roster or metadata of its own.
+        - `extent`, `projection`, `default_label`, `visibility`, `title`: as for `declare_view`,
+          applied to every view in the group.
+
+        A name already declared for a view or a view group is refused, and so is `metadata` given
+        with `members`.
+
+            db.declare_view_group("years", metadata={"year": "i32"})
         """
-        block = D.view_group_block(name, **kwargs)
-        for record in block.get("view") or []:
-            self._refuse_an_unstaged_roster_source(name, record)
+        block = D.view_group_block(
+            name,
+            metadata=metadata,
+            members=members,
+            extent=extent,
+            projection=projection,
+            default_label=default_label,
+            visibility=visibility,
+            title=title,
+        )
         return self._declared(self.blocks.add("view_group", block))
 
-    def add_view(
+    def declare_vocabulary(
         self,
-        group: str,
-        key: str,
-        source: str | None = None,
-        visibility: Any = None,
-        **metadata,
+        name: str,
+        *,
+        closed: bool = False,
+        width: str = "u16",
+        values: Any = None,
+        reserved: Sequence[int] | None = None,
+        visibility: str = "public",
+        title: str | None = None,
     ) -> dict:
-        """One more view of a declared group: the roster record (§4.3, views.md §3.2).
+        """Declare a vocabulary, the values a category column may take, and return its block.
 
-        Before the first commit it is a `[[view_group.view]]` block the build compiles; after it,
-        `PUT /control/views/{group}/{key}` at the next commit. The record is immutable, so every
-        metadata name the group declared is carried here and a wrong one is a drop and a recreate.
+        Each value has a key, a small integer code and an optional title. Its values come from
+        `values=` or from `insert(name, table, key=, title=, code=)`.
+
+        - `name`: the vocabulary's name.
+        - `closed`: `True` if only the values given are allowed. An open vocabulary, the default,
+          adds each new value it meets.
+        - `width`: the integer size of a code, `"u8"`, `"u16"` (the default) or `"u32"`, which
+          limits how many values there can be.
+        - `values`: the values, as a list of keys or as `{key: code}` to fix each code.
+        - `reserved`: codes never to hand out.
+        - `visibility`: `"public"` (the default) to list every value to every reader, or
+          `"derived"` to list a value only to a reader who may see at least one item carrying it.
+        - `title`: a display name.
+
+        A name already declared for a vocabulary is refused.
+
+            db.declare_vocabulary("venue", closed=True, values=["neurips", "icml", "iclr"])
         """
-        block = self.blocks.group(group)
-        if block.get("members"):
-            raise Refusal(
-                f"view group {group!r}: its views are {block['members']!r}'s, and a key belongs to "
-                f"the group that owns it. Add the view to {block['members']!r}; creating a key "
-                f"there creates it here"
-            )
-        if block.get("source"):
-            raise Refusal(
-                f"view group {group!r}: its views are the distinct values of its own "
-                f"'{dict(block.get('fields', {})).get('view')}' column, so a view added by hand "
-                f"would be a second roster. Stage the rows that name the key"
-            )
-        record = D.roster_record(
-            group, key, source, visibility, metadata, dict(block.get("metadata") or {})
+        block = D.vocabulary_block(
+            name,
+            closed=closed,
+            width=width,
+            values=values,
+            reserved=reserved,
+            visibility=visibility,
+            title=title,
         )
-        if any(held["key"] == key for held in block.get("view") or []):
-            raise Refusal(
-                f"view group {group!r}: a view keyed {key!r} is already declared. A roster record "
-                f"is immutable: drop the key and recreate it under the record you want"
-            )
-        self._refuse_an_unstaged_roster_source(group, record)
-        block.setdefault("view", []).append(record)
-        self._save_state()
-        return record
+        return self._declared(self.blocks.add("vocabulary", block))
 
-    def _refuse_an_unstaged_roster_source(self, group: str, record: dict) -> None:
-        """A view of a group is its own points file, and `[defaults].source` does not reach one."""
-        if record.get("source") is None:
-            raise Refusal(
-                f"view group {group!r}, view {record['key']!r}: under a roster of inline views the "
-                f"file is the view, and `[defaults].source` does not reach a group. Give source="
-            )
+    def declare_attribute(
+        self,
+        name: str,
+        type: str,
+        *,
+        render: bool | None = None,
+        index: bool | None = None,
+        vocabulary: str | None = None,
+        analyser: str | None = None,
+        scope: Any = "entity",
+        title: str | None = None,
+        unique: bool | None = None,
+    ) -> dict:
+        """Declare a column the items carry, and return its block.
 
-    def declare_vocabulary(self, name: str, **kwargs) -> dict:
-        """One `[[vocabulary]]` block, at any commit (§4.4).
+        Its values come from a column of the same name in the table inserted into the anchor view
+        (after the first commit, in any view's table), or from `insert(name, table, value=)`.
 
-        A vocabulary declared after the first commit is sent as
-        `PUT /control/vocabularies/{name}` at the next commit, with the body `tessera check
-        --payloads` emits over this declaration. A closed set's values follow as
-        `PATCH /control/vocabularies/{name}/values`, from the `values=` list or from the `source=`
-        table's `(key, title?)` rows; an open set needs nothing more, its codes being minted from
-        the values that arrive.
+        - `name`: the column's name.
+        - `type`: `"bool"`, `"u8"`, `"u16"`, `"u32"`, `"u64"`, `"i8"`, `"i16"`, `"i32"`,
+          `"i64"`, `"f32"`, `"f64"`, `"timestamp_us"`, `"keyword"` (a string matched exactly),
+          `"text"` (a string searched by word) or `"category"` (a value from a vocabulary).
+        - `render`: `True` sends the value with every point drawn, so a map can colour by it. It
+          is fixed at the first commit, and a keyword or text column cannot be rendered. The
+          default is `False`.
+        - `index`: `True` makes the column filterable. The default is `False`.
+        - `vocabulary`: for a category, the vocabulary its values come from.
+        - `analyser`: for text, how the text is split into words. `"unicode"`, the default, is the
+          one there is.
+        - `scope`: `{"group": name}` gives the column a separate value in each view of that
+          view group. The default is one value per item.
+        - `title`: a display name.
+        - `unique`: `True` holds each value on one item at most, so a value names one item. Every
+          table carrying the column names its rows' items by it: a view's row naming no item is
+          an item of its own, and a row of any other table must name one. An insert giving an
+          item a value another item holds is refused, and a filter `{name: {"in": values}}`
+          finds the items holding the values from the column's index, with or without `index`.
+          For `"keyword"`, integer and `"timestamp_us"` columns scoped to the item. The default
+          is `False`.
+
+        A name already declared for an attribute is refused, and so are `render=True` after the
+        first commit and a `scope` naming a view group not yet declared.
+
+            db.declare_attribute("year", type="i32", render=True, index=True)
+            db.declare_attribute("doi", type="keyword", unique=True)
         """
-        return self._declared(self.blocks.add("vocabulary", D.vocabulary_block(name, **kwargs)))
-
-    def declare_attribute(self, name: str, type: str, **kwargs) -> dict:
-        """One `[[attribute]]` block (§4.5).
-
-        `scope={"group": name}` makes it a family of columns, one per view of that group, and
-        `fields={"view": column}` says where a source of its own carries the view each value
-        belongs to.
-
-        An attribute declared after the first commit is sent as `PUT /control/attributes` at the
-        next commit, with the body `tessera check --payloads` emits over this declaration; the
-        column reads absent on every entity that predates it, and a delta on the attribute's source
-        fills it through `POST /control/values` as any values delta does. `render=True` is the one
-        such attribute the route refuses, and the refusal is here.
-        """
-        block = D.attribute_block(name, type, **kwargs)
+        block = D.attribute_block(
+            name,
+            type,
+            render=render,
+            index=index,
+            vocabulary=vocabulary,
+            analyser=analyser,
+            scope=scope,
+            title=title,
+            unique=unique,
+        )
         self._refuse_a_render_column(name, block.get("render"))
         self._refuse_an_undeclared_group("attribute", name, block)
         self._mark_a_filled_column(block)
         return self._declared(self.blocks.add("attribute", block))
 
-    def _mark_a_filled_column(self, block: dict) -> None:
-        """An attribute declared at a running service is filled, not read (§6.2 step 1).
+    def declare_unique(self, name: str, unique: bool = True) -> dict:
+        """Make an attribute already declared unique, or stop it being unique, and return its block.
 
-        The mark is kept beside the block and never written: what it decides is that the written
-        declaration names no source for this column, since the file the first commit built from has
-        never carried it. `tessera check` takes such a block as a note and emits its payload, which
-        is what the next commit declares.
+        After the first commit the change reaches the database at the next `commit()`: making a
+        column unique builds its index over the values it holds, and is refused, naming up to ten
+        of them, where more than one item holds one value. Stopping it keeps the values.
+
+            db.declare_unique("doi")
         """
-        if self.built and "source" not in block and not block.get("scope"):
+        for block in self.blocks.blocks["attribute"]:
+            if block.get("name") == name:
+                block["unique"] = bool(unique)
+                return self._declared(block)
+        raise Refusal(f"declare_unique: no attribute named {name!r} is declared")
+
+    def declare_columns(
+        self,
+        frame: Any,
+        skip: Sequence[str] = (),
+        render: Sequence[str] = (),
+        index: Sequence[str] = (),
+        keyword: Sequence[str] = (),
+        category: Sequence[str] = (),
+        unique: Sequence[str] = (),
+    ) -> Declared:
+        """Declare every column of a data frame from its data type, and return what was declared.
+
+        Each column is declared as a detail: stored, and shown when an item is opened, but neither
+        drawn nor filterable unless named below. The report returned lists what was declared.
+
+        - `frame`: a pandas or polars data frame or a pyarrow table. Only its column types are read.
+        - `skip`: columns to leave out, such as the id and the coordinates.
+        - `render`: columns to send with every point drawn.
+        - `index`: columns to make filterable.
+        - `keyword`, `category`: string columns to declare as keywords or as categories. Other
+          string columns are declared as text.
+        - `unique`: columns each value of which one item holds at most, as `declare_attribute`'s
+          `unique=True` says.
+
+        A categorical column (a pandas `Categorical` or an Arrow dictionary column of strings) is
+        declared as a category, unless `keyword` names it. A category declared here reads a new
+        open vocabulary of the same name, which adds each value it meets, with codes of width
+        `u16`, so it holds at most 65,535 values. The width cannot be changed after the first
+        commit; for another width, call `declare_vocabulary` and `declare_attribute` instead.
+        A column already declared is left as it is.
+
+            db.declare_columns(frame, skip=["paper_id", "x", "y"], category=["venue"])
+        """
+        schema = _inserts.schema_of(frame)
+        attributes, vocabularies, rows = _columns.columns_of(
+            schema,
+            set(skip),
+            set(render),
+            set(index),
+            set(keyword),
+            set(category),
+            self.blocks.attribute_names(),
+            set(unique),
+        )
+        held = self.blocks.vocabulary_names()
+        for block in vocabularies:
+            if block["name"] not in held:
+                self.declare("vocabulary", block)
+        for block in attributes:
+            self.declare("attribute", block)
+        return Declared(columns=rows, vocabularies=[block["name"] for block in vocabularies])
+
+    def declare_layer(
+        self,
+        name: str,
+        kind: str,
+        *,
+        views: Iterable[str] | None = None,
+        membership: Any = "enumerated",
+        shape: Any = None,
+        default_space: str = "view",
+        levels: Sequence[Any] | None = None,
+        require_member_visibility: Any = "none",
+        visibility: Any = "public",
+        artifact_visibility: Any = "inherited",
+        computed: Sequence[str] = D.DERIVED,
+        supplied: Sequence[Any] | None = None,
+        depends_on: Sequence[str] | None = None,
+        prune_children: bool = False,
+        withdraw_on_member_deletion: bool = False,
+        value_set: str | None = None,
+        scope: Any = "entity",
+        layout: str | None = None,
+        artifacts: Any = None,
+        title: str | None = None,
+    ) -> dict:
+        """Declare an annotation layer, and return its block.
+
+        A layer is a set of annotations over the items, such as one clustering, a set of regions or
+        a taxonomy. Each annotation, or artifact, has a key and a set of member items. Its
+        annotations and members come from `insert(name, table, key=)`, or from
+        `insert(name, artifacts=...)` and `insert(name, members=...)`.
+
+        - `name`: the layer's name.
+        - `kind`: how the annotations relate. `"flat"` has no parents; `"nested"` is a tree;
+          `"dag"` allows several parents; `"stacked"` holds independent levels; `"tiered"` holds
+          levels where each coarser annotation contains finer ones.
+        - `views`: the views it is drawn on. The default is every view.
+        - `membership`: how members are decided. `"enumerated"` (the default) reads them from a
+          table; `"spatial"` makes each annotation a shape whose members are the items inside it;
+          `{"attribute": column}` makes one annotation per value of a category column.
+        - `shape`: for a spatial layer, the kind of shape: `"bbox"`, `"circle"`, `"ellipse"` or
+          `"polygon"`.
+        - `default_space`: for a spatial layer, the coordinates shapes are given in: `"view"`
+          (the default) or `"wgs84"` (longitude and latitude).
+        - `levels`: the levels of a layered hierarchy, as `(level, title)` or
+          `(level, title, (min_zoom, max_zoom))`.
+        - `require_member_visibility`: how much of an annotation's membership a reader must see
+          for it to be shown. `"none"`, the default, shows it to every reader the access labels
+          admit, whatever they see of its members. `"any"`, `"all"`, `{"fraction": 0.1}` and
+          `{"count": 50}` require that much.
+        - `visibility`: who may see the layer at all: `"public"` (the default) or an access
+          label.
+        - `artifact_visibility`: the access label of an annotation that carries none of its own,
+          or `{"field": column, "default": label}`. The default, `"inherited"`, gives such an
+          annotation no label, so `visibility` and `require_member_visibility` decide alone. The
+          field names the column each annotation's own labels are read from; every artifacts
+          insert names that column with `access=`, and an insert naming another column or none
+          is refused. Without a field, the first artifacts insert naming `access=` sets it.
+        - `computed`: which properties the server computes per reader from the members it may
+          see: `"centroid"`, `"box"` and `"hull"`. The default is all three; `"centroid"` and
+          `"box"` on a spatial layer, whose shape is drawn instead of a hull; and none on a layer
+          with attribute membership.
+        - `supplied`: content you provide per annotation, such as text, as
+          `(name, type, requires)` entries. `requires` is `"inherited"` to show the content
+          wherever its annotation is shown, or `"all"` to show it only to a reader who may see
+          every item it was written from.
+        - `depends_on`: layers this one attaches to, such as the clustering a label set names.
+        - `prune_children`: `True` shows a parent in place of its children when both qualify.
+          The default is `False`.
+        - `withdraw_on_member_deletion`: Not built yet: `True` is refused at `check()`. The
+          default, `False`, keeps the annotation.
+        - `value_set`: `"closed"` if no annotation keys may appear beyond those inserted, `"open"`
+          otherwise. By default it is closed where an annotations table, `artifacts` or an
+          attribute membership says which annotations there are, and open otherwise.
+        - `scope`: `{"group": name}` keeps a separate set of annotations per view of that group.
+        - `layout`: how the server stores memberships for serving: `"rows"`, `"column"` or
+          `"list"`. It affects speed only. By default the server chooses.
+        - `artifacts`: annotations written in the declaration itself, as a list of dictionaries or
+          a table.
+        - `title`: a display name.
+
+        A name already declared for a layer is refused, and so is a `scope` naming a view group
+        not yet declared.
+
+            db.declare_layer("clusters", kind="flat", require_member_visibility={"count": 20})
+        """
+        block = D.layer_block(
+            name,
+            kind,
+            views=views,
+            membership=membership,
+            shape=shape,
+            default_space=default_space,
+            levels=levels,
+            require_member_visibility=require_member_visibility,
+            visibility=visibility,
+            artifact_visibility=artifact_visibility,
+            computed=computed,
+            supplied=supplied,
+            depends_on=depends_on,
+            prune_children=prune_children,
+            withdraw_on_member_deletion=withdraw_on_member_deletion,
+            value_set=value_set,
+            scope=scope,
+            layout=layout,
+            artifacts=artifacts,
+            title=title,
+        )
+        self._refuse_an_undeclared_group("layer", name, block)
+        return self._declared(self.blocks.add("layer", block))
+
+    def declare_labels(
+        self,
+        name: str,
+        of: str,
+        *,
+        content_requires: str = "inherited",
+        require_member_visibility: Any = "none",
+        artifact_visibility: Any = "inherited",
+        type: str = "text",
+        title: str | None = None,
+    ) -> dict:
+        """Declare text labels for the annotations of another layer, and return their block.
+
+        Each label names one annotation of the layer `of`, such as a topic line for a cluster, and
+        is drawn where that annotation is drawn. Its text comes from `insert(name, {key: text})` or
+        `insert(name, table, key=, text=)`.
+
+        - `name`: the label set's name.
+        - `of`: the layer it labels.
+        - `content_requires`: `"inherited"` (the default) shows a label wherever its annotation is
+          shown. `"all"` shows it only to a reader who may see every item the text was written
+          from; those items come from `insert(name, members=table, key=)`.
+        - `require_member_visibility`, `title`: as for `declare_layer`.
+        - `artifact_visibility`: the access label of every label in the set. The default,
+          `"inherited"`, gives the labels none of their own, so the layer they label and
+          `require_member_visibility` decide alone. A label carries no labels of its own to read,
+          so a `field` is refused.
+        - `type`: the type of each label's text. The default is `"text"`.
+
+        A layer `of` that is not declared, or that already carries a label set, is refused.
+
+            db.declare_labels("topics", of="clusters")
+            db.insert("topics", {"c0": "graph neural networks", "c1": "diffusion models"})
+        """
+        parent = self.blocks.layer(of)
+        if "labels" in parent:
+            raise Refusal(
+                f"layer {of!r} already carries a label set. A second one is a `[[layer]]` of its "
+                f"own; write it through declare_layer"
+            )
+        parent["labels"] = D.labels_block(
+            name,
+            content_requires=content_requires,
+            require_member_visibility=require_member_visibility,
+            artifact_visibility=artifact_visibility,
+            type=type,
+            title=title,
+        )
+        self._declared(parent["labels"])
+        return parent["labels"]
+
+    def _declared(self, block: dict) -> dict:
+        self._save_state()
+        return block
+
+    def _mark_a_filled_column(self, block: dict) -> None:
+        """Mark an attribute declared after the first commit, which only inserts fill.
+
+        The mark is never written. It keeps the written declaration from naming a source for the
+        column, since the files the first commit read do not carry it.
+        """
+        if self.built and not block.get("scope"):
             block[D.FILLED] = True
 
     def _refuse_a_render_column(self, name: Any, render: Any) -> None:
-        """A render column belongs to the first commit (decision 0136's amendment, §4.5).
+        """Refuse `render=True` after the first commit.
 
-        `PUT /control/attributes` refuses `render: true` whatever the type: a rendered value is
-        served from the hot column of the row that carries it, and the route declares a column
-        against entities rather than rows. The rows this database holds have no slot for one, so
-        the refusal is at the verb, where the declaration is still the user's to change.
+        The server cannot add a rendered column to rows that already exist, so the refusal comes
+        here, where the user can still change the declaration.
         """
         if not (self.built and render):
             return
         raise Refusal(
             f"attribute {name!r}: render=True is fixed at the first commit. A rendered value is "
             f"served from the hot column of the row that carries it, and PUT /control/attributes "
-            f"declares a column against entities that already exist, so it refuses one (decision "
-            f"0136's amendment). Declare it with index=True, which is filterable and drawn at "
-            f"drill-down, or rebuild the database with create(path, replace=True)"
+            f"declares a column against entities that already exist, so it refuses one. Declare "
+            f"it with index=True, which is filterable and drawn at drill-down, or rebuild the "
+            f"database with create(path, replace=True)"
         )
 
     def _refuse_an_undeclared_group(self, kind: str, name: str, block: dict) -> None:
@@ -330,242 +623,588 @@ class Database:
             f"carry. declare_view_group({group!r}, …) before the block scoped to it"
         )
 
-    def declare_layer(self, name: str, kind: str, **kwargs) -> dict:
-        """One `[[layer]]` block, at any commit (§4.6).
+    # ------------------------------------------------------------------ inserting
 
-        A layer declared after the first commit is sent as `PUT /control/layers` at the next
-        commit, with the body `tessera check --payloads` emits over this declaration. `from_column`
-        is refused there: the column is read at the build and by the ingest route, so a layer over
-        rows the database already holds is published through an artifacts table (§6.2 step 3).
-        """
-        views = kwargs.get("views")
-        from_column = kwargs.get("from_column")
-        if from_column is not None and isinstance(kwargs.get("scope"), dict):
-            # One key per point says nothing about which view an artifact belongs to, and the
-            # block's own refusal names the tables that do. Asked before the one below, which
-            # would otherwise answer a scoped layer with the wrong remedy.
-            D.layer_block(name, kind, None, from_column=from_column, scope=kwargs["scope"],
-                          fields=kwargs.get("fields"))
-        if self.built and from_column is not None:
-            raise Refusal(
-                f"layer {name!r}: from_column= mints its artifacts from the rows that carry the "
-                f"column, at the build and on the ingest route, and the rows this database holds "
-                f"were read at the first commit. Publish the clustering through its tables: "
-                f"declare_layer({name!r}, kind=..., source=<artifacts>, members=<members>)"
-            )
-        source = self._points_source(views)
-        if from_column is not None:
-            kwargs = dict(kwargs)
-            kwargs["entity_field"] = self._id_column_of(source)
-        block = D.layer_block(name, kind, source, **kwargs)
-        self._refuse_an_undeclared_group("layer", name, block)
-        return self._declared(self.blocks.add("layer", block))
-
-    def _id_column_of(self, source: str | None) -> str | None:
-        """The column a staged source names its rows by, or `None` where it names none (§3)."""
-        staged = self.sources.get(source) or self.deltas.get(source)
-        return None if staged is None else staged.id_column
-
-    def declare_labels(
+    def insert(
         self,
-        name: str,
-        of: str,
-        source: Any,
-        members: str | None = None,
-        **kwargs,
-    ) -> dict:
-        """A label set over a clustering: the `[layer.labels]` block on the layer `of` (§4.7).
+        target: str,
+        table: Any = None,
+        roster: Any = None,
+        artifacts: Any = None,
+        members: Any = None,
+        columns: dict | None = None,
+        **named: str,
+    ) -> Insert:
+        """Hand a table to something declared, naming the columns it reads, and return a record.
 
-        It expands to a flat layer of supplied content, so it is declarable at any commit on
-        `declare_layer`'s terms.
+        - `target`: the name of a declared view, view group, attribute, layer, label set or
+          vocabulary.
+        - `table`: a pandas or polars data frame, a pyarrow table, or the path of a Parquet file,
+          which is read where it lies.
+        - `roster`, `artifacts`, `members`: tables of a view group's views, a layer's annotations,
+          and a layer's memberships. Each is its own insert, since their columns share names.
+        - `columns`: `{attribute: column}` for an attribute read from a column with another name:
+          on any insert, a unique attribute whose values name the rows' items; on the anchor
+          view's insert, and after the first commit on any view's, any attribute the rows fill.
+        - the other keywords: which column of the table holds each thing the target needs, such as
+          `x=`, `y=` and `access=` for a view.
+
+        A table names the item each row belongs to by its `tessera_id` column and the columns it
+        carries of the attributes declared `unique`: the column of the attribute's name, or the
+        one `columns=` names. A view's row naming no item is an item of its own. A row of any
+        other table must name one, and a row naming none, or two, is left out at the commit and
+        reported.
+
+        A categorical column (a pandas `Categorical` or an Arrow dictionary column) is read as the
+        values it holds, wherever a column of those values is read. A column the call does not
+        name is ignored, and the record returned says what was read and what was ignored. A column
+        named like a declared attribute fills that attribute: at the first commit on the anchor
+        view alone, and after it on any view's rows. Several inserts into one target add up.
+        Nothing is sent until `commit()`.
+
+        A target that is not declared, a keyword the target does not read, a column the target
+        needs and the call does not name, and a name that is not a column of the table are
+        refused.
+
+            db.insert("papers", frame, x="x", y="y", access="labels")
+            db.insert("clusters", frame, key="cluster", columns={"paper": "paper_id"})
         """
-        parent = self.blocks.layer(of)
-        if "labels" in parent:
+        kind, block = self._target(target, named, roster, artifacts, members)
+        role, data = self._role(target, kind, table, roster, artifacts, members, named)
+        if _inserts.is_path(data) and not Path(data).expanduser().exists():
+            raise Refusal(f"insert into {target!r}: {Path(data).expanduser()} does not exist")
+        if (kind, role) not in _inserts.CONTRACTS:
             raise Refusal(
-                f"layer {of!r} already carries a label set. A second one is a `[[layer]]` of its "
-                f"own; write it through declare_layer"
+                f"insert into {kind} {target!r}: a {kind} takes no {role} table"
             )
-        if isinstance(source, dict):
-            source = self._stage_label_text(name, of, source)
-        parent["labels"] = D.labels_block(name, source, members=members, **kwargs)
-        self._save_state()
-        return parent["labels"]
-
-    def _declared(self, block: dict) -> dict:
-        self._save_state()
-        return block
-
-    def _stage_label_text(self, name: str, of: str, mapping: dict) -> str:
-        """A mapping from cluster key to text, as the artifacts table the block reads (§4.7).
-
-        Each row carries the attachment as well as the text: a label set expands to a layer that
-        depends on its clustering, and every artifact such a layer publishes attaches to one, so a
-        row naming no `attached_layer` and `attached_key` is refused at the build. The key the
-        mapping gives is the cluster's, which is what the label attaches to and what names the
-        label's own artifact in its own layer.
-        """
-        source_name = name.replace("/", "_")
-        if source_name in self.sources:
-            raise Refusal(
-                f"labels {name!r} would write its text to source {source_name!r}, which is "
-                f"already staged. Stage the (key, contents) table yourself and name it in source="
-            )
-        table = pa.table(
-            {
-                "level": pa.array([0] * len(mapping), type=pa.uint32()),
-                "key": pa.array([str(k) for k in mapping], type=pa.string()),
-                "contents": pa.array(
-                    [[[v]] if isinstance(v, str) else [list(v)] for v in mapping.values()],
-                    type=pa.list_(pa.list_(pa.string())),
-                ),
-                "attached_layer": pa.array([of] * len(mapping), type=pa.string()),
-                "attached_key": pa.array([str(k) for k in mapping], type=pa.string()),
-            }
+        self._refuse_an_insert_the_target_cannot_take(target, kind, role, block, named)
+        self._refuse_a_label_column_the_layer_does_not_read(target, kind, role, block, named)
+        projected = kind in ("view", "view_group") and block.get("projection", "none") != "none"
+        metadata = D.metadata_names(block) if role == "roster" else ()
+        if kind == "labels" and role == "text":
+            data, named = self._label_text(target, block, data, named)
+        items = self._item_columns(target, kind, role, data, columns, named)
+        matched = self._attribute_columns(target, kind, role, data, columns, named)
+        insert = _inserts.build(
+            target=target,
+            kind=kind,
+            role=role,
+            data=data,
+            named=named,
+            directory=self.path,
+            source=self._source_key(target, kind, role, named.get("view_key")),
+            at_build=not self.built,
+            projected=projected,
+            metadata=metadata,
+            named_attributes=matched,
+            items=items,
         )
-        path = self.path / "sources" / f"{source_name}.parquet"
+        self._refuse_a_second_view_without_its_labels(kind, role, target, insert)
+        self._refuse_keys_that_would_create_unlabelled_artifacts(block, insert)
+        insert = self._accumulated(insert)
+        (self.pending if self.built else self.inserts).append(insert)
+        self._save_state()
+        return insert
+
+    def _target(
+        self, target: str, named: dict, roster=None, artifacts=None, members=None
+    ) -> tuple[str, dict]:
+        """The declared block this name refers to, or a refusal naming how to declare one.
+
+        A category column and its vocabulary may share a name. The columns the call names then say
+        which is meant: an attribute reads `value=`, a vocabulary `key=`, `title=` and `code=`.
+        """
+        found: list[tuple[str, dict]] = []
+        for kind in D.KINDS:
+            for block in self.blocks.blocks[kind]:
+                if block.get("name") == target:
+                    found.append((kind, block))
+        for block in self.blocks.blocks["layer"]:
+            labels = block.get("labels")
+            if isinstance(labels, dict) and labels.get("name") == target:
+                found.append(("labels", labels))
+        if not found:
+            raise Refusal(
+                f"insert into {target!r}: nothing of that name is declared. A table is handed to "
+                f"a declared thing, so declare_view, declare_view_group, declare_attribute, "
+                f"declare_layer, declare_labels or declare_vocabulary comes first"
+            )
+        if len(found) == 1:
+            return found[0]
+        table_word = {"roster": roster, "artifacts": artifacts, "members": members}
+        fits = [
+            (kind, block)
+            for kind, block in found
+            if _fits(kind, named, next((w for w, v in table_word.items() if v is not None), None))
+        ]
+        if len(fits) == 1:
+            return fits[0]
+        kinds = ", ".join(sorted(kind for kind, _ in found))
+        raise Refusal(
+            f"insert into {target!r}: {kinds} are declared under that name, and the columns this "
+            f"call names fit {'both' if not fits else 'neither'}. An attribute reads "
+            f"value=; a vocabulary reads key=, title= and code=; a layer takes artifacts= or "
+            f"members="
+        )
+
+    def _role(
+        self, target: str, kind: str, table: Any, roster: Any, artifacts: Any, members: Any,
+        named: dict,
+    ) -> tuple[str, Any]:
+        """Which of the target's tables this call is, and the data it carries."""
+        given = [word for word, value in
+                 (("roster", roster), ("artifacts", artifacts), ("members", members))
+                 if value is not None]
+        if artifacts is not None and isinstance(members, str):
+            # On an artifacts insert `members=` names the column the memberships are in, which is
+            # the artifact table's own key.
+            named["members"] = members
+            given.remove("members")
+            members = None
+        if table is not None and given:
+            raise Refusal(
+                f"insert into {target!r}: a table and {given[0]}= are two tables, and each insert "
+                f"hands over one. Make them two calls"
+            )
+        if len(given) > 1:
+            raise Refusal(
+                f"insert into {target!r}: {' and '.join(given)} are two tables, each with its own "
+                f"column names. Make them two calls"
+            )
+        if given:
+            return given[0], {"roster": roster, "artifacts": artifacts, "members": members}[
+                given[0]
+            ]
+        if table is None:
+            raise Refusal(f"insert into {target!r}: no table was given")
+        return PLAIN_ROLE[kind], table
+
+    def _refuse_an_insert_the_target_cannot_take(
+        self, target: str, kind: str, role: str, block: dict, named: dict
+    ) -> None:
+        """Refuse rows for a scoped layer that do not name their view."""
+        scope = block.get("scope")
+        group = scope.get("group") if isinstance(scope, dict) else None
+        if group is not None and role in ("artifacts", "members", "key") and "view" not in named:
+            raise Refusal(
+                f"insert into {kind} {target!r}: this layer is scoped to group {group!r} and keys "
+                f"its artifacts per view, one key in two views being two artifacts, so every row "
+                f"carries the view it belongs to. Name the column that says which with view="
+            )
+
+    def _label_column(self, target: str, block: dict) -> str | None:
+        """The column a layer reads its artifacts' labels from: the one it declares, a commit sent
+        or an uncommitted artifacts insert named, or `None` where it reads none."""
+        return dict(block.get("artifact_visibility") or {}).get("field") or next(
+            (
+                one.columns["access"]
+                for one in self._uncommitted(target, "artifacts")
+                if one.columns.get("access")
+            ),
+            None,
+        )
+
+    def _uncommitted(self, target: str, role: str) -> list[Insert]:
+        """This layer's inserts of one role that no commit has sent yet."""
+        return [
+            one
+            for one in (self.pending if self.built else self.inserts)
+            if one.target == target and one.kind == "layer" and one.role == role
+        ]
+
+    def _refuse_a_label_column_the_layer_does_not_read(
+        self, target: str, kind: str, role: str, block: dict, named: dict
+    ) -> None:
+        """Refuse an artifacts insert whose `access=` is not the column the layer reads its labels
+        from. An insert naming no column is refused where the layer reads one, before and after
+        the first commit, since its artifacts would reach the layer with no labels.
+        """
+        if kind != "layer" or role != "artifacts":
+            return
+        column = named.get("access") or None
+        held = self._label_column(target, block)
+        if column is None and held is not None:
+            raise Refusal(
+                f"insert into layer {target!r}: this layer reads each artifact's own access labels "
+                f"from column {held!r}, and this insert names no access column. Name it with "
+                f"access={held!r}, giving that column nulls for artifacts with no label of their "
+                f"own"
+            )
+        if column is not None and held is not None:
+            D.carry_labels(target, {"artifact_visibility": {"field": held}}, column)
+
+    def _refuse_keys_that_would_create_unlabelled_artifacts(
+        self, block: dict, insert: Insert
+    ) -> None:
+        """Before the first commit, refuse a `key=` or `members=` insert naming a key that neither
+        an artifacts insert nor the layer's inline artifacts declare, on a layer that reads labels:
+        the build would create that artifact from its key alone, with no labels. After the first
+        commit the server refuses the same artifact.
+        """
+        target = insert.target
+        if self.built or insert.kind != "layer" or insert.role not in ("key", "members"):
+            return
+        column = self._label_column(target, block)
+        if column is None:
+            return
+        declared = {
+            (int(row.get("level") or 0), str(row["key"]), None)
+            for row in block.get("artifacts") or []
+        }
+        for one in self._uncommitted(target, "artifacts"):
+            declared |= _artifact_addresses(one)
+        kind = dict(block.get("hierarchy") or {}).get("kind")
+        missing = _member_addresses(insert, levelled=kind in ("stacked", "tiered")) - declared
+        if missing:
+            level, key, view = min(missing, key=repr)
+            raise Refusal(
+                f"insert into layer {target!r}: key {key!r} names no artifact an artifacts "
+                f"insert or the layer's own artifacts declare, so the build would create one with "
+                f"no labels, and this layer reads each artifact's labels from column {column!r}. "
+                f"Insert that artifact first with insert({target!r}, artifacts=..., key=..., "
+                f"access={column!r})"
+            )
+
+    def _refuse_a_second_view_without_its_labels(
+        self, kind: str, role: str, target: str, insert: Insert
+    ) -> None:
+        """Refuse rows for a second view that name no access column.
+
+        An item carries the same labels in every view, and the build and the server both refuse rows
+        whose labels disagree, so the missing column is refused here.
+        """
+        if kind not in ("view", "view_group") or role != "rows" or insert.columns.get("access"):
+            return
+        for other in self.inserts + self.pending:
+            if other.role == "rows" and other.target != target and other.columns.get("access"):
+                raise Refusal(
+                    f"insert into {kind} {target!r}: view {other.target!r} reads each point's "
+                    f"labels from column '{other.columns['access']}', and every view over one "
+                    f"entity carries that entity's labels: a row whose labels disagree between "
+                    f"views is refused at the build and on the ingest route. Name this frame's "
+                    f"own label column with access="
+                )
+
+    def _item_columns(
+        self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
+    ) -> dict:
+        """The columns a table names its items by, as `{name: column}`: its `tessera_id` column,
+        and the unique attributes it carries.
+
+        A table carries a unique attribute in the column `columns=` names for it, else in the
+        attribute's own column: the `field` its block declares, or its name. An artifacts table names its members inside its member
+        structs, and a roster, a label set's text and a value set name no item, so they carry none
+        here. An insert into a unique attribute carries it as its values.
+        """
+        schema = _inserts.schema_of(data)
+        for name, column in (columns or {}).items():
+            if column not in schema:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: columns={{{name!r}: {column!r}}} names no "
+                    f"column of this table. Its columns are {', '.join(schema)}"
+                )
+            if name not in self.blocks.attribute_names():
+                raise Refusal(
+                    f"insert into {kind} {target!r}: columns= names attribute {name!r}, which "
+                    f"this declaration does not carry. declare_attribute({name!r}, …) first"
+                )
+        unique = self.blocks.unique_names()
+        rows = kind in ("view", "view_group") and role == "rows"
+        beyond = sorted(set(columns or {}) - set(unique))
+        if beyond and not rows:
+            raise Refusal(
+                f"insert into {kind} {target!r}: columns= names the column each unique attribute "
+                f"is read from, which names the item a row belongs to, and "
+                f"{', '.join(repr(one) for one in beyond)} is not declared unique. Drop it, or "
+                f"insert its values into the attribute itself: insert(<attribute>, table, value=…)"
+            )
+        if role in ("artifacts", "text", "roster") or kind == "vocabulary":
+            if columns:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: this table names no item by its rows, so "
+                    f"columns= has nothing to say; drop it"
+                )
+            return {}
+        items = {"tessera_id": "tessera_id"} if "tessera_id" in schema else {}
+        for name in unique:
+            column = (columns or {}).get(name) or self._unique_column(name)
+            if column in schema and column != named.get("view"):
+                items[name] = column
+        if kind == "attribute" and target in unique and named.get("value") is not None:
+            items[target] = named["value"]
+        return items
+
+    def _unique_column(self, name: str) -> str:
+        """The column a table carries a unique attribute in when `columns=` names none: the
+        `field` its block declares, or its name."""
+        block = next(b for b in self.blocks.blocks["attribute"] if b.get("name") == name)
+        return block.get("field") or name
+
+    def _attribute_columns(
+        self, target: str, kind: str, role: str, data: Any, columns: dict | None, named: dict
+    ) -> dict:
+        """The declared attributes a view's rows fill, as `{attribute: column}`.
+
+        A column fills the declared attribute of the same name, or the one `columns=` maps it
+        to. The first commit's build reads an attribute from the anchor view's table alone, so
+        there attribute-named columns in any other view's table fill nothing, and its unique
+        columns only name the rows' items. After it, every view's points carry the declared
+        columns their table holds, those declared since and the scoped columns of the view's
+        group included.
+        """
+        if kind not in ("view", "view_group") or role != "rows":
+            return {}
+        anchor = kind == "view" and target == self.blocks.allocation_view()
+        if not anchor and not self.built:
+            filled = sorted(set(columns or {}) - set(self.blocks.unique_names()))
+            if filled:
+                raise Refusal(
+                    f"insert into {kind} {target!r}: the first commit reads an attribute from "
+                    f"the allocation view's frame, which is {self.blocks.allocation_view()!r}; "
+                    f"map the column there, or insert the values into the attribute itself: "
+                    f"insert(<attribute>, table, value=…)"
+                )
+            return {}
+        # The groups whose scoped columns this table's views take: its own, and the one it shares.
+        groups = set()
+        if kind == "view_group":
+            groups = {target, self.blocks.group(target).get("members")} - {None}
+        schema = _inserts.schema_of(data)
+        matched = {}
+        for block in self.blocks.blocks["attribute"]:
+            group = C._scoped_to(block)
+            if group is not None and (not self.built or group not in groups):
+                continue
+            name = block["name"]
+            column = (columns or {}).get(name, name)
+            # The view column fills no attribute. A coordinate or label column can fill one.
+            if column in schema and column != named.get("view"):
+                matched[name] = column
+        return matched
+
+    def _source_key(self, target: str, kind: str, role: str, view_key: str | None = None) -> str:
+        """The `[sources]` key an insert is written under, unique among this database's inserts."""
+        stem = target.replace("/", "_").replace(":", "_")
+        if view_key is not None:
+            stem = f"{stem}_{view_key}".replace("-", "_").replace("/", "_")
+        key = stem if role in ("rows", "values", "text") else f"{stem}_{role}"
+        taken = {insert.source for insert in self.inserts + self.pending}
+        # A category column and its vocabulary may share a name; the second is named for its kind.
+        candidate, at = key, 1
+        if candidate in taken:
+            candidate = f"{key}_{kind}"
+        while candidate in taken:
+            at += 1
+            candidate = f"{key}_{at}"
+        return candidate
+
+    def _accumulated(self, insert: Insert) -> Insert:
+        """Join a second insert into the same target before the first commit onto the first.
+
+        A block reads one file, so the parts are written together under `sources/`. Parts that name
+        different columns, or whose column types differ, are refused.
+        """
+        if self.built:
+            return insert
+        held = next(
+            (
+                one
+                for one in self.inserts
+                if one.target == insert.target
+                and one.kind == insert.kind
+                and one.role == insert.role
+                # A group whose views each have their own file inserts one table per view, and
+                # the parts of one view are the parts that name it.
+                and one.view_key == insert.view_key
+            ),
+            None,
+        )
+        if held is None:
+            return insert
+        if (
+            held.columns != insert.columns
+            or held.named_attributes != insert.named_attributes
+            or held.items != insert.items
+        ):
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: this table names its columns "
+                f"differently from the one already inserted ({held.columns} against "
+                f"{insert.columns}). A block names its columns once, so a corpus in parts names "
+                f"them the same way in every part"
+            )
+        differs = [
+            (name, held.schema[name], insert.schema[name])
+            for name in held.schema
+            if name in insert.schema and str(held.schema[name]) != str(insert.schema[name])
+        ]
+        if differs or set(held.schema) != set(insert.schema):
+            name, one, other = differs[0] if differs else (
+                sorted(set(held.schema) ^ set(insert.schema))[0], "present", "absent"
+            )
+            raise Refusal(
+                f"insert into {insert.kind} {insert.target!r}: this part's schema differs from "
+                f"the one already inserted, at column {name!r}: {one} against {other}. A block "
+                f"reads one file, and the parts are written as one, so a promoted column would "
+                f"be a type neither part was written in. Write the parts in one schema"
+            )
+        table = pa.concat_tables([held.table(), insert.table()])
+        path = self.path / "sources" / f"{held.source}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, path)
-        staged = StagedSource(
-            name=source_name,
-            path=path,
-            declared_path=f"sources/{source_name}.parquet",
-            rows=table.num_rows,
-            columns=dict(zip(table.schema.names, table.schema.types)),
-            notes=["written from a mapping of cluster key to text"],
-        )
-        self.sources[source_name] = staged
-        if self.built:
-            # The file is in `[sources]` so `tessera check` reads it, and in the deltas so the
-            # commit publishes what it holds: a built database has already read every source it
-            # names, and a table written now is rows it has not seen.
-            self.deltas[source_name] = staged
-        return source_name
+        if not insert.in_place and insert.path != path:
+            insert.path.unlink(missing_ok=True)
+        self.inserts.remove(held)
+        insert.path = path
+        insert.declared_path = f"sources/{held.source}.parquet"
+        insert.source = held.source
+        insert.in_place = False
+        insert.rows = table.num_rows
+        insert.schema = dict(zip(table.schema.names, table.schema.types))
+        return insert
 
-    def _points_source(self, views: Iterable[str] | None) -> str | None:
-        """The points source a `from_column` layer reads: its first view's, or the default."""
-        names = list(views) if views is not None else self.blocks.view_names()
-        for name in names:
-            for block in self.blocks.blocks["view"]:
-                if block["name"] == name and block.get("source"):
-                    return block["source"]
-        return self.default_source
+    def _label_text(
+        self, target: str, block: dict, data: Any, named: dict
+    ) -> tuple[Any, dict]:
+        """A label set's text as the annotations table its layer reads, and the columns it names.
+
+        Given a mapping from key to text, or a table with `text=`, the table is written here and
+        each label is attached to the annotation with its own key in the layer it labels. Given a
+        table with `contents=`, the table is read as it is and must name its attachment.
+        """
+        of = next(
+            one["name"]
+            for one in self.blocks.blocks["layer"]
+            if isinstance(one.get("labels"), dict) and one["labels"]["name"] == target
+        )
+        if isinstance(data, dict):
+            if named:
+                raise Refusal(
+                    f"insert into labels {target!r}: a mapping from key to text carries no "
+                    f"columns, so {', '.join(f'{one}=' for one in sorted(named))} names nothing. "
+                    f"Insert a table to name columns on it"
+                )
+            keys = [str(key) for key in data]
+            texts = [[[value]] if isinstance(value, str) else [list(value)]
+                     for value in data.values()]
+            levels = [0] * len(keys)
+            attached_keys = list(keys)
+            attached_layers = [of] * len(keys)
+        elif "text" in named:
+            table = _inserts.decoded(
+                _inserts.as_table(data) if not _inserts.is_path(data) else pq.read_table(data)
+            )
+            missing = [
+                name for name, column in named.items() if column not in table.column_names
+            ]
+            if missing:
+                raise Refusal(
+                    f"insert into labels {target!r}: "
+                    + ", ".join(f"{name}={named[name]!r}" for name in missing)
+                    + f" names no column of this table. Its columns are "
+                    f"{', '.join(table.column_names)}"
+                )
+            keys = [str(key) for key in table[named["key"]].to_pylist()]
+            texts = [[[value]] for value in table[named["text"]].to_pylist()]
+            levels = (
+                [int(one or 0) for one in table[named["level"]].to_pylist()]
+                if "level" in named
+                else [0] * len(keys)
+            )
+            attached_keys = (
+                [str(one) for one in table[named["attached_key"]].to_pylist()]
+                if "attached_key" in named
+                else list(keys)
+            )
+            attached_layers = (
+                [str(one) for one in table[named["attached_layer"]].to_pylist()]
+                if "attached_layer" in named
+                else [of] * len(keys)
+            )
+            carried = {"key", "text", "level", "attached_key", "attached_layer"}
+            beyond = sorted(set(named) - carried)
+            if beyond:
+                raise Refusal(
+                    f"insert into labels {target!r}: "
+                    + ", ".join(f"{one}=" for one in beyond)
+                    + " names a column the table the SDK writes from text= does not carry. That "
+                    "table is the key, the text as one ranked content, the level and the "
+                    "attachment. Write the table in the publication's own shape and insert it "
+                    "with contents=, which is read as it stands"
+                )
+        else:
+            if "attached_key" not in named:
+                raise Refusal(
+                    f"insert into labels {target!r}: a label set expands to a layer that depends "
+                    f"on its clustering, so every artifact it publishes attaches to one, and a "
+                    f"table read as it stands carries the attachment. Name it with "
+                    f"attached_key= (and attached_layer= where the table says which layer), or "
+                    f"insert the text as a mapping or with text=, which attaches each label to "
+                    f"the cluster its key names"
+                )
+            return data, named
+        written = pa.table(
+            {
+                "level": pa.array(levels, type=pa.uint32()),
+                "key": pa.array(keys, type=pa.string()),
+                "contents": pa.array(texts, type=pa.list_(pa.list_(pa.string()))),
+                "attached_layer": pa.array(attached_layers, type=pa.string()),
+                "attached_key": pa.array(attached_keys, type=pa.string()),
+            }
+        )
+        return written, {
+            "key": "key",
+            "contents": "contents",
+            "level": "level",
+            "attached_layer": "attached_layer",
+            "attached_key": "attached_key",
+        }
 
     # ------------------------------------------------------------------ the document
 
     @property
     def declaration(self) -> str:
-        """The declaration as TOML: what the SDK writes and `tessera check` reads."""
+        """The declaration as the TOML text the database's `schema.toml` holds."""
         if self._loaded_text is not None:
             return self._loaded_text
         return dumps(self._document())
 
     def _document(self) -> dict:
-        inferred_attributes, inferred_vocabularies = self._infer_columns()
-        # A block declared after the first commit may name a source this database has never read.
-        # Its `[sources]` entry is the delta's own file: `tessera check` resolves a name rather than
-        # a path, so a name the table does not carry is refused rather than read as a relative path.
-        paths = {name: staged.declared_path for name, staged in self.sources.items()}
-        for name, staged in self.deltas.items():
-            paths.setdefault(name, staged.declared_path)
-        document = self.blocks.document(paths, inferred_attributes, inferred_vocabularies)
-        # Every source named on every block (§4.8). `default=True` is the SDK's own convenience and
-        # is written here rather than under `[defaults]`: the file an object reads is on the
-        # object, which is what lets a reader of `schema.toml` see the whole declaration. A
-        # group-scoped attribute is the exception, and the one the rule would break: its values are
-        # read from each of its group's views' own points files (configuration.md §1).
-        for kind in ("view", "attribute"):
-            for block in document.get(kind, []):
-                if block.pop(D.FILLED, False):
-                    # An attribute declared at a running service names no source: its column is
-                    # filled through `POST /control/values` and read from no file (§6.2 step 1).
-                    continue
-                if "source" in block or block.get("scope"):
-                    continue
-                if self.default_source is None:
-                    raise Refusal(
-                        f"{kind} {block.get('name')!r} names no source and no source is "
-                        f"staged with default=True"
-                    )
-                block["source"] = self.default_source
-        # Where identity is, block by block: the SDK rewrites no file, so a column staged under
-        # the user's own name is named here rather than copied into a canonical one (§3).
-        D.name_identity(document, self._id_column_of)
-        self._refuse_a_view_without_its_labels(document)
+        sources = {
+            insert.source: insert.declared_path
+            for insert in self.inserts
+            if insert.declared_path is not None
+        }
+        document = self.blocks.document(sources)
+        self._anchor_a_group(document)
+        D.bind(document, self.inserts)
+        D.bind_value_sets(document, self.inserts + self.pending)
         return document
 
-    def _refuse_a_view_without_its_labels(self, document: dict) -> None:
-        """A view whose points file does not carry the access column it names (§4.2).
-
-        Every view over the same entities carries the same labels: the build refuses an entity
-        whose labels disagree between views, and the ingest route refuses a join row whose labels
-        differ from the held ones. The SDK copies no column between views, so a frame that lacks
-        the one its view names is refused here, naming it.
-        """
-        for entry in D.view_entries(document, self.default_source):
-            field = entry["point_visibility"].get("field")
-            staged = self.sources.get(entry["source"])
-            if not field or staged is None or field in staged.columns:
-                continue
-            raise Refusal(
-                f"view {entry['id'] or entry['group']!r}: its labels are in column '{field}', "
-                f"which source '{entry['source']}' does not carry. Every view over one entity "
-                f"carries that entity's labels, and a row whose labels disagree between views is "
-                f"refused at the build and on the ingest route. Add '{field}' to the frame"
-            )
-
-    def view_entries(self) -> list[dict]:
-        """Every view this declaration carries, plain and grouped, as the commit works from it."""
-        return D.view_entries(
-            {"view": self.blocks.blocks["view"], "view_group": self.blocks.blocks["view_group"]},
-            self.default_source,
-        )
-
-    def _infer_columns(self) -> tuple[list[dict], list[dict]]:
-        """§4.5's inference over the default source's unclaimed columns."""
-        self._inference = Inference()
-        default = self.default_source
-        if default is None:
-            return [], []
-        staged = self.sources[default]
-        # The id column is this source's identity rather than one of its columns: the declaration
-        # points at it and the build takes its bytes as the external id (§3).
-        claimed = {staged.id_column} if staged.id_column else set()
-        for entry in self.view_entries():
-            if entry["source"] != default:
-                continue
-            claimed |= {entry["x"], entry["y"]}
-            if entry["discriminator"]:
-                claimed.add(entry["discriminator"])
-            visibility = entry["point_visibility"]
-            if "field" in visibility:
-                claimed.add(visibility["field"])
-        for block in self.blocks.blocks["attribute"]:
-            # A group-scoped column with no source is read from each view's own points file, so it
-            # is claimed on the default source wherever that file is one of them.
-            if block.get("scope") and "source" not in block:
-                claimed.add(block.get("field") or block["name"])
-        for block in self.blocks.blocks["layer"]:
-            members = block.get("members")
-            if isinstance(members, dict) and members.get("source") == default:
-                claimed |= set(dict(members.get("fields", {})).values())
-        declared = self.blocks.attribute_names()
-        attributes: list[dict] = []
-        vocabularies: list[dict] = []
-        unclaimed = [c for c in staged.columns if c not in claimed and c not in declared]
-        if unclaimed:
-            table = pq.read_table(staged.path, columns=unclaimed)
-            inferred, inferred_vocabularies, rows = _infer.infer(table, set())
-            attributes += inferred
-            vocabularies += inferred_vocabularies
-            self._inference = Inference(
-                source=default,
-                columns=rows,
-                vocabularies=[v["name"] for v in inferred_vocabularies],
-            )
-        return attributes, vocabularies
+    def _anchor_a_group(self, document: dict) -> None:
+        """Anchor on the first view of the first group's roster when no plain view is declared."""
+        defaults = document.setdefault("defaults", {})
+        if defaults.get("allocation_view") or not document.get("view_group"):
+            return
+        for group in document["view_group"]:
+            for record in group.get("view") or []:
+                defaults["allocation_view"] = f"{group['name']}:{record['key']}"
+                return
+            for insert in self.inserts + self.pending:
+                if insert.target != group["name"] or insert.role != "roster":
+                    continue
+                keys = insert.table()[insert.columns["key"]].to_pylist()
+                if keys:
+                    defaults["allocation_view"] = f"{group['name']}:{keys[0]}"
+                    return
+        if not defaults:
+            document.pop("defaults")
 
     def write(self) -> dict:
-        """Write `schema.toml` and `tessera.toml`, and return the document written."""
+        """Write `schema.toml` and `tessera.toml` into the directory, and return the declaration
+        as a dictionary.
+
+        `check()` and `commit()` do this themselves. Call it to look at the files first.
+        """
         document = self._document()
         self.path.mkdir(parents=True, exist_ok=True)
         (self.path / "schema.toml").write_text(dumps(document), encoding="utf-8")
@@ -575,10 +1214,10 @@ class Database:
         return document
 
     def _save_state(self) -> None:
-        """The SDK's own copy of the declaration, so `open()` reads the blocks back (§2)."""
+        """The SDK's own copy of the declaration, so `open()` reads the blocks back."""
         state = {
-            "sources": {name: _stored(staged) for name, staged in self.sources.items()},
-            "deltas": {name: _stored(staged) for name, staged in self.deltas.items()},
+            "inserts": [_stored(insert) for insert in self.inserts],
+            "pending": [_stored(insert) for insert in self.pending],
             "terms": list(self.terms),
             "blocks": _tagged(self.blocks.blocks),
         }
@@ -589,207 +1228,250 @@ class Database:
     # ------------------------------------------------------------------ check and commit
 
     def check(self) -> Report | PagedReport:
-        """What the next commit would do, with nothing sent (§5).
+        """What the next `commit()` would do, with nothing sent, as a report.
 
-        Before the first commit that is `tessera check` over this directory: what the declaration
-        reads from each file and the disclosure decisions it makes, schemas only and no rows. After
-        it, the plan (§6.2) and the pre-flight (§6.3).
+        Before the first commit it reads the declaration against the inserted files and reports
+        each problem it finds, reading the files' column types only. After it, the report lists the
+        requests the commit would send and any problem found before sending.
+
+            db.check()
         """
         if self.built:
             return self._paged(sent=False)
         document = self.write()
-        result = self._run(["check", "--deployment", str(self.path / "tessera.toml")])
+        findings = self._preflight(document)
+        ok, page = self._checked()
         return Report(
             what="check",
-            ok=result.returncode == 0,
-            inference=self._inference,
+            ok=ok and not findings,
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
-            output=result.stdout + result.stderr,
+            rows=self._inserted_rows(),
+            findings=findings,
+            log=page,
         )
 
-    def commit(self) -> CommitReport | PagedReport:
-        """Make the staged data part of the database: the build the first time, pages after (§6).
+    def _checked(self) -> tuple[bool, str]:
+        """Check the written declaration, and return whether it passed and the page it printed.
 
-        The first commit runs `tessera check`, then `tessera build`, then `tessera serve`. Three
-        things happen there and at no later commit, and the report says each: the frame is fixed,
-        the column types and render flags are fixed, and the allocation is signature-sorted over
-        the whole staged corpus (§6.1). Every commit after it pages the deltas through the control
-        plane in §6.2's order, flushes once and waits for the publication that flush arms.
+        The check runs in this process where the extension is installed, and as `tessera check`
+        otherwise. The page is the same either way.
+        """
+        deployment = str(self.path / "tessera.toml")
+        if _tessera is None:
+            result = self._run(["check", "--deployment", deployment])
+            return result.returncode == 0, result.stdout + result.stderr
+        try:
+            report = _tessera.check(deployment)
+        except _tessera.DeclarationError as refused:
+            return False, f"check FAILED: {refused}"
+        return report.ok, report.page
+
+    def commit(self, strict: bool = False) -> CommitReport | PagedReport:
+        """Make what was inserted part of the database, and return a report of what happened.
+
+        The first commit checks the declaration, builds the database from the inserted tables and
+        starts a server over it. Three things are fixed then and cannot change: each view's extent,
+        the column types, and which columns are rendered.
+
+        Each later commit sends what was inserted since the last one to the running server and
+        waits until it can be read. Then the inserts are forgotten.
+
+        A row naming two items, or naming an item or a unique value an earlier row of its table
+        names, and a member or a row of values naming no item, is refused: it is left out, the
+        rest is applied, and the report counts the refused rows by reason.
+
+        - `strict`: `True` refuses instead the whole build, or the whole request, that carries a
+          refused row.
+
+        A commit that did nothing raises `Refusal`, with the report as its `report`: a problem found
+        before anything was sent, a build that failed, or every request refused. A commit in which
+        some requests succeeded returns its report, with the refusals listed.
+
+            db.commit()
         """
         if self.built:
-            return self._paged(sent=True)
+            return self._paged(sent=True, strict=strict)
         document = self.write()
         self._refuse_an_empty_build(document)
-        check = self._run(["check", "--deployment", str(self.path / "tessera.toml")])
-        if check.returncode != 0:
-            raise Refusal("commit: the declaration did not check\n" + check.stdout + check.stderr)
+        findings = self._preflight(document)
+        if findings:
+            raise Refusal(
+                "commit: the pre-flight found what follows, and nothing was sent or built\n"
+                + "\n".join(f"  {finding}" for finding in findings)
+            )
+        started = time.monotonic()
+        ok, page = self._checked()
+        if not ok:
+            raise Refusal("commit: the declaration did not check\n" + page)
         build = self._run(
-            [
-                "build",
-                "--deployment",
-                str(self.path / "tessera.toml"),
-                *self._id_arguments(),
-                "--identity-file",
-                str(self.path / ".tessera" / "identity.toml"),
-            ]
+            ["build", "--deployment", str(self.path / "tessera.toml")]
+            + (["--strict"] if strict else [])
         )
         report = CommitReport(
             what="commit",
             ok=build.returncode == 0,
-            inference=self._inference,
             frames=self._frames(document),
             render_columns=render_columns_of(document.get("attribute", [])),
             notes=self._notes(),
-            output=check.stdout + build.stdout + build.stderr,
+            rows=self._inserted_rows(),
+            log=page + "\n" + build.stdout + build.stderr,
             identity=self._identity_in_words(),
         )
         if build.returncode != 0:
-            raise Refusal("commit: the build failed\n" + report.output)
+            raise Refusal("commit: the build failed\n" + report.log, report)
         self.built = True
+        self._record_label_columns(document.get("layer", []))
         self._record_terms(document)
         self.serve()
+        report.seconds = time.monotonic() - started
         if self.listening is not None:
             report.viewer = self.listening.viewer
             report.session = self.listening.session
             report.control = self.listening.control
+        for view in self.meta().get("views", []):
+            name = view.get("group") or view["id"]
+            report.views[name] = report.views.get(name, 0) + 1
+        # From the declaration: a layer gated on a label no row carries is in no reader's meta.
+        for block in document.get("layer", []):
+            report.layers.append(block["name"])
+            if "labels" in block:
+                report.layers.append(block["labels"]["name"])
+        built = _BUILT.search(build.stdout + build.stderr)
+        if built is not None:
+            report.items = int(built.group("items"))
+            report.minted = int(built.group("minted"))
+            report.unclustered = int(built.group("unclustered"))
+        refused = self.path / "bundle" / "reports" / "refused.json"
+        if built is not None and int(built.group("refused")) > 0 and refused.exists():
+            report.refused = json.loads(refused.read_text(encoding="utf-8"))
         return report
 
+    def _inserted_rows(self) -> dict:
+        """The rows inserted before the first commit, by view or view group."""
+        rows: dict = {}
+        for insert in self.inserts:
+            if insert.role == "rows":
+                rows[insert.target] = rows.get(insert.target, 0) + insert.rows
+        return rows
+
+    def _preflight(self, document: dict) -> list[C.Finding]:
+        """The findings the build's own inserts can raise, before a byte is read."""
+        findings: list[C.Finding] = []
+        C.keys_into_supplied_content(document, self.inserts, findings)
+        return findings
+
     def _refuse_an_empty_build(self, document: dict) -> None:
-        """A first commit with no points staged needs an explicit extent on every view (§6.1)."""
-        for entry in D.view_entries(document, self.default_source):
-            staged = self.sources.get(entry["source"])
-            if staged is not None and staged.rows:
+        """A first commit with no rows inserted needs an explicit extent on every view."""
+        inserted = {
+            insert.target for insert in self.inserts if insert.role == "rows" and insert.rows
+        }
+        for block in document.get("view", []) + document.get("view_group", []):
+            if block["name"] in inserted:
                 continue
-            extent = entry["extent"]
+            extent = block.get("extent")
             fitted = extent == "auto" or (isinstance(extent, dict) and extent.get("auto"))
             if fitted:
-                named = (
-                    f"view {entry['id']!r}"
-                    if entry["id"]
-                    else f"view group {entry['group']!r}"
-                )
                 raise Refusal(
-                    f"commit: {named} has no staged rows to fit a frame around. "
+                    f"commit: view {block['name']!r} has no inserted rows to fit a frame around. "
                     f"An empty database needs extent= on every view"
                 )
 
     # ------------------------------------------------------------------ the paged commit
 
-    def _paged(self, sent: bool) -> PagedReport:
-        """§6.2's plan over the staged deltas, run where `sent` and printed where not."""
+    def _paged(self, sent: bool, strict: bool = False) -> PagedReport:
+        """The plan over what was inserted since the last commit, run where `sent`."""
         self.serve()
         control = self.control
         planner = C.Planner(self, control, self.meta())
         pages, findings = planner.plan()
         report = PagedReport(
             sent=sent,
-            # The closing flush is a request of the plan and is printed as one: it is where the
-            # commit blocks, and a plan that did not name it would understate what `commit()` does.
+            # The closing flush is where the commit waits, so the plan lists it.
             plan=[page.line for page in pages]
             + (["flush, and wait for the publication it arms"] if pages else []),
             findings=findings,
+            ignored_columns=planner.ignored_columns,
         )
-        if not sent or not report.ok:
+        if not sent:
             return report
-        C.run(control, pages, report)
+        if report.findings:
+            raise Refusal(str(report), report)
+        accepted = C.run(control, pages, report, strict)
+        self._record_label_columns(page.body for page in accepted if page.kind == "layer")
         self._record_terms(self._document())
-        self.deltas.clear()
+        self.pending.clear()
         self._save_state()
+        if pages and not accepted:
+            raise Refusal(str(report), report)
         return report
 
     @property
     def control(self) -> Control:
-        """The operator plane of this database's own server."""
+        """A `Control` for this database's control plane, starting the server if needed."""
         listening = self.serve()
         credential = (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8")
         return Control(f"http://{listening.control}", credential.strip())
 
     def _payloads(self) -> dict:
-        """`tessera check --payloads` over this declaration: one body per runtime declaration.
+        """The request bodies the declaration becomes at a running server, one entry per block kind.
 
-        The emitter writes one object with a key per block kind: `layers` and `attributes` as
-        bare bodies, and `views`, `view_groups` and `vocabularies` as `{name, body}`, each
-        addressed by a path segment. The paged commit sends every kind: the view groups and their
-        roster views, the plain views, the vocabularies with the pages of their values, the
-        attributes and the layers.
-
-        The declaration minus its acquisition keys *is* the payload (configuration.md §2), so this
-        is the binary serialising what it parsed rather than a second emitter in Python.
+        `tessera check --payloads` writes them, so the binary serialises what it parsed.
         """
         self.write()
-        result = self._run(
-            ["check", "--deployment", str(self.path / "tessera.toml"), "--payloads"]
-        )
-        if result.returncode != 0:
-            raise Refusal(
-                "commit: the declaration did not check, so no declaration payload was emitted\n"
-                + result.stdout
-                + result.stderr
-            )
-        return json.loads(result.stdout)
+        deployment = str(self.path / "tessera.toml")
+        refused = "commit: the declaration did not check, so no declaration payload was emitted\n"
+        if _tessera is None:
+            result = self._run(["check", "--deployment", deployment, "--payloads"])
+            if result.returncode != 0:
+                raise Refusal(refused + result.stdout + result.stderr)
+            return json.loads(result.stdout)
+        try:
+            return json.loads(_tessera.payloads(deployment))
+        except _tessera.DeclarationError as why:
+            raise Refusal(f"{refused}check FAILED: {why}") from None
 
-    def token(self, terms: Sequence[str] | None = None):
-        """A viewer token for this database, minted from its own session credential (§8).
+    def token(self, terms: Sequence[str] | None = None) -> Token:
+        """A token for reading this database, made with its own session credential.
 
-        With no terms it mints for every access label the SDK has staged plus each view's default
-        label, which is Python asserting the local principal's authority: admissible on a
-        single-operator database and nowhere else.
+        - `terms`: the access terms the token grants. By default it grants every access label the
+          database's rows carry, and each view's default label.
+
+        Pass the token to `connect` or `Map` to read as that reader.
+
+            token = db.token(["cs.LG"])
         """
         self.serve()
         chosen = list(terms) if terms is not None else list(self.terms)
         return authorise(self.session_url, self.session_credential, chosen)
 
     def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
-        """A `Viewer` on this database as the principal whose visibility is `terms` (§8).
+        """A reader of this database holding only the access terms given.
 
-        The map of any principal is one call: `db.viewer(["public"]).map()` is what a viewer
-        holding that one term sees, computed inside their mask and not filtered down from the
-        operator's. With no terms it is the union the SDK recorded, which is this database's own
-        principal.
+        - `terms`: the access terms. The reader sees an item when it holds one of the item's
+          labels. By default it holds every label the database's rows carry, which sees everything.
 
-        A term the union does not hold is refused and named. The SDK knows every label it staged,
-        so a typo would otherwise mint a principal who sees nothing and draw an empty map with no
-        error anywhere.
+        Every count, map and record the reader is given covers only what those terms let it see.
+        An empty list is refused, since such a reader sees nothing. A term no row carries is
+        accepted and reaches nothing.
 
-        An empty term list is refused too. A principal holding no term sees nothing, which is the
-        blank map this refusal exists to prevent, and `viewer()` with no argument is how the
-        database's own principal is asked for.
-
-        The credential stays here: what the viewer holds is a source that calls `token()`, and
-        what the source hands out is the minted token.
+            db.viewer(["cs.LG"]).view("papers").count()
+            db.viewer(["cs.LG"]).map()
         """
         self._refuse_before_the_first_commit("viewer")
-        if terms is not None:
-            if not list(terms):
-                raise Refusal(
-                    "viewer: a principal holding no term sees nothing, and a map of nothing is "
-                    "what this refuses. viewer() with no terms is this database's own principal"
-                )
-            unknown = [term for term in terms if term not in self.terms]
-            if unknown:
-                raise Refusal(
-                    f"viewer: this database has staged no access label named "
-                    f"{', '.join(repr(term) for term in unknown)}. It has staged "
-                    f"{', '.join(repr(term) for term in self.terms) or 'none'}"
-                )
-            chosen = list(terms)
-        else:
-            chosen = list(self.terms)
+        if terms is not None and not list(terms):
+            raise Refusal(
+                "viewer: a reader holding no terms sees nothing. Name at least one term, or "
+                "call viewer() with no terms to read everything"
+            )
+        chosen = list(terms) if terms is not None else list(self.terms)
         self.serve()
-        return Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
-
-    def _all_terms(self) -> Viewer:
-        """The viewer this database reads itself through: every term the SDK has staged.
-
-        Held for the life of the database so one token serves many reads, and dropped whenever a
-        commit records a term it did not have — a held token grants what it was minted with, and
-        a stale one would read the new rows as a principal who cannot see them.
-        """
-        if self._viewer is None:
-            self._viewer = self.viewer()
-        return self._viewer
+        reader = Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
+        # A new token is made for each call, so a commit's new views are seen, while the category
+        # keys already looked up are kept for every reader holding the same terms.
+        reader._keys = self._keys.setdefault((self.viewer_url, frozenset(chosen)), {})
+        return reader
 
     def map(
         self,
@@ -798,193 +1480,396 @@ class Database:
         colour_by: str | None = None,
         filters: dict | None = None,
         height: int = 480,
+        size_by: str | None = None,
         **kwargs,
-    ):
-        """The explorer in this cell, over this database as its own principal (§8).
+    ) -> Map:
+        """The interactive map of this database, as a notebook widget, showing everything.
 
-        `db.viewer(terms).map(...)` is the same widget as any other principal. The token is minted
-        here and handed to the page as a custom message; the session credential never leaves the
-        kernel and no traitlet carries either.
+        - `view`: the view to open on. `None` opens the first one.
+        - `layers`: the annotation layers to draw. `None` lets the map choose and `[]` draws none.
+        - `colour_by`: the column to colour points by, or `"cluster:<layer>"`.
+        - `filters`: a filter expression to apply, as `Selection.filter` takes one.
+        - `height`: the widget's height in pixels.
+        - `size_by`: a number column to size points by; `None` draws them at one size.
+
+        Other keywords go to `Map` unchanged, such as `size_scale`. `db.view(name).map()` opens on a selection instead,
+        and `db.viewer(terms).map()` shows what a reader holding those terms sees.
+
+            db.map(colour_by="cluster:clusters")
         """
         self._refuse_before_the_first_commit("map")
-        return self._all_terms().map(
+        return self.viewer().map(
             view=view,
             layers=layers,
             colour_by=colour_by,
             filters=filters,
             height=height,
+            size_by=size_by,
             **kwargs,
         )
 
     def meta(self) -> dict:
-        """`/v1/meta` as this database's own principal reads it: the frames and the schema."""
+        """The database's structure as its server describes it, as a dictionary.
+
+        It lists the views with their coordinate ranges, the annotation layers, the columns and
+        how each can be filtered, and the server's limits.
+        """
         self._refuse_before_the_first_commit("meta")
-        return self._all_terms().meta()
+        return self.viewer().meta()
 
-    def item(self, tessera_id, idset: int | None = None) -> dict:
-        """The drill-down record for one item, as this database's own principal (§8).
+    def item(self, tessera_id) -> dict:
+        """One item's full record.
 
-        `external_id` comes back as the staged id column's own type: an integer column's eight
-        little-endian bytes as an integer, a string column's as text, anything else as the bytes
-        themselves. The wire says bytes and the SDK knows which column those bytes came from, so
-        the id a cell prints here is the id the user staged and can look up in their own frame.
+        - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
+
+        The record has `fields`, `labels` and `views` as `Viewer.item` describes.
+
+            db.item(db.view("papers").sample(k=1).column("tessera_id")[0].as_py())
         """
         self._refuse_before_the_first_commit("item")
-        record = self._all_terms().item(tessera_id, idset)
-        if record.get("external_id") is not None:
-            record["external_id"] = self._staged_id(record["external_id"])
-        return record
+        return self.viewer().item(tessera_id)
 
-    def _staged_id(self, raw: bytes):
-        """External-id bytes read as the type the id column staged (`_control.external_id`)."""
-        staged = self.sources.get(self._identity_source())
-        dtype = None if staged is None else staged.id_type
-        if is_integer_type(dtype):
-            # `_control.external_id` writes eight little-endian bytes, signed where the value was.
-            return int.from_bytes(raw, "little", signed=str(dtype).startswith("int"))
-        if dtype is not None and (pa.types.is_string(dtype) or pa.types.is_large_string(dtype)):
-            return raw.decode()
-        return raw
+    def items(self, view: str, fields: Sequence[str], **options):
+        """Every item in `view`, with the fields named, as one pyarrow table.
 
-    def viewport(
-        self,
-        bbox: Sequence[float] | None = None,
-        view: str | None = None,
-        filters: dict | None = None,
-        k: int | None = None,
-        zoom: int = 0,
-    ):
-        """The points served for a box, as a pyarrow table (§8). `Viewer.viewport` is the verb."""
-        self._refuse_before_the_first_commit("viewport")
-        return self._all_terms().viewport(bbox, view, filters, k, zoom)
+        This is `Viewer.items` as this database's own reader, which sees every item; `options`
+        are its keywords. `batches=True` returns the pages one at a time instead.
 
-    def _id_arguments(self) -> list[str]:
-        """`--mint-external-ids`, where the identity column is an integer (configuration.md §8).
-
-        A supplied key is an external id and the build writes it without a flag. An integer id
-        column is a source-corpus number rather than a namespace the caller owns, so writing the
-        sidecar from it is opt-in, and the SDK asks for it, because every route the later commits
-        use addresses a row by the bytes of the column the user staged. A database whose points
-        name no identity takes neither the flag nor the sidecar: its rows are `tessera_id` rows.
+            db.items("papers", ["title", "year"]).to_pandas()
+            db.items("papers", ["title"], filters={"year": {"eq": 2023}}, order="stored")
         """
-        source = self._identity_source()
-        column = self._id_column_of(source)
-        staged = self.sources.get(source)
-        if column is None or staged is None:
-            return []
-        return ["--mint-external-ids"] if is_integer_type(staged.columns.get(column)) else []
+        self._refuse_before_the_first_commit("items")
+        return self.viewer().items(view, fields, **options)
 
-    def _identity_source(self) -> str | None:
-        """The points source this declaration reads identity from: its first view's (§3)."""
-        for entry in self.view_entries():
-            if entry["source"] is not None:
-                return entry["source"]
-        return self.default_source
+    def lookup(self, view: str, field: str, values: Iterable[Any], fields: Sequence[str] = ()):
+        """The items in `view` holding `values` in the unique column `field`, as a pyarrow table.
+
+        This is `Viewer.lookup` as this database's own reader, which sees every item.
+
+            db.lookup("papers", "doi", ["10.1/a", "10.2/b"], fields=["title"])
+        """
+        self._refuse_before_the_first_commit("lookup")
+        return self.items(view, [field, *fields], filters={field: {"in": list(values)}})
+
+    def artifacts(self, view: str, layer: str, fields: Sequence[str], **options):
+        """Every artifact of `layer`, with the properties named, as one pyarrow table.
+
+        This is `Viewer.artifacts` as this database's own reader; `options` are its keywords.
+        `batches=True` returns the pages one at a time instead.
+
+            db.artifacts("papers", "clusters", ["key", "masked_count"])
+        """
+        self._refuse_before_the_first_commit("artifacts")
+        return self.viewer().artifacts(view, layer, fields, **options)
+
+    def aggregate(
+        self,
+        view: str,
+        groupings: Sequence[dict],
+        filters: dict | None = None,
+        reference: dict | None = None,
+    ) -> list:
+        """How the items in `view` are distributed, as one pyarrow table of counts per grouping.
+
+        This is `Viewer.aggregate` as this database's own reader, which sees every item.
+
+            [size, venues] = db.aggregate("papers", [{}, {"by": {"field": "venue", "top": 10}}])
+        """
+        self._refuse_before_the_first_commit("aggregate")
+        return self.viewer().aggregate(view, groupings, filters, reference)
+
+    def view(self, name: str) -> Selection:
+        """The whole of one view, as this database's own reader sees it: every item.
+
+        `name` is a view's name. A view in a view group is named `"<group>:<key>"`. An unknown
+        name is refused, and the refusal lists the views there are.
+
+            db.view("papers").count()
+            db.view("papers").filter({"venue": {"eq": "neurips"}}).map()
+        """
+        self._refuse_before_the_first_commit("view")
+        self.viewer()._require_view(name)
+        return Selection(self.viewer, name, items=self.items)
+
+    def categories(
+        self,
+        column: str,
+        prefix: str | None = None,
+        view: str | None = None,
+        codes: Sequence[int] | None = None,
+        filters: dict | None = None,
+    ):
+        """The values of a category column, as a pyarrow table.
+
+        This is `Viewer.categories` as this database's own reader, which sees every value.
+        `prefix` lists only the values starting with it, with a count of items for each; `view`
+        names the view to read a column declared for a view group in; `codes` lists only the
+        values of those codes; `filters`, with `prefix` and `view`, counts only the items in the
+        view that pass it.
+
+            db.categories("venue")
+            db.categories("venue", prefix="neur")
+            db.categories("venue", codes=[1, 3])
+        """
+        self._refuse_before_the_first_commit("categories")
+        return self.viewer().categories(column, prefix, view, codes, filters)
 
     def _identity_in_words(self) -> str:
         """How this database names a row, for the commit report."""
-        source = self._identity_source()
-        column = self._id_column_of(source)
-        if column is None:
+        unique = self.blocks.unique_names()
+        if not unique:
             return (
-                "the points name no id column, so every row is named by its tessera_id and the "
-                "bundle writes no external id"
+                "no attribute is declared unique, so each row of the points is an item of its "
+                "own, named by its tessera_id"
             )
-        staged = self.sources.get(source)
-        kind = "an integer" if is_integer_type(staged.columns.get(column)) else "bytes"
-        return f"rows are named by '{column}' on '{source}', read as {kind} (configuration.md §8)"
+        return (
+            f"a row names its item by its values of {', '.join(repr(one) for one in unique)}, "
+            f"and a row of the points naming none is an item of its own"
+        )
 
-    def _record_terms(self, document: dict) -> None:
-        """Every access label this commit staged, kept for `map()` (§8)."""
-        for term in self._staged_terms(document):
-            if term not in self.terms:
-                self.terms.append(term)
-                # A held token grants the terms it was minted with, so a new label needs a new one.
-                self._viewer = None
+    def _record_label_columns(self, layers: Iterable[dict]) -> None:
+        """Write onto the SDK's own layer blocks the label column each layer was committed with,
+        so a later insert naming another column is refused."""
+        for layer in layers:
+            field = dict(layer.get("artifact_visibility") or {}).get("field")
+            if field:
+                D.carry_labels(layer["name"], self.blocks.layer(layer["name"]), field)
         self._save_state()
 
-    def _staged_terms(self, document: dict) -> list[str]:
-        """Every access label this commit staged, plus each view's default label (§8)."""
+    def _record_terms(self, document: dict) -> None:
+        """Remember every access label inserted so far: the terms `viewer()` holds by default."""
+        for term in self._inserted_terms(document):
+            if term not in self.terms:
+                self.terms.append(term)
+        self._save_state()
+
+    def _inserted_terms(self, document: dict) -> list[str]:
+        """Every access label inserted into a view or onto an artifact, plus each view's default
+        label and each layer's named default."""
         terms: list[str] = []
-        for entry in D.view_entries(document, self.default_source):
-            visibility = entry["point_visibility"]
-            default = visibility.get("default")
-            if default:
-                terms.append(default)
-            field = visibility.get("field")
-            source = entry["source"]
-            for staged in (self.sources.get(source), self.deltas.get(source)):
-                if staged is None or not field or field not in staged.columns:
-                    continue
-                column = pq.read_table(staged.path, columns=[field])[field]
-                for value in column.to_pylist():
-                    if value is None:
-                        continue
-                    for label in value if isinstance(value, list) else [value]:
-                        terms.append(str(label))
+        for block in document.get("view", []) + document.get("view_group", []):
+            terms.extend(_label_terms(dict(block.get("point_visibility") or {}).get("default")))
+        for block in document.get("layer", []):
+            default = _label_terms(dict(block.get("artifact_visibility") or {}).get("default"))
+            if default != ["inherited"]:
+                terms.extend(default)
+        for insert in self.inserts + self.pending:
+            column = insert.columns.get("access") if insert.role in ("rows", "artifacts") else None
+            if column is None:
+                continue
+            for value in insert.table()[column].to_pylist():
+                terms.extend(_label_terms(value))
         return terms
 
-    # ------------------------------------------------------------------ verbs that are not stages
+    # ------------------------------------------------------------------ verbs that are not inserts
 
-    def remove(self, ids: Iterable[Hashable]) -> ChangeReport:
-        """Delete rows by the ids their id column holds, or by their `tessera_id` (§6.5).
+    def remove(self, items: Any, strict: bool = False) -> ChangeReport:
+        """Delete items, and return a report.
 
-        A deletion leaves the overlay at the compaction that removes its rows and at no other point
-        (write-path §5.4). A removed id staged again goes as a point row, which decision 0047
-        allows: an edit is a delete and a re-ingest.
+        - `items`: the items, as a list of their `tessera_id`s, or as a table (a pandas or polars
+          data frame, a pyarrow table, or a dict of columns) whose rows each name one item by the
+          values they carry in its `tessera_id` column and its unique attributes' columns. A
+          unique attribute is read from the column an insert reads it from: the `field` its block
+          declares, or its name.
+        - `strict`: `True` refuses the whole request at a row that names no item, or names two.
+
+        A row naming no item, or two, is refused and the report lists it; the other rows are
+        applied. A `None` in the list, or a row whose cells are all null, names no item. A column
+        that is neither `tessera_id` nor a unique attribute is not sent, and the report names it
+        in `ignored_columns`; a table with no other column is refused before anything is sent.
+        The items stop being served at once. Their rows are removed from disk at the next
+        compaction; `compact()` asks for one.
+
+        A call whose every request the server refused raises `Refusal`, with the report as its
+        `report`: a strict call naming a row it refuses is one.
+
+            db.remove([tessera_id])
+            db.remove({"paper": ["paper-17", "paper-23"]})
         """
-        return self._changes(ids, "delete")
+        return self._changes(items, "delete", strict)
 
-    def suppress(self, ids: Iterable[Hashable]) -> ChangeReport:
-        """Hide rows by their ids. A suppression is lifted by `unsuppress` alone (§6.5)."""
-        return self._changes(ids, "suppress")
+    def suppress(self, items: Any, strict: bool = False) -> ChangeReport:
+        """Hide items until `unsuppress` lifts it, and return a report.
 
-    def unsuppress(self, ids: Iterable[Hashable]) -> ChangeReport:
-        """Lift a suppression (§6.5)."""
-        return self._changes(ids, "unsuppress")
+        - `items`, `strict`: as for `remove`.
 
-    def addresses(self, ids: Iterable[Hashable]) -> list[dict]:
-        """How `/control/changes` names the rows these ids name (§3, contracts §3.4).
-
-        A database whose points declare an id column is addressed by the bytes that column holds;
-        one that declares none has no external id anywhere and is addressed by the `tessera_id`
-        the ingest route and a pick hand back, which carries the idset it was minted under.
+        A hidden item is left out of every answer from the moment the call returns.
         """
-        if self._id_column_of(self._identity_source()) is not None:
-            return [{"external_id": addressed(one)} for one in ids]
-        idset = int(self.meta()["idset"])
-        return [{"tessera_id": str(one), "idset": idset} for one in ids]
+        return self._changes(items, "suppress", strict)
 
-    def _changes(self, ids: Iterable[Hashable], op: str) -> ChangeReport:
+    def unsuppress(self, items: Any, strict: bool = False) -> ChangeReport:
+        """Show items hidden by `suppress` again, and return a report.
+
+        - `items`, `strict`: as for `remove`.
+        """
+        return self._changes(items, "unsuppress", strict)
+
+    def addresses(self, items: Any) -> list[dict]:
+        """The items given, as the rows that name them in the server's change requests.
+
+        A list is read as `tessera_id`s, and each becomes `{"tessera_id": ...}`, a `None` staying
+        `None`. A table (a pandas or polars data frame, a pyarrow table, or a dict of columns)
+        gives one row per table row, `{name: value}` for its `tessera_id` column and each unique
+        attribute's column under the attribute's name, a null cell staying `None`. Its other
+        columns are left out. Every value travels as text: an integer in decimal digits, a
+        timestamp as the decimal digits of its microseconds since the epoch, and a string as
+        itself.
+        """
+        return _rows_of(self._addressed(items, "addresses")[0])
+
+    def _addressed(self, items: Any, verb: str) -> tuple[dict, list[str]]:
+        """The items given as a table of the columns that name them, `{name: [text or None]}`,
+        and the names of the columns given that name no item, which are not sent."""
+        if isinstance(items, (str, bytes)):
+            raise Refusal(
+                f"{verb}: items is the text {items!r}, which would be read one character per "
+                f"item. Pass a list of tessera_ids, such as [{items!r}], or a table of columns"
+            )
+        if not (isinstance(items, dict) or hasattr(items, "columns")):
+            items = list(items)
+            if any(isinstance(one, dict) for one in items):
+                raise Refusal(
+                    f"{verb}: items is a list of dicts. Pass a table instead: a dict of columns, "
+                    f"such as {{'tessera_id': [...], 'paper': [...]}}, or a data frame"
+                )
+            return {"tessera_id": [None if one is None else C.text(one) for one in items]}, []
+        table = _address_table(items, verb)
+        naming = self._identifying_columns()
+        sent = {
+            naming[column]: [
+                None if one is None else C.text(one) for one in table[column].to_pylist()
+            ]
+            for column in table.column_names
+            if column in naming
+        }
+        ignored = [column for column in table.column_names if column not in naming]
+        if table.num_rows and not sent:
+            raise Refusal(
+                f"{verb}: the table's columns {', '.join(ignored)} name no item, since none is "
+                f"tessera_id or a unique attribute's column ({', '.join(naming)}). Pass the "
+                f"items' tessera_ids or their unique values in one of those columns"
+            )
+        return sent, ignored
+
+    def _identifying_columns(self) -> dict[str, str]:
+        """The column a table names items by, mapped to the name the server reads it under:
+        `tessera_id`, and each unique attribute's column as an insert reads it."""
+        named = {self._unique_column(one): one for one in self.blocks.unique_names()}
+        return {"tessera_id": "tessera_id", **named}
+
+    def _changes(self, items: Any, op: str, strict: bool) -> ChangeReport:
         self._refuse_before_the_first_commit(op)
-        addresses = self.addresses(ids)
-        report = ChangeReport(op=op, requested=len(addresses))
+        table, ignored = self._addressed(items, op)
+        rows = _rows_of(table)
+        report = ChangeReport(op=op, requested=len(rows), ignored_columns=ignored)
         control = self.control
-        for answer in C.changes(control, addresses, op, control.limits()):
-            if not answer.ok:
-                report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+        for start, answer in C.changes(control, rows, op, control.limits(), strict):
+            _fold_change(report, answer, start)
+        if rows and not report.accepted and report.refusals:
+            raise Refusal(str(report), report)
         return report
 
     def leave(
         self,
         layer: str,
         key: str,
-        ids: Iterable[Hashable],
+        items: Any,
         rank: int = 0,
         level: int = 0,
+        view: str | None = None,
+        strict: bool = False,
     ) -> ChangeReport:
-        """Shrink a content's generating set, the one set that may (decision 0135, §6.5).
+        """Take items out of the set a label's text was written from, and return a report.
 
-        A page that empties a set withdraws the content: the record is removed and the caller
-        supplies it again rather than refilling the set.
+        A label declared with `content_requires="all"` is shown only to a reader who may see every
+        item its text was written from. This removes items from that set.
+
+        - `layer`: the label set.
+        - `key`: the label's key.
+        - `items`: the items to take out, as for `remove`: a list of `tessera_id`s, or a table
+          whose columns are `tessera_id` and unique attributes.
+        - `rank`: which of the label's texts, where it has several. The default is 0, the first.
+        - `level`: the level the label is at. The default is 0.
+        - `view`: the view the label belongs to, on a layer scoped to a group.
+        - `strict`: `True` refuses the whole request at a row that names no item, or names two.
+
+        A row naming no item, or two, is refused and the report lists it; the other rows leave.
+        Columns are read and ignored as for `remove`. Taking out every item withdraws the text;
+        insert it again to replace it. A call the server refuses raises `Refusal`, with the report
+        as its `report`.
         """
         self._refuse_before_the_first_commit("leave")
-        wanted = list(ids)
-        report = ChangeReport(op=f"leave {layer}/{key} rank {rank}", requested=len(wanted))
-        answer = C.leave(self.control, layer, key, wanted, rank, level)
-        if not answer.ok:
+        table, ignored = self._addressed(items, "leave")
+        rows = _rows_of(table)
+        report = ChangeReport(
+            op=f"leave {layer}/{key} rank {rank}", requested=len(rows), ignored_columns=ignored
+        )
+        answer = C.leave(self.control, layer, key, rows, list(table), rank, level, view, strict)
+        if answer.ok:
+            report.refused = [
+                {"row": int(one["row"]), "reason": one["reason"]}
+                for one in answer.body.get("refused", [])
+            ]
+            report.accepted = len(rows) - len(report.refused)
+            C.add_ignored(report.ignored_columns, answer.body)
+        else:
             report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+            raise Refusal(str(report), report)
         return report
+
+    def status(self) -> dict:
+        """The server's own report on this database, as a dictionary.
+
+        It holds what the operator sees: how far writes have got, queue depths, and the page sizes
+        each write request accepts.
+        """
+        self._refuse_before_the_first_commit("status")
+        return _accepted(self.control.status_answer(), "status")
+
+    def compact(self) -> dict:
+        """Ask the server to remove the rows of deleted items from disk now.
+
+        It returns `{}` once the server has accepted the request, before the work is done. A
+        request made while a compaction runs is dropped; the `compaction` block of `status()`
+        shows what happened.
+        """
+        self._refuse_before_the_first_commit("compact")
+        return _accepted(self.control.compact(), "compact")
+
+    def drop_layer(self, name: str, wait: bool = False) -> dict:
+        """Remove an annotation layer, and return the server's answer.
+
+        - `name`: the layer's name. It cannot be used for a new layer afterwards.
+        - `wait`: `True` returns only once readers no longer see the layer, or after the server's
+          `serve.visible_wait_max_secs`, when the answer's `visible` is `false`.
+
+        The answer's `publication` names the publication from which readers no longer see it.
+        """
+        self._refuse_before_the_first_commit("drop_layer")
+        return _accepted(self.control.drop_layer(name, wait), f"drop_layer {name}")
+
+    def drop_view(self, group: str, key: str, wait: bool = False) -> dict:
+        """Remove one view of a view group, and return the server's answer.
+
+        - `group`, `key`: the view is `"<group>:<key>"`.
+        - `wait`: as for `drop_layer`.
+
+        The items the drop leaves in no view are deleted, and the answer's `deleted` says how
+        many. A deletion cannot be undone. Rows sent for the view and not yet published are
+        dropped with it.
+        """
+        self._refuse_before_the_first_commit("drop_view")
+        return _accepted(self.control.drop_view(group, key, wait), f"drop_view {group}/{key}")
+
+    def revoke(self, token) -> None:
+        """End a token this database made, so it can no longer read.
+
+        - `token`: the `Token`, or its `token_id`.
+
+        Only the token's id is sent. An id that names no live token is accepted without comment.
+        """
+        self.serve()
+        revoke(self.session_url, self.session_credential, token)
 
     def _refuse_before_the_first_commit(self, verb: str) -> None:
         if not self.built:
@@ -994,27 +1879,31 @@ class Database:
             )
 
     def serve(self) -> _instance.Listening:
-        """Start `tessera serve` over this directory and read the addresses it bound (§7)."""
+        """Start the server if it is not running, and return the addresses it listens on.
+
+        Reading and later commits do this themselves.
+        """
         if self._child is not None:
             return self.listening
-        identity = (self.path / ".tessera" / "identity.key").read_text(encoding="utf-8").strip()
         binary, _ = _instance.find_binary()
-        self._child, self.listening = _instance.start(
-            binary, self.path / "tessera.toml", identity
-        )
+        self._child, self.listening = _instance.start(binary, self.path / "tessera.toml")
         return self.listening
 
     @property
     def session_credential(self) -> str:
-        """The credential this database mints its tokens with, which stays in the kernel (§8)."""
+        """The secret this database makes its tokens with. It stays on this machine."""
         return (self.path / ".tessera" / "session.cred").read_text(encoding="utf-8").strip()
 
     @property
     def viewer_url(self) -> str | None:
+        """The address of the viewer plane, where readers read, or `None` if the server is not
+        running."""
         return None if self.listening is None else f"http://{self.listening.viewer}"
 
     @property
     def session_url(self) -> str | None:
+        """The address of the session plane, where tokens are made, or `None` if the server is
+        not running."""
         return None if self.listening is None else f"http://{self.listening.session}"
 
     def _run(self, arguments: Sequence[str]) -> subprocess.CompletedProcess:
@@ -1033,16 +1922,66 @@ class Database:
         ]
 
     def _notes(self) -> list[str]:
+        """What each insert read and ignored, and what is declared and still empty."""
         notes = []
-        for staged in self.sources.values():
-            for note in staged.notes:
-                notes.append(f"source '{staged.name}': {note}")
+        for insert in self.inserts + self.pending:
+            notes.append(
+                f"{insert.kind} '{insert.target}' ({insert.role}): read "
+                f"{', '.join(insert.read) or 'nothing'}; ignored "
+                f"{', '.join(insert.ignored) or 'nothing'}"
+            )
+        filled = {insert.target for insert in self.inserts + self.pending}
+        anchor = self.blocks.allocation_view()
+        rows = next(
+            (
+                one
+                for one in self.inserts + self.pending
+                if one.role == "rows" and one.target == anchor
+            ),
+            None,
+        )
+        for block in self.blocks.blocks["attribute"]:
+            name = block["name"]
+            if name in filled or any(name in one.named_attributes for one in self.inserts):
+                continue
+            notes.append(f"attribute '{name}' is declared and empty: " + self._why_empty(name, rows, block))
         return notes
+
+    def _why_empty(self, name: str, rows: Insert | None, block: dict) -> str:
+        """Why no column filled this attribute, which is what the reader needs to act on."""
+        if block.get(D.FILLED):
+            return (
+                "it was declared after the first commit, so no frame the build read carries it; "
+                f"insert({name!r}, table, value=…) fills it at the next commit"
+            )
+        if block.get("scope"):
+            return (
+                "a group-scoped column belongs to one view, so it is filled by an insert of its "
+                f"own: insert({name!r}, table, value=…, view=…)"
+            )
+        if rows is None:
+            return "no frame has been inserted into the allocation view"
+        if name in rows.schema:
+            return (
+                f"the frame inserted into '{rows.target}' carries a column of that name, and the "
+                f"attribute was declared after that insert: the match is made where the frame is "
+                f"handed over. Declare it first, or insert the values with "
+                f"insert({name!r}, table, value=…)"
+            )
+        return (
+            f"the frame inserted into '{rows.target}' carries no column of that name, and no "
+            f"insert names one for it"
+        )
 
     # ------------------------------------------------------------------ the directory
 
     def save(self, path: str | os.PathLike) -> Path:
-        """Copy this database out, so a temporary one survives `close()` (§2)."""
+        """Copy the database directory to the empty directory `path`, and return that path.
+
+        A temporary database is deleted when it is closed, so this is how to keep one. The copy
+        can be reopened with `open(path)` or served with
+        `tessera serve --deployment <path>/tessera.toml`.
+        """
         target = Path(path).expanduser()
         if target.exists() and any(target.iterdir()):
             raise Refusal(f"save: {target} is not empty")
@@ -1050,19 +1989,18 @@ class Database:
         return target
 
     def close(self) -> None:
-        """Stop the child and, for a temporary database, remove the directory.
+        """Stop the server, and delete the directory if the database is a temporary one.
 
-        Nothing is invalidated server-side: a token this database minted is good until its
-        lifetime runs out (`[disclosure] token_max_lifetime`, one hour), and there is no route
-        that withdraws one. What `close()` stops is the process that would answer it.
+        Tokens the database made stay valid until they expire, within the hour; `revoke` ends one
+        sooner. A directory you named is never deleted.
         """
         if self._child is not None:
             _instance.stop(self._child)
             self._child = None
             self.listening = None
-            self._viewer = None
-        if self.temporary and self.path.exists():
+        if self.temporary:
             shutil.rmtree(self.path, ignore_errors=True)
+            _instance.temporary.discard(self.path)
 
     def __enter__(self) -> "Database":
         return self
@@ -1071,41 +2009,100 @@ class Database:
         self.close()
 
 
-def _names_source(block: Any, name: str) -> bool:
-    """Whether a declaration block, or anything nested in it, names this source."""
-    if isinstance(block, dict):
-        if block.get("source") == name:
-            return True
-        return any(_names_source(value, name) for value in block.values())
-    if isinstance(block, list):
-        return any(_names_source(value, name) for value in block)
-    return False
+def _fold_change(report: ChangeReport, answer, start: int) -> None:
+    """One page of changes onto the report: its applied count, its refused rows, each by its
+    position in what the call was given, and the columns it ignored, or the refusal of the whole
+    page."""
+    if not answer.ok:
+        report.refusals.append({"status": answer.status, "detail": answer.detail[:1000]})
+        return
+    report.accepted += int(answer.body.get("accepted", 0))
+    report.refused += [
+        {"row": start + int(one["row"]), "reason": one["reason"]}
+        for one in answer.body.get("refused", [])
+    ]
+    C.add_ignored(report.ignored_columns, answer.body)
+
+
+def _address_table(items: Any, verb: str) -> pa.Table:
+    """A table of addresses as Arrow: a dict of columns of one length each, or a frame."""
+    if isinstance(items, dict):
+        for name, values in items.items():
+            if isinstance(values, (str, bytes)) or not hasattr(values, "__len__"):
+                raise Refusal(
+                    f"{verb}: column {name!r} is the one value {values!r}. Give each column a "
+                    f"list of values, one per row, such as {{{name!r}: [{values!r}]}}"
+                )
+        lengths = {name: len(values) for name, values in items.items()}
+        if len(set(lengths.values())) > 1:
+            raise Refusal(
+                f"{verb}: the columns have different lengths ("
+                + ", ".join(f"{name} {n}" for name, n in lengths.items())
+                + "). Give every column one value per row, None where a row names nothing by it"
+            )
+    if type(items).__module__.partition(".")[0] == "pandas":
+        # A pandas index is not a column of the table: only the columns name items.
+        return pa.Table.from_pandas(items, preserve_index=False)
+    return _inserts.as_table(items)
+
+
+def _rows_of(table: dict) -> list[dict]:
+    """A table of addresses, `{name: [cells]}`, as one `{name: cell}` per row."""
+    rows = len(next(iter(table.values()), []))
+    return [{name: cells[at] for name, cells in table.items()} for at in range(rows)]
+
+
+def _fits(kind: str, named: dict, table_word: str | None) -> bool:
+    """Whether the columns this call names are the ones that kind of target reads."""
+    roles = {
+        role
+        for (one, _), contract in _inserts.CONTRACTS.items()
+        if one == kind
+        for role in contract.required + contract.optional + contract.either
+    }
+    if table_word is not None:
+        return (kind, table_word) in _inserts.CONTRACTS
+    return bool(named) and set(named) <= roles
 
 
 def _extent_in_words(extent: Any) -> str:
     if isinstance(extent, dict) and extent.get("auto"):
         margin = extent.get("margin", 0.01)
-        return f"fitted to the staged rows, with {margin:g} of the data span as headroom each side"
+        return f"fitted to the inserted rows, with {margin:g} of the data span as headroom each side"
     if extent == "auto":
-        return "fitted to the staged rows, squared, with the build's own margin"
+        return "fitted to the inserted rows, squared, with the build's own margin"
     return str(extent)
+
+
+#: The build's closing line: `built <bundle> (v…): N items, …, M artifact(s) minted, K
+#: unclustered member row(s), R row(s) refused`.
+_BUILT = re.compile(
+    r"^built .*: (?P<items>\d+) items, .* (?P<minted>\d+) artifact\(s\) minted, "
+    r"(?P<unclustered>\d+) unclustered member row\(s\), (?P<refused>\d+) row\(s\) refused$",
+    re.MULTILINE,
+)
 
 
 # ---------------------------------------------------------------------- create and open
 
 
 def create(path: str | os.PathLike | None = None, replace: bool = False) -> Database:
-    """A new database, in `path` or in a temporary directory `close()` removes (§2).
+    """Make a new, empty database, in `path` or in a temporary directory.
 
-    With no path the directory is on a RAM-backed filesystem where the platform has one
-    (`/dev/shm` on Linux and WSL2) and on disk otherwise, and the call says which: the build reads
-    and the server maps that directory, so a small corpus on the RAM-backed path touches no disk.
+    - `path`: the directory. It must be empty or not yet exist. Without it the database goes in
+      a temporary directory, in memory where the system offers one (`/dev/shm` on Linux), and is
+      deleted when closed or when Python exits.
+    - `replace`: `True` deletes a Tessera database already at `path` first. A directory that holds
+      anything else is refused.
+
+    `db.path` is where the database is, and `db.binary` the `tessera` program it runs.
+
+        db = tesseradb.create()
+        db = tesseradb.create("~/maps/papers", replace=True)
     """
     if path is None:
         parent = RAM_BACKED if RAM_BACKED.is_dir() else None
         directory = Path(tempfile.mkdtemp(prefix="tesseradb-", dir=parent))
-        where = "a RAM-backed filesystem" if parent is not None else "disk"
-        print(f"tesseradb: a temporary database at {directory}, on {where}")
         database = Database(directory, temporary=True)
     else:
         directory = Path(path).expanduser()
@@ -1126,24 +2123,17 @@ def create(path: str | os.PathLike | None = None, replace: bool = False) -> Data
         database = Database(directory)
     (database.path / "sources").mkdir(parents=True, exist_ok=True)
     (database.path / ".tessera").mkdir(parents=True, exist_ok=True)
-    print(f"tesseradb: {_binary_in_words()}")
     return database
 
 
-def _binary_in_words() -> str:
-    try:
-        binary, where = _instance.find_binary()
-    except Refusal as why:
-        return str(why)
-    return f"the binary is {binary} (from {where})"
+def open(path: str | os.PathLike) -> Database:  # noqa: A001
+    """Reopen a database saved in `path`.
 
+    A committed database reopens ready to read, and its next commit adds to it. One saved before
+    its first commit reopens with its declarations and inserts as they were left.
 
-def open(path: str | os.PathLike) -> Database:  # noqa: A001, the design's verb is `td.open`
-    """A saved database: the directory, its sources and its declaration (§2).
-
-    A database that has committed reopens built, and its next commit ingests; one saved before its
-    first commit reopens where it was left, the SDK's own copy of the blocks being what it reads
-    rather than the TOML it wrote.
+        db = tesseradb.open("~/maps/papers")
+        db.view("papers").count()
     """
     directory = Path(path).expanduser()
     if not (directory / "tessera.toml").exists():
@@ -1165,50 +2155,65 @@ def _arrow_type(alias: str):
         return alias
 
 
-def _stored(staged: StagedSource) -> dict:
-    """One staged source as the SDK's own JSON copy holds it."""
+def _stored(insert: Insert) -> dict:
+    """One insert as the SDK's own JSON copy holds it."""
     return {
-        "path": str(staged.path),
-        "declared_path": staged.declared_path,
-        "default": staged.default,
-        "in_place": staged.in_place,
-        "id_column": staged.id_column,
-        "rows": staged.rows,
-        "columns": {c: str(t) for c, t in staged.columns.items()},
-        "notes": staged.notes,
+        "target": insert.target,
+        "kind": insert.kind,
+        "role": insert.role,
+        "columns": dict(insert.columns),
+        "named_attributes": dict(insert.named_attributes),
+        "items": dict(insert.items),
+        "metadata_columns": dict(insert.metadata_columns),
+        "source": insert.source,
+        "path": str(insert.path),
+        "declared_path": insert.declared_path,
+        "in_place": insert.in_place,
+        "rows": insert.rows,
+        "schema": {c: str(t) for c, t in insert.schema.items()},
+        "read": list(insert.read),
+        "ignored": list(insert.ignored),
+        "shape": insert.shape,
+        "shape_columns": list(insert.shape_columns),
+        "view_key": insert.view_key,
     }
 
 
-def _restored(name: str, source: dict) -> StagedSource:
-    return StagedSource(
-        name=name,
-        path=Path(source["path"]),
-        declared_path=source["declared_path"],
-        default=source["default"],
-        in_place=source["in_place"],
-        id_column=source["id_column"],
-        rows=source["rows"],
-        columns={c: _arrow_type(t) for c, t in source["columns"].items()},
-        notes=list(source["notes"]),
+def _restored(stored: dict) -> Insert:
+    return Insert(
+        target=stored["target"],
+        kind=stored["kind"],
+        role=stored["role"],
+        columns=dict(stored["columns"]),
+        named_attributes=dict(stored["named_attributes"]),
+        items=dict(stored["items"]),
+        metadata_columns=dict(stored["metadata_columns"]),
+        source=stored["source"],
+        path=Path(stored["path"]),
+        declared_path=stored["declared_path"],
+        in_place=stored["in_place"],
+        rows=stored["rows"],
+        schema={c: _arrow_type(t) for c, t in stored["schema"].items()},
+        read=list(stored["read"]),
+        ignored=list(stored["ignored"]),
+        shape=stored["shape"],
+        shape_columns=list(stored["shape_columns"]),
+        view_key=stored["view_key"],
     )
 
 
 def _load(database: Database, state: dict) -> None:
-    for name, source in state.get("sources", {}).items():
-        database.sources[name] = _restored(name, source)
-    for name, source in state.get("deltas", {}).items():
-        database.deltas[name] = _restored(name, source)
+    database.inserts = [_restored(one) for one in state.get("inserts", [])]
+    database.pending = [_restored(one) for one in state.get("pending", [])]
     database.terms = list(state.get("terms", []))
     for kind, blocks in state.get("blocks", {}).items():
         database.blocks.blocks[kind] = [_untagged(block) for block in blocks]
 
 
-#: How an inline table is marked in the SDK's JSON copy. A plain dict is a block of its own, and
-#: reading one back as the other would move `extent` out of its view's table.
+#: How an inline TOML table is marked in the JSON copy, to tell it from a block of its own.
 INLINE = "__inline__"
 
-#: How a TOML offset date-time is marked in the same copy: a view group's metadata carries them,
-#: and JSON has no spelling for one.
+#: How a TOML date-time, which a view group's metadata may hold, is marked in the JSON copy.
 MOMENT = "__moment__"
 
 
@@ -1234,3 +2239,92 @@ def _untagged(value: Any) -> Any:
     if isinstance(value, list):
         return [_untagged(v) for v in value]
     return value
+
+
+#: The integer a member key column spells "in no artifact" with, beside a null: the build and the
+#: ingest route read a member key the same way (`tessera_store::member_key`). An artifact's own key
+#: of -1 is a name.
+NOISE_KEY = -1
+
+
+def _key_columns(insert: Insert) -> pa.Table:
+    """The insert's key, level and view columns and nothing else, as the rows name them."""
+    names = [insert.columns[role] for role in ("key", "level", "view") if insert.columns.get(role)]
+    return _inserts.decoded(pq.read_table(insert.path, columns=list(dict.fromkeys(names))))
+
+
+def _distinct(level: pa.Array, key: pa.Array, view: pa.Array) -> set[tuple]:
+    """The distinct `(level, key, view)` triples of three aligned arrays, a key in decimal where
+    its column is an integer one."""
+    table = pa.table({
+        "level": pc.cast(level, pa.int64()),
+        "key": pc.cast(key, pa.string()),
+        "view": pc.cast(view, pa.string()),
+    }).group_by(["level", "key", "view"]).aggregate([])
+    return {(row["level"] or 0, row["key"], row["view"]) for row in table.to_pylist()}
+
+
+def _artifact_addresses(insert: Insert) -> set[tuple]:
+    """The `(level, key, view)` an artifacts insert declares, one per row with a key."""
+    table = _key_columns(insert)
+    key = table[insert.columns["key"]].combine_chunks()
+    present = pc.is_valid(key)
+
+    def column(role: str) -> pa.Array:
+        name = insert.columns.get(role)
+        if name is None:
+            return pa.nulls(len(key), pa.int64() if role == "level" else pa.string())
+        return table[name].combine_chunks()
+
+    return _distinct(
+        *(pc.filter(array, present) for array in (column("level"), key, column("view")))
+    )
+
+
+def _member_addresses(insert: Insert, levelled: bool) -> set[tuple]:
+    """The `(level, key, view)` every member row of a `key=` or `members=` insert names, read as
+    the build reads a member key: a null or the integer -1 is in no artifact, and a list cell
+    names one artifact per element, at the element's position on a stacked or tiered layer and
+    at level 0 otherwise."""
+    table = _key_columns(insert)
+    key = table[insert.columns["key"]].combine_chunks()
+    rows = len(key)
+
+    def column(role: str, of: pa.DataType) -> pa.Array:
+        name = insert.columns.get(role)
+        return table[name].combine_chunks() if name else pa.nulls(rows, of)
+
+    view = column("view", pa.string())
+    if (
+        pa.types.is_list(key.type)
+        or pa.types.is_large_list(key.type)
+        or pa.types.is_fixed_size_list(key.type)
+    ):
+        lengths = pc.fill_null(pc.list_value_length(key), 0)
+        starts = pc.subtract(pc.cumulative_sum(lengths), lengths)
+        parents = pc.list_parent_indices(key)
+        elements = pc.list_flatten(key)
+        ones = pc.fill_null(pa.nulls(len(elements), pa.int64()), 1)
+        indices = pc.subtract(pc.cumulative_sum(ones), 1)
+        positions = pc.subtract(indices, pc.take(pc.cast(starts, pa.int64()), parents))
+        level = positions if levelled else pa.nulls(len(elements), pa.int64())
+        key, view = elements, pc.take(view, parents)
+    else:
+        level = column("level", pa.int64())
+    named = pc.is_valid(key)
+    if pa.types.is_signed_integer(key.type):
+        named = pc.and_(named, pc.not_equal(key, NOISE_KEY))
+    return _distinct(*(pc.filter(array, named) for array in (level, key, view)))
+
+
+# Rust's `str::trim` set, the Unicode White_Space property; `str.strip()` also strips U+001C-001F.
+_WHITE_SPACE = (
+    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+def _label_terms(value) -> list[str]:
+    """One access cell's labels as the server stores them: each trimmed, an empty one dropped."""
+    trimmed = (str(one).strip(_WHITE_SPACE) for one in C._labels(value) if one is not None)
+    return [label for label in trimmed if label]

@@ -1,7 +1,7 @@
 """The endurance tier — correctness-suite §6's backstop, build-order row 9.
 
 **The axis here is the operation count, not the corpus size**, and it is the one axis nothing
-else in the tree exercises: the soak reaches forty flushes, the stage-invariance plan eight
+else in the tree exercises: the soak reaches forty flushes, the stage-invariance plan six
 writes and one fold, and every number they check is small enough to be right by accident. The
 defects this tier exists for need a long life — a `seg_id` allocator that wraps, a reclamation
 pass that takes back slightly less than each fold orphans, a maintenance width that holds for
@@ -38,9 +38,9 @@ What only accumulation shows, and where this module looks for it:
   one — confirming the settle needs enough unfolded merges to reach it, which is what the
   fold-free ladder phase at the head of the plan provides.
 - **The six axes the coalesce bounds** — delta tiers, dictionary extents, attribute extents,
-  record extents, text extents, and external-id runs (with their locators, bounded by the merge)
-  — over hundreds of cycles rather than the soak's five. Attribute extents are bounded per
-  column, a keyword column among them: its coalesce merges the window's dictionaries and
+  record extents, text extents, and the key runs of the unique indexes and the edited-items map —
+  over hundreds of cycles rather than the soak's five. Attribute extents are bounded per column, a
+  keyword column among them: its coalesce merges the window's dictionaries and
   installs the merged one beside the renumbered ordinals (filter-index §5.2, records §7).
 - **The allocator floor and the entity high-water** — monotone across every reload, fold and the
   kill, never re-minting — and the **WAL's reclaim bound**: rotation's steady state is two
@@ -569,15 +569,17 @@ def observe(
             )
         segments = manifest["segments"]
         seg_count += len(segments)
-        runs = len(manifest["external_id_runs"])
-        locators = len(manifest["locator_extents"])
-        assert runs <= len(segments) + LADDER_SLACK, (
-            f"{label}: {runs} external-id runs against {len(segments)} segments — the merge "
-            f"coalesces its inputs' runs, so runs must track the segment count"
-        )
-        assert locators <= len(segments) + LADDER_SLACK, (
-            f"{label}: {locators} locator extents against {len(segments)} segments"
-        )
+        key_runs = {
+            f"unique index `{index['attribute']}`": index["live"]
+            for index in manifest["unique_indexes"]
+        }
+        for direction in ("by_number", "by_entity"):
+            key_runs[f"edited items {direction}"] = manifest["edited_items"][direction]["live"]
+        for axis, live in key_runs.items():
+            assert len(live) <= AXIS_CEILING, (
+                f"{label}: the {axis} reached {len(live)} live runs (ceiling {AXIS_CEILING}) — "
+                f"only the entity-space coalesce bounds this axis, and it has stopped"
+            )
 
     non_base = dict(view.segment_bytes)
     if non_base:
@@ -675,7 +677,9 @@ def observe(
         "attrs": sum(len(m["attr_extents"]) for m in view.latest.values()),
         "records": sum(len(m["record_extents"]) for m in view.latest.values()),
         "texts": sum(len(m["text_extents"]) for m in view.latest.values()),
-        "runs": sum(len(m["external_id_runs"]) for m in view.latest.values()),
+        "runs": sum(
+            len(index["live"]) for m in view.latest.values() for index in m["unique_indexes"]
+        ),
         "side_n": max((n for (_pfx, _p, n) in t.side_seen if _pfx == view.live_prefix), default=0),
         "overlay": f"{overlay['depth']}/{overlay['retirable']}",
         "alarms": overlay["soft_limit_alarms"],
@@ -940,6 +944,7 @@ def test_endurance_long_life(tmp_path_factory):
         bbox=BBOX,
         k=K,
         filters={"bay": {"eq": "cedar"}},
+        isolated_ticks=False,
     )
     t = Tracker()
     drainer = PipeDrainer()

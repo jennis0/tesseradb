@@ -13737,7 +13737,7 @@
       "union_peak_bytes": 819965
     }
   ],
-  "morton": "/home/joe/code/tessera/data/ladder/treeoflife-1m/bundle/v00000/partitions/default/views/bioclip/segments/seg-0/morton.u32",
+  "morton": "/home/user/code/tessera/data/ladder/treeoflife-1m/bundle/v00000/partitions/default/views/bioclip/segments/seg-0/morton.u32",
   "precisions": [
     12,
     14

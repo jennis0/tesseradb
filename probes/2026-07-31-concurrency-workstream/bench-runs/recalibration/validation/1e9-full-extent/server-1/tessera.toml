@@ -1,8 +1,8 @@
 
 [bundle]
-path = "/home/joe/code/tessera/data/bench-fixtures/1e9"
-cache = "/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9-full-extent/server-1/cache"
-wal = "/home/joe/code/tessera/.claude/worktrees/concurrency-viewpath/.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9-full-extent/server-1/wal.log"
+path = "/home/user/code/tessera/data/bench-fixtures/1e9"
+cache = "/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9-full-extent/server-1/cache"
+wal = "/home/user/code/tessera/.claude/worktrees/concurrency-viewpath/.superpowers/sdd/i-d-like-you-to-jiggly-cupcake/bench-runs/recalibration/validation/1e9-full-extent/server-1/wal.log"
 
 [plugin]
 module = "builtin:passthrough"

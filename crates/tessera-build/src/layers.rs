@@ -26,15 +26,14 @@
 //! validation against the deny lane (`annotation-write-cycle.md` §3.1): a bundle straight out of
 //! `tessera build` has no overlay, so no declared member can be deleted or suppressed yet.
 //!
-//! ## Addressing: source ids, because that is what a build input has
+//! ## Addressing: by the values a member carries
 //!
-//! Members are named by the **source** entity id — the `entity_id` of the points file — and
-//! resolved through this build's own assignment, exactly as the pairs file's ids are. A
-//! `tessera_id` would be meaningless: it is a keyed permutation of an entity space this build is in
-//! the middle of assigning. An id the build did not assign **refuses the build** rather than being
-//! dropped, on `input`'s rule for the pairs file and for the sharper reason the control plane gives
-//! it: a dropped member moves both the count a viewer is shown and the size a proportional
-//! criterion divides by, quietly, in the direction of hiding an artifact.
+//! A member is named by the values of the unique fields it carries, in a members file's columns
+//! or as a struct per member in an artifact row's list, and the rule decides which item each
+//! names ([`crate::ids`]), exactly as it decides a points row's. A member naming no item is a row
+//! the rule refused and the build reports, and the artifact holds the rest. A `tessera_id` would
+//! be meaningless here: it is a keyed permutation of an entity space this build is in the middle
+//! of assigning.
 //!
 //! ## Determinism
 //!
@@ -46,7 +45,7 @@
 //!
 //! ## What the batched publication changed about `attached_to`
 //!
-//! A level is published in batches sized by the memory budget ([`publication_batch_entries`]), and
+//! A level is published in batches sized by the build's plan ([`publication_batch_entries`]), and
 //! `prepare_publish` resolves a parent against the batch in hand **plus the store**. So an
 //! `attached_to` naming an artifact in an *earlier batch of the same level* now resolves, where an
 //! unbatched publication refused it as a within-level edge. Whether that shape is accepted
@@ -70,10 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{
-    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
-    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
-};
+use arrow::array::{Array, ListArray, UInt32Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
@@ -83,12 +79,14 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
+use tessera_types::layer::{parent_edges, LayerDeclaration, ValueSet};
 use tessera_types::EntityId;
 
 use rayon::prelude::*;
 
-use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
+use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources, MemberTable, MemberValue};
+use crate::ids::{Numbering, Numbers, ReadKind, NO_SOURCE};
+use tessera_store::unique::UniqueKey;
 use crate::error::{BuildError, Result};
 use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
@@ -119,6 +117,9 @@ struct PlannedArtifact {
     /// shape content is read in the same space, and is read in a second pass once every row of the
     /// layer is in hand.
     space: Option<String>,
+    /// The artifact's own access labels, as the plugin's descriptors, on
+    /// [`IncomingArtifact::access`]'s terms.
+    access: Option<Vec<Vec<u8>>>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -163,6 +164,7 @@ struct ResolvedArtifact {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
+    access: Option<Vec<Vec<u8>>>,
 }
 
 /// Where an artifact's members are by the time anything wants to read them.
@@ -200,7 +202,7 @@ pub struct LayerPlan {
     ///
     /// The map is still what publication order is read off, so ordinals — which are identity under
     /// I9 — remain a function of the keys and never of arena order.
-    artifacts: BTreeMap<(String, u32, String), usize>,
+    artifacts: BTreeMap<Address, usize>,
     /// The artifacts themselves, named by the index [`Self::artifacts`] carries. Append-only: an
     /// index handed out stays valid for the whole read.
     bodies: Vec<PlannedArtifact>,
@@ -217,8 +219,7 @@ pub struct LayerPlan {
     minted: BTreeMap<String, u64>,
     /// Every member row's `(artifact, source)` pair, on its way to disk.
     members: MemberSpill,
-    /// The build's memory budget, which is what the publication batch is sized against
-    /// ([`PUBLICATION_BUDGET_SHARE`]).
+    /// The build's memory budget, which is what the member merge's fan-in is sized against.
     memory_budget: u64,
 }
 
@@ -429,7 +430,11 @@ impl LayerPlan {
             std::collections::btree_map::Entry::Occupied(e) => *e.get(),
             std::collections::btree_map::Entry::Vacant(e) => {
                 e.insert(next);
-                self.bodies.push(PlannedArtifact::default());
+                // A key minted by a member row is in the view its row named.
+                self.bodies.push(PlannedArtifact {
+                    view_key: address.3.clone(),
+                    ..PlannedArtifact::default()
+                });
                 self.addresses.push(address);
                 next
             }
@@ -531,6 +536,8 @@ pub struct PublishedLayers {
     /// unscoped layer, whose one set is drawn on every view it names.
     pub artifact_views: BTreeMap<String, BTreeMap<(u32, u32), String>>,
     pub layers: Vec<RegisteredLayer>,
+    /// The registry's version counter as the build leaves it.
+    pub registry_version: u64,
     /// Edges whose child escapes its parent's membership — reported, never acted on.
     pub containment_violations: Vec<ContainmentViolation>,
     /// Per-parent coverage: how much of each split its children hold between them.
@@ -585,17 +592,14 @@ pub struct PublishedLayers {
     pub store: ArtifactStore,
     /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
     /// runs.
-    pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
-    pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
-    pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
-    pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
-    pub shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
+    pub derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
 }
 
 impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            registry_version: 0,
             artifact_views: BTreeMap::new(),
             containment_violations: Vec::new(),
             split_coverage: Vec::new(),
@@ -608,11 +612,7 @@ impl Default for PublishedLayers {
             unclustered: Vec::new(),
             minted: BTreeMap::new(),
             store: ArtifactStore::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            containment_extents: Vec::new(),
+            derived_extents: Vec::new(),
         }
     }
 }
@@ -626,12 +626,11 @@ impl Default for PublishedLayers {
 // The eighth argument is which layers are scoped, and it belongs beside the declarations it
 // qualifies: a struct around the seven would be a second spelling of `BuildArgs`' layer half.
 #[allow(clippy::too_many_arguments)]
-pub fn read(
+pub(crate) fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
-    // How this declaration names a row, so a members table and an inline membership resolve their
-    // entities the way the points file spells them (`crate::ids`).
-    ids: &crate::ids::IdSpace,
+    // Which item each member row and each listed member names (`crate::ids`).
+    numbering: &Numbering,
     // Which layers are scoped to a group, by name (`views.md` §3.5).
     scoped: &BTreeMap<String, crate::ScopedLayer>,
     // **Every view this build materialises, each with its own frame** (decision 0111): a shape
@@ -653,7 +652,8 @@ pub fn read(
         members: MemberSpill::new(scratch, memory_budget),
         memory_budget,
     };
-    for input in inputs {
+    for (index, input) in inputs.iter().enumerate() {
+        let lists = numbering.of(ReadKind::Lists(index)).map(|rows| &rows.numbers);
         // An artifact source names artifacts *in a layer*, and a layer this build does not
         // register is a name the manifest cannot carry. The config produces these parallel to the
         // declarations; a caller assembling them by hand gets the refusal instead of a silently
@@ -711,11 +711,12 @@ pub fn read(
                 &input.name,
                 path,
                 fields,
+                declaration.artifact_visibility.field.as_deref(),
                 enumerated,
                 scoped.get(&input.name),
                 &mut plan,
                 shapes.as_mut(),
-                ids,
+                lists,
             )?,
             Some(ArtifactSource::Inline(rows)) => {
                 // **A scoped layer's artifacts are read from a file**, because the view each
@@ -732,7 +733,7 @@ pub fn read(
                         input.name, scope.group
                     )));
                 }
-                plan_inline(&input.name, rows, &mut plan, shapes.as_mut())?
+                plan_inline(&input.name, rows, &mut plan, shapes.as_mut(), lists)?
             }
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
             // layer's value set is closed. Without one a member source would be both the roster and
@@ -762,8 +763,8 @@ pub fn read(
             let parents: Vec<(String, String)> = plan
                 .artifacts
                 .iter()
-                .filter(|((layer, _, _), _)| layer == &input.name)
-                .flat_map(|((_, _, key), index)| {
+                .filter(|((layer, _, _, _), _)| layer == &input.name)
+                .flat_map(|((_, _, key, _), index)| {
                     plan.bodies[*index]
                         .parent_keys
                         .iter()
@@ -799,8 +800,8 @@ pub fn read(
             let mine: Vec<(String, usize)> = plan
                 .artifacts
                 .iter()
-                .filter(|((layer, _, _), _)| layer == &input.name)
-                .map(|((_, _, key), index)| (key.clone(), *index))
+                .filter(|((layer, _, _, _), _)| layer == &input.name)
+                .map(|((_, _, key, _), index)| (key.clone(), *index))
                 .collect();
             for (key, index) in mine {
                 let space = plan.bodies[index].space.clone();
@@ -836,8 +837,12 @@ pub fn read(
                 &members.path,
                 &members.fields,
                 declaration,
+                scoped.get(&input.name),
                 &mut plan,
-                ids,
+                &numbering
+                    .of(ReadKind::Members(index))
+                    .expect("a layer's members file is numbered")
+                    .numbers,
             )?;
             let minted = (plan.artifacts.len() - before) as u64;
             if minted > 0 {
@@ -890,12 +895,17 @@ fn read_artifacts(
     layer: &str,
     path: &Path,
     fields: &Fields,
+    // The column each artifact's own access label is read from, named directly by the layer's
+    // `artifact_visibility.field` as a view's access column is by `point_visibility.field`.
+    access_field: Option<&str>,
     enumerated: bool,
     scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
-    ids: &crate::ids::IdSpace,
+    lists: Option<&Numbers>,
 ) -> Result<()> {
+    // The listed members, numbered in the order the rows are read ([`member_lists`]).
+    let mut listed = 0u64;
     for batch in batches(path)? {
         let batch = batch?;
         let key = key_column(path, &batch, fields, "key")?;
@@ -933,14 +943,29 @@ fn read_artifacts(
         // Read whether or not the layer declares a membership shape: the same column is the space
         // of the row's authored shape content, which the second pass below reads (§6.1).
         let spaces = space_column(path, &batch, fields)?;
-        let level = optional_u32(path, &batch, LEVEL)?;
+        let level = optional_levels(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
-        let members = optional_u64_list(path, &batch, fields, "members")?;
-        let excluding = optional_u64_list(path, &batch, fields, "excluding")?;
+        let members = optional_list(path, &batch, fields, "members")?;
+        let excluding = optional_list(path, &batch, fields, "excluding")?;
         let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
-        let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
+        let target_level = optional_levels(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = parent_column(path, &batch, fields)?;
+        // A source without the declared column states no labels, and the publication refuses
+        // its artifacts as it refuses a record without `access` at a running service.
+        let access = match access_field.and_then(|field| Some((field, batch.column_by_name(field)?)))
+        {
+            None => None,
+            Some((field, column)) => {
+                if let Some(detail) = crate::check::access_column_problem(field, &batch.schema()) {
+                    return Err(BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: format!("layer '{layer}': {detail}"),
+                    });
+                }
+                Some(crate::input::access_labels(path, column, field)?)
+            }
+        };
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -970,15 +995,25 @@ fn read_artifacts(
         }
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, &key, row)?;
+            // **The view is read before the duplicate check, because it is part of the identity**
+            // (`views.md` §3.5, contracts §3.4 r84). A key is unique per `(layer, view)` on a
+            // group-scoped layer, so one key on two views is two artifacts — which is what the
+            // control plane takes, and a build that refused it would be the fail-closed half of
+            // one rule stated twice (decision 0091).
+            let named = view_of_row(path, layer, scoped, view, &key, row)?;
+            let address = address(path, layer, &level, &key, row, named)?;
             if plan.artifacts.contains_key(&address) {
                 return Err(BuildError::Invalid(format!(
-                    "{}: artifact {} is declared on more than one row. One row is one artifact, so \
-                     a second row for a key is a second artifact under one name — which of the two \
-                     was published would be the file's row order rather than anything the caller \
-                     wrote",
+                    "{}: artifact {} is declared on more than one row{}. One row is one artifact, \
+                     so a second row for a key is a second artifact under one name — which of the \
+                     two was published would be the file's row order rather than anything the \
+                     caller wrote",
                     path.display(),
-                    address.2
+                    address.2,
+                    match named {
+                        Some(view) => format!(" of view '{view}'"),
+                        None => String::new(),
+                    }
                 )));
             }
 
@@ -988,7 +1023,7 @@ fn read_artifacts(
             ) {
                 (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
-                    level: target_level.as_ref().map_or(0, |c| number_at(c, row)),
+                    level: level_in(target_level, row),
                     key,
                 }),
                 (None, None) => None,
@@ -1007,47 +1042,18 @@ fn read_artifacts(
             // cycle detection all derive children by inverting the parent edges. Two spellings of
             // one edge is one more place for them to disagree, so the column is gone rather than
             // carried.
-            let membership = match (&members, &excluding) {
+            let membership = match (members, excluding) {
                 (Some(column), _) => {
-                    PlannedMembership::Included(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Included(listed_at(column, row, lists, &mut listed))
                 }
                 (_, Some(column)) => {
-                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2, ids)?)
+                    PlannedMembership::Excluded(listed_at(column, row, lists, &mut listed))
                 }
                 (None, None) => PlannedMembership::default(),
             };
-            let view_key = match (scoped, view) {
-                (Some(scope), Some(column)) => {
-                    let named = value_at(column, row).ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{}: artifact {} carries no '{}', and this layer's artifacts are a \
-                             different set per view of '{}' (views §3.5) — a row naming no view \
-                             is in no artifact set",
-                            path.display(),
-                            address.2,
-                            scope.column,
-                            scope.group
-                        ))
-                    })?;
-                    if scope.keys.binary_search(&named).is_err() {
-                        return Err(BuildError::Invalid(format!(
-                            "{}: artifact {} names view '{named}', which group '{}' has no such \
-                             key for. Its keys are: {}. An artifact belongs to one view and its \
-                             keys are unique per (layer, view), so a key nobody declared is a \
-                             refusal rather than an artifact drawn nowhere (views §3.5)",
-                            path.display(),
-                            address.2,
-                            scope.group,
-                            scope.keys.join(", ")
-                        )));
-                    }
-                    Some(named)
-                }
-                _ => None,
-            };
             let index = plan.intern(address.clone());
             plan.bodies[index] = PlannedArtifact {
-                view_key,
+                view_key: named.map(str::to_string),
                 membership,
                 contents: match contents.as_ref() {
                     None => Vec::new(),
@@ -1064,6 +1070,10 @@ fn read_artifacts(
                     _ => None,
                 },
                 space: space_at(spaces, row).map(str::to_string),
+                access: match &access {
+                    Some(labels) => Some(descriptors_of(layer, &labels[row])?),
+                    None => None,
+                },
             };
         }
     }
@@ -1081,9 +1091,14 @@ fn plan_inline(
     rows: &[InlineArtifact],
     plan: &mut LayerPlan,
     mut shapes: Option<&mut ShapeReader>,
+    lists: Option<&Numbers>,
 ) -> Result<()> {
+    // The listed members, numbered in the order the artifacts are written ([`member_lists`]).
+    let mut listed = 0u64;
     for row in rows {
-        let address = (layer.to_string(), row.level, row.key.clone());
+        // An inline artifact is on an unscoped layer: the scoped spelling is refused where the
+        // source is chosen, having no column to name a view with.
+        let address = (layer.to_string(), row.level, row.key.clone(), None);
         if plan.artifacts.contains_key(&address) {
             return Err(BuildError::Invalid(format!(
                 "layer '{layer}': artifact {} is written twice in the declaration. One entry is \
@@ -1113,8 +1128,16 @@ fn plan_inline(
             view_key: None,
             membership: match (&row.members, &row.excluding) {
                 // Both is refused at parse, where the declaration can name the artifact.
-                (Some(members), _) => PlannedMembership::Included(members.clone()),
-                (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                (Some(members), _) => PlannedMembership::Included(listed_in(
+                    table_len(members),
+                    lists,
+                    &mut listed,
+                )),
+                (_, Some(excluding)) => PlannedMembership::Excluded(listed_in(
+                    table_len(excluding),
+                    lists,
+                    &mut listed,
+                )),
                 (None, None) => PlannedMembership::default(),
             },
             contents: row
@@ -1131,33 +1154,30 @@ fn plan_inline(
                 dedup_keys(&mut keys);
                 keys
             },
-            shape: match shapes.as_deref_mut() {
-                Some(reader) => {
-                    let input = inline_shape(row, reader.kind())
-                        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
-                    reader.row(&row.key, input, row.space.as_deref())?
-                }
-                None => {
-                    if row.bbox.is_some()
-                        || row.circle.is_some()
-                        || row.ellipse.is_some()
-                        || row.wkt.is_some()
-                    {
-                        return Err(BuildError::Invalid(format!(
-                            "layer '{layer}': artifact {} carries a shape, and the layer \
-                                 declares no `[layer.shape]`. Its members come from the stored \
-                                 set its membership names, so a shape beside them is a region \
-                                 nothing evaluates",
-                            row.key
-                        )));
-                    }
-                    None
+            shape: {
+                let input = inline_shape(row, shapes.as_deref().map(ShapeReader::kind))
+                    .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
+                match shapes.as_deref_mut() {
+                    Some(reader) => reader.row(&row.key, input, row.space.as_deref())?,
+                    None => None,
                 }
             },
             space: row.space.clone(),
+            access: row
+                .access
+                .as_deref()
+                .map(|labels| descriptors_of(layer, labels))
+                .transpose()?,
         };
     }
     Ok(())
+}
+
+/// An artifact's labels as the plugin's descriptors. The build labels with the passthrough plugin,
+/// as it does a points file's access column.
+fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
+    tessera_plugin::artifact_access(&tessera_plugin::Passthrough::new(), labels)
+        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))
 }
 
 /// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
@@ -1188,14 +1208,17 @@ fn read_members(
     path: &Path,
     fields: &Fields,
     declaration: &LayerDeclaration,
+    scoped: Option<&crate::ScopedLayer>,
     plan: &mut LayerPlan,
-    ids: &crate::ids::IdSpace,
+    numbers: &Numbers,
 ) -> Result<(u64, u64)> {
     let value_set = declaration.value_set;
     let (mut unclustered, mut read) = (0u64, 0u64);
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
-    // layer of 10⁷ artifacts pays once rather than per point.
-    let mut roster: Option<KeyRoster> = None;
+    // layer of 10⁷ artifacts pays once rather than per point. **One roster per view**, because a
+    // key means an artifact only together with its view on a group-scoped layer — an unscoped
+    // layer has exactly one, under `None`, and pays a pointer comparison per row for it.
+    let mut rosters = Rosters::default();
     // The edges a list column declared, child address → parents. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
@@ -1207,14 +1230,44 @@ fn read_members(
     // `None` where the entry named no artifact.
     let mut entries: Vec<Option<usize>> = Vec::new();
     let mut said_level_is_ignored = false;
+    let mut entity: Vec<u64> = Vec::new();
     // **Decoded ahead, on one other thread, in file order** ([`batches_ahead`]). The row loop below
     // stays serial: it mints into the plan, and the mint order is the file's.
     for batch in batches_ahead(path, READ_AHEAD_BATCHES)? {
         let batch = batch?;
+        entity.clear();
+        numbers.extend(read, batch.num_rows(), &mut entity);
         let key = member_keys(path, &batch, fields, layer, declaration)?;
-        let level = optional_u32(path, &batch, LEVEL)?;
+        // **Which view each member row's key is in**, on a layer scoped to a group (`views.md`
+        // §3.5) — the same column the artifacts source carries, under the same declared name. A
+        // key alone would be ambiguous here: it is unique per `(layer, view)`, so two views' rows
+        // would join whichever artifact the reader met first.
+        let view: Option<crate::utf8::Utf8Column<'_>> = match scoped {
+            None => None,
+            Some(scope) => {
+                let array = batch.column_by_name(&scope.column).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: layer '{layer}' is scoped to group '{}' and reads the view each \
+                         member row's artifact belongs to from a column named '{}', which this \
+                         file does not carry. Its columns are: {}",
+                        path.display(),
+                        scope.group,
+                        scope.column,
+                        column_names(&batch)
+                    ))
+                })?;
+                Some(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: column {} is {:?}, which this reader cannot take",
+                        path.display(),
+                        scope.column,
+                        array.data_type()
+                    ))
+                })?)
+            }
+        };
+        let level = optional_levels(path, &batch, LEVEL)?;
         let rank = optional_u32_field(path, &batch, fields, "rank")?;
-        let entity = member_entities(path, &batch, fields, ids)?;
         read += batch.num_rows() as u64;
 
         // **Ignored and said so**, rather than refused or read: the positions in a list are what
@@ -1222,7 +1275,7 @@ fn read_members(
         // column has already answered. Reading it would place a point at a level its list did not
         // name; refusing would block a build over an input that discloses nothing and costs a
         // rerun.
-        if level.is_some() && matches!(key, MemberKeys::Listed(_)) && !said_level_is_ignored {
+        if level.is_some() && key.cells.is_list() && !said_level_is_ignored {
             said_level_is_ignored = true;
             eprintln!(
                 "layer '{layer}': {} carries a `level` column beside a list key column, whose own \
@@ -1231,61 +1284,68 @@ fn read_members(
             );
         }
 
-        for row in 0..batch.num_rows() {
-            match &key {
-                MemberKeys::Scalar(column) => {
-                    let at_level = level.map_or(0, |c| number_at(c, row));
+        for (row, &source) in entity.iter().enumerate() {
+            // **A row the rule refused is not read**: it names no item, and the report counts it.
+            if source == NO_SOURCE {
+                continue;
+            }
+            match key.cells.is_list() {
+                false => {
+                    let named = member_view(path, layer, scoped, view, row)?;
                     let Some(member) = resolve_member(
-                        layer,
-                        at_level,
-                        column.read_at(row),
-                        value_set,
-                        path,
+                        MemberKey {
+                            layer,
+                            level: key.level_at(level, row, 0),
+                            view: named,
+                            read: key.keys.read_at(row),
+                            value_set,
+                            path,
+                        },
                         plan,
-                        &mut roster,
+                        &mut rosters,
                     )?
                     else {
                         unclustered += 1;
                         continue;
                     };
-                    let name = plan.address_of(member).2.clone();
-                    // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
-                    // values buffer whatever the validity bitmap says, and a Parquet writer leaves
-                    // a zero there — so a producer whose join missed a row would publish the
-                    // corpus's lowest-numbered document into the cluster, moving its masked count
-                    // for every viewer who can see that one document.
-                    if entity.is_null(row) {
-                        return Err(null_entity(path, &name));
-                    }
                     attach_member(
                         plan,
                         member,
                         path,
-                        entity.value(row),
+                        source,
                         rank.as_ref().and_then(|c| value_index(c, row)),
                     )?;
                 }
-                MemberKeys::Listed(listed) => {
-                    let Some(positions) = listed.entries(path, layer, row)? else {
+                true => {
+                    let named = member_view(path, layer, scoped, view, row)?;
+                    // A stacked or tiered layer's list is one entry per level, which is what
+                    // makes entry k mean level k.
+                    let positions = key.entries(row).map_err(|e| {
+                        BuildError::Invalid(format!(
+                            "{}: row {row} of layer '{layer}'s key column {e}; declare \
+                             `hierarchy.kind = \"nested\"` if the column is a lineage",
+                            path.display()
+                        ))
+                    })?;
+                    let Some(positions) = positions else {
                         unclustered += 1;
                         continue;
                     };
-                    if entity.is_null(row) {
-                        return Err(null_entity(path, &format!("row {row}")));
-                    }
-                    let source = entity.value(row);
                     let rank = rank.as_ref().and_then(|c| value_index(c, row));
 
                     entries.clear();
                     for (position, index) in positions.enumerate() {
                         entries.push(resolve_member(
-                            layer,
-                            listed.meaning.level_of(position),
-                            listed.values.read_at(index),
-                            value_set,
-                            path,
+                            MemberKey {
+                                layer,
+                                level: key.level_at(level, row, position),
+                                view: named,
+                                read: key.keys.read_at(index),
+                                value_set,
+                                path,
+                            },
                             plan,
-                            &mut roster,
+                            &mut rosters,
                         )?);
                     }
                     // **A row whose every entry is noise is one row in no artifact**, counted
@@ -1298,7 +1358,7 @@ fn read_members(
                     for member in entries.iter().flatten() {
                         attach_member(plan, *member, path, source, rank)?;
                     }
-                    if listed.meaning.declares_edges() {
+                    if key.meaning.declares_edges() {
                         record_lineage(&entries, plan, &mut lineage, path)?;
                     }
                 }
@@ -1307,6 +1367,19 @@ fn read_members(
     }
     apply_lineage(plan, lineage, path)?;
     Ok((unclustered, read))
+}
+
+/// One member row's key as the file spelled it, with what the layer's declaration says about it.
+///
+/// `layer`, `value_set` and `path` are the same for every row of a file; `level`, `view` and `read`
+/// are the row's.
+struct MemberKey<'a> {
+    layer: &'a str,
+    level: u32,
+    view: Option<&'a str>,
+    read: KeyRead<'a>,
+    value_set: ValueSet,
+    path: &'a Path,
 }
 
 /// One member row's key, resolved against the plan — **minting where the value set is open**, and
@@ -1323,14 +1396,18 @@ fn read_members(
 /// and the artifacts source, if there is one, is enrichment. A list column mints from the same call,
 /// so an interior parent no artifact declares is minted on the same rule as a leaf.
 fn resolve_member(
-    layer: &str,
-    level: u32,
-    read: KeyRead<'_>,
-    value_set: ValueSet,
-    path: &Path,
+    key: MemberKey<'_>,
     plan: &mut LayerPlan,
-    roster: &mut Option<KeyRoster>,
+    rosters: &mut Rosters,
 ) -> Result<Option<usize>> {
+    let MemberKey {
+        layer,
+        level,
+        view,
+        read,
+        value_set,
+        path,
+    } = key;
     Ok(match read {
         KeyRead::Unclustered => None,
         KeyRead::Named(name) => {
@@ -1338,11 +1415,16 @@ fn resolve_member(
             // built once per artifact rather than once per point. Building it here allocated the
             // layer name and the key on every member entry and then probed a `BTreeMap` whose
             // comparison walks both — three times over, counting `attach_member` and the lineage.
-            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            let roster = rosters.of(layer, view, plan);
             match roster.text(level, name) {
                 Some(index) => Some(index),
                 None => {
-                    let address = (layer.to_string(), level, name.to_string());
+                    let address = (
+                        layer.to_string(),
+                        level,
+                        name.to_string(),
+                        view.map(str::to_string),
+                    );
                     if value_set == ValueSet::Closed {
                         return Err(undeclared_key(path, &address));
                     }
@@ -1352,7 +1434,7 @@ fn resolve_member(
             }
         }
         KeyRead::Numbered(value) => {
-            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            let roster = rosters.of(layer, view, plan);
             match roster.get(level, value) {
                 Some(index) => Some(index),
                 None => {
@@ -1360,7 +1442,12 @@ fn resolve_member(
                     // never once per point. The spelling is the one
                     // `tessera_types::layer::integer_key` states for the wire — `3` and "3" name
                     // one artifact — taken here without allocating for the point that matched.
-                    let address = (layer.to_string(), level, value.to_string());
+                    let address = (
+                        layer.to_string(),
+                        level,
+                        value.to_string(),
+                        view.map(str::to_string),
+                    );
                     if value_set == ValueSet::Closed {
                         return Err(undeclared_key(path, &address));
                     }
@@ -1424,14 +1511,6 @@ fn attach_member(
         Some(rank) => content_at_rank(entry, rank).generated_from.push(source),
     }
     Ok(())
-}
-
-fn null_entity(path: &Path, what: &str) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: {what} has a null entity; a null is not entity zero, and publishing it as one puts a \
-         document nobody named into the artifact",
-        path.display()
-    ))
 }
 
 /// The edges one row's list declares, folded into what each child's parent is.
@@ -1548,11 +1627,36 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
     &mut artifact.contents[index]
 }
 
+/// The views this build writes, each at the incarnation a build gives it.
+struct DeclaredViews<'a>(&'a [String]);
+
+impl tessera_lifecycle::GroupViews for DeclaredViews<'_> {
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation> {
+        let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
+        self.0
+            .contains(&id)
+            .then_some(tessera_types::view::DECLARED_INCARNATION)
+    }
+    fn keys_of(&self, group: &str) -> Vec<String> {
+        self.0
+            .iter()
+            .filter_map(|id| id.split_once(tessera_store::GROUP_SEPARATOR))
+            .filter(|(held, _)| *held == group)
+            .map(|(_, key)| key.to_string())
+            .collect()
+    }
+}
+
 /// Register every declaration, publish every artifact, and write the extents that carry them.
 ///
 /// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
-/// meet unnoticed.
+/// meet unnoticed. `entries_per_batch` is how many member entries one publication batch holds
+/// ([`publication_batch_entries`]).
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &mut LayerPlan,
@@ -1562,6 +1666,7 @@ pub fn publish(
     partition: &str,
     views: &[String],
     derived: &BTreeMap<String, Vec<String>>,
+    entries_per_batch: u64,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
     let mut alloc = Allocator::new(high_water);
@@ -1655,7 +1760,7 @@ pub fn publish(
         .par_iter_mut()
         .enumerate()
         .map(|(index, body)| {
-            let (layer, level, key) = &addresses[index];
+            let (layer, level, key, _) = &addresses[index];
             resolve_artifact(layer, *level, key, body, resolve, high_water)
         })
         .collect::<Result<_>>()?;
@@ -1673,7 +1778,7 @@ pub fn publish(
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
     // row order. The plan's own map is already in that order, so this is a walk rather than a sort.
     let mut batched: BTreeMap<(&str, u32), Vec<(&str, usize)>> = BTreeMap::new();
-    for ((layer, level, key), index) in &plan.artifacts {
+    for ((layer, level, key, _), index) in &plan.artifacts {
         batched
             .entry((layer.as_str(), *level))
             .or_default()
@@ -1708,12 +1813,9 @@ pub fn publish(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&members_dir).map_err(|e| BuildError::io(&members_dir, e))?;
-    let entries_per_batch = publication_batch_entries(plan.memory_budget);
     eprintln!(
         "layers: publishing in batches of at most {entries_per_batch} member entr(ies), \
-         {PUBLICATION_BYTES_PER_ENTRY} B an entry against a {}th of the {} MiB budget",
-        PUBLICATION_BUDGET_SHARE,
-        plan.memory_budget >> 20
+         {PUBLICATION_BYTES_PER_ENTRY} B an entry"
     );
     // Each level's pack, written here under a name no final one can take and renamed at
     // [`write_membership_extents`], which is where the extent index in a pack's filename is
@@ -1798,6 +1900,7 @@ pub fn publish(
                     &store,
                     &mut alloc,
                     &tessera_lifecycle::no_pending,
+                    &DeclaredViews(views),
                 )
                 .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
             // The record carries its own copy of every membership, so the bitmaps this built are
@@ -1829,12 +1932,6 @@ pub fn publish(
             let batch_lo = ordinal_lo + start as u32;
             let batch_len = (end - start) as u32;
             for blob in store.encode_pending(layer, level, batch_lo, batch_len) {
-                let blob = blob.ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} has no record at an ordinal this publication just \
-                         assigned"
-                    ))
-                })?;
                 writer.push(&blob).map_err(BuildError::Store)?;
             }
             // The bytes are in the writer, so the store's own bitmaps have one reader left — the
@@ -1887,6 +1984,7 @@ pub fn publish(
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        registry_version: registry.version(),
         artifact_views,
         containment_violations: violations,
         split_coverage: coverage,
@@ -1960,7 +2058,7 @@ fn merge_member_runs(
     let mut pairs = 0u64;
     while merge.next_artifact()? {
         let index = merge.index() as usize;
-        let (layer, level, key) = &plan.addresses[index];
+        let (layer, level, key, _) = &plan.addresses[index];
         // **Resolved in place, in the merge's own buffer.** A source id and the entity it resolves
         // to are both `u64`, so the artifact's sources *become* its entities; a second vector held
         // the largest single membership of the corpus twice, which at the Overture rung is
@@ -2171,8 +2269,8 @@ pub fn predicate_artifact_keys(
         let mut key_of_code: BTreeMap<u32, &str> = BTreeMap::new();
         if let Some(name) = &attribute.vocabulary {
             if let Some(vocabulary) = schema.vocabularies.get(name) {
-                for (key, code) in &vocabulary.codes {
-                    key_of_code.insert(*code, key.as_str());
+                for (key, code) in vocabulary.values.bindings() {
+                    key_of_code.insert(code, key);
                 }
             }
             if let Some(minter) = minters.get(name) {
@@ -2214,7 +2312,7 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
         .iter()
         .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
         .collect();
-    for ((layer, _, key), index) in &plan.artifacts {
+    for ((layer, _, key, _), index) in &plan.artifacts {
         let Some(depends_on) = declared.get(layer.as_str()) else {
             continue;
         };
@@ -2254,7 +2352,11 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
 /// level is a resolution, so the two never carry each other
 /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
 /// An edge naming a key in another level is therefore an unknown key here, and refuses.
-type Address = (String, u32, String);
+/// `(layer, level, key, view)`. **The view is part of the identity on a group-scoped layer**
+/// (`views.md` §3.5, contracts §3.4 r84): keys are unique per `(layer, view)` there, so one key on
+/// two views is two artifacts and the control plane takes exactly that. `None` on an unscoped
+/// layer, whose one artifact set is drawn on every view it names.
+type Address = (String, u32, String, Option<String>);
 
 /// The buffers one containment pass reads a membership through: the extent's raw bytes, and the
 /// members they decode to. Held by the task rather than by the parent, so the pass allocates once
@@ -2282,7 +2384,9 @@ fn verify_hierarchies(
     // depend on iteration order. **A `dag` layer's child holds several, and never enters this
     // map** (`dag-hierarchies.md` §4); its containment and coverage are per edge below, exactly as
     // a tree's are.
-    let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
+    // **Keyed by the child's whole address**, the view included: a key is unique per
+    // `(layer, view)` on a group-scoped layer, so two views' children legitimately share a key.
+    let mut claimed: BTreeMap<(&str, u32, Option<&str>, &str), &str> = BTreeMap::new();
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
     // tiered layer's child sits at a different level from its parent and a bare key would
@@ -2303,7 +2407,7 @@ fn verify_hierarchies(
     // counts once, its parents each once.
     let mut shapes: BTreeMap<(&str, u32), HierarchyShape> = BTreeMap::new();
     for (address, index) in index_of {
-        let (layer, level, key) = address;
+        let (layer, level, key, view) = address;
         if let Some(kind) = kind_of.get(layer.as_str()).filter(|k| {
             !matches!(
                 k,
@@ -2358,7 +2462,9 @@ fn verify_hierarchies(
             let parent_address = if cross_level {
                 let mut found = None;
                 for coarser in 0..*level {
-                    let candidate = (layer.clone(), coarser, parent_key.to_string());
+                    // **An edge may not cross views** (`views.md` §3.5), so the parent is looked
+                    // for in the child's own view and nowhere else.
+                    let candidate = (layer.clone(), coarser, parent_key.to_string(), view.clone());
                     if let Some((stored, _)) = index_of.get_key_value(&candidate) {
                         if found.is_some() {
                             return Err(BuildError::Invalid(format!(
@@ -2382,7 +2488,7 @@ fn verify_hierarchies(
                     }
                 }
             } else {
-                let candidate = (layer.clone(), *level, parent_key.to_string());
+                let candidate = (layer.clone(), *level, parent_key.to_string(), view.clone());
                 match index_of.get_key_value(&candidate) {
                     Some((stored, _)) => stored,
                     None => {
@@ -2406,7 +2512,8 @@ fn verify_hierarchies(
             )));
             }
             if !several {
-                if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+                if let Some(first) = claimed.insert((layer, *level, view.as_deref(), key), parent_key)
+                {
                     return Err(BuildError::Invalid(format!(
                         "{layer} level {level} artifact {key} is claimed by both {first} and \
                      {parent_key}; a child has one lineage or the cut that walks it depends on \
@@ -2437,7 +2544,7 @@ fn verify_hierarchies(
         // parent's, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times as the
         // serial pass did, and the peak is a set of them per thread rather than one.
         .map_init(HierarchyBuffers::default, |scratch, (address, children)| {
-            let (layer, level, parent_key) = *address;
+            let (layer, level, parent_key, _) = *address;
             let parent_index = index_of[*address];
             load_members(
                 &resolved[parent_index].members,
@@ -2469,7 +2576,7 @@ fn verify_hierarchies(
                     &mut scratch.child_bytes,
                     &mut scratch.child_buf,
                 )?;
-                let (_, child_level, child_key) = *child_address;
+                let (_, child_level, child_key, _) = *child_address;
                 let mut escaping = 0u64;
                 // **Galloping from a cursor**, both sides being sorted: a child whose members sit
                 // in one region of the parent's finds them in a few probes each rather than a full
@@ -2540,6 +2647,12 @@ fn verify_hierarchies(
     Ok((violations, coverage, shapes.into_values().collect()))
 }
 
+/// Each key at one level of one layer, with the parent keys it names.
+type ParentsByKey<'a> = BTreeMap<&'a str, &'a [String]>;
+
+/// The parent edges a cycle walk reads, one entry per `(layer, level, view)`.
+type ParentLevels<'a> = BTreeMap<(&'a str, u32, Option<&'a str>), ParentsByKey<'a>>;
+
 /// Refuse a hierarchy holding a cycle, which is neither a tree nor a DAG and has no root to descend
 /// from.
 ///
@@ -2567,8 +2680,8 @@ fn detect_cycles(
     //
     // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
     // reports a cycle in, and that order must stay `artifacts.keys()`'s.
-    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, &[String]>> = BTreeMap::new();
-    for ((layer, level, key), index) in index_of {
+    let mut levels: ParentLevels<'_> = BTreeMap::new();
+    for ((layer, level, key, view), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
             Some(
@@ -2579,7 +2692,7 @@ fn detect_cycles(
             continue;
         }
         levels
-            .entry((layer.as_str(), *level))
+            .entry((layer.as_str(), *level, view.as_deref()))
             .or_default()
             .insert(key.as_str(), resolved[*index].parent_keys.as_slice());
     }
@@ -2598,7 +2711,7 @@ fn detect_cycles(
     // Over parent lists the walk is a depth-first search with an explicit stack of
     // `(node, next parent to try)`; on a tree every list has one entry and it is the chain walk
     // it replaces.
-    for ((layer, level), parents) in &levels {
+    for ((layer, level, _), parents) in &levels {
         // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
         let mut state: std::collections::HashMap<&str, u8> =
             std::collections::HashMap::with_capacity(parents.len());
@@ -2788,6 +2901,7 @@ fn resolve_artifact(
         attached_to: artifact.attached_to.take(),
         parent_keys: std::mem::take(&mut artifact.parent_keys),
         shape: artifact.shape.take(),
+        access: std::mem::take(&mut artifact.access),
     })
 }
 
@@ -2802,6 +2916,7 @@ struct PublishableBody {
     attached_to: Option<IncomingAttachment>,
     parent_keys: Vec<String>,
     shape: Option<ArtifactShapes>,
+    access: Option<Vec<Vec<u8>>>,
 }
 
 impl ResolvedArtifact {
@@ -2814,6 +2929,7 @@ impl ResolvedArtifact {
             attached_to: self.attached_to.take(),
             parent_keys: std::mem::take(&mut self.parent_keys),
             shape: self.shape.take(),
+            access: std::mem::take(&mut self.access),
         }
     }
 }
@@ -2840,6 +2956,7 @@ fn incoming_artifact(
     result.parent_keys = body.parent_keys;
     result.shape = body.shape;
     result.view = body.view;
+    result.access = body.access;
     Ok(result)
 }
 
@@ -2865,14 +2982,10 @@ fn load_members(
     }
 }
 
-/// The share of the build's memory budget one publication batch may hold.
-///
-/// A quarter. The publication runs between the join and the assembly, where the terms beside it
-/// are the member table's reads and the store's mapped extents rather than anything anonymous, so
-/// a quarter is headroom rather than a squeeze; and a batch larger than a few million entries buys
-/// nothing, the work per artifact being the same in any batch and the batch already built across
-/// the cores.
-pub(crate) const PUBLICATION_BUDGET_SHARE: u64 = 4;
+/// The most member entries one publication batch takes, however much memory is free: 2²⁴, 384 MiB
+/// at [`PUBLICATION_BYTES_PER_ENTRY`]. A batch larger than a few million entries buys nothing, the
+/// work per artifact being the same in any batch and the batch already built across the cores.
+pub(crate) const PUBLICATION_BATCH_MAX_ENTRIES: u64 = 1 << 24;
 
 /// What one member entry costs while a batch is in flight: **24 bytes**.
 ///
@@ -2883,10 +2996,10 @@ pub(crate) const PUBLICATION_BUDGET_SHARE: u64 = 4;
 /// of each before the first is dropped.
 pub(crate) const PUBLICATION_BYTES_PER_ENTRY: u64 = 24;
 
-/// How many member entries one publication batch takes at `memory_budget` — the one arithmetic
-/// [`publish`] cuts its batches by and [`crate::residency`] charges the stage at.
-pub(crate) fn publication_batch_entries(memory_budget: u64) -> u64 {
-    ((memory_budget / PUBLICATION_BUDGET_SHARE) / PUBLICATION_BYTES_PER_ENTRY).max(1)
+/// How many member entries one publication batch takes where the rest of its stage leaves `room`
+/// bytes: what the room holds, one at least and [`PUBLICATION_BATCH_MAX_ENTRIES`] at most.
+pub(crate) fn publication_batch_entries(room: u64) -> u64 {
+    (room / PUBLICATION_BYTES_PER_ENTRY).clamp(1, PUBLICATION_BATCH_MAX_ENTRIES)
 }
 
 /// One level's membership pack, written as the level was published and waiting to be named.
@@ -2980,17 +3093,7 @@ fn write_membership_extents(
     published: &mut PublishedLayers,
     streamed: &mut BTreeMap<(String, u32), StreamedPack>,
 ) -> Result<()> {
-    let (ready, skipped) = store.pending_ranges();
-    if let Some((layer, level)) = skipped.first() {
-        // Unreachable from a build: every artifact of a level is published in one batch, so a
-        // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
-        // build can simply not produce the bundle.
-        return Err(BuildError::Invalid(format!(
-            "{layer} level {level} has a hole in its ordinals, so its memberships cannot be packed \
-             — an extent addresses a dense range and packing around a hole shifts every later \
-             artifact's identity by one"
-        )));
-    }
+    let ready = store.pending_ranges();
     if ready.is_empty() {
         return Ok(());
     }
@@ -3041,16 +3144,6 @@ fn write_membership_extents(
                         .map_err(BuildError::Store)?;
                 let mut pushed = 0u32;
                 for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
-                    // Unreachable: `pending_ranges` reports a level with a hole as skipped above
-                    // rather than as a range. A refusal rather than an assertion because the
-                    // alternative is an extent one blob short of the range it addresses, which
-                    // serves every ordinal above the hole as another artifact's membership.
-                    let blob = blob.ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{layer} level {level} has no record at an ordinal inside the range \
-                             it reported as ready to pack"
-                        ))
-                    })?;
                     writer.push(&blob).map_err(BuildError::Store)?;
                     pushed += 1;
                 }
@@ -3229,10 +3322,8 @@ fn write_content_extent(
 // named and the file does not carry is simply absent, which is what an optional column of the
 // artifact grain is.
 
-/// The two fields no `fields` map may move, because `configuration.md` §1's table does not name
-/// them: a level is an address rather than a value, and the map's key set is the closed one that
-/// table states.
-const LEVEL: &str = "level";
+/// A level column read under its own name, which no `fields` map may move, as [`LEVEL`] is: a
+/// level is an address rather than a value.
 const ATTACHED_LEVEL: &str = "attached_level";
 
 pub(crate) fn batches(
@@ -3419,76 +3510,23 @@ fn optional_utf8<'a>(
     }
 }
 
-/// One member table batch's `entity` column, at whichever type the declaration spells identity.
-///
-/// The integer route hands back the `uint64` column itself, with no copy. A supplied id column is
-/// resolved to the source ids the build joins on, one per row; a key no points file carries
-/// becomes [`crate::ids::NO_SOURCE_ID`], which is the refusal an unknown integer earns where the
-/// member is attached.
-enum MemberEntities<'a> {
-    Integer(&'a UInt64Array),
-    Supplied(Vec<Option<u64>>),
-}
-
-impl MemberEntities<'_> {
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            MemberEntities::Integer(column) => column.is_null(row),
-            MemberEntities::Supplied(rows) => rows[row].is_none(),
-        }
-    }
-
-    fn value(&self, row: usize) -> u64 {
-        match self {
-            MemberEntities::Integer(column) => column.value(row),
-            MemberEntities::Supplied(rows) => rows[row].unwrap_or(crate::ids::NO_SOURCE_ID),
-        }
-    }
-}
-
-fn member_entities<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    ids: &crate::ids::IdSpace,
-) -> Result<MemberEntities<'a>> {
-    let column = required(path, batch, fields, "entity")?;
-    if let Some(keys) = ids.supplied() {
-        keys.require_same_family(
-            path,
-            "the member table",
-            fields.of("entity"),
-            column.data_type(),
-        )?;
-        let mut rows = Vec::with_capacity(column.len());
-        for row in 0..column.len() {
-            rows.push(match crate::ids::key_at(column.as_ref(), row) {
-                None => None,
-                Some(key) => match keys.rank(&key) {
-                    crate::ids::NO_SOURCE_ID => return Err(unknown_member(path, &key)),
-                    source_id => Some(source_id),
-                },
-            });
-        }
-        return Ok(MemberEntities::Supplied(rows));
-    }
-    Ok(MemberEntities::Integer(typed(
-        path,
-        column,
-        fields.of("entity"),
-    )?))
-}
-
-/// A `u32` column read under its own name — the two the field map may not move.
-fn optional_u32<'a>(
+/// A level column read under its own name, one of the two the field map may not move, by
+/// [`read_levels`].
+fn optional_levels<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     name: &str,
 ) -> Result<Option<&'a UInt32Array>> {
-    match batch.column_by_name(name) {
-        None => Ok(None),
-        Some(array) => typed(path, array, name).map(Some),
-    }
+    let Some(array) = batch.column_by_name(name) else {
+        return Ok(None);
+    };
+    read_levels(array.as_ref()).map(Some).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: column {name} is {:?}; write it as uint32",
+            path.display(),
+            array.data_type()
+        ))
+    })
 }
 
 fn optional_u32_field<'a>(
@@ -3515,16 +3553,6 @@ fn optional_list<'a>(
     }
 }
 
-/// The membership list on an artifact row, included or excluded.
-fn optional_u64_list<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    canonical: &str,
-) -> Result<Option<&'a ListArray>> {
-    optional_list(path, batch, fields, canonical)
-}
-
 /// The ranked `contents` on an artifact row: a list of entries, each a list of values.
 fn optional_ranked_values<'a>(
     path: &Path,
@@ -3539,91 +3567,270 @@ fn value_at(column: crate::utf8::Utf8Column<'_>, row: usize) -> Option<String> {
     column.at(row).map(str::to_string)
 }
 
-fn number_at(column: &UInt32Array, row: usize) -> u32 {
-    if column.is_null(row) {
-        0
-    } else {
-        column.value(row)
-    }
-}
-
 fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
-/// One row's membership, as source entity ids.
-///
-/// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
-/// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
-/// would otherwise publish the corpus's lowest-numbered document into the artifact.
-fn u64s_at(
+/// One artifact row's listed members, as the items the rule numbered them: the row's list is the
+/// next `len` members of the layer's lists, and a member the rule refused is left out.
+fn listed_at(column: &ListArray, row: usize, lists: Option<&Numbers>, listed: &mut u64) -> Vec<u64> {
+    let len = match column.is_null(row) {
+        true => 0,
+        false => column.value_length(row) as usize,
+    };
+    listed_in(len, lists, listed)
+}
+
+/// The next `len` listed members' items.
+fn listed_in(len: usize, lists: Option<&Numbers>, listed: &mut u64) -> Vec<u64> {
+    let mut items = Vec::with_capacity(len);
+    if let Some(lists) = lists {
+        lists.extend(*listed, len, &mut items);
+    }
+    *listed += len as u64;
+    items.retain(|&item| item != NO_SOURCE);
+    items
+}
+
+/// How many members a membership written in the declaration names: its columns' one length.
+fn table_len(table: &MemberTable) -> usize {
+    table.values().next().map_or(0, Vec::len)
+}
+
+/// A layer's memberships written in its artifact rows or in the declaration, each member a row
+/// the rule decides ([`crate::ids`]), in the order the artifacts are read: an artifacts file's rows
+/// in file order, or the declaration's artifacts in order, and each artifact's members in list
+/// order.
+pub(crate) struct MemberLists {
+    /// The file, or `the declaration`.
+    pub source: String,
+    pub carried: Vec<crate::ids::CarriedField>,
+    /// Each carried field's key at each member, in `carried`'s order.
+    pub keys: Vec<Vec<Option<UniqueKey>>>,
+    /// Each member as the report names it.
+    pub texts: Vec<String>,
+}
+
+impl MemberLists {
+    pub(crate) fn len(&self) -> usize {
+        self.texts.len()
+    }
+}
+
+/// The memberships a layer writes in its artifact rows or its declaration, or `None` where it
+/// writes none.
+pub(crate) fn member_lists(
+    input: &LayerSources,
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    match &input.artifacts {
+        None => Ok(None),
+        Some(ArtifactSource::Inline(rows)) => inline_lists(&input.name, rows, schema),
+        Some(ArtifactSource::File { path, fields, .. }) => file_lists(path, fields, schema),
+    }
+}
+
+/// The member lists of an artifacts file: `members` or `excluding`, each a `list<struct>` whose
+/// struct carries a field per unique attribute a member is named by.
+fn file_lists(
     path: &Path,
-    column: &ListArray,
-    row: usize,
-    key: &str,
-    ids: &crate::ids::IdSpace,
-) -> Result<Vec<u64>> {
-    if column.is_null(row) {
-        return Ok(Vec::new());
+    fields: &Fields,
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    let names = [fields.of("members"), fields.of("excluding")];
+    if crate::input::first_column_present(path, &names)?.is_none() {
+        return Ok(None);
     }
-    let values = column.value(row);
-    // **Named the way the declaration names a row** (`crate::ids`): the integer route takes the
-    // list of uint64 it always did, and a supplied id column makes this a list of keys, each
-    // resolved to the source id the build joins on.
-    if let Some(keys) = ids.supplied() {
-        keys.require_same_family(path, key, "members", values.data_type())?;
-        return (0..values.len())
-            .map(|i| {
-                let member =
-                    crate::ids::key_at(values.as_ref(), i).ok_or_else(|| null_member(path, key))?;
-                match keys.rank(&member) {
-                    crate::ids::NO_SOURCE_ID => Err(unknown_member(path, &member)),
-                    source_id => Ok(source_id),
-                }
-            })
-            .collect();
-    }
-    let ids = values
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-            "{}: the membership of {key} is a list of {:?}, and this reader takes a list of uint64",
-            path.display(),
-            values.data_type()
-        ))
-        })?;
-    (0..ids.len())
-        .map(|i| {
-            if ids.is_null(i) {
-                return Err(null_member(path, key));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let mut lists = MemberLists {
+        source: file_name,
+        carried: Vec::new(),
+        keys: Vec::new(),
+        texts: Vec::new(),
+    };
+    let mut carried_known = false;
+    for batch in batches(path)? {
+        let batch = batch?;
+        let key = key_column(path, &batch, fields, "key")?;
+        for name in names {
+            let Some(column) = batch.column_by_name(name) else {
+                continue;
+            };
+            let refuse = || {
+                BuildError::Invalid(format!(
+                    "{}: column '{name}' is {:?}. A membership names each member by the fields \
+                     declared `unique`: write it as a list of structs with a field per unique \
+                     attribute",
+                    path.display(),
+                    column.data_type()
+                ))
+            };
+            let list = column.as_any().downcast_ref::<ListArray>().ok_or_else(refuse)?;
+            let members = list
+                .values()
+                .as_any()
+                .downcast_ref::<arrow::array::StructArray>()
+                .ok_or_else(refuse)?;
+            let struct_schema = arrow::datatypes::Schema::new(members.fields().clone());
+            let carried = crate::ids::carried_unique(&struct_schema, fields, schema)
+                .map_err(BuildError::Invalid)?;
+            if !carried_known {
+                lists.keys = vec![Vec::new(); carried.len()];
+                lists.carried = carried;
+                carried_known = true;
+            } else if carried != lists.carried {
+                return Err(BuildError::Invalid(format!(
+                    "{}: the member structs name different unique fields in different batches; \
+                     write every membership with the same fields",
+                    path.display()
+                )));
             }
-            Ok(ids.value(i))
+            let mut keys: Vec<Vec<Option<UniqueKey>>> = Vec::with_capacity(lists.carried.len());
+            for field in &lists.carried {
+                let child = members.column_by_name(&field.column).expect("carried");
+                keys.push(crate::ids::scan::keys_of(path, child, field)?);
+            }
+            for (row, bounds) in list.value_offsets().windows(2).enumerate() {
+                if list.is_null(row) {
+                    continue;
+                }
+                for member in bounds[0] as usize..bounds[1] as usize {
+                    let null = members.is_null(member);
+                    let mut parts = Vec::new();
+                    for (at, field) in lists.carried.iter().enumerate() {
+                        let value = keys[at].get(member).copied().flatten().filter(|_| !null);
+                        lists.keys[at].push(value);
+                        let child = members.column_by_name(&field.column).expect("carried");
+                        if let Some(text) = crate::ids::scan::value_text(child.as_ref(), member)
+                            .filter(|_| !null)
+                        {
+                            parts.push(format!("{} = {text}", field.attribute));
+                        }
+                    }
+                    lists.texts.push(format!(
+                        "artifact {}: {}",
+                        key.key_at(row).unwrap_or_default(),
+                        match parts.is_empty() {
+                            true => "a member naming no field".to_string(),
+                            false => parts.join(", "),
+                        }
+                    ));
+                }
+            }
+        }
+    }
+    Ok(Some(lists))
+}
+
+/// The memberships a declaration writes, as tables of unique-field columns.
+fn inline_lists(
+    layer: &str,
+    rows: &[InlineArtifact],
+    schema: &crate::config::Schema,
+) -> Result<Option<MemberLists>> {
+    let tables: Vec<(&str, &MemberTable)> = rows
+        .iter()
+        .flat_map(|row| {
+            [&row.members, &row.excluding]
+                .into_iter()
+                .flatten()
+                .map(move |table| (row.key.as_str(), table))
         })
-        .collect()
+        .collect();
+    if tables.is_empty() {
+        return Ok(None);
+    }
+    let mut carried: Vec<crate::ids::CarriedField> = Vec::new();
+    for (position, attribute) in schema.attributes.iter().enumerate() {
+        if attribute.unique && tables.iter().any(|(_, t)| t.contains_key(&attribute.name)) {
+            carried.push(crate::ids::CarriedField {
+                position: position as u16,
+                attribute: attribute.name.clone(),
+                column: attribute.name.clone(),
+                ty: attribute.ty,
+            });
+        }
+    }
+    let mut lists = MemberLists {
+        source: "the declaration".to_string(),
+        keys: vec![Vec::new(); carried.len()],
+        texts: Vec::new(),
+        carried,
+    };
+    for (key, table) in tables {
+        if let Some(name) = table
+            .keys()
+            .find(|name| !lists.carried.iter().any(|f| &f.attribute == *name))
+        {
+            return Err(BuildError::Invalid(format!(
+                "layer '{layer}': artifact {key}: the membership column '{name}' is not an \
+                 attribute declared `unique`"
+            )));
+        }
+        for member in 0..table_len(table) {
+            let mut parts = Vec::new();
+            for (at, field) in lists.carried.iter().enumerate() {
+                let value = table.get(&field.attribute).map(|column| &column[member]);
+                lists.keys[at].push(match value {
+                    Some(value) => Some(member_value_key(layer, key, field, value)?),
+                    None => None,
+                });
+                if let Some(value) = value {
+                    parts.push(format!(
+                        "{} = {}",
+                        field.attribute,
+                        match value {
+                            MemberValue::Integer(integer) => integer.to_string(),
+                            MemberValue::Text(text) => text.clone(),
+                        }
+                    ));
+                }
+            }
+            lists.texts.push(format!("artifact {key}: {}", parts.join(", ")));
+        }
+    }
+    Ok(Some(lists))
 }
 
-/// **A member naming a row no points file carries is refused**, exactly as an integer naming an
-/// entity this build did not assign is: a dropped member moves the count a viewer is shown and the
-/// size a proportional criterion divides by. Named here, where the key itself is still in hand.
-fn unknown_member(path: &Path, key: &[u8]) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: the membership names '{}', which no points file of this build carries. A member is \
-         named by the column the declaration spells identity in (configuration.md §8)",
-        path.display(),
-        String::from_utf8_lossy(key)
-    ))
-}
-
-/// **A null element is not entity zero.** Arrow reads the values buffer whatever the validity
-/// bitmap says, so a producer whose join missed a row would otherwise publish the corpus's
-/// lowest-numbered document into the artifact.
-fn null_member(path: &Path, key: &str) -> BuildError {
-    BuildError::Invalid(format!(
-        "{}: {key} has a null entity in its membership; a null is not entity zero, and publishing \
-         it as one puts a document nobody named into the artifact",
-        path.display()
-    ))
+/// A value written in the declaration as the key its unique field holds it under: a string for a
+/// keyword, and an integer, or a string of its decimal digits, for an integer field.
+fn member_value_key(
+    layer: &str,
+    key: &str,
+    field: &crate::ids::CarriedField,
+    value: &MemberValue,
+) -> Result<UniqueKey> {
+    let object = format!("layer '{layer}': artifact {key}");
+    let integer = match (field.ty, value) {
+        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Text(text)) => {
+            return Ok(UniqueKey::keyword(text))
+        }
+        (tessera_spatial::tiler::ScalarType::Keyword, MemberValue::Integer(integer)) => {
+            return Err(BuildError::Invalid(format!(
+                "{object}: the member {integer} of '{}' is an integer, and the field holds \
+                 strings. Write it as \"{integer}\"",
+                field.attribute
+            )))
+        }
+        (_, MemberValue::Integer(integer)) => i128::from(*integer),
+        (_, MemberValue::Text(text)) => text.parse::<i128>().map_err(|_| {
+            BuildError::Invalid(format!(
+                "{object}: the member '{text}' of '{}' is not an integer, and the field holds \
+                 integers. Write it in decimal digits",
+                field.attribute
+            ))
+        })?,
+    };
+    tessera_store::unique::key_of_integer(field.ty, integer).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{object}: the member {integer} of '{}' is outside what a `{}` holds",
+            field.attribute,
+            field.ty.arrow_type_name()
+        ))
+    })
 }
 
 /// One row's ranked contents: entry *k* is `contents[k]`'s values, one per supplied kind.
@@ -3707,8 +3914,9 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 // Key columns: text, or an integer spelling one
 // ---------------------------------------------------------------------------------------------
 
-/// A `key` column at the two types a producer has — UTF-8, or an integer canonicalised to its
-/// decimal string, so `3` and `"3"` name one artifact.
+/// A `key` column: text, or an integer canonicalised to its decimal string, so `3` and `"3"` name
+/// one artifact. Which types, and how a cell reads, is [`tessera_store::member_key`]'s, the rule the
+/// running service reads a batch's layer column by.
 ///
 /// **A key is one type below this reader**: the plan, the store and the manifest all hold a string,
 /// so an integer column is converted rather than carried. *Where* the conversion happens is the
@@ -3720,88 +3928,9 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
-#[derive(Clone, Copy)]
-pub(crate) enum KeyColumn<'a> {
-    Text(crate::utf8::Utf8Column<'a>),
-    I8(&'a Int8Array),
-    I16(&'a Int16Array),
-    I32(&'a Int32Array),
-    I64(&'a Int64Array),
-    U8(&'a UInt8Array),
-    U16(&'a UInt16Array),
-    U32(&'a UInt32Array),
-    U64(&'a UInt64Array),
-}
-
-/// What one **member** row's key says.
-enum KeyRead<'a> {
-    /// **This point is in no artifact** — a null key, or exactly `-1`, the sentinel every clusterer
-    /// emits for noise (`artifacts-from-points.md` §2). Exactly `-1` and not any negative: a
-    /// negative id is otherwise unusual enough that swallowing `-7` would more likely be eating
-    /// data than handling noise. For a text column, null only.
-    Unclustered,
-    Named(&'a str),
-    Numbered(i128),
-}
-
-impl<'a> KeyColumn<'a> {
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            KeyColumn::Text(a) => return a.is_null(row),
-            KeyColumn::I8(a) => *a as &dyn Array,
-            KeyColumn::I16(a) => *a as &dyn Array,
-            KeyColumn::I32(a) => *a as &dyn Array,
-            KeyColumn::I64(a) => *a as &dyn Array,
-            KeyColumn::U8(a) => *a as &dyn Array,
-            KeyColumn::U16(a) => *a as &dyn Array,
-            KeyColumn::U32(a) => *a as &dyn Array,
-            KeyColumn::U64(a) => *a as &dyn Array,
-        }
-        .is_null(row)
-    }
-
-    fn integer_at(&self, row: usize) -> Option<i128> {
-        match self {
-            KeyColumn::Text(_) => None,
-            KeyColumn::I8(a) => Some(a.value(row) as i128),
-            KeyColumn::I16(a) => Some(a.value(row) as i128),
-            KeyColumn::I32(a) => Some(a.value(row) as i128),
-            KeyColumn::I64(a) => Some(a.value(row) as i128),
-            KeyColumn::U8(a) => Some(a.value(row) as i128),
-            KeyColumn::U16(a) => Some(a.value(row) as i128),
-            KeyColumn::U32(a) => Some(a.value(row) as i128),
-            KeyColumn::U64(a) => Some(a.value(row) as i128),
-        }
-    }
-
-    /// The canonical key at `row` — **the allocating read, for one row per artifact.**
-    fn key_at(&self, row: usize) -> Option<String> {
-        if self.is_null(row) {
-            return None;
-        }
-        Some(match self {
-            KeyColumn::Text(a) => a.value(row).to_string(),
-            _ => self.integer_at(row).expect("an integer column").to_string(),
-        })
-    }
-
-    /// What one member row's key says — **the non-allocating read, for one row per point.**
-    ///
-    /// The noise sentinel is [`tessera_types::layer::NOISE_KEY`]'s, not a literal here: the wire
-    /// reads the same cell out of an Arrow batch and the two must agree about what `-1` means.
-    fn read_at(&self, row: usize) -> KeyRead<'a> {
-        if self.is_null(row) {
-            return KeyRead::Unclustered;
-        }
-        match self {
-            KeyColumn::Text(a) => KeyRead::Named(a.value(row)),
-            _ => match self.integer_at(row).expect("an integer column") {
-                tessera_types::layer::NOISE_KEY => KeyRead::Unclustered,
-                value => KeyRead::Numbered(value),
-            },
-        }
-    }
-}
+pub(crate) use tessera_store::member_key::{
+    level_in, read_levels, KeyCells, KeyColumn, KeyRead, MemberColumn, LEVEL,
+};
 
 pub(crate) fn key_column<'a>(
     path: &Path,
@@ -3812,7 +3941,7 @@ pub(crate) fn key_column<'a>(
     let name = fields.of(canonical);
     scalar_key_column(
         path,
-        required(path, batch, fields, canonical)?,
+        required(path, batch, fields, canonical)?.as_ref(),
         name,
         "column",
     )
@@ -3821,35 +3950,18 @@ pub(crate) fn key_column<'a>(
 /// One array read as a key column — the member source's own, or the elements of its list.
 fn scalar_key_column<'a>(
     path: &Path,
-    array: &'a std::sync::Arc<dyn Array>,
+    array: &'a dyn Array,
     name: &str,
     what: &str,
 ) -> Result<KeyColumn<'a>> {
-    Ok(match array.data_type() {
-        arrow::datatypes::DataType::Utf8 | arrow::datatypes::DataType::LargeUtf8 => {
-            KeyColumn::Text(crate::utf8::Utf8Column::new(array.as_ref()).ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{}: column {name} is {:?}, which this reader cannot take",
-                    path.display(),
-                    array.data_type()
-                ))
-            })?)
-        }
-        arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int16 => KeyColumn::I16(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int32 => KeyColumn::I32(typed(path, array, name)?),
-        arrow::datatypes::DataType::Int64 => KeyColumn::I64(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt8 => KeyColumn::U8(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt16 => KeyColumn::U16(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt32 => KeyColumn::U32(typed(path, array, name)?),
-        arrow::datatypes::DataType::UInt64 => KeyColumn::U64(typed(path, array, name)?),
-        other => {
-            return Err(BuildError::Invalid(format!(
-                "{}: {what} {name} is {other:?}, and a key is text or an integer — an integer key \
-                 is read as its decimal spelling, so `3` and \"3\" name one artifact",
-                path.display()
-            )))
-        }
+    KeyColumn::new(array).ok_or_else(|| {
+        BuildError::Invalid(format!(
+            "{}: {what} {name} is {:?}, and a key is {}; an integer key is read as its decimal \
+             spelling, so `3` and \"3\" name one artifact",
+            path.display(),
+            array.data_type(),
+            tessera_store::member_key::KEY_TYPES
+        ))
     })
 }
 
@@ -3862,9 +3974,9 @@ fn scalar_key_column<'a>(
 /// every kind accepts, a scalar being a list of one (`dag-hierarchies.md` §4). The row's grain
 /// stays one row per artifact: several parents are several entries in one cell, and the one-row
 /// refusal in [`read_artifacts`] stands.
-pub(crate) enum ParentColumn<'a> {
-    Scalar(KeyColumn<'a>),
-    Listed(ListShape<'a>, KeyColumn<'a>),
+pub(crate) struct ParentColumn<'a> {
+    cells: KeyCells<'a>,
+    keys: KeyColumn<'a>,
 }
 
 pub(crate) fn parent_column<'a>(
@@ -3876,23 +3988,13 @@ pub(crate) fn parent_column<'a>(
         return Ok(None);
     };
     let name = fields.of("parent");
-    Ok(Some(match array.data_type() {
-        arrow::datatypes::DataType::List(_) => {
-            let list: &ListArray = typed(path, array, name)?;
-            ParentColumn::Listed(
-                ListShape::Variable(list),
-                scalar_key_column(path, list.values(), name, "the elements of")?,
-            )
-        }
-        arrow::datatypes::DataType::FixedSizeList(..) => {
-            let list: &FixedSizeListArray = typed(path, array, name)?;
-            ParentColumn::Listed(
-                ListShape::Fixed(list),
-                scalar_key_column(path, list.values(), name, "the elements of")?,
-            )
-        }
-        _ => ParentColumn::Scalar(scalar_key_column(path, array, name, "column")?),
-    }))
+    let (cells, values) = KeyCells::new(array.as_ref());
+    let what = match cells.is_list() {
+        true => "the elements of",
+        false => "column",
+    };
+    let keys = scalar_key_column(path, values, name, what)?;
+    Ok(Some(ParentColumn { cells, keys }))
 }
 
 /// One row's parents, each key once in the order written; empty where the cell is null, which is
@@ -3902,185 +4004,49 @@ pub(crate) fn parents_at(
     column: Option<&ParentColumn<'_>>,
     row: usize,
 ) -> Result<Vec<String>> {
-    let mut keys = match column {
-        None => Vec::new(),
-        Some(ParentColumn::Scalar(key)) => key.key_at(row).into_iter().collect(),
-        Some(ParentColumn::Listed(shape, values)) => {
-            let range = match shape {
-                ListShape::Variable(list) => {
-                    if list.is_null(row) {
-                        return Ok(Vec::new());
-                    }
-                    let offsets = list.value_offsets();
-                    offsets[row] as usize..offsets[row + 1] as usize
-                }
-                ListShape::Fixed(list) => {
-                    if list.is_null(row) {
-                        return Ok(Vec::new());
-                    }
-                    let width = list.value_length() as usize;
-                    row * width..(row + 1) * width
-                }
-            };
-            range
-                .map(|index| {
-                    values.key_at(index).ok_or_else(|| {
-                        BuildError::Invalid(format!(
-                            "{}: row {row}'s parent list holds a null entry; a parent is named \
-                             or the entry is left out, and a null here would be an edge to \
-                             nothing",
-                            path.display()
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<String>>>()?
-        }
+    let Some(ParentColumn { cells, keys }) = column else {
+        return Ok(Vec::new());
     };
-    dedup_keys(&mut keys);
-    Ok(keys)
+    let mut parents = match cells.range(row) {
+        None => Vec::new(),
+        Some(_) if !cells.is_list() => keys.key_at(row).into_iter().collect(),
+        Some(range) => range
+            .map(|index| {
+                keys.key_at(index).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "{}: row {row}'s parent list holds a null entry; a parent is named or the \
+                         entry is left out, and a null here would be an edge to nothing",
+                        path.display()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<String>>>()?,
+    };
+    dedup_keys(&mut parents);
+    Ok(parents)
 }
 
 // ---------------------------------------------------------------------------------------------
 // A list key column: the artifacts a point belongs to, and the edges between them
 // ---------------------------------------------------------------------------------------------
 
-/// A member source's `key` column: one artifact per row, or a list of them.
-///
-/// **The list's meaning is the hierarchy kind the layer already declares**
-/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point and nothing in
-/// the list says what its positions mean, so the kind is declared as it always was and only the
-/// edges are read from the data.
-enum MemberKeys<'a> {
-    Scalar(KeyColumn<'a>),
-    Listed(ListedKeys<'a>),
-}
-
-/// A list key column, its elements, and what its positions mean.
-struct ListedKeys<'a> {
-    shape: ListShape<'a>,
-    /// The list's child array, read as a key column: an element is a key on exactly the rule a
-    /// scalar is, integer or text, with the roster converted once rather than per element.
-    values: KeyColumn<'a>,
-    meaning: ListMeaning,
-}
-
-pub(crate) enum ListShape<'a> {
-    /// A `List`: its rows may differ in length, which is what a lineage is.
-    Variable(&'a ListArray),
-    /// A `FixedSizeList`: every row has the arity the type states.
-    Fixed(&'a FixedSizeListArray),
-}
-
-impl ListedKeys<'_> {
-    /// The row's entries, as a range into the element array — `None` where the row named no
-    /// artifact at all.
-    ///
-    /// **A null cell and an empty one are the whole row's `Unclustered`**, which is §2's rule for a
-    /// scalar key applied to a cell that holds no key: a point may be in no artifact at any
-    /// resolution, and a clusterer that emitted nothing for it is the ordinary way of saying so.
-    fn entries(
-        &self,
-        path: &Path,
-        layer: &str,
-        row: usize,
-    ) -> Result<Option<std::ops::Range<usize>>> {
-        let (start, end) = match &self.shape {
-            ListShape::Variable(list) => {
-                if list.is_null(row) {
-                    return Ok(None);
-                }
-                let offsets = list.value_offsets();
-                (offsets[row] as usize, offsets[row + 1] as usize)
-            }
-            ListShape::Fixed(list) => {
-                if list.is_null(row) {
-                    return Ok(None);
-                }
-                let start = list.value_offset(row) as usize;
-                (start, start + list.value_length() as usize)
-            }
-        };
-        if start == end {
-            return Ok(None);
-        }
-        // **The declaration and the data must agree.** A `stacked` or `tiered` layer's list is one
-        // entry per declared level — that is what makes entry *k* mean level *k* — so a row of any
-        // other length is a lineage against a levelled declaration, and guessing which of the two
-        // the caller meant would publish a hierarchy they did not write.
-        if let ListMeaning::Levelled { levels, .. } = self.meaning {
-            if end - start != levels {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {row} names {} artifacts and layer '{layer}' declares {levels} \
-                     levels. A stacked or tiered layer's key column is one entry per level, \
-                     nullable where the point is in no artifact at that resolution, so a row of \
-                     another length is a variable-length list against a levelled declaration — \
-                     declare `hierarchy.kind = \"nested\"` if the column is a lineage",
-                    path.display(),
-                    end - start,
-                )));
-            }
-        }
-        Ok(Some(start..end))
-    }
-}
-
-/// The member source's key column, at the shapes a layer of this kind may carry.
+/// The member source's key column, read against the layer's hierarchy: one artifact per row, or a
+/// list of them whose positions mean what the layer's hierarchy kind declares.
 fn member_keys<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
     layer: &str,
     declaration: &LayerDeclaration,
-) -> Result<MemberKeys<'a>> {
+) -> Result<MemberColumn<'a>> {
     let name = fields.of("key");
     let array = required(path, batch, fields, "key")?;
-    let fixed = match array.data_type() {
-        arrow::datatypes::DataType::List(_) => None,
-        arrow::datatypes::DataType::FixedSizeList(_, size) => Some(*size as usize),
-        _ => return Ok(MemberKeys::Scalar(key_column(path, batch, fields, "key")?)),
-    };
-    // **The meaning of the positions is the layer's own declaration**, read through the one rule
-    // both entry points share ([`ListMeaning`]). What is left here is the *type* half of the arity
-    // check: an Arrow `FixedSizeList` states its length in its own type, which a plain list does
-    // not, so it is the one place a disagreement can be caught before a row is read.
-    let meaning = declaration.list_meaning();
-    if let Some(size) = fixed {
-        match meaning {
-            ListMeaning::Lineage => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' is \
-                     declared nested, whose lineage is as deep as each point's own branch — a \
-                     fixed arity is one entry per level, which is the stacked and tiered shape. \
-                     Write the column as a list, or declare the layer tiered and its levels",
-                    path.display()
-                )))
-            }
-            ListMeaning::Levelled { levels, .. } if size != levels => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
-                     declares {levels} levels. Entry k is the artifact at level k, so the two \
-                     counts are one number written twice",
-                    path.display()
-                )))
-            }
-            _ => {}
-        }
-    }
-    let shape = match array.data_type() {
-        arrow::datatypes::DataType::List(_) => {
-            ListShape::Variable(typed::<ListArray>(path, array, name)?)
-        }
-        _ => ListShape::Fixed(typed::<FixedSizeListArray>(path, array, name)?),
-    };
-    let values = match &shape {
-        ListShape::Variable(list) => list.values(),
-        ListShape::Fixed(list) => list.values(),
-    };
-    Ok(MemberKeys::Listed(ListedKeys {
-        values: scalar_key_column(path, values, name, "the elements of column")?,
-        shape,
-        meaning,
-    }))
+    MemberColumn::new(array.as_ref(), declaration.list_meaning()).map_err(|e| {
+        BuildError::Invalid(format!(
+            "{}: column {name} of layer '{layer}' {e}",
+            path.display()
+        ))
+    })
 }
 
 /// The layer's artifacts, indexed by what their keys spell — the integer, and the text.
@@ -4108,14 +4074,95 @@ struct KeyRoster {
     by_text: BTreeMap<u32, rustc_hash::FxHashMap<Box<str>, usize>>,
 }
 
+/// The key rosters one member source resolves through: **one per view**, because a key names an
+/// artifact only together with its view on a group-scoped layer (`views.md` §3.5).
+///
+/// An unscoped layer has exactly one entry, under `None`, and every row finds it on the cached
+/// index without a probe — which is what keeps the resolution a pointer comparison per member
+/// entry rather than a map lookup. A scoped layer's rows are usually written a view at a time, so
+/// the same hint answers them too; a file that interleaves views pays a short linear scan over the
+/// group's keys, which number in the tens.
+#[derive(Default)]
+struct Rosters {
+    by_view: Vec<(Option<String>, KeyRoster)>,
+    /// The entry the last row resolved through.
+    last: usize,
+}
+
+impl Rosters {
+    fn of(&mut self, layer: &str, view: Option<&str>, plan: &LayerPlan) -> &mut KeyRoster {
+        if self.by_view.get(self.last).map(|(held, _)| held.as_deref()) != Some(view) {
+            self.last = match self
+                .by_view
+                .iter()
+                .position(|(held, _)| held.as_deref() == view)
+            {
+                Some(at) => at,
+                None => {
+                    self.by_view.push((
+                        view.map(str::to_string),
+                        KeyRoster::of_layer(layer, view, plan),
+                    ));
+                    self.by_view.len() - 1
+                }
+            };
+        }
+        &mut self.by_view[self.last].1
+    }
+}
+
+/// The view one member row names, where its layer is scoped — the artifacts source's own check
+/// (`view_of_row`), made against the member file's rows.
+fn member_view<'a>(
+    path: &Path,
+    layer: &str,
+    scoped: Option<&crate::ScopedLayer>,
+    view: Option<crate::utf8::Utf8Column<'a>>,
+    row: usize,
+) -> Result<Option<&'a str>> {
+    let (Some(scope), Some(column)) = (scoped, view) else {
+        return Ok(None);
+    };
+    let Some(named) = column.at(row) else {
+        return Err(BuildError::Invalid(format!(
+            "{}: row {row} carries no '{}', and layer '{layer}'s artifacts are a different set per \
+             view of '{}' (views §3.5) — a member row naming no view names no artifact",
+            path.display(),
+            scope.column,
+            scope.group
+        )));
+    };
+    if scope
+        .keys
+        .binary_search_by(|held| held.as_str().cmp(named))
+        .is_err()
+    {
+        return Err(BuildError::Invalid(format!(
+            "{}: row {row} names view '{named}', which group '{}' has no such key for. Its keys \
+             are: {}",
+            path.display(),
+            scope.group,
+            scope.keys.join(", ")
+        )));
+    }
+    Ok(Some(named))
+}
+
 impl KeyRoster {
-    /// **Built once, over the layer's whole planned roster**, integer and text keys alike.
-    fn of_layer(layer: &str, plan: &LayerPlan) -> KeyRoster {
+    /// **Built once, over the layer's whole planned roster for one view**, integer and text keys
+    /// alike. The view is part of the identity on a group-scoped layer (`views.md` §3.5), so a
+    /// roster holds one view's keys and a member row is resolved against the roster of the view
+    /// its own row names.
+    fn of_layer(layer: &str, view: Option<&str>, plan: &LayerPlan) -> KeyRoster {
         let mut roster = KeyRoster {
             by_integer: BTreeMap::new(),
             by_text: BTreeMap::new(),
         };
-        for (address, index) in plan.artifacts.iter().filter(|(a, _)| a.0 == layer) {
+        for (address, index) in plan
+            .artifacts
+            .iter()
+            .filter(|(a, _)| a.0 == layer && a.3.as_deref() == view)
+        {
             if let Some(value) = canonical_integer(&address.2) {
                 roster.by_integer.insert((address.1, value), *index);
             }
@@ -4178,7 +4225,7 @@ fn undeclared_key(path: &Path, address: &Address) -> BuildError {
     ))
 }
 
-/// One row's `(layer, level, key)`.
+/// One row's `(layer, level, key, view)`.
 ///
 /// **The layer is the source's own**, never a column: one file holds one layer, which is what
 /// removes the discriminator and with it any way for a layer to ingest another's rows.
@@ -4192,12 +4239,41 @@ pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
     key.key_at(row).unwrap_or_else(|| format!("row {row}"))
 }
 
+/// The view one artifact row of a group-scoped layer names, and `None` on an unscoped layer,
+/// whose one artifact set is drawn on every view it names (`views.md` §3.5). A key means nothing
+/// without it on such a layer: keys are unique per `(layer, view)`. Whether the group has the view
+/// is the registry's rule, checked when the level is published.
+fn view_of_row<'a>(
+    path: &Path,
+    layer: &str,
+    scoped: Option<&crate::ScopedLayer>,
+    view: Option<crate::utf8::Utf8Column<'a>>,
+    key: &KeyColumn,
+    row: usize,
+) -> Result<Option<&'a str>> {
+    let (Some(scope), Some(column)) = (scoped, view) else {
+        return Ok(None);
+    };
+    let Some(named) = column.at(row) else {
+        return Err(BuildError::Invalid(format!(
+            "{}: {} carries no '{}', and layer '{layer}'s artifacts are a different set per view \
+             of '{}' (views §3.5) — a row naming no view is in no artifact set",
+            path.display(),
+            key_at(key, row),
+            scope.column,
+            scope.group
+        )));
+    };
+    Ok(Some(named))
+}
+
 fn address(
     path: &Path,
     layer: &str,
     level: &Option<&UInt32Array>,
     key: &KeyColumn,
     row: usize,
+    view: Option<&str>,
 ) -> Result<Address> {
     let Some(key) = key.key_at(row) else {
         return Err(BuildError::Invalid(format!(
@@ -4208,8 +4284,9 @@ fn address(
     };
     Ok((
         layer.to_string(),
-        level.map_or(0, |c| number_at(c, row)),
+        level_in(*level, row),
         key,
+        view.map(str::to_string),
     ))
 }
 
@@ -4297,7 +4374,7 @@ mod tests {
         let plan = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4307,7 +4384,7 @@ mod tests {
             1 << 30,
         )?;
         let body = |layer: &str| -> &PlannedArtifact {
-            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string())];
+            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string(), None)];
             &plan.bodies[index]
         };
         let selects = body("regions/selects")
@@ -4392,7 +4469,7 @@ mod tests {
         }))
         .expect("the fixture declaration is well-formed");
         let row = |key: &str, members: &[u64]| -> InlineArtifact {
-            serde_json::from_value(serde_json::json!({ "key": key, "members": members }))
+            serde_json::from_value(serde_json::json!({ "key": key, "members": { "id": members } }))
                 .expect("the fixture row is well-formed")
         };
         let sources = vec![LayerSources {
@@ -4405,10 +4482,14 @@ mod tests {
         }];
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let prefix = tempfile::tempdir().expect("a prefix directory");
+        // The members the rule numbered, in the order the rows list them: each names the item of
+        // its own number.
+        let numbering =
+            crate::ids::Numbering::with_lists(0, [1, 2, 3, 900, 4, 5].map(|item| item + 1).to_vec());
         let mut plan = read(
             std::slice::from_ref(&declaration),
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &numbering,
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world",
@@ -4428,6 +4509,7 @@ mod tests {
             "default",
             &["world".to_string()],
             &BTreeMap::new(),
+            PUBLICATION_BATCH_MAX_ENTRIES,
         )
         .expect("two artifacts publish");
 
@@ -4464,7 +4546,7 @@ mod tests {
         let error = read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[
                 tessera_store::derived::ViewFrame::new(
@@ -4506,7 +4588,7 @@ mod tests {
         read(
             &declarations,
             &sources,
-            &crate::ids::IdSpace::Integer,
+            &crate::ids::Numbering::empty(),
             &BTreeMap::new(),
             &[tessera_store::derived::ViewFrame::new(
                 "world", projection, extent,
@@ -4740,16 +4822,17 @@ mod tests {
             attached_to: None,
             parent_keys,
             shape: None,
+            access: None,
         };
         for parent in 0..parents {
             let member = parent as u32 * 10;
             index_of.insert(
-                ("clusters/a".to_string(), 0, format!("p{parent:03}")),
+                ("clusters/a".to_string(), 0, format!("p{parent:03}"), None),
                 resolved.len(),
             );
             resolved.push(body(vec![member], Vec::new()));
             index_of.insert(
-                ("clusters/a".to_string(), 0, format!("c{parent:03}")),
+                ("clusters/a".to_string(), 0, format!("c{parent:03}"), None),
                 resolved.len(),
             );
             // One member the parent holds and one it does not, so every parent has exactly one
@@ -4855,6 +4938,7 @@ mod tests {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
+                access: None,
             })
             .collect();
         let artifacts: Vec<(&str, usize)> = (0..sizes.len()).map(|i| ("k", i)).collect();
@@ -4915,15 +4999,5 @@ mod tests {
             open_runs_for(MEMBER_BUDGET_MAX * 8),
             MEMBER_MERGE_DESCRIPTOR_CAP
         );
-    }
-
-    /// The publication batch is the budget's share divided by what an entry costs, and never zero.
-    #[test]
-    fn the_publication_batch_is_a_share_of_the_budget() {
-        assert_eq!(
-            publication_batch_entries(24 << 30),
-            (24u64 << 30) / PUBLICATION_BUDGET_SHARE / PUBLICATION_BYTES_PER_ENTRY
-        );
-        assert_eq!(publication_batch_entries(0), 1);
     }
 }

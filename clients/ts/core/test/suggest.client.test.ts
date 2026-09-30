@@ -1,10 +1,10 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
+import type {FilterExpr} from '../src/types.js';
 
 /**
- * `TesseraClient.suggest`: `GET /v1/categories/{column}/suggest` (`value-suggestion.md` §5.1,
- * contracts §3.2). The server does not exist yet, so every case here is a fake `fetch` — the
- * shape of the request the client composes, and what it makes of what comes back.
+ * `TesseraClient.suggest`: `GET /v1/categories/{column}/suggest`, against a fake `fetch`. Checks the
+ * request the client composes and what it makes of the reply.
  */
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -21,7 +21,7 @@ describe('TesseraClient.suggest', () => {
     let seenAuth = '';
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       seenUrl = url;
-      seenAuth = (init?.headers as Record<string, string>).authorization;
+      seenAuth = new Headers(init?.headers).get('authorization')!;
       return jsonResponse(200, {column: 'primary_category', q: 'mach', values: [], more: false});
     });
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
@@ -67,21 +67,51 @@ describe('TesseraClient.suggest', () => {
     });
   });
 
-  it('surfaces a 429 as a typed superseded result, never a thrown error', async () => {
+  it('sends filters as a POST body with the other fields, and reads the region verdict', async () => {
+    let seenUrl = '';
+    let seenInit: RequestInit | undefined;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      seenUrl = url;
+      seenInit = init;
+      return jsonResponse(
+        200,
+        {column: 'archive', q: 'a', values: [{code: 11, key: 'astro', match: {field: 'key', start: 0, len: 1}, count: 0}], more: false, total: 40},
+        {'x-tessera-region': 'cover; depth=12'}
+      );
+    });
+    const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
+    const filters: FilterExpr = {all_of: [{department: {in: ['d01']}}, {region: {bbox: [0, 0, 10, 10]}}]};
+    const result = await client.suggest('tok', 'archive', 'a', {counts: true, view: 's0', filters});
+    expect(seenUrl).toBe('http://viewer/v1/categories/archive/suggest');
+    expect(seenInit?.method).toBe('POST');
+    expect(new Headers(seenInit?.headers).get('authorization')).toBe('Bearer tok');
+    expect(JSON.parse(seenInit?.body as string)).toEqual({q: 'a', filters, counts: true, view: 's0'});
+    expect(result).toEqual({
+      status: 'ok',
+      column: 'archive',
+      q: 'a',
+      values: [{code: 11, key: 'astro', title: null, match: {field: 'key', start: 0, len: 1}, count: 0}],
+      more: false,
+      total: 40,
+      region: {exact: false, depth: 12}
+    });
+  });
+
+  it('surfaces a 429 as a typed shed result, never a thrown error', async () => {
     vi.stubGlobal(
       'fetch',
       async () => jsonResponse(429, {error: 'backpressure', detail: 'one suggest in flight', retry_after_s: 2}, {'Retry-After': '2'})
     );
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 2});
+    expect(result).toEqual({status: 'shed', retryAfterS: 2, detail: 'one suggest in flight'});
   });
 
   it('falls back to the Retry-After header when a 429 body will not parse', async () => {
     vi.stubGlobal('fetch', async () => new Response('not json', {status: 429, headers: {'Retry-After': '3'}}));
     const client = new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: ''});
     const result = await client.suggest('tok', 'primary_category', 'ma');
-    expect(result).toEqual({status: 'superseded', retryAfterS: 3});
+    expect(result).toEqual({status: 'shed', retryAfterS: 3, detail: null});
   });
 
   it('throws TesseraError for a real refusal, e.g. 500 fail-closed on a derived column', async () => {

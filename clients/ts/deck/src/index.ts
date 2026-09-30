@@ -1,35 +1,27 @@
-export {TesseraLayer, artifactName, hasText, clusterLayerOf, encodingOf, encodingSignature, outlineOf, contourShapes, focusOutlines, labelBudget, LABEL_CANDIDATE_CEILING, labelCandidates, frontier, attachedTopics, displayName, type TesseraLayerProps, type LayerTimings, type Outline, type OutlineSource, type OutlineDatum, type OutlineOptions, type ContourOptions, type LabelText} from './layer.js';
-export {LookupTexture, buildLut, patchLut, lutRows, dimmed, LUT_WIDTH, LUT_SHIFT, type LutInputs} from './lut.js';
-export {MarksLayer, type MarksLayerProps} from './marks-layer.js';
-export {placeLabels, labelSize, LABEL_SIZE_MIN, LABEL_SIZE_MAX, wrapLabel, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, MAX_LABEL_LINES, LABEL_LINE_HEIGHT, type LabelCandidate, type PlacedLabel} from './labels.js';
-export {MarkSlab, type SlabDraw, type SlabLayer, type GpuSlab} from './slab.js';
+/**
+ * A deck.gl layer that draws a Tessera store, for a host that builds its own `Deck`.
+ * {@link TesseraLayer} draws the marks, density, the artifacts' names and outlines and the
+ * selection. {@link CATEGORY_PALETTES} and {@link RAMPS} are the named colour sets a
+ * {@link Colouring} chooses from, and {@link Sizing} the sizes a number column sizes marks
+ * between. {@link viewInputOf} turns the host's camera into a view for the store, and
+ * {@link resolvePick} reads a pick.
+ *
+ * @module @tesseradb/deck
+ */
+export {TesseraLayer, type TesseraLayerProps, type LayerTimings} from './layer.js';
 export {
-  UNIFORM,
-  UNMAPPED,
-  PALETTE_SIZE,
-  buildColourAttribute,
-  colourOfFraction,
-  colourOfRank,
-  css,
-  formatScalar,
-  paletteValues,
-  writeColours,
-  type Encoding
+  CATEGORY_PALETTES,
+  DEFAULT_COLOURING,
+  RAMPS,
+  type CategoryPalette,
+  type CategoryPaletteName,
+  type Colouring,
+  type Ramp,
+  type RampName,
+  type RampScale,
+  type Rgb
 } from './colour.js';
-export {binDensity, filterDensity, DENSITY_SUPERSAMPLE, WASH_HUE, type DensityImage} from './density.js';
-export {resolvePick, artifactOfMark, type Picked, type PickInfo} from './pick.js';
-export {materialiseStandIn, type StandInBuffers} from './assemble.js';
-export {markStyle, deckOpacity, ANTIALIAS_ABOVE_PX, type MarkStyle} from './marks-style.js';
-export {
-  distanceToRing,
-  hoverAt,
-  pointInRing,
-  ringWithin,
-  shapeBbox,
-  shapeContains,
-  shapeDistance,
-  signedArea2,
-  smoothRing,
-  type ContourShape,
-  type Ring
-} from './contours.js';
+export {DEFAULT_SIZING, type SizeScale, type Sizing} from './size.js';
+export type {DensityColours, DensityMode} from './density.js';
+export {viewInputOf, type OrthographicCamera} from './camera.js';
+export {resolvePick, type Picked, type PickInfo} from './pick.js';

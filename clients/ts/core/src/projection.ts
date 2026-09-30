@@ -1,53 +1,39 @@
 import {CELL_GRID} from './coords.js';
-import type {ProjectionName, Quantisation, TileScheme, ViewInfo} from './types.js';
+import type {MapProjection, Quantisation, TileScheme, ViewInfo} from './types.js';
 
 /**
- * What a view is a picture of, read off `/v1/meta` (`projections.md` §9).
+ * What a view is a picture of, read from `/v1/meta`: whether a basemap may be drawn under it, and
+ * how to invert a stored position to longitude and latitude.
  *
- * A client is told four things about each view — the projection that placed its positions, the
- * ratio its world should be drawn at, the tile scheme its frame addresses, and the tile the frame
- * is under that scheme — and decides two things from them: **whether a basemap may be drawn**, and
- * **how to invert a stored position back to longitude and latitude**. Both used to be facts a host
- * was told out of band, and a host that was told wrong drew a map that looked right.
- *
- * **A client does not choose a basemap — it is handed one** ({@link ViewInfo.tileScheme} is what a
- * host chooses by). So nothing here fetches a tile or names a server; it answers which scheme, if
- * any, this view's frame is addressed in.
- *
- * **Alignment is not availability, which is why the scheme is a name and not a flag.** An
- * equirectangular frame is a square of a square tiling exactly as a Web Mercator frame is, and no
- * tile server serves that tiling — the published longitude/latitude schemes are 2:1 at their top
- * level. A `null` scheme means: draw the points, draw no basemap.
+ * The host supplies the basemap; nothing here fetches a tile. The scheme is a name because a frame
+ * that aligns with a square tiling may have no tile server: an equirectangular frame is a square
+ * of a square tiling, and the published longitude and latitude schemes are 2:1 at their top level.
+ * A `null` scheme means draw the points and no basemap.
  */
 
-/** The only tile scheme a Tessera view can address: the slippy-map `z/x/y`. */
-export const XYZ: TileScheme = 'xyz';
-
 /**
- * The tile scheme `view`'s frame is addressed in, or `null` where none is — **the one condition
- * under which a tile basemap lines up with the points**.
+ * The tile scheme `view`'s frame is addressed in (`view.tileScheme`), or `null`. A tile basemap
+ * lines up with the points only where this is not `null`; with `null`, draw the points and no
+ * basemap. The server decides it from the view's projection and frame.
  *
- * A host reads this rather than inspecting the frame: a frame's alignment to a square tiling is
- * necessary and not sufficient, and the server has already applied the projection half of the
- * question.
+ * @category Coordinates and colour
  */
 export function basemapScheme(view: ViewInfo): TileScheme | null {
   return view.tileScheme;
 }
 
 /**
- * A stored position back to longitude and latitude in degrees, or `null` for a view that projects
- * nothing and therefore has no longitude at all.
+ * A stored position as `[longitude, latitude]` in degrees, or `null` for a view whose projection is
+ * `none`. A point clipped at the build (beyond Web Mercator's ±85.0511°) returns the frame's edge,
+ * where it is stored and drawn.
  *
- * `cx`/`cy` are cell-grid units — what {@link decodeViewport} returns, `0…65536` per axis with the
- * residual as the fraction — which the view's own quantisation extent scales into the unit square
- * the projection produced, and the projection's inverse then reads as a place on the Earth.
+ * @param cx - The x position in cell space, `[0, 65536)` across the frame: a
+ *   {@link ViewportResult}'s `positions`, or a {@link Band}'s world-space `positions` times
+ *   `65536 / WORLD_SIZE`.
+ * @param cy - The y position in cell space.
+ * @param q - The view's `quantisation`.
  *
- * The inverse is exact for any position the forward transform produced from an in-domain
- * coordinate. It is **not** exact for a clipped one: a point beyond Web Mercator's ±85.0511° was
- * moved onto the frame's edge at the build, losing the difference, and no inverse recovers it
- * (`projections.md` §7). What comes back for such a point is the edge, which is where it is
- * stored and where it is drawn.
+ * @category Coordinates and colour
  */
 export function lonLatOfCell(
   cx: number,
@@ -62,15 +48,11 @@ export function lonLatOfCell(
 }
 
 /**
- * The projection's own inverse, over the unit square its forward transform produces — x east and
- * **y south**, which is the direction an XYZ tile row counts in and the opposite of EPSG:3857's
- * northing.
- *
- * Every equirectangular alias is one transform (`projections.md` §5.2): the standard parallel
- * never reaches a stored coordinate and survives only as {@link ViewInfo.worldAspect}, so
- * `gall_isographic` inverts identically to `equirectangular`.
+ * The projection's inverse over its unit square, x east and y south, as XYZ tile rows count. Every
+ * equirectangular alias is one transform; the standard parallel affects only
+ * {@link ViewInfo.worldAspect}.
  */
-function lonLatOfUnitSquare(x: number, y: number, projection: ProjectionName): [number, number] {
+function lonLatOfUnitSquare(x: number, y: number, projection: MapProjection): [number, number] {
   const lon = x * 360 - 180;
   if (projection === 'web_mercator') {
     const mercY = (0.5 - y) * 2 * Math.PI;

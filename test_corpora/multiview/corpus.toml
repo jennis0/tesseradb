@@ -31,11 +31,10 @@ clusters_q      = "clusters-quarter.parquet" # key, quarter, contents, members
 
 [defaults]
 source           = "world"
-entity_id_field  = "entity_id"
 # The anchor view (decision 0112): within a signature group, entity ids are ordered by the item's
-# Morton code *here*, then by external id. Required because this declaration carries more than one
-# view, and explicit so that reordering the blocks below cannot silently re-key a rebuild — the
-# ids are permanent (I9).
+# Morton code *here*, then by the order the points files create items in. Required because this
+# declaration carries more than one view, and explicit so that reordering the blocks below cannot
+# silently re-key a rebuild — the ids are permanent (I9).
 allocation_view  = "world"
 
 # ---------------------------------------------------------------------------------------------
@@ -154,6 +153,17 @@ value_set  = "closed"
 visibility = "public"
 source     = "vocab_kind"
 
+# Every file names its place by the GeoNames id, in the `entity_id` column `prepare.py` writes,
+# and each layer file's member structs carry the same field. The value is read from
+# `attrs_constant`, which carries every place; `world` does not.
+[[attribute]]
+name   = "geonameid"
+title  = "GeoNames id"
+type   = "i64"
+unique = true
+field  = "entity_id"
+source = "attrs_constant"
+
 [[attribute]]
 name   = "importance"
 type   = "i64"
@@ -222,7 +232,9 @@ fields = { view = "quarter" }
 # ---------------------------------------------------------------------------------------------
 # Two layers: one unscoped, drawn on the plain view and on every quarter alike (spec §3.5's
 # default `scope = "entity"`); one scoped to the group, a different artifact set per quarter
-# (`scope = { group = "quarter" }`), its rows carrying the `view` column via `fields.view`.
+# (`scope = { group = "quarter" }`), its rows carrying the `view` column via `fields.view`. The
+# scoped layer is also drawn on `quarter_alt`, whose views are `quarter`'s keys selected out of one
+# file, so each quarter's clusters resolve against both of that quarter's layouts.
 # ---------------------------------------------------------------------------------------------
 
 [[layer]]
@@ -234,7 +246,7 @@ membership                = "enumerated"
 hierarchy                 = { kind = "flat" }
 visibility                = "public"
 artifact_visibility       = { field = "access", default = "inherited" }
-require_member_visibility = "all"
+require_member_visibility = { count = 1 }
 
 # One supplied content value per artifact — the `contents` column both layer files carry, one
 # entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's
@@ -252,7 +264,7 @@ require_member_visibility = "inherited"
 [[layer]]
 name                      = "quarter_clusters"
 title                     = "Clusters by quarter"
-views                     = ["quarter"]
+views                     = ["quarter", "quarter_alt"]
 scope                     = { group = "quarter" }
 source                    = "clusters_q"
 fields                    = { view = "quarter" }

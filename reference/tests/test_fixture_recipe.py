@@ -1,10 +1,10 @@
 """The fixture-reuse receipt, which is the fix for a defect that has now happened twice.
 
-A fixture bundle is built once per machine at a fixed `/tmp` path and reused across sessions, so
+A fixture bundle is built once per `tessera` binary under `/tmp` and reused across sessions, so
 "may this one be reused?" is answered on every run of both suites. Answering it by *inspecting the
 bundle* is an allowlist — it has to be extended in step with every new build input, and the input
 nobody adds is the one that then goes wrong silently. It failed that way on MANIFEST's `identity`
-object, again on `--mint-external-ids`, and the catalogue builder had reintroduced it a third time
+object, again on a build flag, and the catalogue builder had reintroduced it a third time
 with a `CURRENT`-plus-`identity` predicate over inputs it shares none of.
 
 The receipt inverts it: the builder stamps the whole input set beside the bundle, and reuse is
@@ -15,7 +15,10 @@ they cost milliseconds and can enumerate the cases a real build never would.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +30,22 @@ from oracle import harness
 @pytest.fixture
 def work_dir(tmp_path: Path) -> Path:
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def binary(monkeypatch, tmp_path: Path) -> Path:
+    """A stand-in for the `tessera` binary, with the session's digest fixed to its contents, and a
+    fixture root under `tmp_path`: nothing here builds the binary or touches `/tmp`."""
+    fake = tmp_path / "bin" / "tessera"
+    fake.parent.mkdir()
+    fake.write_bytes(b"one tessera binary")
+    digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+    monkeypatch.setattr(harness, "CLI_BIN", fake)
+    monkeypatch.setattr(harness, "builder_identity", lambda: digest)
+    root = tmp_path / "fixtures"
+    root.mkdir()
+    monkeypatch.setattr(harness, "FIXTURE_ROOT", root)
+    return fake
 
 
 def _stamped(bundle_root: Path, recipe: dict) -> None:
@@ -49,7 +68,6 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("ONE_TILE_DEPTH", 5),
         ("EXTENT", (0.0, 1024.0, 0.0, 1024.0)),
         ("VIEW_ID", "s9"),
-        ("CATALOGUE_ID_KEY_HEX", "0102030405060708090a0b0c0d0e0f10"),
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
         ("POINTS_NAME", "other.parquet"),
@@ -70,8 +88,7 @@ def test_every_input_the_catalogue_is_a_function_of_changes_its_recipe(
     Each of these silently changes what a rebuild would produce. The two that motivated the whole
     receipt are `SEED` and `ONE_TILE_TX`: change either, and `verify()` still passes — it re-derives
     geometry from the *bundle* — while every planted `fx_key` and every geometric claim in the
-    suite is computed from the *new* corpus. `CATALOGUE_ID_KEY_HEX` is the one with the widest
-    blast radius, because `tessera_id` is §7.2's entire served order.
+    suite is computed from the *new* corpus.
     """
     bundle_root = work_dir / "bundle"
     before = cat.recipe(work_dir, bundle_root)
@@ -141,6 +158,78 @@ def test_a_bundle_a_server_has_published_into_is_not_reused(work_dir: Path):
     )
 
 
+def test_a_bundle_built_by_another_binary_is_rebuilt_in_its_own_directory(
+    monkeypatch, work_dir: Path
+):
+    """A receipt records the binary that built the bundle, so another binary rebuilds it, and the
+    other binary's fixtures live in another directory, so that rebuild replaces nothing the first
+    binary's sessions are reading."""
+    bundle_root = work_dir / "bundle"
+    wanted = cat.recipe(work_dir, bundle_root)
+    _stamped(bundle_root, wanted)
+    ours = harness.fixture_dir("catalogue")
+    assert cat._is_usable_bundle(bundle_root, wanted)
+
+    monkeypatch.setattr(harness, "builder_identity", lambda: "0" * 64)
+
+    assert not cat._is_usable_bundle(bundle_root, wanted), (
+        "a bundle built by another binary was reused"
+    )
+    assert harness.fixture_dir("catalogue") != ours, (
+        "two binaries share a fixture directory, so each rebuilds the bundle the other is reading"
+    )
+
+
+def test_a_binary_rebuilt_during_the_build_leaves_no_receipt(binary: Path, work_dir: Path):
+    """Cargo rebuilds the binary when a commit or a saved edit lands during a session, after the
+    session read its digest. The bundle the new binary builds must not be stamped as the old
+    binary's, or a session still on the old binary would reuse it."""
+    bundle_root = work_dir / "bundle"
+    wanted = cat.recipe(work_dir, bundle_root)
+    binary.write_bytes(b"the tessera binary cargo rebuilt")
+
+    _stamped(bundle_root, wanted)
+
+    assert not cat._is_usable_bundle(bundle_root, wanted), (
+        "a bundle built by a rebuilt binary was stamped with the digest read before the rebuild"
+    )
+
+
+def test_a_fixture_directory_prunes_only_its_own_idle_directories(monkeypatch):
+    """Each binary leaves a directory per fixture, so a fixture deletes its directories for other
+    binaries once they have gone unused for 7 days. Nothing else under the root is deleted: not a
+    recent directory, not another fixture's, not a name of any other form (the fixed-path fixtures
+    other checkouts still use among them), and not one a session has used within the week."""
+    root = harness.FIXTURE_ROOT
+    eight_days_ago = time.time() - 8 * 24 * 3600
+
+    def made(name: str, *, idle: bool) -> Path:
+        path = root / name
+        (path / "bundle").mkdir(parents=True)
+        if idle:
+            os.utime(path, (eight_days_ago, eight_days_ago))
+        return path
+
+    ours = made(f"tessera-catalogue-{harness.builder_identity()[:12]}", idle=True)
+    stale = made(f"tessera-catalogue-{'a' * 12}", idle=True)
+    kept = [
+        made(f"tessera-catalogue-{'b' * 12}", idle=False),
+        made(f"tessera-multiview-{'c' * 12}", idle=True),
+        made("tessera-catalogue", idle=True),
+        made(f"tessera-catalogue-{'d' * 12}-copy", idle=True),
+        made(f"tessera-catalogue-{'E' * 12}", idle=True),
+    ]
+
+    assert harness.fixture_dir("catalogue") == ours
+    assert not stale.exists(), "an idle directory of another binary was kept"
+    for path in kept:
+        assert path.exists(), f"{path.name} was deleted"
+
+    monkeypatch.setattr(harness, "builder_identity", lambda: "f" * 64)
+    harness.fixture_dir("catalogue")
+    assert ours.exists(), "a directory used this session was deleted as idle"
+
+
 def test_the_receipt_lives_beside_the_bundle_and_not_inside_it(work_dir: Path):
     """The bundle is a `tessera build` output and the suite audits it byte by byte; a
     fixture-management file inside it would be the suite planting something in its own evidence."""
@@ -197,11 +286,6 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
     """`ensure_fixture_bundle`'s inputs are all `tessera build` arguments, so the argv is the
     recipe — with `--out` and the binary path dropped, since neither is a property of the fixture
     and both differ per worktree.
-
-    The two flags in it are the two that broke this before: `--mint-id-key` (r6 refuses to build
-    without a lineage decision) and `--mint-external-ids` (every `/control/changes` test needs one
-    to address an item *by*). Under the old predicate, a bundle built before either flag existed
-    was reused and the failure surfaced as a `KeyError` deep inside the oracle.
     """
     def recipe_for(*, limit: int | None, extent: str = "0,65536,0,65536") -> dict:
         return harness.fixture_recipe(
@@ -227,8 +311,6 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
         "points=p.parquet",
         "pairs=q.parquet",
         "250000",
-        "--mint-id-key",
-        "--mint-external-ids",
     ):
         assert expected in recipe, f"{expected} is not in the recipe, so a change to it is silent"
 

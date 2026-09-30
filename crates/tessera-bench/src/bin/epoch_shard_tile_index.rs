@@ -49,7 +49,7 @@ use serde::Serialize;
 use tessera_engine::artifacts::MembershipRows;
 use tessera_engine::row_column::RowColumn;
 use tessera_engine::tile_index::{Extent, TileIndex};
-use tessera_lifecycle::membership::{decode_record, ArtifactRecord, Members};
+use tessera_lifecycle::membership::{decode_record, ArtifactRecord, ArtifactStore, Members};
 use tessera_store::derived::tile_index_shifts;
 use tessera_store::manifest::SegmentsManifest;
 use tessera_store::membership::{row_column_width, MembershipPack};
@@ -196,8 +196,10 @@ fn open_fixture(args: &Args) -> Fixture {
             "row-entity.u32 covers the segment"
         );
         bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect::<Vec<u32>>()
     };
     let morton = MortonSlice::load(
@@ -433,7 +435,7 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
         let entities = sharding.entities_of(shard, fixture.bound);
         memberships = 0;
         for (ordinal, record) in &fixture.records {
-            let mut members = record.members.and(&entities);
+            let mut members = record.members.projected(|part| part.and(&entities));
             members.run_optimize();
             memberships += members.cardinality();
             restricted.push((
@@ -442,10 +444,12 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
                     entity: record.entity,
                     key: None,
                     view: None,
+                    incarnation: 0,
                     members: Members::owned(members),
                     contents: Vec::new(),
                     attached_to: None,
                     parents: Vec::new(),
+                    access: Vec::new(),
                 },
             ));
         }
@@ -461,10 +465,13 @@ fn build_shard(fixture: &Fixture, sharding: &Sharding, shard: u32, scratch: &Pat
 
 fn project_index(fixture: &Fixture, shard: &ShardBuild) -> TileIndex {
     let records = shard.records(fixture);
+    // No bench record is an attachment, so the store consulted for a borrowed membership
+    // (decision 0145) is never read; an empty one states that.
     TileIndex::project(
         fixture.ordinals,
         || records.iter().map(|(o, r)| (*o, r)),
         &shard.space,
+        &ArtifactStore::new(),
     )
 }
 
@@ -946,12 +953,12 @@ fn check_whole(args: &Args, fixture: &Fixture, shard: &ShardBuild, index: &TileI
         .iter()
         .find(|v| v.layer == args.layer && v.level == args.level)
         .map(|v| v.version);
-    if let Some(extent) = fixture
-        .manifest
-        .tile_index_extents
-        .iter()
-        .find(|e| e.layer == args.layer && e.level == args.level && e.view == fixture.view)
-    {
+    if let Some(extent) = fixture.manifest.derived_extents.iter().find(|e| {
+        e.form == tessera_store::manifest::DerivedForm::TileIndex
+            && e.layer == args.layer
+            && e.level == args.level
+            && e.view.as_deref() == Some(fixture.view.as_str())
+    }) {
         let written = TileIndex::open(&fixture.prefix_dir.join(&extent.path))
             .expect("fold-written index opens");
         let bytes_identical = written.as_bytes() == index.as_bytes();

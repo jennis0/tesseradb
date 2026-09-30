@@ -19,7 +19,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -105,37 +105,11 @@ fn write_points(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path, n: u64) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..n {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn build_text_fixture(out: &Path, tmp: &Path) {
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
     write_points(&points, N);
-    write_pairs(&pairs, N);
+    write_pairs_n(&pairs, N);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
     let schema = Config::parse(&schema_path, &HashMap::new())
@@ -155,22 +129,20 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("a bundle with an indexed text column builds");
 }
@@ -196,7 +168,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
     for i in 0..FLUSHED {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
-            external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -208,7 +179,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         };
         out.push(
             engine
-                .accept_ingest(vec![row], external, [0u8; 32])
+                .ingest_rows(vec![row], external, [0u8; 32])
                 .expect("an ingest carrying prose is accepted")[0],
         );
     }
@@ -224,34 +195,6 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
 }
 
 fn partition_dir(root: &Path) -> PathBuf {
@@ -550,7 +493,6 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
     let second = {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
-            external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -561,7 +503,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
             scoped: Vec::new(),
         };
         let id = engine
-            .accept_ingest(vec![row], external, [0u8; 32])
+            .ingest_rows(vec![row], external, [0u8; 32])
             .expect("the flight ingest is accepted")[0];
         engine.request_flush();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -623,7 +565,6 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
 
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
-            external_id: Some(name.as_bytes().to_vec()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -634,7 +575,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], name.to_string(), [0u8; 32])
+            .ingest_rows(vec![row], name.to_string(), [0u8; 32])
             .expect("the ingest is accepted")[0]
     };
 

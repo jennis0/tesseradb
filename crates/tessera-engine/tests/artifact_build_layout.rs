@@ -37,7 +37,6 @@ use tessera_build::BuildArgs;
 use tessera_engine::{LayerSelection, ViewportRequest};
 use tessera_types::layer::ServingLayout;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const SPREAD: &str = "clusters/spread";
 const CLUMPED: &str = "clusters/clumped";
 const N: u64 = 12_000;
@@ -52,6 +51,12 @@ spread          = "spread.parquet"
 spread_members  = "spread_members.parquet"
 clumped         = "clumped.parquet"
 clumped_members = "clumped_members.parquet"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"
@@ -70,6 +75,7 @@ hierarchy = { kind = "flat" }
 
   [layer.members]
   source = "spread_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "clusters/clumped"
@@ -83,6 +89,7 @@ hierarchy = { kind = "flat" }
 
   [layer.members]
   source = "clumped_members"
+  fields = { id = "entity" }
 "#;
 
 fn write(path: &Path, schema: Arc<Schema>, batch: RecordBatch) {
@@ -156,13 +163,6 @@ fn clumped_members() -> (Vec<String>, Vec<(String, u64)>) {
     (keys, rows)
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
 fn fixture() -> Fixture {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -196,22 +196,20 @@ fn fixture() -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema,
     };
     tessera_build::build(&args).expect("a build carrying two enumerated layers");
     Fixture {
@@ -283,32 +281,43 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
     let fx = fixture();
     let manifest = manifest(&fx);
 
+    let is_column = |e: &&tessera_store::manifest::DerivedExtent| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. });
+    let is_index = |e: &&tessera_store::manifest::DerivedExtent| e.form == tessera_store::manifest::DerivedForm::TileIndex;
     let columns: Vec<_> = manifest
-        .row_column_extents
+        .derived_extents
         .iter()
+        .filter(is_column)
         .filter(|e| e.layer == SPREAD)
         .collect();
     assert_eq!(columns.len(), 1, "one column per (view, layer, level)");
-    assert_eq!(columns[0].view, "s0");
-    assert_eq!(columns[0].layout, ServingLayout::RowMajorLabel);
+    assert_eq!(columns[0].view.as_deref(), Some("s0"));
+    assert_eq!(
+        columns[0].form,
+        tessera_store::manifest::DerivedForm::RowColumn {
+            layout: ServingLayout::RowMajorLabel
+        }
+    );
     assert!(
         manifest
-            .row_column_extents
+            .derived_extents
             .iter()
+            .filter(is_column)
             .all(|e| e.layer != CLUMPED),
         "an artifact-major level has no column"
     );
 
     let indexes: Vec<_> = manifest
-        .tile_index_extents
+        .derived_extents
         .iter()
+        .filter(is_index)
         .filter(|e| e.layer == CLUMPED)
         .collect();
     assert_eq!(indexes.len(), 1, "one index per (view, layer, level)");
     assert!(
         manifest
-            .tile_index_extents
+            .derived_extents
             .iter()
+            .filter(is_index)
             .all(|e| e.layer != SPREAD),
         "a row-major level has nothing to index — its candidacy is a scan of the viewport"
     );
@@ -319,13 +328,7 @@ fn the_manifest_names_a_column_for_one_level_and_an_index_for_the_other() {
     let generation = engine.generation();
     let prefix_dir = fx.root.join(generation.prefix.as_str());
     let digests = &generation.bundle.manifest.files;
-    for path in manifest
-        .row_column_extents
-        .iter()
-        .map(|e| &e.path)
-        .chain(manifest.tile_index_extents.iter().map(|e| &e.path))
-        .chain(manifest.containment_extents.iter().map(|e| &e.path))
-    {
+    for path in manifest.derived_extents.iter().map(|e| &e.path) {
         assert!(
             prefix_dir.join(path).exists(),
             "{path} is named by the manifest and is not in the prefix"

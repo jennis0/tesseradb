@@ -1,62 +1,102 @@
 /**
- * Numbers typed by what they are (design client-components §4).
+ * Numbers typed by what they are. A masked map shows two kinds of figure, and a panel that confuses
+ * them presents a sample as a set: "12,040 of 12,040" against a cluster is false. The formatters
+ * render each kind correctly, so a customer drawing their own panel can rely on the type.
+ */
+
+/**
+ * A sample of a set: how many marks were drawn out of how many items the set holds. The store
+ * publishes one as `view.served`, `marks.count` and a region's `served`. Show `shown` and `total`
+ * together or not at all, since a sample shown alone reads as the whole set.
  *
- * A masked map shows two kinds of figure, and a panel that confuses them presents a sample as a
- * set — "12,040 of 12,040" against a cluster is false, not secret. The types make the confusion
- * unnatural to write, and the two formatters render each correctly so a customer drawing their own
- * panel gets the right figure by taking the type's word for it.
+ * @category Counts
  */
-
-/**
- * A **served sample** of a set: `served` for the view, the draw list, the marks inside a region.
- * `shown` is how many of the set were drawn; `total` is the set they sample. Both figures are
- * shown, or neither — a sample presented alone reads as the set.
- */
-export type Count = {shown: number; total: number; exact: boolean};
-
-/**
- * A **number-channel scalar** with no sample behind it: `visible`, `matched`, an artifact's masked
- * count, a region's counts. One figure, or none. `exact` is false where the figure is exact for a
- * cover the user cannot see — a region counted at a cell coarser than a pixel (§5.11).
- */
-export type Masked = {value: number; exact: boolean};
-
-export type FormatOptions = {
+export type Count = {
+  /** How many marks were drawn. */
+  shown: number;
+  /** How many items the sampled set holds, counted over the viewer's visible set. */
+  total: number;
   /**
-   * Whether the view the figure belongs to is stale — the content key moved under it. Nothing
-   * renders against a stale view: a stale number beside a refresh control is the honest state,
-   * and the acceptance harness (§9) checks that no count renders while `status.stale` is set.
+   * Whether the pair is exact. `false` before anything is served and while a region waits for its
+   * numbers; {@link formatCount} then renders nothing.
    */
-  stale?: boolean;
-  locale?: string;
+  exact: boolean;
 };
 
-const fmt = (n: number, locale: string) => n.toLocaleString(locale);
+/**
+ * A count with no sample behind it, over the viewer's visible set: `visible`, `matched` and
+ * `highlighted` in the `view` projection, a region's counts, or an artifact's masked count.
+ *
+ * @category Counts
+ */
+export type Masked = {
+  /** The count. */
+  value: number;
+  /**
+   * Whether `value` is exact. A region's count is inexact where the server answered for a cover of
+   * the shape at some depth, which is a superset of the shape. {@link formatMasked} prefixes an
+   * inexact figure with `≈`.
+   */
+  exact: boolean;
+};
 
-/** The zero count — what a view holds before anything is served. */
+/**
+ * Options for {@link formatCount} and {@link formatMasked}.
+ *
+ * @category Counts
+ */
+export type FormatOptions = {
+  /**
+   * Whether the figure's view is stale (`status.stale` in the store). A stale figure renders as the
+   * empty string. Defaults to `false`.
+   */
+  stale?: boolean;
+  /** The locale for thousands separators, as `Number.prototype.toLocaleString` takes it. Defaults to `en-GB`. */
+  locale?: string;
+  /**
+   * Whether figures of a thousand or more are shortened to one decimal, as `16.8M` for 16,822,190,
+   * where there is no room for every digit. Defaults to `false`.
+   */
+  compact?: boolean;
+};
+
+/** ICU writes British English's compact suffixes in lower case (`16.8m`); the figures use capitals. */
+const fmt = (n: number, opts: FormatOptions) =>
+  opts.compact
+    ? n.toLocaleString(opts.locale ?? 'en-GB', {notation: 'compact', maximumFractionDigits: 1}).replace(/(\d)([kmbt])$/, (_, d: string, u: string) => d + u.toUpperCase())
+    : n.toLocaleString(opts.locale ?? 'en-GB');
+
+/**
+ * The count before anything is served: zero of zero, not exact.
+ *
+ * @category Counts
+ */
 export const NO_COUNT: Count = {shown: 0, total: 0, exact: false};
+/**
+ * The masked count before anything is served: zero, not exact.
+ *
+ * @category Counts
+ */
 export const NO_MASKED: Masked = {value: 0, exact: false};
 
 /**
- * Both figures — `shown of total` — or the empty string.
+ * Formats a count as `<shown> of <total>`, such as `1,204 of 29,935`. Returns the empty string
+ * where the count is not exact or `opts.stale` is set.
  *
- * Nothing when the count is not exact (the drawn set is a superset of the served one, so the
- * figures would compare a superset to a set) and nothing against a stale view.
+ * @category Counts
  */
 export function formatCount(count: Count, opts: FormatOptions = {}): string {
   if (opts.stale || !count.exact) return '';
-  const locale = opts.locale ?? 'en-GB';
-  return `${fmt(count.shown, locale)} of ${fmt(count.total, locale)}`;
+  return `${fmt(count.shown, opts)} of ${fmt(count.total, opts)}`;
 }
 
 /**
- * One figure, or the empty string.
+ * Formats a masked count as one figure, such as `29,935`, prefixed `≈ ` where it is not exact.
+ * Returns the empty string where `opts.stale` is set.
  *
- * Nothing against a stale view. An inexact figure is still one figure, marked as approximate —
- * a region counted at a cell coarser than a pixel is exact for the cells and not for the shape.
+ * @category Counts
  */
 export function formatMasked(masked: Masked, opts: FormatOptions = {}): string {
   if (opts.stale) return '';
-  const locale = opts.locale ?? 'en-GB';
-  return masked.exact ? fmt(masked.value, locale) : `≈ ${fmt(masked.value, locale)}`;
+  return masked.exact ? fmt(masked.value, opts) : `≈ ${fmt(masked.value, opts)}`;
 }

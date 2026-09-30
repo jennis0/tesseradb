@@ -4,16 +4,16 @@
 //! An item's data does not live in one place. Records §3 gives every declared field exactly one of
 //! three homes — the hot column in row space (`render`), the family's entity-space structure
 //! (`index`), or the per-entity record blob (neither key set) — and beside those an item has a row
-//! in row space, a bit in the render presence bitmap decision 0064 added, a binding in the
-//! external-id sidecar, and the access-control postings that decide whether it is reachable at all.
+//! in row space, a bit in the render presence bitmap decision 0064 added, and the access-control
+//! postings that decide whether it is reachable at all.
 //! The compaction fold rewrites all of them.
 //!
 //! Each of those rewrites is covered where it lives, and **nothing asserted that they agree**.
 //! That is the gap this file closes: a home added to the corpus and forgotten by the fold leaves
 //! every existing case passing while a deleted item's bytes stay in the bundle. [`Home`] is the
-//! enumeration, in one place; its `files` is an exhaustive match, so a variant added there does not
-//! compile until it has been given a file set, and each variant has its own block of assertions
-//! below carrying its name.
+//! enumeration, shared with `edit_carries_every_home.rs`; `files` here is an exhaustive match, so a
+//! variant added there does not compile until it has been given a file set, and each variant this
+//! fixture exercises has its own block of assertions below carrying its name.
 //!
 //! **Rule S and Rule F are both here and must not be conflated** (write-path §5.4 — conflating
 //! them is fail-open and has been caught in review twice). A suppression retires nothing and
@@ -24,13 +24,14 @@
 //! nothing.
 
 mod common;
+mod homes;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, Int32Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -44,6 +45,8 @@ use tessera_lifecycle::wal::ChangeOp;
 use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 use tessera_types::{AttrLocalId, EntityId, TermId};
 
+use homes::Home;
+
 // ---------------------------------------------------------------------------------------------
 // The fixture — a schema that puts one item in every home at once
 // ---------------------------------------------------------------------------------------------
@@ -53,7 +56,7 @@ use tessera_types::{AttrLocalId, EntityId, TermId};
 const N: u64 = 64;
 
 /// The item deleted. It carries a value in every home: a band, a score, the keyword no other item
-/// carries, a blob row, an external id and both terms' postings.
+/// carries, a blob row and both terms' postings.
 const DELETED_SOURCE: u64 = 9;
 
 /// The item **suppressed**, and therefore the one every home assertion checks the survivors
@@ -61,10 +64,6 @@ const DELETED_SOURCE: u64 = 9;
 /// present in all nine homes after the fold — which is what stops "gone from every home" being
 /// satisfiable by a fold that simply emptied the artefacts.
 const SUPPRESSED_SOURCE: u64 = 11;
-
-/// The `idset` [`build_fixture_with_every_home`] mints under, which a `tessera_id`-addressed
-/// change must carry (contracts §3.1).
-const IDSET: u32 = 1;
 
 /// The schema is the point of the fixture: one column per home.
 ///
@@ -122,6 +121,14 @@ name     = "prose"
 type     = "text"
 index    = true
 analyser = "unicode"
+
+# The points file's `entity_id`, declared unique, which is how the test finds the item a source
+# row became.
+[[attribute]]
+name   = "id"
+type   = "u64"
+field  = "entity_id"
+unique = true
 "#;
 
 fn band_of(source: u64) -> &'static str {
@@ -259,22 +266,20 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: IDSET,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build carrying all three homes succeeds");
 }
@@ -293,29 +298,6 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-/// Request a fold and block until it has published, asserting it was not discarded — the counter
-/// is the deterministic wait, exactly as in `tests/fold.rs`.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Items a full-coverage principal is served across the whole extent.
 fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
     engine
@@ -328,16 +310,6 @@ fn visible(engine: &Engine, session: &tessera_engine::Session) -> u64 {
         .iter()
         .map(|tile| tile.visible)
         .sum()
-}
-
-/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one
-/// and a hard-coded `v00000` would read the *pre-fold* artefacts and pass without ever looking at
-/// the fold's output.
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
 }
 
 fn partition_dir(root: &Path) -> PathBuf {
@@ -365,61 +337,18 @@ fn segment_dirs(root: &Path) -> Vec<PathBuf> {
 // The homes
 // ---------------------------------------------------------------------------------------------
 
-/// **Every place one item's data lives.**
-///
-/// A home added to the corpus must be added *here* and given its own block of assertions in
-/// [`a_deletion_reaches_every_home`]. [`Home::files`] is an exhaustive match, so a variant added
-/// without a file set does not compile; the assertion blocks carry the variant's name so the other
-/// half is visible in review.
-///
-/// **A type rather than a comment**, because this set grows and every per-artefact case in the
-/// suite passes on a fold that forgot the newest member of it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Home {
-    /// The item's row in row space, and the two directions between it and the entity.
-    Row,
-    /// A `render` column's value, in the hot row (records §3).
-    RenderColumn,
-    /// Which rows of a render column mean anything (decision 0064).
-    RenderPresence,
-    /// An `index` column's entity-space value column, with the presence bitmap beside it.
-    ValueColumn,
-    /// A public category's membership postings, rebuilt at the fold from the folded column.
-    CategoryPostings,
-    /// A keyword column's dictionary, where a key whose only carrier was deleted must vanish.
-    KeywordDictionary,
-    /// A text column's token index — the dictionary and the postings over it, which the fold
-    /// rebuilds by merging every layer and subtracting the deleted set.
-    TextIndex,
-    /// The per-entity record blob: every field with neither key set (records §3).
-    RecordBlob,
-    /// The external-id binding, whose survival past a fold 409s a lawful re-ingest of the same key
-    /// (decision 0047).
-    ExternalIdSidecar,
-    /// The access-control postings that decide whether the item is reachable at all.
-    TermPostings,
-}
-
-impl Home {
-    const ALL: [Home; 10] = [
-        Home::Row,
-        Home::RenderColumn,
-        Home::RenderPresence,
-        Home::ValueColumn,
-        Home::CategoryPostings,
-        Home::KeywordDictionary,
-        Home::TextIndex,
-        Home::RecordBlob,
-        Home::ExternalIdSidecar,
-        Home::TermPostings,
-    ];
-
+/// The files each home's data is in.
+trait Files {
     /// The files this home's data is in, under the prefix `CURRENT` names **now**.
     ///
     /// Resolved on each call rather than cached, so the same function serves the pre-fold prefix
     /// and the folded one. The two homes that own a whole directory are listed by walking it, so
     /// an artefact added inside one is covered here without this match being touched; the rest are
     /// named by the readers' own path constants.
+    fn files(self, root: &Path) -> Vec<PathBuf>;
+}
+
+impl Files for Home {
     fn files(self, root: &Path) -> Vec<PathBuf> {
         let partition = partition_dir(root);
         let attrs = partition.join("attrs");
@@ -458,8 +387,17 @@ impl Home {
                 attrs.join("prose/postings.arrow"),
             ],
             Home::RecordBlob => files_under(&attrs.join("record")),
-            Home::ExternalIdSidecar => files_under(&partition.join("entities")),
             Home::TermPostings => vec![partition.join("terms/postings.arrow")],
+            // Homes this fixture does not have: the second test, over the fixture that has every
+            // home, reaches them. A suppression is not a file; it is asserted below, on the
+            // suppressed survivor.
+            Home::UniqueIndex
+            | Home::EditedItems
+            | Home::Membership
+            | Home::GeneratingSet
+            | Home::Suppression
+            | Home::ScopedValue
+            | Home::ScopedProse => Vec::new(),
         }
     }
 }
@@ -616,40 +554,6 @@ fn record_blob(root: &Path) -> tessera_filter::RecordBlob {
     .expect("the record blob opens")
 }
 
-/// `Home::ExternalIdSidecar`: source id → entity, decoded from **every** run the manifest names.
-///
-/// `common::source_to_new_map` reads only the first run. Asserting that a key is *gone* has to
-/// look at all of them or it asserts nothing.
-fn sidecar_bindings(root: &Path) -> BTreeMap<u64, u64> {
-    let bundle = open_bundle(root).expect("the bundle opens");
-    let prefix = root.join(current_prefix(root));
-    let mut map = BTreeMap::new();
-    for rel in &bundle.partitions["default"].manifest.external_id_runs {
-        let file = File::open(prefix.join(rel)).expect("an external-id run opens");
-        let reader = arrow::ipc::reader::FileReader::try_new(file, None).expect("the run reads");
-        for batch in reader {
-            let batch = batch.expect("a run batch reads");
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("the key column is binary");
-            let entity = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .expect("the entity column is u32");
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                    u64::from(entity.value(i)),
-                );
-            }
-        }
-    }
-    map
-}
-
 /// `Home::TermPostings`: whether the base term index still names `entity` under `term`.
 /// The term id `ALL_TERM`'s descriptor was interned at, read from the bundle's own dictionary.
 ///
@@ -682,8 +586,10 @@ fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
         None => false,
         Some(PostingRef::Roaring(view)) => view.contains(entity),
         Some(PostingRef::Array(bytes)) => bytes
-            .chunks_exact(4)
-            .any(|c| u32::from_le_bytes(c.try_into().unwrap()) == entity),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|c| u32::from_le_bytes(*c) == entity),
     };
     named
 }
@@ -700,7 +606,7 @@ fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
 ///
 /// **What this kills that the per-home cases do not:** a home the fold forgets. Every existing
 /// case tests one artefact, so a value column rewritten without its postings, a blob rewritten
-/// without the sidecar, or a render bitmap carried across the renumbering unchanged all leave the
+/// without its postings, or a render bitmap carried across the renumbering unchanged all leave the
 /// suite green while a deleted item's bytes stay in the bundle.
 #[test]
 fn a_deletion_reaches_every_home() {
@@ -715,23 +621,18 @@ fn a_deletion_reaches_every_home() {
     let deleted = EntityId::new(entity_of_source[&DELETED_SOURCE]);
     let survivor = EntityId::new(entity_of_source[&SUPPRESSED_SOURCE]);
 
-    // **Addressed the way a caller addresses a change.** The control plane takes exactly one of
-    // `external_id` or `tessera_id` (contracts §3.1) and resolves both to an `EntityId` before the
-    // deny lane sees anything, so the engine's change path takes only the entity — there is no
-    // delete-by-external-id route below this line to drive. What is checkable here is that the two
-    // resolutions name the same item, and the delete goes through the `tessera_id` one.
-    let by_external = engine
-        .resolve_external_id(&source_id_key(DELETED_SOURCE))
-        .expect("the sidecar reads")
-        .expect("the deleted item's external id resolves before the fold");
+    // **Addressed the way a caller addresses a change.** The control plane takes a `tessera_id` or
+    // a unique field and value and resolves either to an `EntityId` before the deny lane sees
+    // anything, so the engine's change path takes only the entity. What is checkable here is that
+    // the two resolutions name the same item, and the delete goes through the `tessera_id` one.
+    let by_value = item_of_id(&engine, DELETED_SOURCE)
+        .expect("the index reads")
+        .expect("the deleted item's `id` names it before the delete");
     let by_tessera = engine
-        .resolve_tessera_ids(
-            &[engine.tessera_id_of(deleted).expect("a wire identifier")],
-            IDSET,
-        )
-        .expect("the idset is the deployment's")[0]
+        .resolve_tessera_ids(&[engine.tessera_id_of(deleted).expect("a wire identifier")])
+        .unwrap()[0]
         .expect("the identifier names a live item");
-    assert_eq!(by_external, deleted, "the external-id route names the item");
+    assert_eq!(by_value, deleted, "the unique-field route names the item");
     assert_eq!(by_tessera, deleted, "and so does the tessera_id route");
 
     let baseline = {
@@ -796,11 +697,6 @@ fn a_deletion_reaches_every_home() {
             .expect("a served blob holds its has-row bitmap"),
         "Home::RecordBlob"
     );
-    assert_eq!(
-        sidecar_bindings(&root).get(&DELETED_SOURCE),
-        Some(&deleted.raw()),
-        "Home::ExternalIdSidecar"
-    );
     assert!(
         term_names(&root, all_term(&root), deleted),
         "Home::TermPostings"
@@ -836,13 +732,6 @@ fn a_deletion_reaches_every_home() {
         every_home_byte(&root),
         "an accepted change rewrote an artefact: Rule S touches nothing ever, and Rule F touches \
          nothing until the fold"
-    );
-    assert!(
-        engine
-            .resolve_external_id(&source_id_key(DELETED_SOURCE))
-            .expect("the sidecar reads")
-            .is_some(),
-        "and the binding is still there to resolve, which is what the fold has to remove"
     );
 
     // ---- Phase 3: the fold executes it, everywhere -------------------------------------------
@@ -1081,8 +970,8 @@ fn a_deletion_reaches_every_home() {
         let source = source_of_entity[&u64::from(entity)];
         assert_eq!(
             fields.len(),
-            2,
-            "Home::RecordBlob: source {source}'s row is not its two blob-resident fields"
+            3,
+            "Home::RecordBlob: source {source}'s row is not its three blob-resident fields"
         );
         assert_eq!(
             fields[0].value,
@@ -1096,6 +985,11 @@ fn a_deletion_reaches_every_home() {
             fields[1].value,
             tessera_filter::RecordValue::Utf8(prose_of(source)),
             "Home::RecordBlob: source {source}'s prose"
+        );
+        assert_eq!(
+            fields[2].value,
+            tessera_filter::RecordValue::U64(source),
+            "Home::RecordBlob: source {source}'s id"
         );
         walked += 1;
         Ok(())
@@ -1116,32 +1010,6 @@ fn a_deletion_reaches_every_home() {
     assert!(
         !blocks.windows(needle.len()).any(|w| w == needle),
         "Home::RecordBlob: the deleted prose is in the folded file verbatim"
-    );
-
-    // Home::ExternalIdSidecar — the key resolves to nothing, through the live engine and in the
-    // run the fold wrote. Leaving it standing 409s a lawful re-ingest of that key for ever
-    // (decision 0047: edit is delete plus re-ingest).
-    assert_eq!(
-        engine
-            .resolve_external_id(&source_id_key(DELETED_SOURCE))
-            .expect("the sidecar reads"),
-        None,
-        "Home::ExternalIdSidecar: the deleted item's key still resolves"
-    );
-    let bindings = sidecar_bindings(&root);
-    assert!(
-        !bindings.contains_key(&DELETED_SOURCE),
-        "Home::ExternalIdSidecar: the folded run still binds the deleted key"
-    );
-    assert_eq!(
-        bindings.get(&SUPPRESSED_SOURCE),
-        Some(&survivor.raw()),
-        "Home::ExternalIdSidecar: a suppressed item's binding folds through intact"
-    );
-    assert_eq!(
-        bindings.len() as u64,
-        N - 1,
-        "Home::ExternalIdSidecar: the fold dropped more than the executed key"
     );
 
     // Home::TermPostings — the access-control half. Both halves or neither: a row dropped with the
@@ -1170,4 +1038,344 @@ fn a_deletion_reaches_every_home() {
         N - 1,
         "the suppressed item folded through every home, so there is something to reveal"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// An edited item, deleted: every home again, over the fixture that has all of them
+// ---------------------------------------------------------------------------------------------
+
+/// Every directory under `dir`, `dir` among them.
+fn dirs_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![dir.to_path_buf()];
+    let mut at = 0;
+    while at < out.len() {
+        for entry in std::fs::read_dir(&out[at]).expect("a directory lists") {
+            let path = entry.expect("a directory entry reads").path();
+            if path.is_dir() {
+                out.push(path);
+            }
+        }
+        at += 1;
+    }
+    out
+}
+
+/// What the entity-space files of the current prefix hold for `entities`: the value columns and
+/// record blobs (the record itself and each scoped text family's prose) holding a value or a row
+/// for one of them, and every key of every dictionary.
+struct Stored {
+    values: Vec<PathBuf>,
+    rows: Vec<PathBuf>,
+    words: BTreeSet<String>,
+}
+
+fn stored(root: &Path, entities: &[EntityId]) -> Stored {
+    use tessera_filter::{Access, RecordBlob, SortedDict, ValueColumn};
+    let mut out = Stored {
+        values: Vec::new(),
+        rows: Vec::new(),
+        words: Default::default(),
+    };
+    for dir in dirs_under(&partition_dir(root).join("attrs")) {
+        let holds =
+            |present: &dyn Fn(u32) -> bool| entities.iter().any(|e| present(e.raw() as u32));
+        if dir.join(tessera_filter::VALUES_FILE).is_file() {
+            let column = ValueColumn::open_dir(&dir, Access::Read).expect("a value column opens");
+            let present = column.present();
+            if holds(&|e| present.contains(e)) {
+                out.values.push(dir.clone());
+            }
+        }
+        if dir.join(tessera_filter::RECORD_BLOCKS_FILE).is_file() {
+            let blob = RecordBlob::open_dir(&dir, Access::Read).expect("a record blob opens");
+            if holds(&|e| blob.has_row(e).expect("the has-row bitmap reads")) {
+                out.rows.push(dir.clone());
+            }
+        }
+        if dir.join(tessera_filter::DICT_FILE).is_file() {
+            SortedDict::open_dir(&dir, Access::Read)
+                .expect("a dictionary opens")
+                .walk(|_, key| {
+                    out.words.insert(key.to_string());
+                })
+                .expect("the dictionary walks");
+        }
+    }
+    out
+}
+
+/// **An edited item, deleted, is gone from every home at the fold**, the homes the fixture above
+/// lacks among them: its unique value, the edited-items map, its layer membership, the content
+/// generated from it, and the values and prose of every group key it held.
+///
+/// The item is edited and folded first, so its data sits in the base under its second entity and
+/// the edited-items map names it. After the deletion's fold nothing holds either entity, and the
+/// deny has retired, so a home the fold missed would serve the item again.
+#[test]
+fn a_deletion_of_an_edited_item_reaches_every_home() {
+    use homes::fixture as every;
+    use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
+    use tessera_engine::IngestRequest;
+    use tessera_lifecycle::wal::WalScalar;
+    use tessera_lifecycle::IngestRow;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = every::build_homes(tmp.path());
+    let mut engine = every::open(tmp.path(), &root);
+    every::publish(&engine, &root);
+    let first = EntityId::new(source_to_new_map(&root, "v00000")[&every::X]);
+    let tid = engine.tessera_id_of(first).unwrap();
+
+    let blank = |tessera_id| IngestRow {
+        tessera_id,
+        labels: None,
+        position: None,
+        scalars: vec![WalScalar::Null; every::DECLARED],
+        scoped: vec![WalScalar::Null; 2],
+        omitted: (0..every::DECLARED + 2).collect(),
+    };
+    let send = |engine: &Engine, batch: &str, row: IngestRow| {
+        let mut body_hash = [0u8; 32];
+        body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
+        engine
+            .ingest(IngestRequest {
+                batch_id: batch.to_string(),
+                body_hash,
+                view: Some("s0".to_string()),
+                rows: vec![row],
+                artifacts: Default::default(),
+                strict: false,
+                tessera_id_column: false,
+            })
+            .expect("the batch is accepted")
+    };
+    let mut edit = blank(Some(tid));
+    edit.scalars[every::SCORE_AT] = WalScalar::I32(555);
+    edit.omitted.retain(|at| *at != every::SCORE_AT);
+    assert_eq!(send(&engine, "edit", edit).edited, 1);
+    publish_buffered(&engine);
+    fold(&engine);
+    let moved = engine.resolve_tessera_ids(&[tid]).unwrap()[0].expect("the edited item resolves");
+    assert_ne!(moved, first, "the edit gave the item a new entity");
+    let entities = [first, moved];
+    let verified = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("the edited bundle verifies");
+    assert_eq!((verified.edited_pairs, verified.edited_rows), (1, 3));
+
+    // Words only the item carries: its tag, a word of its prose, and one of its memo per key.
+    let tag = every::tag_of(every::X);
+    let prose_word = format!("p{}q", every::X);
+    let memo_words: Vec<String> = (0..every::QUARTERS.len())
+        .map(|slot| format!("m{slot}n{}x", every::X))
+        .collect();
+    let before = stored(&root, &entities);
+    let named = |dirs: &[PathBuf]| -> BTreeSet<String> {
+        let attrs = partition_dir(&root).join("attrs");
+        dirs.iter()
+            .map(|dir| dir.strip_prefix(&attrs).unwrap().display().to_string())
+            .collect()
+    };
+    assert_eq!(
+        named(&before.values),
+        BTreeSet::from(
+            [
+                "band",
+                "score",
+                "tag",
+                "ident",
+                "heat/quarter/q1",
+                "heat/quarter/q2"
+            ]
+            .map(String::from)
+        ),
+        "before the deletion, the edited item has a value in each indexed column"
+    );
+    assert_eq!(
+        named(&before.rows),
+        BTreeSet::from(
+            ["record", "memo/quarter/q1/prose", "memo/quarter/q2/prose"].map(String::from)
+        ),
+        "and a row in its record and in each key's prose"
+    );
+    assert!(
+        [&tag, &prose_word]
+            .into_iter()
+            .chain(&memo_words)
+            .all(|word| before.words.contains(word)),
+        "and its words in the dictionaries"
+    );
+
+    engine
+        .accept_change(moved, ChangeOp::Delete)
+        .expect("the deletion is accepted");
+    fold(&engine);
+    let report = engine.last_fold_report();
+    drop(engine);
+    engine = every::open(tmp.path(), &root);
+
+    let after = stored(&root, &entities);
+    let full = engine.authorise(&full_coverage_credential()).unwrap();
+    let served =
+        |view: &str, filter: Option<FilterExpr>| every::served(&engine, &full, view, filter);
+    let degraded = report
+        .iter()
+        .find(|d| d.key.as_deref() == Some("t0"))
+        .expect("the fold reports what it took from the artifact");
+    for home in Home::ALL {
+        match home {
+            Home::Row | Home::RenderColumn | Home::RenderPresence => {
+                for view in every::VIEWS {
+                    let points = served(view, None);
+                    assert!(
+                        !points.contains(&tid.raw()),
+                        "{home:?}: {view} serves the item"
+                    );
+                }
+                assert_eq!(served("s0", None).len() as u64, every::N - 1, "{home:?}");
+            }
+            Home::ValueColumn => assert!(
+                after.values.is_empty(),
+                "{home:?}: a value column still holds the item: {:?}",
+                named(&after.values)
+            ),
+            Home::CategoryPostings => {
+                for entity in entities {
+                    assert!(
+                        !band_carriers(&root, every::band_code(every::X))
+                            .contains(entity.raw() as u32),
+                        "{home:?}: the band postings name the item"
+                    );
+                }
+            }
+            Home::KeywordDictionary => {
+                assert!(
+                    !after.words.contains(&tag),
+                    "{home:?}: the item's tag survives"
+                )
+            }
+            Home::TextIndex => assert!(
+                !after.words.contains(&prose_word),
+                "{home:?}: the item's word survives"
+            ),
+            Home::RecordBlob => assert!(
+                !named(&after.rows).contains("record"),
+                "{home:?}: the record still holds the item"
+            ),
+            Home::TermPostings => {
+                for entity in entities {
+                    assert!(
+                        !term_names(&root, all_term(&root), entity),
+                        "{home:?}: a term still names the item"
+                    );
+                }
+            }
+            Home::UniqueIndex => {
+                let ident = |filter_for: u64| {
+                    Some(FilterExpr::Leaf {
+                        column: "ident".to_string(),
+                        operand: FilterOperand::NumIn(vec![Scalar::Int(i128::from(filter_for))]),
+                    })
+                };
+                assert!(
+                    served("s0", ident(every::ident_of(every::X))).is_empty(),
+                    "{home:?}"
+                );
+                let mut fresh = blank(None);
+                fresh.labels = Some(vec![ALL_TERM.to_string().into_bytes()]);
+                fresh.position = Some((500.0, 500.0));
+                fresh.scalars[every::IDENT_AT] = WalScalar::U64(every::ident_of(every::X));
+                fresh.omitted.retain(|at| *at != every::IDENT_AT);
+                let receipt = send(&engine, "fresh", fresh);
+                assert_eq!(
+                    receipt.created, 1,
+                    "{home:?}: the deleted item's unique value is free for a new item"
+                );
+            }
+            Home::EditedItems => {
+                assert_eq!(
+                    engine.resolve_tessera_ids(&[tid]).unwrap()[0],
+                    None,
+                    "{home:?}: the item's tessera_id still resolves"
+                );
+                let verified =
+                    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+                        .expect("the folded bundle verifies");
+                assert_eq!(
+                    (verified.edited_pairs, verified.edited_rows),
+                    (0, 0),
+                    "{home:?}: the map still names the item"
+                );
+            }
+            Home::Membership => {
+                assert_eq!(degraded.members_lost, 1, "{home:?}: the fold's report");
+                let members = engine.level_memberships_for_test(every::LAYER, 0);
+                let (_, members, _) = &members[0];
+                assert_eq!(members.len() as u64, every::N - 1, "{home:?}");
+                for entity in entities {
+                    assert!(
+                        !members.contains(&(entity.raw() as u32)),
+                        "{home:?}: the artifact still holds the item"
+                    );
+                }
+            }
+            // A content generated from a deleted item is withdrawn with it, and an artifact left
+            // with no content is served to nobody.
+            Home::GeneratingSet => {
+                assert_eq!(
+                    degraded.contents_lost,
+                    vec![(0, 1)],
+                    "{home:?}: the fold's report"
+                );
+                assert!(
+                    artifacts_of(&engine, &full_coverage_credential()).is_empty(),
+                    "{home:?}: the artifact is served with a content generated from a deleted item"
+                );
+            }
+            Home::Suppression => assert_eq!(
+                engine.overlay_depth(),
+                0,
+                "{home:?}: the deletion retired at its fold and no deny stands for the item"
+            ),
+            Home::ScopedValue => {
+                for (slot, (key, _)) in every::QUARTERS.iter().enumerate() {
+                    let heat = f64::from(every::heat(slot, every::X));
+                    let exactly = FilterOperand::Range {
+                        lo: Some(tessera_engine::filter::Endpoint {
+                            value: Scalar::Float(heat),
+                            inclusive: true,
+                        }),
+                        hi: Some(tessera_engine::filter::Endpoint {
+                            value: Scalar::Float(heat),
+                            inclusive: true,
+                        }),
+                    };
+                    let filter = Some(FilterExpr::Leaf {
+                        column: format!("heat@quarter:{key}"),
+                        operand: exactly,
+                    });
+                    assert!(
+                        served(&format!("quarter:{key}"), filter).is_empty(),
+                        "{home:?}"
+                    );
+                }
+                assert!(
+                    !named(&after.values)
+                        .iter()
+                        .any(|dir| dir.starts_with("heat/")),
+                    "{home:?}: a key's column still holds a value for the item"
+                );
+            }
+            Home::ScopedProse => {
+                assert!(
+                    !named(&after.rows)
+                        .iter()
+                        .any(|dir| dir.starts_with("memo/")),
+                    "{home:?}: a key's prose still holds the item"
+                );
+                for word in &memo_words {
+                    assert!(!after.words.contains(word), "{home:?}: '{word}' survives");
+                }
+            }
+        }
+    }
 }

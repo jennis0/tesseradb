@@ -1,16 +1,14 @@
-//! Visvalingam–Whyatt weights, computed once at canonicalisation and read at every serve
-//! (`polygon-membership.md` §7.2).
+//! Visvalingam–Whyatt weights, computed once at canonicalisation and read at every serve.
 //!
-//! Each vertex's **effective area** is the area of the triangle it makes with its two neighbours
-//! — what removing it would change the ring by. Removing the least-area vertex and recomputing
-//! its neighbours, repeatedly, is the classic simplification; recording the area at which each
-//! vertex *was* removed, made monotone along the removal order, is `topojson`'s *presimplify*:
-//! a ring filtered to the vertices whose recorded area is at least *t* is exactly the ring the
-//! classic algorithm would have stopped at when no remaining vertex had area below *t*.
+//! Each vertex's effective area is the area of the triangle it makes with its two neighbours,
+//! what removing it would change the ring by. Removing the least-area vertex and recomputing its
+//! neighbours, repeatedly, is the classic simplification; recording the area at which each vertex
+//! was removed, made monotone along the removal order, means a ring filtered to the vertices
+//! whose recorded area is at least *t* is exactly the ring the classic algorithm would have
+//! stopped at when no remaining vertex had area below *t*.
 //!
-//! The weight stored is the **side of the square** with that area, in grid units, so a request
-//! whose cell side is *s* keeps the vertices with `weight ≥ s`. It fits a `u32` where the area
-//! would not, and the comparison a serve makes is against a length anyway.
+//! The weight stored is the side of the square with that area, in grid units, so a request whose
+//! cell side is *s* keeps the vertices with `weight ≥ s`; it fits a `u32` where the area would not.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -51,10 +49,8 @@ pub(crate) fn weight_ring(points: &[(u32, u32)]) -> Vec<Vertex> {
         .collect();
     let mut alive = vec![true; n];
     let mut weight: Vec<u32> = vec![u32::MAX; n];
-    // Lazy heap: an entry is stale when its area no longer matches the vertex's. **Ties break
-    // on the vertex's own position, never its index**, so the weights are a function of the
-    // ring's vertex set and not of where the caller started it or which way round it ran —
-    // which is what lets two submissions of one ring store one byte sequence.
+    // Lazy heap: an entry is stale when its area no longer matches the vertex's. Ties break on
+    // the vertex's own position, never its index, so the weights depend only on the vertex set.
     let key = |i: usize| (area[i], points[i].1, points[i].0, i);
     let mut heap: BinaryHeap<Reverse<(u128, u32, u32, usize)>> =
         (0..n).map(|i| Reverse(key(i))).collect();
@@ -123,7 +119,7 @@ mod tests {
             .collect();
         let w = weight_ring(&ring);
         // Filtering at any threshold leaves at least three vertices and is a superset of
-        // filtering at a higher one — the property a serve depends on.
+        // filtering at a higher one, the property a serve depends on.
         let mut last = usize::MAX;
         for t in [0u32, 10, 100, 1000, 10_000, u32::MAX] {
             let kept = w.iter().filter(|v| v.weight >= t).count();

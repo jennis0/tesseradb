@@ -121,7 +121,7 @@ pub(crate) struct MaskedCountKey {
 /// **A value rather than five arguments**, on [`MaskedCountKey`]'s argument one call earlier: four
 /// of the five are `u64`, and a transposition among them would key one principal's counts under
 /// another's.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MaskIdentity {
     pub token_id: u64,
     pub segments_version: u64,

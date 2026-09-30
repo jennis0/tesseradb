@@ -26,7 +26,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::Engine;
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
@@ -35,7 +35,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "topics/a";
 
 /// A label layer whose content is served only to a viewer who can see every document it was
@@ -70,29 +69,6 @@ fn label_layer(name: &str) -> LayerDeclaration {
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         open_engine_publishing(&self.root, &self.cache, &self.wal)
@@ -111,17 +87,6 @@ impl Fixture {
 /// [`SUBSET_TERM`] to every third source id (`common::terms_of`).
 fn seen_by_subset(source_id: u64) -> bool {
     terms_of(source_id).contains(&SUBSET_TERM)
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
 }
 
 /// The content this principal is served for `t0`, or `None` where the artifact is withheld.

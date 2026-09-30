@@ -1,6 +1,9 @@
 import {
+  CLUSTER_PREFIX,
+  colourLayers,
   createStore,
   emptyDraft,
+  textQueryOf,
   type ColumnDraft,
   type FilterDraft,
   type FilterExpr,
@@ -8,49 +11,41 @@ import {
   type Store,
   type TokenSupplier
 } from '@tesseradb/client';
+import type {Sizing} from '@tesseradb/deck';
 import {idString} from './base.js';
+import {setSizing, sizingOf} from './colouring.js';
 import type {TesseraExplorer} from './explorer.js';
 import './explorer.js';
 
 /**
- * The notebook widget's JavaScript half (design client-components §7): what anywidget evaluates
- * as `_esm`, exported from the single-file bundle so the widget and a page with no build step
- * load one file. The kernel half is `clients/py/tesseradb/widget.py`; this module and that one are
- * the two ends of one protocol, and the protocol is the thing to read first.
+ * The notebook widget's JavaScript half: what anywidget evaluates as `_esm`, exported from the
+ * single-file bundle. The kernel half is `clients/py/tesseradb/widget.py`.
  *
- * **The token is never model state.** Nothing here calls `model.set` with a token, and no traitlet
- * carries one. `initialize` sends `ready` — once per model, so two views of one widget share a
- * token and two widgets do not — and the kernel answers with the token as a **custom message**,
- * which no route that serialises widget state can save: not the frontend's "save widget state",
- * not `nbconvert --execute`, not papermill, not a headless run where no frontend mounts. The
- * store's token supplier is the other half: its first call awaits the answer to `ready`, and every
- * later call (the store renews a beat before expiry, and again on a refusal that means the session
- * ended) sends `reauthorise` and awaits the next answer. A view rendered after a page reload is a
- * new model, so it sends `ready` again.
+ * The token is not model state: no traitlet carries it, so saving widget state, `nbconvert
+ * --execute` or papermill cannot write it into a notebook. `initialize` sends `ready` once per
+ * model and the kernel answers with the token as a custom message. Later calls to the token
+ * supplier (renewal before expiry, or after a refusal that ends the session) send `reauthorise`.
+ * A page reload makes a new model, which sends `ready` again.
  *
- * **What crosses the kernel boundary is control and selection, never data.** `url` comes down
- * (with `explorer_layout` and `height`, which are the cell's, not the store's); `view`, `bbox`,
- * `layers`, `colour_by` and `filters` go both ways; `selected`, `selected_artifact`
- * and `region` go up. Up-syncs happen **at the settle** — when the store's status reaches `shown`
- * for a new composition, and when a region's counts arrive — never per frame, so the kernel is
- * off the pan path (client-interaction §7). Ids cross as decimal strings: a `tessera_id` is a
- * `u64`, which is not a JS number, and a `BigInt` does not serialise.
+ * Only controls and selections cross the kernel boundary. `url`, `explorer_layout`, `height` and
+ * `title_field` come down; `view`, `bbox`, `layers`, `colour_by`, `size_by`, `size_min`,
+ * `size_max`, `size_scale` and `filters` go both ways;
+ * `selected`, `selected_artifact` and `region` go up. Up-syncs happen at the settle (a new
+ * composition shown, or a region's counts), not per frame. Ids cross as decimal strings, since a
+ * `tessera_id` is a `u64`.
  *
- * **The token is per model; the store and the camera are per view.** anywidget calls
- * `initialize` once per model and `render` once per view of it. A store has one view input, so
- * two explorers sharing one store would fight over the camera and one of them would draw the
- * other's frame; each view builds its own store over the shared supplier instead, and the
- * supplier hands a token it already holds back without a round trip, so a second view costs no
- * second `ready`. Up-syncs come from the **active** view — the one whose camera last moved — and
- * down-syncs go to every view; the store is disposed with its view.
+ * The token is per model; the store and camera are per view, since a store has one view input.
+ * Each view builds its own store over the shared supplier, which returns a held token without a
+ * round trip. Up-syncs come from the active view, the one whose camera last moved; down-syncs go
+ * to every view.
  *
- * **Echo guard.** Backbone fires `change:<key>` for a `model.set` made here as much as for one
- * made in the kernel, so every up-sync sets a flag the down-sync handlers read and ignore. Without
- * it a `bbox` set in Python would fit the camera, the settle would report the box actually shown
- * (the aspect differs), and that report would fit the camera again, for ever.
+ * Backbone fires `change:<key>` for a `model.set` made here as well as one from the kernel, so
+ * each up-sync sets a flag the down-sync handlers check. Without it a `bbox` from Python would fit
+ * the camera, the settle would report a box of a different aspect, and that would fit the camera
+ * again, without end.
  */
 
-/** The subset of anywidget's `AnyModel` this module uses — typed here so a test can fake it. */
+/** The part of anywidget's `AnyModel` this module uses, typed here so a test can fake it. */
 export type WidgetModel = {
   get(key: string): unknown;
   set(key: string, value: unknown): void;
@@ -72,7 +67,7 @@ type ViewState = {
   explorer: TesseraExplorer;
   store: Store | null;
   unsubscribe: (() => void) | null;
-  /** The box this view's camera last reported, in data coordinates — what its settle syncs up. */
+  /** The box this view's camera last reported, in data coordinates, which its settle syncs up. */
   lastBbox: [number, number, number, number] | null;
 };
 
@@ -97,13 +92,11 @@ export function stateOf(model: object): {stores: (Store | null)[]; views: number
 }
 
 /**
- * The token supplier over the comm, shared by every view of the model. A token it holds that is
- * not about to expire is handed back without a round trip — that is what makes a second view cost
- * no second `ready`. Otherwise one request is outstanding at a time: `ready` the first time, then
- * `reauthorise`, and the promise settles on the next `token` or `refused` message; a call while
- * one is outstanding shares its promise rather than asking the kernel twice. An `expires_at` of
- * `null` (a token handed in as a string, with no known expiry) is never renewed early; the server
- * refuses it when it expires and the store reports `expired`.
+ * The token supplier over the comm, shared by every view of the model. A held token not about to
+ * expire is returned without a round trip. Otherwise one request is outstanding at a time
+ * (`ready` first, then `reauthorise`), settled by the next `token` or `refused` message, and
+ * concurrent calls share it. A token with `expires_at: null` is not renewed early; when the
+ * server refuses it the store reports `expired`.
  */
 function tokenSupplier(model: WidgetModel, onMessage: (cb: (msg: KernelMessage) => void) => void): TokenSupplier {
   type Got = {token: string; expiresAt: number};
@@ -136,84 +129,84 @@ function tokenSupplier(model: WidgetModel, onMessage: (cb: (msg: KernelMessage) 
   };
 }
 
-// ---- filters: the wire's expression, as the store's draft --------------------------------------
+/** The one column every leaf under `expr` names, or `null` where they name several or none. */
+function columnOf(expr: FilterExpr): string | null {
+  const keys = Object.keys(expr);
+  if (keys.length !== 1) return null;
+  const key = keys[0]!;
+  if (key === 'none_of') return null;
+  if (key !== 'all_of' && key !== 'any_of') return key;
+  const inner = (expr as Record<string, FilterExpr[]>)[key]!;
+  const columns = new Set(inner.map(columnOf));
+  return columns.size === 1 && !columns.has(null) ? [...columns][0]! : null;
+}
 
 /**
- * The widget's `filters` traitlet carries the composed expression — the wire's form, which is
- * what a Python caller can write and read without learning the panel's draft — while the store
- * takes a draft, one control per filterable column. This inverts `composeFilters` over the shapes
- * a draft can express: a leaf per column, conjoined at the top. `any_of`, `none_of`, a nested
- * `all_of`, two leaves on one column, an unknown column and an operator the column's family
- * cannot hold are refused with a reason, and the refusal goes to the kernel as an `error` message
- * rather than silently filtering nothing. `null` is the unfiltered request.
+ * The store's draft for the `filters` traitlet's expression, which is in the wire's form, with every
+ * control in the `filter` position and none in `highlight`. This inverts `composeFilters`: the
+ * expression is an `all_of` over the columns, or one column's expression alone, and each column
+ * holds one leaf, except a text column, which may hold any expression on itself. A text column's
+ * expression becomes the query that writes it where there is one, and is otherwise kept as sent
+ * and sent back as it is. Anything else (`none_of`, an `any_of` across columns, two leaves on
+ * another column, an unknown column, an operator the column's family cannot hold) throws with a
+ * reason, which goes to the kernel as an `error` message. `null` is no filter.
  */
 export function draftOf(expr: FilterExpr | null, operands: FilterOperandSet[]): FilterDraft {
   const draft = emptyDraft(operands);
   if (expr === null) return draft;
-  const leaves: FilterExpr[] = 'all_of' in expr && Array.isArray(expr.all_of) ? (expr.all_of as FilterExpr[]) : [expr];
-  const seen = new Set<string>();
-  for (const leaf of leaves) {
-    const keys = Object.keys(leaf);
-    if (keys.length !== 1) throw new Error(`a filter leaf names exactly one column; got ${JSON.stringify(leaf)}`);
-    const column = keys[0]!;
-    if (column === 'all_of' || column === 'any_of' || column === 'none_of') {
-      throw new Error(`only a conjunction of column leaves can be set from the widget; got ${column}`);
-    }
-    if (seen.has(column)) throw new Error(`two leaves on ${column}; the widget holds one per column`);
-    seen.add(column);
-    const control = draft[column];
+  const top: FilterExpr[] = columnOf(expr) === null && 'all_of' in expr && Array.isArray(expr.all_of) ? (expr.all_of as FilterExpr[]) : [expr];
+  const byColumn = new Map<string, FilterExpr[]>();
+  for (const part of top) {
+    const column = columnOf(part);
+    if (column === null) throw new Error(`each part of a filter set from the widget names one column; got ${JSON.stringify(part)}`);
+    byColumn.set(column, [...(byColumn.get(column) ?? []), part]);
+  }
+  for (const [column, parts] of byColumn) {
+    const control = draft.filter[column];
     if (!control) throw new Error(`${column} is not a filterable column of this view`);
-    draft[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
+    if (control.family === 'text') {
+      const held = parts.length === 1 ? parts[0]! : {all_of: parts};
+      const query = textQueryOf(column, held, control.phrase);
+      draft.filter[column] = query === null ? {...control, expr: held} : {...control, query};
+      continue;
+    }
+    if (parts.length !== 1) throw new Error(`two leaves on ${column}; the widget holds one per column`);
+    const leaf = parts[0]!;
+    if (Object.keys(leaf)[0] !== column) throw new Error(`${column}: only a text column holds a combination of leaves`);
+    draft.filter[column] = controlOf(column, control, (leaf as Record<string, unknown>)[column] as Record<string, unknown>);
   }
   return draft;
 }
 
-/**
- * One leaf back into a control. **The control's own `verb` is kept** — the widget sets the
- * `filters` expression, and a column already in the highlight position is not moved by it being
- * named; the notebook moves a clause by setting the draft, as the panel does.
- */
-function controlOf(column: string, control: ColumnDraft, op: Record<string, unknown>): ColumnDraft {
-  const {verb} = control;
+/** One leaf back into a control of the family `control` has, for a family other than text. */
+function controlOf(column: string, control: Exclude<ColumnDraft, {family: 'text'}>, op: Record<string, unknown>): ColumnDraft {
   const names = Object.keys(op);
   if (names.length !== 1) throw new Error(`${column}: an operator has exactly one key; got ${names.join(', ')}`);
   const name = names[0]!;
   const value = op[name];
   const bad = () => new Error(`${column}: a ${control.family} column cannot hold ${name}`);
   switch (control.family) {
-    case 'text': {
-      if (name === 'phrase' && typeof value === 'string') return {family: 'text', query: value, mode: 'phrase', verb};
-      if (name === 'match' && typeof value === 'string') return {family: 'text', query: value, mode: 'all', verb};
-      if (name === 'match' && value && typeof value === 'object') {
-        const m = value as {query: string; minimum_should_match?: number};
-        return {family: 'text', query: m.query, mode: m.minimum_should_match === 1 ? 'any' : 'all', verb};
-      }
-      throw bad();
-    }
-    case 'string':
     case 'keyword': {
       if ((name === 'eq' || name === 'prefix' || name === 'contains') && typeof value === 'string') {
-        return {family: control.family, needle: value, op: name, verb};
+        return {family: control.family, needle: value, op: name};
       }
       throw bad();
     }
     case 'category': {
-      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String), verb};
-      if (name === 'eq') return {family: 'category', keys: [String(value)], verb};
+      if (name === 'in' && Array.isArray(value)) return {family: 'category', keys: value.map(String)};
+      if (name === 'eq') return {family: 'category', keys: [String(value)]};
       throw bad();
     }
     case 'numeric': {
       if (name === 'range' && value && typeof value === 'object') {
         const r = value as {gte?: number; lte?: number; gt?: number; lt?: number};
         if (r.gt !== undefined || r.lt !== undefined) throw new Error(`${column}: the widget's range is inclusive (gte, lte)`);
-        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null, verb};
+        return {family: 'numeric', gte: r.gte ?? null, lte: r.lte ?? null};
       }
       throw bad();
     }
   }
 }
-
-// ---- the anywidget entry ------------------------------------------------------------------------
 
 function sameBbox(a: number[] | null, b: number[] | null): boolean {
   if (a === b) return true;
@@ -221,7 +214,7 @@ function sameBbox(a: number[] | null, b: number[] | null): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
-/** How a store is built — `createStore` unless a test injects one with no network. */
+/** How a store is built: `createStore`, unless a test injects one. */
 export type StoreFactory = (options: {viewerUrl: string; authorise: TokenSupplier; view?: string}) => Store;
 
 function buildStore(model: WidgetModel, state: ModelState): Store | null {
@@ -264,7 +257,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     model.send({type: 'error', what, detail: e instanceof Error ? e.message : String(e)} satisfies PageMessage);
   };
 
-  // Up-sync, at the settle and at the region's answer — one `save_changes` per settle.
+  // Up-sync: one `save_changes` per settle or region answer.
   const syncUp = (patch: Record<string, unknown>) => {
     state.syncingUp = true;
     try {
@@ -286,10 +279,43 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     // expression when meta arrives.
     if (!meta) return;
     try {
-      store.setFilters(draftOf(expr, meta.filterOperands));
+      // The traitlet is the `filters` expression, so the highlight is kept.
+      store.setFilters({...draftOf(expr, meta.filterOperands), highlight: store.get('filters').draft.highlight});
     } catch (e) {
       report('filters', e);
     }
+  };
+
+  /**
+   * A `cluster:<layer>` naming no layer this view can colour by is reported, as a bad filter is;
+   * the store still takes it and draws the points uniform. Checked once `/v1/meta` is in hand.
+   */
+  const checkColour = (store: Store, colourBy: unknown) => {
+    const meta = store.get('meta');
+    if (!meta || typeof colourBy !== 'string' || !colourBy.startsWith(CLUSTER_PREFIX)) return;
+    const offered = colourLayers(meta.layers).map((l) => l.name);
+    const layer = colourBy.slice(CLUSTER_PREFIX.length);
+    if (offered.includes(layer)) return;
+    const instead = offered.length === 0 ? 'this view has no layer to colour by' : `use one of ${offered.map((n) => CLUSTER_PREFIX + n).join(', ')}`;
+    report('colour_by', new Error(`${layer} is not a layer this view can colour by; ${instead}`));
+  };
+
+  /** The size range and scale the kernel holds, shared with every element over `store`; `null` leaves the choice standing. */
+  const applySizing = (store: Store) => {
+    const patch: Partial<Sizing> = {};
+    const min = model.get('size_min');
+    const max = model.get('size_max');
+    const scale = model.get('size_scale');
+    if (typeof min === 'number') patch.min = min;
+    if (typeof max === 'number') patch.max = max;
+    if (typeof scale === 'string') patch.scale = scale as Sizing['scale'];
+    setSizing(store, patch);
+  };
+
+  /** The column the kernel sizes by, `null` for one size, with a sample kept under rank. */
+  const applySizeBy = (store: Store) => {
+    const sizeBy = model.get('size_by');
+    store.setSizeBy(typeof sizeBy === 'string' && sizeBy ? sizeBy : null, {rank: sizingOf(store).scale === 'rank'});
   };
 
   // Down-sync: what the kernel holds, applied to one store (a new one, or one whose meta arrived).
@@ -299,6 +325,9 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     if (Array.isArray(layers)) store.setLayers(layers.map(String));
     const colourBy = model.get('colour_by');
     if (typeof colourBy === 'string' && colourBy) store.setColourBy(colourBy);
+    applySizing(store);
+    const sizeBy = model.get('size_by');
+    if (typeof sizeBy === 'string' && sizeBy) applySizeBy(store);
     const filters = model.get('filters');
     if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
   };
@@ -320,24 +349,27 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
         metaSeen = true;
         const filters = model.get('filters');
         if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
+        checkColour(store, model.get('colour_by'));
         if (state.pendingFit) fit(state.pendingFit);
       }
       if (state.active !== v) return;
       const status = store.get('status');
       const view = store.get('view');
       const patch: Record<string, unknown> = {};
-      // The settle: a new composition presented as `shown` (or `empty` — a masked-out view is a
-      // settled one). The control traits are read from the store, so what the kernel holds is what
-      // the store applied, whichever side set it.
+      // The settle: a new composition presented as `shown` or `empty`. The control traits are read
+      // from the store, so the kernel holds what the store applied, whichever side set it.
       const settled = (status.status === 'shown' || status.status === 'empty') && view.composition !== lastComposition;
       if (settled) {
         lastComposition = view.composition;
         patch.bbox = v.lastBbox;
-        // The view the map is actually showing, up-synced with the other controls at the settle
-        // (§6.6), so `m.view` reads what is on screen whichever side switched it.
         patch.view = view.id;
         patch.layers = store.get('artifacts').layers;
         patch.colour_by = store.get('legend').colourBy;
+        const sizing = sizingOf(store);
+        patch.size_by = store.get('legend').sizeBy;
+        patch.size_min = sizing.min;
+        patch.size_max = sizing.max;
+        patch.size_scale = sizing.scale;
         patch.filters = store.get('filters').expr;
       }
       const region = store.get('region');
@@ -373,7 +405,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     v.explorer.store = null;
   };
 
-  /** Give a view a store — at mount, and again when `url` or `view` changes under it. */
+  /** Give a view a store, at mount and again when `url` changes. */
   const equip = (v: ViewState) => {
     teardown(v);
     v.store = buildStore(model, state);
@@ -388,14 +420,10 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     for (const v of state.views.values()) equip(v);
   };
   model.on('change:url', rebuildAll);
-  // **A view change is a pointer change, never a rebuild** (`view-switching.md` §3, §6.6): the
-  // store holds the machinery of several views at once, so a slider stepping through a group's
-  // roster costs one `setCurrentView` per step rather than a store torn down and reopened — which
-  // is correct and unusable under a slider. A `url` change is still a rebuild: a `tessera_id`
-  // minted by one bundle means nothing to another.
-  // As with `layers` and `colour_by`, the echo guard means a switch made **in one cell** reaches
-  // that cell's store alone: the up-sync writes the trait with the guard set, so the other mounted
-  // views are not steered by it. A switch written from the kernel still reaches every view.
+  // A view change calls `setCurrentView` on each store; a store holds several views, so stepping
+  // through a roster rebuilds nothing. A `url` change rebuilds, since a `tessera_id` from one
+  // bundle means nothing in another. A switch made in one view reaches only that view's store,
+  // through the echo guard; one written from the kernel reaches every view.
   model.on('change:view', () => {
     if (state.syncingUp) return;
     const view = model.get('view');
@@ -411,8 +439,22 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:colour_by', () => {
     if (state.syncingUp) return;
     const c = model.get('colour_by');
-    for (const v of state.views.values()) v.store?.setColourBy(typeof c === 'string' && c ? c : null);
+    for (const v of state.views.values()) {
+      if (!v.store) continue;
+      v.store.setColourBy(typeof c === 'string' && c ? c : null);
+      checkColour(v.store, c);
+    }
   });
+  model.on('change:size_by', () => {
+    if (state.syncingUp) return;
+    for (const v of state.views.values()) if (v.store) applySizeBy(v.store);
+  });
+  for (const key of ['size_min', 'size_max', 'size_scale']) {
+    model.on(`change:${key}`, () => {
+      if (state.syncingUp) return;
+      for (const v of state.views.values()) if (v.store) applySizing(v.store);
+    });
+  }
   model.on('change:filters', () => {
     if (state.syncingUp) return;
     const expr = (model.get('filters') as FilterExpr | null) ?? null;
@@ -427,9 +469,12 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   model.on('change:height', () => {
     for (const v of state.views.values()) v.explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
   });
+  model.on('change:title_field', () => {
+    for (const v of state.views.values()) v.explorer.titleField = titleFieldOf(model);
+  });
   model.on('destroy', () => state.dispose());
 
-  // What `render` calls, kept on the state so a test's fake model needs no second entry point.
+  // What `render` calls, kept on the state so a test can mount through it.
   mounts.set(state, (explorer) => {
     const v: ViewState = {explorer, store: null, unsubscribe: null, lastBbox: null};
     state.views.set(explorer, v);
@@ -444,18 +489,25 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
   return () => state.dispose();
 }
 
+/** The record field that titles a point, as the kernel set it; empty where it set none. */
+function titleFieldOf(model: WidgetModel): string {
+  const f = model.get('title_field');
+  return typeof f === 'string' ? f : '';
+}
+
 const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
   let state = states.get(model);
   if (!state) {
-    // An anywidget without `initialize` (older than 0.9): set up on first render instead.
+    // An anywidget without `initialize` (before 0.9): set up on first render.
     initialize({model});
     state = states.get(model)!;
   }
   const explorer = document.createElement('tessera-explorer') as TesseraExplorer;
   explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
   explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+  explorer.titleField = titleFieldOf(model);
   el.append(explorer);
   const unmount = mounts.get(state)!(explorer);
   const v = state.views.get(explorer)!;

@@ -56,7 +56,7 @@ const POLYGONS: &str = "regions/polygons";
 const DIAMOND: &str = "POLYGON ((500 100, 900 500, 500 900, 100 500, 500 100))";
 const FRAME: &str =
     "POLYGON ((50 50, 350 50, 350 350, 50 350, 50 50), (150 150, 250 150, 250 250, 150 250, 150 150))";
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
 /// A polygon smaller than one depth-16 cell, drawn around one generator point: the shape a
 /// neighbourhood-sized division is at a world extent, which has no interior tile and one
 /// boundary cell. Overture's part 0 has three whose one place the build found no row for
@@ -72,16 +72,6 @@ const VIEWPORT_ZOOM: u8 = 4;
 
 fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
-}
-
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 /// The depth-[`DEPTH`] tile one position lands in — **the generator's own quantisation**, which is
@@ -369,7 +359,7 @@ impl Fixture {
 /// narrows nothing. Every case below that is *about* the viewport therefore asks at a depth where
 /// the box means something.
 fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<String, u64> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -387,51 +377,16 @@ fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<St
         .collect()
 }
 
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Ingest one point at `(x, y)` visible to `term`.
-fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
+fn ingest_point(engine: &Engine, batch: &str, term: u32, x: f64, y: f64) {
     let descriptors = vec![term.to_string().into_bytes()];
     let mut hash = [0u8; 32];
-    for (slot, byte) in hash.iter_mut().zip(external_id.as_bytes()) {
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: descriptors.clone(),
@@ -441,7 +396,7 @@ fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
                 terms: engine.resolve_terms(&descriptors),
                 scoped: Vec::new(),
             }],
-            external_id.to_string(),
+            batch.to_string(),
             hash,
         )
         .expect("an ordinary point is an ordinary write");
@@ -535,7 +490,7 @@ fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
     ingest_point(&engine, "inside-1", 0, inside[0].0, inside[0].1);
     ingest_point(&engine, "inside-2", 0, inside[1].0, inside[1].1);
     ingest_point(&engine, "outside-1", 0, outside.0, outside.1);
-    flush(&engine);
+    publish_buffered(&engine);
 
     let after = served(&engine, "0", 0, WHOLE_MAP);
     let mut extra: Vec<(f64, f64)> = inside.to_vec();
@@ -575,7 +530,7 @@ fn a_fold_leaves_a_boundarys_answers_unchanged() {
 
     // Something to fold: a flushed extent above the base, so the fold has rows to renumber.
     ingest_point(&engine, "pre-fold", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
 
     let after = served(&engine, grant, 0, WHOLE_MAP);
@@ -644,7 +599,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 /// The entity behind a served artifact, found by asking the identifier route to resolve what the
 /// viewport handed out — the same address a suppression names.
 fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -657,10 +612,8 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
         .expect("the key is served");
     // Inverted through the admin plane's own resolver, the way `/control/changes` does — so the
     // suppression below exercises the misdirection guard rather than going round it.
-    let idset = engine.generation().bundle.manifest.identity.idset;
     engine
-        .resolve_tessera_ids(&[row.tessera_id], idset)
-        .unwrap()[0]
+        .resolve_tessera_ids(&[row.tessera_id]).unwrap()[0]
         .expect("an artifact identifier names the entity this deployment issued for it")
 }
 
@@ -734,7 +687,7 @@ fn a_boundarys_box_survives_a_restart() {
     // And again after a fold, which rewrites every extent whole — the path a restored box takes
     // through `repack_all` rather than through the publication that first wrote it.
     ingest_point(&engine, "pre-fold", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     drop(engine);
 
@@ -791,7 +744,7 @@ fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() 
     // A flush adds a segment nothing persisted covers: claimed 2, resolved 2, and the ingested
     // point counts.
     ingest_point(&engine, "flushed", 0, 3.0, 3.0);
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
     let engine = fx.open();
     let warm = engine.shape_warm_report();
@@ -869,11 +822,11 @@ fn merge(engine: &Engine, at: (f64, f64)) -> Vec<(f64, f64)> {
     engine.set_merge_for_test(false);
     for id in ["merge-a", "merge-b", "merge-c", "merge-d"] {
         ingest_point(engine, id, 0, at.0, at.1);
-        flush(engine);
+        publish_buffered(engine);
     }
     engine.set_merge_for_test(true);
     ingest_point(engine, "merge-e", 0, at.0, at.1);
-    flush(engine);
+    publish_buffered(engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == merges {
         assert!(
@@ -957,7 +910,7 @@ fn a_flush_and_a_merge_extend_a_boundarys_form_rather_than_rebuilding_it() {
 
     ingest_point(&engine, "flushed-inside", 0, centre.0, centre.1);
     ingest_point(&engine, "flushed-outside", 0, 700.0, 702.0);
-    flush(&engine);
+    publish_buffered(&engine);
     let mut extra = vec![centre, (700.0, 702.0)];
     let after_flush = served(&engine, grant, 0, WHOLE_MAP);
     assert_eq!(after_flush, fx.expected(grant, &[], &extra));
@@ -999,10 +952,10 @@ fn a_maintained_boundary_form_equals_one_resolved_from_scratch() {
     // Inside a box, inside the diamond's edge, outside everything: two points per segment.
     ingest_point(&engine, "d-1", 0, centre.0, centre.1);
     ingest_point(&engine, "d-2", 0, 700.0, 698.0);
-    flush(&engine);
+    publish_buffered(&engine);
     ingest_point(&engine, "d-3", 1, 700.0, 702.0);
     ingest_point(&engine, "d-4", 1, 200.0, 200.0);
-    flush(&engine);
+    publish_buffered(&engine);
     let mut extra = vec![centre, (700.0, 698.0), (700.0, 702.0), (200.0, 200.0)];
     extra.extend(merge(&engine, (500.0, 500.0)));
     assert_eq!(

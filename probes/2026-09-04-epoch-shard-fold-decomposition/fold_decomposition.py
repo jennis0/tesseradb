@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/home/joe/code/tessera/test_corpora")
+sys.path.insert(0, "/home/user/code/tessera/test_corpora")
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 import requests  # noqa: E402
@@ -36,7 +36,7 @@ from common import serve_battery  # noqa: E402
 from common.deployment import Deployment  # noqa: E402
 from common.ingest_cycle import Control, wait_for  # noqa: E402
 
-R = Path("/home/joe/code/tessera")
+R = Path("/home/user/code/tessera")
 RUNG = R / "data/ladder/medcpt"
 BUNDLE = Path(
     os.environ.get("TESSERA_BUNDLE", R / "data/ladder/.measure/medcpt36-foldprobe/bundle")

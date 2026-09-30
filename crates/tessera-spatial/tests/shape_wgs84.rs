@@ -1,25 +1,20 @@
-//! **A shape declared in longitude and latitude holds what its *curved* projected image holds**
-//! (`polygon-membership.md` §4.3 and R10, `projections.md` §10).
+//! A shape declared in longitude and latitude holds what its curved projected image holds.
 //!
 //! The space a polygon is declared in defines the plane its edges are straight in. An edge written
 //! in degrees is straight in the longitude/latitude plane, so its image in a Web Mercator frame is
-//! a curve — and the straight chord between the two projected endpoints is a *different boundary*,
-//! selecting different rows. On the United Kingdom's diagonal, from 8°W 50°N to 2°E 58°N, the two
-//! are 60 depth-16 cells apart at the midpoint (21.5 km on the ground), so the rows that
-//! discriminate exist and can be named.
+//! a curve, and the straight chord between the two projected endpoints is a different boundary,
+//! selecting different rows.
 //!
-//! **These tests would pass under either semantics if they compared a densified shape with itself.**
-//! What they compare is the shape this module produces against *the shape the chord reading
-//! produces* — the vertices projected and joined with straight lines, built here by hand — at
-//! positions that lie between the two boundaries. Under the chord reading the two shapes are equal
-//! and every one of these fails.
+//! These tests would pass under either semantics if they compared a densified shape with itself.
+//! What they compare is the shape this module produces against the shape the chord reading would
+//! produce, at positions between the two boundaries. Under the chord reading the two shapes are
+//! equal and every one of these fails.
 
 use tessera_spatial::morton::{fixed32, Bounds};
 use tessera_spatial::shape::{Shape, ShapeF64, Space, DENSIFY_TOLERANCE_CELLS};
 use tessera_spatial::Projection;
 
-/// The whole Web Mercator world: the frame the United Kingdom takes, straddling as it does both
-/// the prime meridian and no sub-square below it (`projections.md` §4.1).
+/// The whole Web Mercator world: the frame the United Kingdom takes, straddling the meridian.
 const WORLD: Bounds = Bounds {
     x_min: 0.0,
     x_max: 1.0,
@@ -29,11 +24,11 @@ const WORLD: Bounds = Bounds {
 
 const WM: Projection = Projection::WebMercator;
 
-/// The diagonal edge, in degrees. Its two readings are 21.5 km apart at the midpoint.
+/// The diagonal edge, in degrees.
 const A: (f64, f64) = (-8.0, 50.0);
 const B: (f64, f64) = (2.0, 58.0);
-/// The third vertex, north-west of the diagonal: the two edges that reach it are a meridian and a
-/// parallel, which are straight in both planes, so the diagonal is the only edge that can differ.
+/// The third vertex, reached by a meridian and a parallel, straight in both planes, so the
+/// diagonal is the only edge that can differ.
 const C: (f64, f64) = (-8.0, 58.0);
 
 /// A place on the Earth, as the grid position the view's own transform puts it at.
@@ -53,11 +48,11 @@ fn curved(extent: &Bounds) -> Shape {
         .0
 }
 
-/// The triangle as the reading the owner ruled against would produce: the three vertices put
-/// through the transform and joined with straight lines in the frame.
+/// The triangle as the rejected reading would produce: the three vertices projected and joined
+/// with straight lines.
 ///
-/// Built here rather than taken from the module, so that a module which joined with chords would
-/// produce a shape *equal* to this one and every assertion below would fail.
+/// Built here rather than taken from the module, so a module which joined with chords would
+/// fail every assertion below.
 fn chorded(extent: &Bounds) -> Shape {
     let ring: Vec<(f64, f64)> = [A, B, C]
         .iter()
@@ -69,13 +64,12 @@ fn chorded(extent: &Bounds) -> Shape {
         .0
 }
 
-/// **The test that proves the phase.** Two named places lie between the curved edge and its chord,
-/// and the two readings disagree about both.
+/// Two named places lie between the curved edge and its chord, and the two readings disagree
+/// about both.
 ///
-/// At 3°W the diagonal's own latitude is 54.000°; the chord between the projected endpoints
-/// crosses that meridian at 54.193°. Everything in between is inside the triangle under the
-/// declared semantics — the triangle lies north-west of the diagonal — and outside it under the
-/// chord reading, which has drawn its boundary 60 cells too far north.
+/// At 3°W the diagonal's own latitude is 54.000° while the chord crosses that meridian at
+/// 54.193°; everything between is inside under the declared semantics and outside under the
+/// chord reading.
 #[test]
 fn the_rows_between_the_curve_and_its_chord_belong_to_the_curve() {
     let curved = curved(&WORLD);
@@ -94,8 +88,7 @@ fn the_rows_between_the_curve_and_its_chord_belong_to_the_curve() {
         );
     }
 
-    // Well north of both boundaries, and well south of both: the two readings agree here, which is
-    // what makes the disagreement above about the boundary and not about the shape.
+    // Well north and well south of both boundaries: the two readings agree here.
     for (lon, lat) in [(-3.0, 55.5), (-6.0, 56.0), (0.0, 57.5)] {
         let p = place(lon, lat, &WORLD);
         assert!(curved.contains(p) && chorded.contains(p), "({lon}, {lat})");
@@ -108,22 +101,19 @@ fn the_rows_between_the_curve_and_its_chord_belong_to_the_curve() {
 
 /// The two shapes are not the same shape, and the difference is the band between the boundaries.
 ///
-/// Swept along the diagonal rather than at the four named places, so the count is a measurement
-/// rather than an anecdote: of 901 probes on a 0.01° grid between the two boundaries, every one
-/// belongs to the curve and none to the chord.
+/// Swept along the diagonal rather than at the four named places: of 901 probes on a 0.01° grid
+/// between the boundaries, every one belongs to the curve and none to the chord.
 #[test]
 fn the_band_between_the_two_readings_is_tens_of_cells_wide_the_whole_way() {
     let curved = curved(&WORLD);
     let chorded = chorded(&WORLD);
     let mut probes = 0;
     let mut widest_cells = 0.0f64;
-    // Every hundredth of a degree of longitude across the edge, away from the two ends where the
-    // readings meet and the band closes.
+    // Every hundredth of a degree across the edge, away from the ends where the band closes.
     for k in 0..=900 {
         let lon = -7.5 + f64::from(k) * 0.01;
         let t = (lon - A.0) / (B.0 - A.0);
         let edge_lat = A.1 + (B.1 - A.1) * t;
-        // Where the chord crosses this meridian, back in degrees.
         let (ax, ay) = WM.forward(A.0, A.1);
         let (bx, by) = WM.forward(B.0, B.1);
         let x = ax + (bx - ax) * t;
@@ -144,20 +134,14 @@ fn the_band_between_the_two_readings_is_tens_of_cells_wide_the_whole_way() {
     );
 }
 
-/// **The tolerance holds**: no point of the true projected image departs from the densified
-/// boundary by more than one depth-16 cell — measured on the *canonical* shape, which is what
-/// membership is tested against, and at 10,001 points per edge rather than the eight the
-/// subdivision test samples.
+/// No point of the true projected image departs from the densified boundary by more than one
+/// depth-16 cell, at 10,001 points per edge.
 ///
-/// Run at the world frame and at a zoom-offset 6 sub-square, because the tolerance is one cell of
-/// the *view's* grid: a fixed world-grid tolerance would leave the finer frame 2^6 cells of error
-/// and break R11. **Measured** worst departure over this fixture: 0.493 cells at the world frame
-/// over 30,003 sampled points, 0.307 at the sub-square over 26,003 — the room the subdivision's
-/// own sampled stopping criterion leaves, and half the bound this asserts.
+/// Run at the world frame and a zoom-offset 6 sub-square, since the tolerance is one cell of
+/// the view's own grid.
 #[test]
 fn no_point_of_the_true_image_leaves_the_densified_boundary_by_a_cell() {
-    // The tile at zoom offset 6 whose square contains the edge's eastern half.
-    // A square inside the triangle, so the shape is not clipped away before it can be measured.
+    // The tile at zoom offset 6 whose square contains the edge's eastern half, inside the triangle.
     let sub = tessera_spatial::snap_outward(&Bounds {
         x_min: WM.forward(-5.5, 56.0).0,
         x_max: WM.forward(-4.5, 56.0).0,
@@ -188,13 +172,11 @@ fn no_point_of_the_true_image_leaves_the_densified_boundary_by_a_cell() {
                     from.1 + (to.1 - from.1) * t,
                 );
                 let (x, y) = WM.forward(lon, lat);
-                // Only the part of the image the frame holds: a sub-square clips the shape, and
-                // the boundary outside the frame is the frame's edge rather than the edge's image.
+                // Only the part of the image the frame holds; a sub-square clips the shape.
                 if x < extent.x_min || x > extent.x_max || y < extent.y_min || y > extent.y_max {
                     continue;
                 }
                 measured += 1;
-                // In grid units, where one depth-16 cell is 65,536 whatever the frame.
                 let p = (
                     (x - extent.x_min) / cell_x * 65_536.0,
                     (y - extent.y_min) / cell_y * 65_536.0,
@@ -212,7 +194,6 @@ fn no_point_of_the_true_image_leaves_the_densified_boundary_by_a_cell() {
                 worst = worst.max(best);
             }
         }
-        // In depth-16 cells: 65,536 grid units to a cell.
         let cells = worst / 65_536.0;
         assert!(
             cells <= DENSIFY_TOLERANCE_CELLS,
@@ -231,14 +212,12 @@ fn no_point_of_the_true_image_leaves_the_densified_boundary_by_a_cell() {
     }
 }
 
-/// **A meridian and a parallel are unchanged by densification**, being straight in both planes.
+/// A meridian and a parallel are unchanged by densification, being straight in both planes.
 ///
-/// These are the cases where the two readings of R10 agree, and they anchor the ones where they do
-/// not: a module that densified everything would still pass the tests above and fail these.
+/// A module that densified everything would still pass the tests above and fail these.
 #[test]
 fn a_meridional_and_an_equatorial_edge_come_back_as_they_went_in() {
-    // A meridian from 60°S to 60°N and a parallel along the equator, closed by a hair's-breadth
-    // third vertex so each is a ring rather than a segment.
+    // A meridian and a parallel, closed by a hair's-breadth third vertex to make each a ring.
     let meridian = ShapeF64::Polygon(vec![vec![vec![
         (0.0, -60.0),
         (0.0, 60.0),
@@ -279,8 +258,7 @@ fn a_meridional_and_an_equatorial_edge_come_back_as_they_went_in() {
         > 3);
 }
 
-/// The report says what the caller wrote, so the build's `vertices in → out` line shows what
-/// densification cost rather than hiding it (`polygon-membership.md` §6.5).
+/// The report says what the caller wrote, so `vertices in → out` shows what densification cost.
 #[test]
 fn the_report_counts_the_declared_vertices_not_the_densified_ones() {
     let (shape, report) = ShapeF64::Polygon(vec![vec![vec![A, B, C]]])
@@ -300,8 +278,7 @@ fn the_report_counts_the_declared_vertices_not_the_densified_ones() {
     assert_eq!(report.vertices_in, 0);
 }
 
-/// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate, and a view that projects nothing
-/// has one space (`projections.md` §2, §5.3).
+/// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate; a view with no projection refuses.
 #[test]
 fn what_a_view_cannot_honour_refuses() {
     use tessera_spatial::shape::CanonError;
@@ -320,7 +297,7 @@ fn what_a_view_cannot_honour_refuses() {
         wrapped.canonical(Space::Wgs84(WM), &WORLD),
         Err(CanonError::NotACoordinate)
     );
-    // The domain's own boundary is a coordinate; the pole is inside ±90 and is clipped, not refused.
+    // The domain's own boundary is a coordinate; the pole is clipped, not refused.
     assert!(ShapeF64::Bbox {
         min_x: -180.0,
         min_y: -90.0,
@@ -337,7 +314,6 @@ fn what_a_view_cannot_honour_refuses() {
     );
 }
 
-/// Distance from `p` to the segment `a`–`b`, in the units all three are given in.
 fn to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     let (px, py) = (p.0 - a.0, p.1 - a.1);
     let (bx, by) = (b.0 - a.0, b.1 - a.1);

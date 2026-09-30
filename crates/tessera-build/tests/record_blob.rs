@@ -14,7 +14,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -26,6 +26,8 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
 use tessera_store::open_bundle;
 use tessera_types::IdentityKey;
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
@@ -138,6 +140,7 @@ fn blob_schema() -> Schema {
         value_set: None,
         index: false,
         render: false,
+        unique: false,
     };
     Schema {
         attributes: vec![
@@ -154,16 +157,17 @@ fn blob_schema() -> Schema {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ],
         vocabularies: HashMap::new(),
     }
 }
 
-/// The same fixture with every column rendered or filtered: no blob-resident column, so the
-/// stage must write nothing and the open must demand nothing.
+/// The same fixture with every column rendered or filtered, the unique `id` among them: no
+/// blob-resident column, so the stage must write nothing and the open must demand nothing.
 fn no_blob_schema() -> Schema {
-    let mut schema = blob_schema();
+    let mut schema = common::with_id(blob_schema());
     for attribute in &mut schema.attributes {
         match attribute.ty {
             // A string may be filter-only, never rendered.
@@ -175,6 +179,7 @@ fn no_blob_schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
+    let schema = common::with_id(schema);
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -200,14 +205,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -233,38 +236,6 @@ fn current_prefix(out: &Path) -> String {
     current["prefix"].as_str().unwrap().to_string()
 }
 
-/// Source id → entity id through the external-id sidecar: entity ids are signature-sorted
-/// (§11.1), so a source id is emphatically not its own entity id.
-fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-                map.insert(source, ent.value(i));
-            }
-        }
-    }
-    map
-}
-
 fn record_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
@@ -280,9 +251,9 @@ fn record_dir(out: &Path) -> PathBuf {
 /// only home, so this is the whole of "the record always exists" for the build half.
 #[test]
 fn the_blob_carries_every_neither_columns_values() {
-    let dir = build_with(blob_schema(), &note_of);
+    let dir = build_with(common::with_id(blob_schema()), &note_of);
     let out = dir.path().join("bundle");
-    let entity_of = source_to_entity(&out);
+    let entity_of = common::entities_of(&out, "id", 0..N);
     let blob = RecordBlob::open_dir(&record_dir(&out), Access::Read).expect("the blob opens");
     blob.self_check().expect("the artefact is self-consistent");
 
@@ -298,11 +269,9 @@ fn the_blob_carries_every_neither_columns_values() {
         if let Some(count) = count_of(source) {
             expected.push((2u16, RecordValue::I64(count)));
         }
+        // The unique `id` a test finds each item by is blob-resident too.
+        expected.push((4u16, RecordValue::U64(source)));
         let got = blob.fields_of(entity).expect("a well-formed read");
-        if expected.is_empty() {
-            assert_eq!(got, None, "source {source} carries nothing blob-resident");
-            continue;
-        }
         let got: Vec<(u16, RecordValue)> = got
             .unwrap_or_else(|| panic!("source {source} owes a row"))
             .into_iter()

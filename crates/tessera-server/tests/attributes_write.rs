@@ -1,12 +1,12 @@
 //! **`PUT /control/attributes`** (`ingest.md` §1.3, §6.3; decision 0136, track T4): a column is
 //! declared at a running service, an identical redeclaration answers the column that exists, a
-//! differing one is refused, a batch may carry the column or omit it from the answer onward, the
+//! differing one is refused, every batch carries the column from the answer onward, the
 //! declaration survives a restart, and every viewer-plane reader answers the column over the rows
 //! that carried it and absence over the rows that predate it.
 //!
 //! The engine-level cases are `tessera-engine/tests/runtime_attributes.rs`; what this file pins
-//! is the wire: the status codes and bodies the route answers, the Arrow batch with and without
-//! the column, and the viewer verbs a client reads the column through.
+//! is the wire: the status codes and bodies the route answers, a batch with and without the
+//! column, and the viewer verbs a client reads the column through.
 
 mod common;
 
@@ -14,19 +14,17 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
+use arrow::array::{Float32Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 60;
 
-/// One rendered, indexed `f32` at the build, and a `public` vocabulary no build column names, so
-/// a runtime category over it fixes the width at the declaration.
+/// One rendered, indexed `f32` at the build and the unique `id` rows name items by, and a
+/// `public` vocabulary no build column names, so a runtime category over it fixes the width at
+/// the declaration.
 const SCHEMA_TOML: &str = r#"
 [[vocabulary]]
 name       = "dept"
@@ -42,113 +40,16 @@ name   = "score"
 type   = "f32"
 render = true
 index  = true
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Float32, false),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let scores: Vec<f32> = ids.iter().map(|e| (*e % 7) as f32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
-    let points = dir.join("points.parquet");
-    let pairs = dir.join("pairs.parquet");
-    write_points(&points, N);
-    write_pairs_n(&pairs, N);
-    let schema_path = dir.join("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let out = dir.join("bundle");
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    })
-    .expect("fixture build should succeed");
-    out
-}
-
-struct Served {
-    server: TestServer,
-    token: String,
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_fixture_bundle(tmp.path());
-    open(tmp).await
-}
-
-async fn open(tmp: TempDir) -> Served {
-    let server = spawn_server(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let token = authorise(&server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    Served { server, token, tmp }
-}
-
-/// Reopen the same bundle and the same log: the restart every durability claim below is made
-/// against. The old server is stopped and waited for first, so its executor has released the
-/// bundle root's write lock before the new one takes it.
-async fn restart(served: Served) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp).await
+fn fixture(dir: &Path) -> std::path::PathBuf {
+    build_scored(dir, N, SCHEMA_TOML)
 }
 
 async fn declare(served: &Served, body: Value) -> (u16, Value) {
@@ -187,10 +88,10 @@ fn declared_names(meta: &Value) -> Vec<String> {
         .collect()
 }
 
-/// One ingest row: the external id, its position, the build's `score`, and the runtime columns
-/// where the batch carries them.
+/// One ingest row: its `id`, the build's `score`, and the runtime columns where the batch carries
+/// them.
 struct Row {
-    id: &'static str,
+    id: u64,
     score: f32,
     sentiment: Option<f32>,
     tag: Option<&'static str>,
@@ -201,15 +102,15 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
     let labels: Vec<&[&str]> = rows.iter().map(|_| &["0"][..]).collect();
     let access = access_lists(&labels);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, true),
+        Field::new("id", DataType::UInt64, true),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
         Field::new("score", DataType::Float32, true),
     ];
     let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(arrow::array::BinaryArray::from_iter(
-            rows.iter().map(|r| Some(r.id.as_bytes())),
+        Arc::new(arrow::array::UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.id),
         )),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
         Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 500.0))),
@@ -233,72 +134,52 @@ fn batch(rows: &[Row], runtime: bool) -> Vec<u8> {
 
 /// Ingest and answer the `tessera_id`s the batch was given, in row order.
 async fn ingest(served: &Served, batch_id: &str, body: Vec<u8>) -> Vec<u64> {
-    ingest_with_receipt(served, batch_id, body).await.0
+    let (status, body) = post_ingest(served, batch_id, ARROW, body).await;
+    assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
+    ingested_ids(&body)
 }
 
-/// [`ingest`], with the receipt's `padded_columns` beside the ids.
-async fn ingest_with_receipt(served: &Served, batch_id: &str, body: Vec<u8>) -> (Vec<u64>, u64) {
+const ARROW: &str = "application/vnd.apache.arrow.stream";
+const JSON: &str = "application/json";
+
+/// One `/control/ingest` request into `s0`, and its status and body.
+async fn post_ingest(
+    served: &Served,
+    batch_id: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Value) {
+    post_ingest_into(served, "s0", batch_id, content_type, body).await
+}
+
+/// [`post_ingest`] into `view`.
+async fn post_ingest_into(
+    served: &Served,
+    view: &str,
+    batch_id: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Value) {
     let resp = served
         .server
         .client
         .post(served.server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", batch_id)
-        .header("x-tessera-view", "s0")
-        .header("content-type", "application/vnd.apache.arrow.stream")
+        .header("x-tessera-view", view)
+        .header("content-type", content_type)
         .body(body)
         .send()
         .await
         .unwrap();
     let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(status, 200, "batch {batch_id} is accepted: {body}");
-    let ids = body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| {
-            v.as_u64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                .unwrap()
-        })
-        .collect();
-    (ids, body["padded_columns"].as_u64().unwrap())
-}
-
-async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            break;
-        }
-    }
+    (status, resp.json().await.unwrap())
 }
 
 /// The `tessera_id`s a filtered viewport answers, from a fresh session so the rows flushed since
 /// the last one are in the answer (`views_write.rs`'s note on `points`).
 async fn filtered(served: &Served, filters: Value) -> BTreeSet<u64> {
-    let token = authorise(&served.server, &["0", "1"][..]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = token_for(&served.server, &["0", "1"][..]).await;
     let resp = served
         .server
         .client
@@ -340,7 +221,7 @@ fn sentiment() -> Value {
 }
 
 fn tag() -> Value {
-    json!({ "name": "tag", "type": "category", "vocabulary": "dept", "width": "u8", "index": true })
+    json!({ "name": "tag", "type": "category", "vocabulary": "dept", "index": true })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -350,8 +231,8 @@ fn tag() -> Value {
 /// schema's rules refuse, and `/v1/meta` listing the column from the answer.
 #[tokio::test]
 async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_refuses() {
-    let served = serve().await;
-    assert_eq!(declared_names(&meta(&served).await), ["score"]);
+    let served = Served::build(fixture).await;
+    assert_eq!(declared_names(&meta(&served).await), ["score", "id"]);
 
     let (status, body) = declare(&served, sentiment()).await;
     assert_eq!(status, 201, "{body}");
@@ -378,58 +259,23 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     let (status, body) = declare(&served, json!({ "name": "score", "type": "i32" })).await;
     assert_eq!(status, 409, "the build's column is a held name too: {body}");
 
-    for (bad, reason) in [
-        (json!({ "name": "weird", "type": "utf8" }), "retired"),
-        (json!({ "name": "region", "type": "u8" }), "may not take it"),
-        (
-            json!({ "name": "tag", "type": "category", "vocabulary": "nothing", "width": "u8" }),
-            "names no vocabulary",
-        ),
-        (
-            json!({ "name": "tag", "type": "category", "vocabulary": "dept" }),
-            "say `width`",
-        ),
-        // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
-        // route declares a column against entities rather than rows, so there is nowhere for a
-        // rendered value to land, and what a rendered column declared at a running service should
-        // mean has not been worked through.
-        (
-            json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
-            "`render` is not accepted at a running service",
-        ),
-        (
-            json!({
-                "name": "shade",
-                "type": "category",
-                "vocabulary": "dept",
-                "width": "u8",
-                "render": true
-            }),
-            "interim",
-        ),
-        (
-            json!({ "name": "blurb", "type": "text", "render": true }),
-            "`render` is not accepted at a running service",
-        ),
-        // The build's own rendered column cannot be restated through this route either: the flag
-        // is refused before the held-name comparison.
-        (
-            json!({ "name": "score", "type": "f32", "index": true, "render": true }),
-            "`render` is not accepted at a running service",
-        ),
+    // What is refused is tested in `tessera_store::declaration` and the engine; here, that a
+    // refusal is a 422 with a `detail`.
+    for bad in [
+        json!({ "name": "region", "type": "u8" }),
+        json!({ "name": "tag", "type": "category", "vocabulary": "nothing" }),
+        json!({ "name": "drawn", "type": "f32", "index": true, "render": true }),
+        json!({ "name": "level", "type": "u32" }),
     ] {
         let (status, body) = declare(&served, bad.clone()).await;
         assert_eq!(status, 422, "{bad}: {body}");
-        assert!(
-            body["detail"].as_str().unwrap().contains(reason),
-            "{bad}: {body}"
-        );
+        assert_eq!(body["error"], "contract", "{bad}: {body}");
     }
     let (status, _) = declare(&served, tag()).await;
     assert_eq!(status, 201);
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "the runtime columns append after the build's, in declaration order"
     );
     let meta = meta(&served).await;
@@ -443,14 +289,42 @@ async fn the_route_declares_answers_redeclarations_and_refuses_what_the_schema_r
     assert_eq!(tag["category"]["vocabulary"], "dept");
 }
 
-/// **A batch may carry the column or omit it from the answer onward**, and every viewer-plane
-/// reader answers the column over the rows that carried it and absence over the rest: the
-/// filter, the drill-down, and the categories vocabulary of a runtime category.
+/// **A row may leave a declared column out, the runtime ones included.** One that creates an item
+/// leaving a column out, at either door, creates it with no value there; the same row sent again
+/// with nulls names that item and changes nothing. Every viewer-plane reader answers the column
+/// over the rows that carried a value: the filter, the drill-down, and the categories vocabulary
+/// of a runtime category.
 #[tokio::test]
-async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
-    let served = serve().await;
+async fn a_row_may_leave_a_column_out_and_every_reader_answers_it() {
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
+
+    let unvalued = |id| Row {
+        id,
+        score: 40.0,
+        sentiment: None,
+        tag: None,
+    };
+    // A JSON record without a key leaves that column out; `null` sends no value.
+    let json_row = |tag: Option<Value>| {
+        let mut record = json!({
+            "id": 1002, "x": 500.0, "y": 500.0, "access": ["0"], "score": 50.0,
+            "sentiment": null,
+        });
+        if let Some(tag) = tag {
+            record["tag"] = tag;
+        }
+        json!([record]).to_string().into_bytes()
+    };
+    for (batch_id, content_type, body) in [
+        ("omitting", ARROW, batch(&[unvalued(1001)], false)),
+        ("json-omitting", JSON, json_row(None)),
+    ] {
+        let (status, body) = post_ingest(&served, batch_id, content_type, body).await;
+        assert_eq!(status, 200, "{batch_id}: {body}");
+        assert_eq!(body["created"], 1, "{batch_id}: {body}");
+    }
 
     let carrying = ingest(
         &served,
@@ -458,19 +332,19 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         batch(
             &[
                 Row {
-                    id: "c1",
+                    id: 1011,
                     score: 1.0,
                     sentiment: Some(0.9),
                     tag: Some("eng"),
                 },
                 Row {
-                    id: "c2",
+                    id: 1012,
                     score: 2.0,
                     sentiment: Some(0.2),
                     tag: Some("ops"),
                 },
                 Row {
-                    id: "c3",
+                    id: 1013,
                     score: 3.0,
                     sentiment: None,
                     tag: None,
@@ -480,45 +354,13 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         ),
     )
     .await;
-    let (omitting, padded) = ingest_with_receipt(
-        &served,
-        "omitting",
-        batch(
-            &[Row {
-                id: "o1",
-                score: 40.0,
-                sentiment: None,
-                tag: None,
-            }],
-            false,
-        ),
-    )
-    .await;
-    assert_eq!(
-        padded, 2,
-        "the receipt counts the declared columns the batch omitted"
-    );
-    // The JSON door pads the same way: a declared column no object names is omitted from the
-    // batch, and one an object names with `null` is a cell absent in that row and nothing padded.
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "json-omitting")
-        .header("x-tessera-view", "s0")
-        .header("content-type", "application/json")
-        .body(
-            r#"[{"external_id":"ajE=","x":500.0,"y":500.0,"access":["0"],"score":50.0,"sentiment":null}]"#,
-        )
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status().as_u16();
-    let receipt: Value = resp.json().await.unwrap();
+    // The same rows with nulls name the items the omitting rows created, and change nothing.
+    let nulls = ingest(&served, "nulls", batch(&[unvalued(1001)], true)).await;
+    let (status, receipt) =
+        post_ingest(&served, "json-nulls", JSON, json_row(Some(Value::Null))).await;
     assert_eq!(status, 200, "{receipt}");
-    assert_eq!(receipt["padded_columns"], json!(1), "{receipt}");
-    flush(&served).await;
+    assert_eq!(receipt["unchanged"], 1, "{receipt}");
+    drain(&served.server).await;
 
     assert_eq!(
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.5 } } })).await,
@@ -528,14 +370,14 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
     assert_eq!(
         filtered(&served, json!({ "sentiment": { "range": { "gte": 0.0 } } })).await,
         BTreeSet::from([carrying[0], carrying[1]]),
-        "a row with a null cell and a row from a batch omitting the column carry no value"
+        "a row with a null cell carries no value"
     );
     assert_eq!(
         filtered(&served, json!({ "score": { "range": { "gte": 40.0 } } }))
             .await
             .len(),
         2,
-        "the JSON row landed beside the Arrow one; no build row scores past 6"
+        "the two omitting rows landed once each; no build row scores past 6"
     );
     assert_eq!(
         filtered(&served, json!({ "tag": { "eq": "ops" } })).await,
@@ -549,11 +391,11 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
         "{record}"
     );
     assert_eq!(record["fields"]["tag"], json!("eng"));
-    let record = item(&served, omitting[0]).await;
+    let record = item(&served, nulls[0]).await;
     assert_eq!(record["fields"]["score"], json!(40.0));
     assert!(
         record["fields"].get("sentiment").is_none() && record["fields"].get("tag").is_none(),
-        "a row from a batch omitting the column carries none: {record}"
+        "a row carrying nulls serves no value: {record}"
     );
     // An entity the build wrote: absent, answered from the segment schema.
     let built = served
@@ -590,17 +432,106 @@ async fn a_batch_carries_the_column_or_omits_it_and_every_reader_answers_it() {
     assert_eq!(keys, ["eng", "ops"]);
 }
 
+/// A batch of rows carrying their `id`, geometry and label and no other declared column.
+fn geometry(ids: &[u64]) -> Vec<u8> {
+    let rows: Vec<(Option<u64>, f32, f32, &str)> =
+        ids.iter().map(|id| (Some(*id), 400.0, 400.0, "0")).collect();
+    build_ingest_batch_optional(&rows)
+}
+
+/// A JSON record carrying its `id`, geometry and label, and `score` where it is given.
+fn record(id: u64, score: Option<f32>) -> Value {
+    let mut record = json!({
+        "id": id,
+        "x": 400.0, "y": 400.0, "access": ["0"],
+    });
+    if let Some(score) = score {
+        record["score"] = json!(score);
+    }
+    record
+}
+
+/// **A row may leave every declared column out, whether it adds an item to a view or creates
+/// one**, at both doors. A row adding a held item to a second view keeps the item's values; a
+/// row creating an item leaving a column out creates it with no value there.
+#[tokio::test]
+async fn a_row_may_leave_declared_columns_out_whether_it_adds_or_creates() {
+    let served = Served::build(fixture).await;
+    let resp = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/extra"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "extent": { "x": [0.0, 1000.0], "y": [0.0, 1000.0] },
+            "point_visibility": { "default": "public" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the second view is created");
+    let held = |id| Row {
+        id,
+        score: 1.0,
+        sentiment: None,
+        tag: None,
+    };
+    ingest(
+        &served,
+        "held",
+        batch(&[held(1021), held(1022), held(1023)], false),
+    )
+    .await;
+
+    let json_body = |records: Vec<Value>| Value::Array(records).to_string().into_bytes();
+    let mut landed = Vec::new();
+    for (batch_id, content_type, body, created, added) in [
+        ("add-arrow", ARROW, geometry(&[1021]), 0, 1),
+        ("new-beside-add-arrow", ARROW, geometry(&[1022, 1031]), 1, 1),
+        (
+            "add-beside-new-json",
+            JSON,
+            json_body(vec![record(1023, None), record(1032, Some(50.0))]),
+            1,
+            1,
+        ),
+    ] {
+        let (status, body) = post_ingest_into(&served, "extra", batch_id, content_type, body).await;
+        assert_eq!(status, 200, "{batch_id}: {body}");
+        assert_eq!((body["created"].clone(), body["added"].clone()), (json!(created), json!(added)), "{batch_id}: {body}");
+        landed.extend(ingested_ids(&body));
+    }
+    drain(&served.server).await;
+    let token = token_for(&served.server, &["0", "1"][..]).await;
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&json!({ "view": "extra", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served_ids: BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served_ids, landed.iter().copied().collect(), "every row is in `extra`");
+    // An added item kept the value it was created with; a new one holds none.
+    assert_eq!(item(&served, landed[0]).await["fields"]["score"], json!(1.0));
+    assert!(item(&served, landed[2]).await["fields"].get("score").is_none());
+}
+
 /// **The declaration survives a restart**, from the log alone before any publication and from
 /// the segments manifest after one, and the column keeps answering over both.
 #[tokio::test]
 async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
-    let served = serve().await;
+    let served = Served::build(fixture).await;
     assert_eq!(declare(&served, sentiment()).await.0, 201);
     assert_eq!(declare(&served, tag()).await.0, 201);
-    let served = restart(served).await;
+    let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "replayed from the log"
     );
     assert_eq!(
@@ -613,7 +544,7 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
         "carrying",
         batch(
             &[Row {
-                id: "c1",
+                id: 1011,
                 score: 1.0,
                 sentiment: Some(0.9),
                 tag: None,
@@ -622,11 +553,11 @@ async fn a_declaration_survives_a_restart_before_and_after_a_publication() {
         ),
     )
     .await;
-    flush(&served).await;
-    let served = restart(served).await;
+    drain(&served.server).await;
+    let served = served.restart().await;
     assert_eq!(
         declared_names(&meta(&served).await),
-        ["score", "sentiment", "tag"],
+        ["score", "id", "sentiment", "tag"],
         "carried by the segments manifest"
     );
     assert_eq!(
@@ -648,4 +579,65 @@ fn without_publication(mut body: Value) -> Value {
         "every write acknowledgement carries a publication number: {body}"
     );
     body
+}
+
+/// One JSON batch to a write route under view `s0`, answering its body.
+async fn write_json(served: &Served, route: &str, batch_id: &str, body: Value) -> Value {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url(route))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", "s0")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let answer: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "batch {batch_id} is accepted: {answer}");
+    answer
+}
+
+/// A text column declared at a running service matches the same items after a restart as it did
+/// before, whether its prose arrived with the item or by a later edit.
+#[tokio::test]
+async fn a_text_column_declared_live_matches_the_same_items_after_a_restart() {
+    let served = Served::build(fixture).await;
+    let note = json!({ "name": "note", "type": "text", "index": true });
+    assert_eq!(declare(&served, note).await.0, 201);
+    let point = |id: u64, note: Option<&str>| {
+        json!({
+            "id": id, "x": 500.0, "y": 500.0, "access": ["0"], "score": 1.0,
+            "note": note,
+        })
+    };
+    let ingested = write_json(
+        &served,
+        "/control/ingest",
+        "points",
+        json!([
+            point(2001, Some("cedar grove")),
+            point(2002, Some("amber light")),
+            point(2003, None),
+        ]),
+    )
+    .await;
+    let ids = ingested_ids(&ingested);
+    drain(&served.server).await;
+    write_json(
+        &served,
+        "/control/ingest",
+        "edit",
+        json!([{ "id": 2003, "note": "cedar bark" }]),
+    )
+    .await;
+    drain(&served.server).await;
+
+    let cedar = json!({ "note": { "match": "cedar" } });
+    let before = filtered(&served, cedar.clone()).await;
+    assert_eq!(before, BTreeSet::from([ids[0], ids[2]]));
+    let served = served.restart().await;
+    assert_eq!(filtered(&served, cedar).await, before);
 }

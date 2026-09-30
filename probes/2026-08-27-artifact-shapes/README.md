@@ -7,16 +7,19 @@ before quoting one.
 **Two of them are not, and deliberately.** The figures a *ruling* rests on are Rust against Rust in
 one release-mode process, because a Qhull-in-C against numpy-in-Python column compares
 implementations rather than algorithms — which is why this probe could not settle ruling C and said
-so. Those live with the engine and are re-run from there:
+so. Those lived with the engine and were re-run from there.
 
-| | |
-|---|---|
-| `crates/tessera-engine/tests/hull_triangulation.rs` | **Ruling C**: a Rust Delaunay against the Rust dig, over the same 197 memberships; the χ-peel it would have bought; the grid grouping against exact single-linkage at α |
-| `crates/tessera-engine/tests/hull_geometry.rs` | What the **served** shape costs — vertices, rings, wire bytes, area, containment — over any layer of a built bundle |
+They were two ignored test binaries beside the engine, `hull_triangulation.rs` (ruling C: a Rust
+Delaunay against the Rust dig, over the same 197 memberships, with the χ-peel it would have bought
+and the grid grouping against exact single-linkage at α) and `hull_geometry.rs` (what the served
+shape costs in vertices, rings, wire bytes, area and containment). Both were removed on 2026-09-20,
+with the sweeps that chose the constants and the seams those sweeps opened in the serving module.
+
+What is reusable is now one benchmark, which takes a built bundle and measures every layer that
+declares a derived hull:
 
 ```bash
-TESSERA_HULL_BUNDLE=<bundle root> \
-  cargo test --release -p tessera-engine --test hull_triangulation -- --ignored --nocapture
+cargo run --release -p tessera-bench --bin hull_cost -- <bundle root>
 ```
 
 **Corpus.** `notebook-2m4`, read from `data/notebook-2m4-live/*.parquet` — `clusters/hdbscan`

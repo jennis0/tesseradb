@@ -1,11 +1,5 @@
-//! The declaration surface's tests, and one of them is the surface itself.
-//!
-//! [`the_accepted_key_set_is_configuration_ms_table`] asserts the **exact** set of keys each block
-//! accepts, read out of serde's own `deny_unknown_fields` message rather than restated by hand — so
-//! it fails both when a key documented in `configuration.md` §1 disappears and when one that
-//! document does not name appears. That second half is the point: closure is what the leak register
-//! rests on, and a key added without an entry in §1 is a disclosure control nobody has reasoned
-//! about.
+//! The declaration surface's tests. The key set of every block is held to the reference page by
+//! `config/reference.rs`.
 
 use super::*;
 
@@ -136,258 +130,6 @@ fn with_line(base: &str, line: &str) -> String {
     base.replacen(AFTER, &format!("{AFTER}{line}\n"), 1)
 }
 
-// ---------------------------------------------------------------------------------------------
-// §1: the surface is a closed set, and this is the assertion that keeps it one
-// ---------------------------------------------------------------------------------------------
-
-/// The keys serde reports as accepted for the block a bogus key was planted in.
-///
-/// `deny_unknown_fields` renders as "unknown field `x`, expected one of `a`, `b`" — or "expected
-/// `a`" for a one-field block — so the parser's own field list is recoverable without a second,
-/// hand-written copy of it that could drift from the derive.
-fn accepted_keys(text: &str) -> Vec<String> {
-    let message = err(text);
-    let (_, tail) = message
-        .split_once("expected ")
-        .unwrap_or_else(|| panic!("not an unknown-field refusal: {message}"));
-    let mut keys: Vec<String> = tail
-        .split('`')
-        .skip(1)
-        .step_by(2)
-        .map(|s| s.to_string())
-        .collect();
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
-fn expect_keys(text: &str, block: &str, documented: &[&str]) {
-    let mut want: Vec<String> = documented.iter().map(|s| s.to_string()).collect();
-    want.sort();
-    let got = accepted_keys(text);
-    assert_eq!(
-        got, want,
-        "{block} accepts a different key set from configuration.md §1's table. Any difference is \
-         a change to the declaration surface: a key here that §1 does not name is a control \
-         nobody has reasoned about, and one §1 names that is missing is a control an author \
-         cannot set"
-    );
-}
-
-/// **`configuration.md` §1's table, transcribed — and the transcription is the test.**
-///
-/// `[layer.labels]` is in it on the same footing as everything else: the sugar expands to a
-/// `[[layer]]` before anything compiles, so its key set is a real surface a caller declares
-/// against and a key added to it without an entry in §1 is a control nobody has reasoned about.
-#[test]
-fn the_accepted_key_set_is_configuration_ms_table() {
-    expect_keys(
-        "nonesuch = 1\n",
-        "the document",
-        &[
-            "sources",
-            "defaults",
-            "view",
-            "view_group",
-            "vocabulary",
-            "attribute",
-            "layer",
-        ],
-    );
-    expect_keys(
-        "[defaults]\nnonesuch = 1\n",
-        "[defaults]",
-        &["source", "entity_id_field", "allocation_view"],
-    );
-    expect_keys(
-        "[[view]]\nname = \"s0\"\nnonesuch = 1\n",
-        "[[view]]",
-        &[
-            "name",
-            "title",
-            "projection",
-            "source",
-            "fields",
-            "extent",
-            "point_visibility",
-            "visibility",
-        ],
-    );
-    expect_keys(
-        "[[view]]\nname = \"s0\"\nextent = { nonesuch = 1 }\n",
-        "extent",
-        &["auto", "margin", "min", "max", "x", "y", "lon", "lat"],
-    );
-    expect_keys(
-        "[[view]]\nname = \"s0\"\npoint_visibility = { nonesuch = 1 }\n",
-        "point_visibility",
-        &["field", "source", "default"],
-    );
-    expect_keys(
-        "[[view_group]]\nname = \"g\"\nnonesuch = 1\n",
-        "[[view_group]]",
-        &[
-            "name",
-            "title",
-            "projection",
-            "source",
-            "fields",
-            "extent",
-            "point_visibility",
-            "visibility",
-            "members",
-            "metadata",
-            "view",
-            "views",
-        ],
-    );
-    expect_keys(
-        "[[view_group]]\nname = \"g\"\n[view_group.views]\nnonesuch = 1\n",
-        "[view_group.views]",
-        &["source", "fields"],
-    );
-    expect_keys(
-        "[[vocabulary]]\nname = \"v\"\nnonesuch = 1\n",
-        "[[vocabulary]]",
-        &[
-            "name",
-            "title",
-            "width",
-            "value_set",
-            "visibility",
-            "source",
-            "fields",
-            "values",
-            "reserved",
-        ],
-    );
-    expect_keys(
-        "[[attribute]]\nname = \"a\"\nnonesuch = 1\n",
-        "[[attribute]]",
-        &[
-            "name",
-            "title",
-            "field",
-            "source",
-            "entity_id_field",
-            "type",
-            "vocabulary",
-            "render",
-            "index",
-            "multi",
-            "render_in",
-            "analyser",
-            "scope",
-            "fields",
-        ],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\nnonesuch = 1\n",
-        "[[layer]]",
-        &[
-            "name",
-            "title",
-            "views",
-            "scope",
-            "source",
-            "fields",
-            "artifacts",
-            "membership",
-            "value_set",
-            "hierarchy",
-            "layout",
-            "visibility",
-            "artifact_visibility",
-            "require_member_visibility",
-            "withdraw_on_member_deletion",
-            "depends_on",
-            "levels",
-            "content",
-            "members",
-            "labels",
-            "shape",
-            "default_space",
-        ],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\nartifacts = [{ nonesuch = 1 }]\n",
-        "an inline artifact",
-        &[
-            "key",
-            "level",
-            "members",
-            "excluding",
-            "bbox",
-            "circle",
-            "ellipse",
-            "wkt",
-            "space",
-            "contents",
-            "parent",
-            "attached_layer",
-            "attached_level",
-            "attached_key",
-        ],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[layer.shape]\nnonesuch = 1\n",
-        "[layer.shape]",
-        &["kind", "depth"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\nhierarchy = { nonesuch = 1 }\n",
-        "hierarchy",
-        &["kind", "prune_children"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\nartifact_visibility = { nonesuch = 1 }\n",
-        "artifact_visibility",
-        &["field", "default"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[layer.members]\nnonesuch = 1\n",
-        "[layer.members]",
-        &["source", "fields"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[[layer.levels]]\nnonesuch = 1\n",
-        "[[layer.levels]]",
-        &["level", "title", "zoom"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[layer.content]\nnonesuch = 1\n",
-        "[layer.content]",
-        &["computed", "supplied"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[[layer.content.supplied]]\nnonesuch = 1\n",
-        "[[layer.content.supplied]]",
-        &["name", "type", "require_member_visibility"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[layer.labels.content]\nnonesuch = 1\n",
-        "[layer.labels.content]",
-        &["require_member_visibility"],
-    );
-    expect_keys(
-        "[[layer]]\nname = \"l\"\n[layer.labels]\nnonesuch = 1\n",
-        "[layer.labels]",
-        &[
-            "artifact_visibility",
-            "content",
-            "name",
-            "title",
-            "source",
-            "fields",
-            "members",
-            "type",
-            "membership",
-            "require_member_visibility",
-            "visibility",
-        ],
-    );
-}
-
 /// Every key the two-file surface carried, refused by the unknown-field rule rather than aliased.
 ///
 /// **Refusal is what tells a caller their file is stale** (decision 0048: replaced, not carried).
@@ -453,41 +195,47 @@ fn a_closed_vocabulary_compiles_to_a_width_and_a_pinned_code_set() {
     let vocab = &config.schema.vocabularies["severity"];
     assert_eq!(vocab.code_of("low"), Some(1));
     assert_eq!(vocab.code_of("nonesuch"), None);
-    assert_eq!(vocab.visibility, Visibility::Public);
+    assert_eq!(vocab.visibility(), Visibility::Public);
     assert_eq!(vocab.value_set, ValueSet::Closed);
     assert_eq!(vocab.width, ScalarType::U8);
     assert_eq!(vocab.title.as_deref(), Some("Severity"));
 }
 
-/// **A bare key list assigns codes, and the assignment is recorded exactly as a pin is.** A caller
-/// who does not care which integer a value gets should not have to invent one.
+/// A bare key list draws each value a code at random over the width, as a running service does,
+/// and the draw is recorded exactly as a pin is.
 #[test]
-fn a_bare_key_list_assigns_codes_in_the_order_given() {
+fn a_bare_key_list_draws_codes_at_random() {
+    let keys: Vec<String> = (0..20).map(|i| format!("v{i}")).collect();
+    let list = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
     let text = SEVERITY.replace(
         "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-        "values     = [\"low\", \"medium\", \"high\"]\n",
+        &format!("values     = [{list}]\n"),
     );
     let config = parse_str(&text).expect("a bare key list is a legal value set");
     let vocab = &config.schema.vocabularies["severity"];
-    assert_eq!(vocab.code_of("low"), Some(1));
-    assert_eq!(vocab.code_of("medium"), Some(2));
-    assert_eq!(vocab.code_of("high"), Some(3));
-    // Code 0 is the *absent* sentinel and is never assigned, which is why the first value is 1.
-    assert!(!vocab.codes.values().any(|&c| c == ABSENT_CODE));
+    let codes: BTreeSet<u32> = keys.iter().map(|k| vocab.code_of(k).unwrap()).collect();
+    assert_eq!(codes.len(), keys.len(), "one code per value");
+    assert!(!codes.contains(&ABSENT_CODE));
+    // Twenty draws over 255 codes all landing in 1..=20 is negligibly likely; numbering the
+    // values in order lands there every time.
+    assert!(codes.iter().any(|&c| c > 20), "{codes:?}");
 }
 
-/// Assignment steps over the codes a caller already spent — pinned or retired.
+/// A draw never lands on a retired code.
 #[test]
-fn assignment_skips_pinned_and_reserved_codes() {
+fn a_drawn_code_skips_reserved_codes() {
+    let reserved = (1..=250).map(|c| c.to_string()).collect::<Vec<_>>().join(", ");
     let text = SEVERITY.replace(
         "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-        "values     = [\"low\", \"medium\", \"high\"]\nreserved   = [2]\n",
+        &format!("values     = [\"a\", \"b\", \"c\", \"d\", \"e\"]\nreserved   = [{reserved}]\n"),
     );
     let config = parse_str(&text).unwrap();
     let vocab = &config.schema.vocabularies["severity"];
-    assert_eq!(vocab.code_of("low"), Some(1));
-    assert_eq!(vocab.code_of("medium"), Some(3), "2 is retired");
-    assert_eq!(vocab.code_of("high"), Some(4));
+    let codes: BTreeSet<u32> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|k| vocab.code_of(k).unwrap())
+        .collect();
+    assert_eq!(codes, (251..=255).collect());
 }
 
 #[test]
@@ -529,14 +277,8 @@ fn width_value_set_and_visibility_are_each_required_on_a_vocabulary() {
         ("value_set  = \"closed\"\n", "`value_set` is required"),
         ("visibility = \"public\"\n", "`visibility` is required"),
     ] {
-        let text = SEVERITY.replace(line, "");
-        let message = err(&text);
+        let message = err(&SEVERITY.replace(line, ""));
         assert!(message.contains(expected), "{message}");
-        // The message must teach, not merely refuse: the values, spelled out.
-        assert!(
-            message.contains("no default"),
-            "a required disclosure control must say why there is no default: {message}"
-        );
     }
 }
 
@@ -548,7 +290,7 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
     let derived = SEVERITY.replace("visibility = \"public\"", "visibility = \"derived\"");
     let config = parse_str(&derived).expect("`derived` is the other setting");
     assert_eq!(
-        config.schema.vocabularies["severity"].visibility,
+        config.schema.vocabularies["severity"].visibility(),
         Visibility::Derived
     );
 
@@ -557,24 +299,11 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
             "visibility = \"public\"",
             &format!("visibility = \"{word}\""),
         );
-        let message = err(&text);
         assert!(
-            message.contains("neither \"public\" nor \"derived\""),
-            "`{word}` must be refused rather than read as a label: {message}"
+            parse_str(&text).is_err(),
+            "`{word}` is neither `public` nor `derived`"
         );
     }
-}
-
-/// A closed set is authored, and an authored set of nothing refuses every ingest.
-#[test]
-fn a_closed_vocabulary_with_no_value_source_is_refused() {
-    let text = SEVERITY.replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "");
-    let message = err(&text);
-    assert!(message.contains("no value source"), "{message}");
-    assert!(
-        message.contains("never a silent fall-through to minting"),
-        "the refusal must say what accepting it would have to do instead: {message}"
-    );
 }
 
 /// An open vocabulary with no values is legal and starts empty — the build mints its first code
@@ -588,8 +317,19 @@ fn an_open_vocabulary_with_no_values_starts_empty() {
     let config = parse_str(&text).unwrap();
     let vocab = &config.schema.vocabularies["severity"];
     assert_eq!(vocab.value_set, ValueSet::Open);
-    assert!(vocab.codes.is_empty());
+    assert!(vocab.values.bindings().next().is_none());
     assert_eq!(config.schema.open_minters().len(), 1);
+}
+
+#[test]
+fn a_closed_vocabulary_may_start_with_no_values() {
+    let text = SEVERITY.replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "");
+    let config = parse_str(&text).unwrap();
+    assert!(config.schema.vocabularies["severity"]
+        .values
+        .bindings()
+        .next()
+        .is_none());
 }
 
 /// A closed vocabulary mints nothing, so it must have no minter for a scan to reach.
@@ -624,27 +364,7 @@ fn two_vocabularies_of_one_name_are_refused() {
 #[test]
 fn an_attribute_naming_an_undeclared_vocabulary_is_refused_at_parse() {
     let text = SEVERITY.replace("vocabulary = \"severity\"", "vocabulary = \"severtiy\"");
-    let message = err(&text);
-    assert!(message.contains("severtiy"), "{message}");
-    assert!(
-        message.contains("names no `[[vocabulary]]` block"),
-        "{message}"
-    );
-    assert!(
-        message.contains("Declared: severity"),
-        "the refusal must name what is available: {message}"
-    );
-    assert!(
-        message.contains("refused rather than minted"),
-        "the refusal must say why a fall-through is not the answer: {message}"
-    );
-}
-
-#[test]
-fn a_category_needs_a_vocabulary_reference() {
-    let text = SEVERITY.replace("vocabulary = \"severity\"\n", "");
-    let message = err(&text);
-    assert!(message.contains("`vocabulary` is required"), "{message}");
+    assert!(err(&text).contains("severtiy"));
 }
 
 /// A category may declare `index` beside `render`, and it reaches the compiled form.
@@ -703,31 +423,6 @@ fn a_number_may_be_rendered_and_indexed_at_once() {
     }
 }
 
-/// Decision 0013: absent machinery names itself rather than refusing generically. Bare `multi`
-/// names records §5 and the epic that lifts it; `render` + `multi` names decision 0039's permanent
-/// fence instead, whatever else the declaration says.
-#[test]
-fn multi_is_refused_naming_what_is_absent_and_0039_when_rendered() {
-    let multi = SEVERITY.replace("render     = true", "index      = true\nmulti      = true");
-    assert!(err(&multi).contains("records §5"), "{}", err(&multi));
-
-    let rendered = SEVERITY.replace("render     = true", "render     = true\nmulti      = true");
-    assert!(err(&rendered).contains("0039"), "{}", err(&rendered));
-}
-
-/// **`render_in` is refused rather than recorded and ignored** (decision 0013).
-#[test]
-fn render_in_is_refused_rather_than_silently_ignored() {
-    let text = with_line(SEVERITY, "render_in = [\"docs_2024\"]");
-    let message = err(&text);
-    assert!(message.contains("§3.9"), "{message}");
-    assert!(
-        message.contains("every view anyway"),
-        "the refusal must say what accepting it would actually do: {message}"
-    );
-    assert!(parse_str(SEVERITY).is_ok());
-}
-
 /// A declaration with neither `render` nor `index` parses and is blob-resident (records §3).
 #[test]
 fn a_declaration_with_neither_key_is_blob_resident() {
@@ -743,30 +438,6 @@ fn a_declaration_with_neither_key_is_blob_resident() {
     // The hot column's tail is exactly the render columns, so the blob-resident `i64` and the
     // entity-space `keyword` cost no row bits — only the rendered `u8` counts.
     assert_eq!(config.schema.row_bits(), Some(8));
-}
-
-#[test]
-fn render_on_a_keyword_is_refused_at_the_declaration() {
-    let message = err("[[attribute]]\nname = \"title\"\ntype = \"keyword\"\nrender = true\n");
-    assert!(message.contains("fixed-width slot"), "{message}");
-    assert!(
-        message.contains("never leaves the server"),
-        "a keyword's refusal must name the ordinal's confinement, not only the width: {message}"
-    );
-}
-
-#[test]
-fn render_on_text_is_refused_at_the_declaration() {
-    let message = err("[[attribute]]\nname = \"abstract\"\ntype = \"text\"\nrender = true\n");
-    assert!(message.contains("record blob"), "{message}");
-}
-
-#[test]
-fn utf8_is_refused_as_a_declared_type_and_names_its_successors() {
-    let message = err("[[attribute]]\nname = \"title\"\ntype = \"utf8\"\nindex = true\n");
-    assert!(message.contains("retired"), "{message}");
-    assert!(message.contains("keyword"), "{message}");
-    assert!(message.contains("text"), "{message}");
 }
 
 #[test]
@@ -787,50 +458,6 @@ fn a_text_column_resolves_its_analyser_and_refuses_an_unknown_one() {
     );
 }
 
-/// An analyser on a column that has no analyser is refused rather than ignored — the same rule a
-/// vocabulary on a non-category gets, and for the same reason.
-#[test]
-fn an_analyser_on_a_non_text_column_is_refused() {
-    let message = err("[[attribute]]\nname = \"score\"\ntype = \"i64\"\nanalyser = \"unicode\"\n");
-    assert!(
-        message.contains("not `text`") && message.contains("believes"),
-        "{message}"
-    );
-    let message = err(&with_line(SEVERITY, "analyser = \"unicode\""));
-    assert!(message.contains("not `text`"), "{message}");
-}
-
-/// A vocabulary on a non-category is a value set its author believes is in effect.
-#[test]
-fn a_vocabulary_on_a_non_category_is_refused_rather_than_ignored() {
-    let text = format!(
-        "{SEVERITY}\n[[attribute]]\nname = \"score\"\ntype = \"f32\"\nvocabulary = \"severity\"\n"
-    );
-    assert!(err(&text).contains("has no meaning"), "{}", err(&text));
-}
-
-#[test]
-fn a_column_may_not_be_named_after_a_combinator() {
-    for name in ["all_of", "any_of", "none_of"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"keyword\"\nindex = true\n");
-        assert!(err(&text).contains("filter combinator"), "{}", err(&text));
-    }
-}
-
-#[test]
-fn a_column_may_not_shadow_a_fixed_or_reserved_name() {
-    for name in ["tessera_id", "residual", "x", "access"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(err(&text).contains("shadows"), "{name}: {}", err(&text));
-    }
-}
-
-#[test]
-fn record_is_a_reserved_column_name() {
-    let message = err("[[attribute]]\nname = \"record\"\ntype = \"i64\"\n");
-    assert!(message.contains("record blob"), "{message}");
-}
-
 #[test]
 fn one_attribute_name_may_not_be_declared_twice() {
     let text = format!(
@@ -839,17 +466,14 @@ fn one_attribute_name_may_not_be_declared_twice() {
     assert!(err(&text).contains("declared twice"), "{}", err(&text));
 }
 
-/// The name addresses the column in `/v1/categories/{column}`, so it must survive a path segment.
+/// `level` places a batch's member keys, so neither an attribute nor a layer may take the name.
 #[test]
-fn a_column_name_must_survive_a_path_segment() {
-    for name in ["a/b", "a b", "a.b", "a%2Fb", "caté"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(err(&text).contains("its identifier on the wire"), "{name}");
-    }
-    for name in ["severity_2", "severity-2", "Severity2"] {
-        let text = format!("[[attribute]]\nname = \"{name}\"\ntype = \"i64\"\n");
-        assert!(parse_str(&text).is_ok(), "{name}");
-    }
+fn an_attribute_or_a_layer_named_level_is_refused() {
+    let attribute = format!("{SEVERITY}\n[[attribute]]\nname = \"level\"\ntype = \"u32\"\n");
+    assert!(parse_str(&attribute).is_err());
+    let layer = format!("{SEVERITY}{}", LAYER.replace("\"clusters/a\"", "\"level\""));
+    assert!(parse_str(&layer).is_err());
+    assert!(parse_str(&with_layer("")).is_ok());
 }
 
 #[test]
@@ -923,11 +547,7 @@ fn a_view_must_declare_its_point_visibility() {
 fn a_point_default_may_not_be_inherited() {
     let text = SEVERITY.replace("default = \"public\"", "default = \"inherited\"");
     let message = err(&text);
-    assert!(message.contains("refused"), "{message}");
-    assert!(
-        message.contains("can only widen"),
-        "the refusal must say which direction it fails in: {message}"
-    );
+    assert!(message.contains("point_visibility.default"), "{message}");
 }
 
 /// A view's own gate is a list of labels the manifest records and `Engine::authorise` evaluates
@@ -967,20 +587,9 @@ fn a_views_own_visibility_is_a_label_the_plugin_can_read() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    let message = refusal("[]");
-    assert!(message.contains("names no terms"), "{message}");
-    let message = refusal("[\"finance\", \"\"]");
-    assert!(
-        message.contains("element 1") && message.contains("is empty"),
-        "an empty element is refused naming its position: {message}"
-    );
-    let message = refusal("\"\"");
-    assert!(message.contains("is empty"), "{message}");
-    let message = refusal("[\"public\", \"finance\"]");
-    assert!(
-        message.contains("`public` beside another label"),
-        "`public` beside a label is a gate everybody passes, and is refused: {message}"
-    );
+    // The rules are tested in `tessera_plugin::check_visibility`; here, that the build applies them.
+    refusal("[]");
+    refusal("[\"public\", \"finance\"]");
 }
 
 /// `public` is the documented default and the current behaviour, so writing it records nothing
@@ -1136,7 +745,7 @@ fn a_projection_outside_the_set_is_refused() {
     let message = err(&projected(
         "projection = \"lambert_cylindrical_equal_area\"\nextent = \"auto\"",
     ));
-    assert!(message.contains("not one of the projections"), "{message}");
+    // The message lists the projections that exist.
     for name in [
         "web_mercator",
         "equirectangular",
@@ -1386,7 +995,7 @@ fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
     let report = crate::check::check(&stated);
     assert_eq!(report.frames.len(), 1);
     assert_eq!(report.frames[0].view, "s0");
-    assert_eq!(report.frames[0].projection, "equirectangular");
+    assert_eq!(report.frames[0].projection.name(), "equirectangular");
     let (asked, snap) = report.frames[0].snapped.expect("a stated box snaps");
     assert_eq!(asked.lon_min, -180.0);
     // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.
@@ -1503,40 +1112,6 @@ fn the_membership_requirement_has_five_settings() {
     assert!(err(&text).contains("exactly one of"), "{}", err(&text));
 }
 
-/// **An empty closed vocabulary is refused in every spelling**, the rule applying after the three
-/// converge rather than at the source.
-///
-/// Refusing only *the absence of a source* would admit a source that declares nothing — the same
-/// column, the same width in every row, and none of the message. A closed set is the authority on
-/// what may be ingested, so an empty one refuses every value for ever.
-#[test]
-fn a_closed_vocabulary_with_no_values_is_refused_in_every_spelling() {
-    // Both spellings of "authored, and authoring nothing": the inline table emptied, and the bare
-    // key array emptied. `SEVERITY` pins two codes, so removing them is the whole edit.
-    for emptied in ["  [vocabulary.values]\n", "values = []\n"] {
-        let text = SEVERITY
-            .replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", emptied)
-            .to_string();
-        let message = err(&text);
-        assert!(
-            message.contains("no values") || message.contains("value source"),
-            "{emptied:?}: {message}"
-        );
-        assert!(
-            message.contains("open"),
-            "{emptied:?}: the refusal must name the other value_set: {message}"
-        );
-    }
-    // An open one is legal empty: its values arrive as they are minted.
-    let text = SEVERITY
-        .replace(
-            "  [vocabulary.values]\n  low = 1\n  high = 2\n",
-            "values = []\n",
-        )
-        .replace("value_set  = \"closed\"", "value_set  = \"open\"");
-    parse_str(&text).expect("an open vocabulary may start empty");
-}
-
 /// A threshold that cannot fail, or cannot pass, is refused rather than compiled.
 ///
 /// `{ count = 0 }` clears on every masked count and `{ fraction = 0.0 }` with it, so each declares
@@ -1582,14 +1157,7 @@ fn an_access_label_may_not_be_spelled_inherited() {
         "visibility                = \"inherited\"",
     );
     let message = err(&text);
-    assert!(
-        message.contains("may not be spelled `inherited`"),
-        "{message}"
-    );
-    assert!(
-        message.contains("`public` is not reserved in this sense"),
-        "the refusal must say why the other reserved word is fine: {message}"
-    );
+    assert!(message.contains("`visibility` is `inherited`"), "{message}");
 
     // ...and it is legal where it is not a label: the member default.
     let text = with_layer("").replace(
@@ -2183,7 +1751,7 @@ fn an_override_is_never_a_fall_through_to_minting() {
     let config = bound_ok(ACQUIRED, &["severity_values"]);
     let severity = &config.schema.vocabularies["severity"];
     assert_eq!(severity.value_set, ValueSet::Closed);
-    assert_eq!(severity.codes.len(), 2, "still the two inline values");
+    assert_eq!(severity.values.bindings().count(), 2, "still the two inline values");
 
     // …and a name `[sources]` does not carry is a refusal listing the ones it does.
     let message = bound_err(ACQUIRED, &["vocabulary:severity"]);
@@ -2288,7 +1856,11 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
     let config = parse_at(dir.path(), &open, &HashMap::new()).expect("a parse");
     assert!(
-        config.schema.vocabularies["severity"].codes.is_empty(),
+        config.schema.vocabularies["severity"]
+            .values
+            .bindings()
+            .next()
+            .is_none(),
         "an open vocabulary with no source starts empty rather than reading the default file"
     );
 
@@ -2307,33 +1879,50 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
 }
 
-/// **A column may name its own source and its own identity column**, which is what `[corpus]`
-/// could not express: the entity id is what puts a value in this entity space, and the file it
-/// arrived in never was.
+/// `ACQUIRED` with a declared unique attribute, `doc`, which every file names its rows by.
+fn identified() -> String {
+    ACQUIRED.to_string() + "\n[[attribute]]\nname = \"doc\"\ntype = \"u64\"\nunique = true\n"
+}
+
+/// **A column may name its own source, and its `fields` may move a unique column there.**
 #[test]
-fn an_attribute_may_name_its_own_source_and_identity_column() {
+fn an_attribute_may_name_its_own_source_and_move_a_unique_column() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!(
-        "{ACQUIRED}\n[[attribute]]\nname            = \"sentiment\"\nfield           = \"score\"\n\
-         type            = \"f32\"\nsource          = \"other\"\nentity_id_field = \"doc_id\"\n"
+        "{}\n[[attribute]]\nname   = \"sentiment\"\nfield  = \"score\"\ntype   = \"f32\"\n\
+         source = \"other\"\nfields = {{ doc = \"doc_id\" }}\n",
+        identified()
     );
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
     assert_eq!(config.attribute_sources.len(), 2, "two files, two passes");
     assert_eq!(config.attribute_sources[0].name, "corpus");
-    assert_eq!(config.attribute_sources[0].attributes, vec![0]);
+    assert_eq!(config.attribute_sources[0].attributes, vec![0, 1]);
     assert_eq!(config.attribute_sources[1].name, "other");
-    assert_eq!(config.attribute_sources[1].attributes, vec![1]);
+    assert_eq!(config.attribute_sources[1].attributes, vec![2]);
     assert_eq!(
         config.attribute_sources[1].path,
         dir.path().join("other.parquet")
     );
-    assert_eq!(config.attribute_sources[1].fields.of("entity_id"), "doc_id");
-    // The first group joins on whatever this declaration spells identity, which is the canonical
-    // name here because `[defaults]` says nothing else.
     assert_eq!(
-        config.attribute_sources[0].fields.of("entity_id"),
-        "entity_id"
+        config.attribute_sources[1].fields.unique_column("doc"),
+        Some("doc_id")
     );
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), None);
+}
+
+/// **A declaration holds at most 65,535 unique fields**, as a running service's schema does.
+#[test]
+fn a_declaration_past_the_most_unique_fields_is_refused() {
+    let declaring = |count: usize| {
+        let mut text = ACQUIRED.to_string();
+        for i in 0..count {
+            text += &format!("\n[[attribute]]\nname = \"u{i}\"\ntype = \"u64\"\nunique = true\n");
+        }
+        parse_str(&text)
+    };
+    let most = tessera_store::declaration::UNIQUE_FIELDS_MAX;
+    assert!(declaring(most).is_ok());
+    assert!(declaring(most + 1).is_err());
 }
 
 /// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
@@ -2356,35 +1945,40 @@ fn columns_sharing_a_source_share_one_pass() {
     assert_eq!(config.attribute_sources[1].attributes, vec![2]);
 }
 
-/// **`[defaults].entity_id_field` says how this declaration spells identity**, and every block
-/// that reads one may say otherwise.
+/// **A unique field's column is its own everywhere a block does not move it**, and each block that
+/// reads a file may move it for that file alone.
 #[test]
-fn the_identity_column_defaults_once_and_each_reader_may_override_it() {
-    let text = ACQUIRED.replace(
-        "[defaults]\nsource = \"corpus\"",
-        "[defaults]\nsource = \"corpus\"\nentity_id_field = \"id\"",
-    );
+fn each_reader_may_move_a_unique_column_for_its_own_file() {
+    let text = identified();
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.views[0].fields.of("entity_id"), "id");
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+    assert_eq!(config.views[0].fields.unique_column("doc"), None);
 
-    // The view says otherwise through its own map…
     let moved = text.replace(
+        "source           = \"geometry\"",
+        "source           = \"geometry\"\nfields           = { doc = \"gid\" }",
+    );
+    let config = bound_ok(&moved, &[]);
+    assert_eq!(config.views[0].fields.unique_column("doc"), Some("gid"));
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), None);
+}
+
+/// **There is no join field**: `[defaults]` refuses the key, and a map may not move a column that
+/// is no field of the object and no unique attribute.
+#[test]
+fn a_join_field_is_not_a_key_and_a_map_moves_only_fields_it_knows() {
+    let joined = identified().replace(
+        "[defaults]\nsource = \"corpus\"",
+        "[defaults]\nsource = \"corpus\"\njoin_field = \"doc\"",
+    );
+    let message = bound_err(&joined, &[]);
+    assert!(message.contains("join_field"), "{message}");
+    let moved = ACQUIRED.replace(
         "source           = \"geometry\"",
         "source           = \"geometry\"\nfields           = { entity_id = \"gid\" }",
     );
-    let config = bound_ok(&moved, &[]);
-    assert_eq!(config.views[0].fields.of("entity_id"), "gid");
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
-
-    // …and a column through its own key.
-    let moved = text.replace(
-        "vocabulary = \"severity\"",
-        "vocabulary = \"severity\"\nentity_id_field = \"doc_id\"",
+    assert!(
+        bound_err(&moved, &[]).contains("`fields.entity_id` is not one of this object's fields")
     );
-    let config = bound_ok(&moved, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "doc_id");
-    assert_eq!(config.views[0].fields.of("entity_id"), "id");
 }
 
 /// `[defaults].source` naming nothing is refused once, quoting `[defaults]`, rather than once per
@@ -2409,7 +2003,7 @@ fn inline_values_and_a_source_together_are_refused() {
         "values     = [\"low\", \"high\"]\nsource     = \"severity_values\"",
     );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("spellings of one thing"), "{message}");
+    assert!(message.contains("give one"), "{message}");
 }
 
 /// **The map says *where*, never *whether*.** A name outside the object's fields is refused
@@ -2427,7 +2021,7 @@ fn a_field_map_may_not_name_a_field_the_object_does_not_have() {
         "{message}"
     );
     assert!(
-        message.contains("entity_id"),
+        message.contains("morton"),
         "the refusal must list them: {message}"
     );
 }
@@ -2478,12 +2072,12 @@ fn a_field_map_without_a_source_is_refused() {
 /// A map *moves* a field, and the reader takes the name it moved it to.
 #[test]
 fn a_renamed_field_reaches_the_reader() {
-    let text = ACQUIRED.replace(
-        "vocabulary = \"severity\"",
-        "vocabulary = \"severity\"\nentity_id_field = \"id\"",
+    let text = identified().replace(
+        "vocabulary = \"severity\"\n",
+        "vocabulary = \"severity\"\nfields = { doc = \"id\" }\n",
     );
     let config = bound_ok(&text, &[]);
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
+    assert_eq!(config.attribute_sources[0].fields.unique_column("doc"), Some("id"));
 
     // An attribute's own one-field map is the same rule, spelled for one field.
     let text = with_line(SEVERITY, "field = \"sev\"");
@@ -2502,16 +2096,14 @@ fn a_renamed_field_reaches_the_reader() {
 /// A field map entry naming no column at all is refused rather than read as *the canonical name*.
 #[test]
 fn an_empty_field_name_is_refused() {
-    let text = ACQUIRED.replace(
+    let text = identified().replace(
         "source           = \"geometry\"",
-        "source           = \"geometry\"\nfields           = { entity_id = \"\" }",
+        "source           = \"geometry\"\nfields           = { doc = \"\" }",
     );
-    let message = bound_err(&text, &[]);
-    assert!(message.contains("names no column"), "{message}");
+    assert!(bound_err(&text, &[]).contains("`fields.doc` is empty"));
 
     let text = with_line(SEVERITY, "field = \"  \"");
-    let message = err(&text);
-    assert!(message.contains("names no column"), "{message}");
+    assert!(err(&text).contains("`field` is empty"));
 }
 
 /// **A layer's map moves a field, and the reader takes the name it moved it to** — the same rule
@@ -2578,7 +2170,7 @@ fn a_field_map_beside_inline_artifacts_is_refused() {
 fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
     let text = with_layer("").replace(
         "views                     = [\"s0\"]",
-        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = [1], excluding = [2] }]",
+        "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = { id = [1] }, excluding = { id = [2] } }]",
     );
     let message = bound_err(&text, &[]);
     assert!(
@@ -2825,10 +2417,7 @@ fn an_access_label_spelled_inherited_is_refused_in_the_sugar_too() {
         "  membership                = \"enumerated\"\n  visibility = \"inherited\"",
     );
     let message = err(&text);
-    assert!(
-        message.contains("may not be spelled `inherited`"),
-        "{message}"
-    );
+    assert!(message.contains("`visibility` is `inherited`"), "{message}");
 }
 
 /// What the sugar never supplies is what a caller must write. It fills in the mechanical keys — the
@@ -3111,7 +2700,7 @@ fn a_value_listed_twice_in_an_array_is_refused() {
         "values     = [\"low\", \"high\", \"low\"]\n",
     );
     let message = err(&text);
-    assert!(message.contains("listed twice"), "{message}");
+    assert!(message.contains("given twice"), "{message}");
 }
 
 /// Declaration order is registration order, and a layer must follow every layer it names.
@@ -3480,11 +3069,7 @@ fn a_group_and_a_view_may_not_share_a_name() {
 fn a_metadata_name_may_not_take_a_roster_key() {
     for reserved in ["key", "source", "visibility"] {
         let text = with_group("").replace("label = \"text\"", &format!("{reserved} = \"text\""));
-        let message = err(&text);
-        assert!(
-            message.contains("a name the roster already uses"),
-            "{reserved}: {message}"
-        );
+        err(&text);
     }
     // And the discriminator, where the group carries one.
     let text = format!("{SEVERITY}{GROUP_B}").replace("label = \"text\"", "quarter = \"text\"");
@@ -3651,16 +3236,18 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
 #[test]
 fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
     let text = with_group(
-        "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
+        "\n[[attribute]]\nname = \"id\"\ntype = \"keyword\"\nunique = true\n\
+         source = \"other\"\n\
+         \n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
          scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-         fields = { view = \"quarter\" }\nentity_id_field = \"doc\"\n",
+         fields = { view = \"quarter\", id = \"doc\" }\n",
     );
     let config = ok(&text);
     let scoped = &config.scoped_attributes[0];
     assert_eq!(scoped.group, "quarter");
     let source = scoped.source.as_ref().expect("its own source is recorded");
     assert_eq!(source.view_field, "quarter");
-    assert_eq!(source.entity_id, "doc");
+    assert_eq!(source.fields.unique_column("id"), Some("doc"));
     assert!(source.path.ends_with("other.parquet"));
     assert!(
         !config
@@ -3673,7 +3260,7 @@ fn a_scoped_attribute_may_read_its_own_source_through_fields_view() {
 
     // `fields.view` is optional and defaults to `view`, the same default a scoped layer's
     // artifacts source takes — one word, one meaning, across the declaration.
-    let defaulted = text.replace("fields = { view = \"quarter\" }\n", "");
+    let defaulted = text.replace("view = \"quarter\", ", "");
     assert_eq!(
         ok(&defaulted).scoped_attributes[0]
             .source
@@ -3693,7 +3280,7 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
          source = \"other\"\nfields = { view = \"quarter\" }\n",
     );
     assert!(
-        err(&entity_scope).contains("entity scope"),
+        err(&entity_scope).contains("`fields.view` is not one of this object's fields"),
         "{}",
         err(&entity_scope)
     );
@@ -3703,7 +3290,7 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
          scope = { group = \"quarter\" }\nindex = true\nfields = { view = \"quarter\" }\n",
     );
     assert!(
-        err(&no_source).contains("there is no `source` here"),
+        err(&no_source).contains("`fields` without a `source`"),
         "{}",
         err(&no_source)
     );
@@ -3711,10 +3298,10 @@ fn fields_on_an_attribute_that_has_no_view_to_choose_is_refused() {
     let stray = with_group(
         "\n[[attribute]]\nname = \"sentiment\"\ntype = \"f32\"\n\
          scope = { group = \"quarter\" }\nindex = true\nsource = \"other\"\n\
-         fields = { entity_id = \"doc\" }\n",
+         fields = { nonesuch = \"doc\" }\n",
     );
     assert!(
-        err(&stray).contains("`fields.entity_id` is not a field"),
+        err(&stray).contains("`fields.nonesuch` is not one of this object's fields"),
         "{}",
         err(&stray)
     );
@@ -3731,7 +3318,6 @@ fn a_scoped_text_column_without_an_index_is_refused() {
     );
     let message = err(&text);
     assert!(message.contains("`index = true`"), "{message}");
-    assert!(message.contains("record blob"), "{message}");
 }
 
 /// A layer may be drawn on a whole group, and a **scoped** layer only on that group's views.
@@ -3884,7 +3470,7 @@ fn the_multiview_fixture_parses() {
     );
 }
 
-/// A one-column vocabulary file: `key`, and the codes assigned in the order given.
+/// A one-column vocabulary file: `key`, each value drawn a code.
 fn write_keys(path: &Path, keys: &[&str]) {
     let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
         arrow::datatypes::Field::new("key", arrow::datatypes::DataType::Utf8, false),

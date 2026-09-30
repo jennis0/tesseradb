@@ -26,7 +26,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const TREE: &str = "clusters/tree";
 const LABELS: &str = "clusters/labels";
 
@@ -495,12 +494,12 @@ fn the_column_set_follows_the_layers_the_response_served() {
     assert_eq!(named.points.membership[0].layer, TREE);
 }
 
-/// **A dependent layer's column is its artifacts' own membership.** A label published with the
-/// members it describes names itself on those points; one published with no members is a
-/// candidate nowhere and so is in neither the frame nor the column; and a label whose cluster
-/// this response does not hold is absent from the frame and so from the column.
+/// A dependent layer's column is the membership its artifacts are served over. A label published
+/// with the members it describes names itself on those points. One published with no members is
+/// served over its cluster's membership and names its cluster's points (decision 0145). A label
+/// whose cluster this response does not hold is absent from the frame and so from the column.
 #[test]
-fn a_dependent_layer_resolves_over_its_own_members() {
+fn a_dependent_layer_resolves_over_the_membership_it_is_served_over() {
     let fx = fixture();
     let engine = fx.open();
     engine
@@ -588,16 +587,26 @@ fn a_dependent_layer_resolves_over_its_own_members() {
     assert_eq!(by_point[&a1_point][TREE], "a1");
     let b1_point = served_from(200..300);
     assert_eq!(by_point[&b1_point][TREE], "b1");
-    assert!(
-        !by_point[&b1_point].contains_key(LABELS),
-        "a label with no members names no point"
+    // The label that declared no members of its own is the label of `b1` (decision 0145). It is
+    // placed where `b1` is placed, so it is a candidate in `b1`'s tiles and names `b1`'s points in
+    // the column as a label published over those members would.
+    assert_eq!(
+        by_point[&b1_point][LABELS], "l-b1",
+        "a label with no members of its own names the points of what it attaches to"
     );
-    assert!(
-        !out.artifacts
-            .iter()
-            .any(|a| a.key.as_deref() == Some("l-b1")),
-        "a memberless label has no visible member in any viewport, so it is no candidate and \
-         is absent from the frame as well as the column"
+    let b1_label = out
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("l-b1"))
+        .expect("and so is served in the frame beside its cluster");
+    let b1 = out
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("b1"))
+        .expect("the cluster it names");
+    assert_eq!(
+        b1_label.masked_count, b1.masked_count,
+        "at the cluster's masked count"
     );
 
     // Cut to the children: `a1` goes, its label goes with it (decision 0089), and the column says
@@ -787,11 +796,19 @@ fn measure_the_column_cost() {
     }
 }
 
-/// **A label carries its cluster's masked count** (D13): the number beside a label is the
-/// target's, as this principal sees it, so the two agree in one response — and a label whose
-/// target this response does not hold is absent, so there is no count to disagree with.
+/// **A label names its cluster by identifier, and its count is its own** (owner ruling,
+/// 2026-09-18).
+///
+/// `target` is the `tessera_id` this same response served the cluster under, so a client attaches
+/// the two exactly rather than by matching numbers — the join that left a label unattached
+/// wherever two clusters happened to share a count. The count copy is gone with it: this label
+/// declares ten members of its own, so by
+/// [decision 0145](../../../docs/decisions/0145-an-attached-artifact-with-no-members-of-its-own-is-served-over-its-targets-membership.md)
+/// it is served over its own generating set and its row carries that number, not its cluster's
+/// hundred. A label whose target this response does not hold is absent entire, so `target` never
+/// names a row that is not here.
 #[test]
-fn a_dependent_artifact_carries_its_targets_masked_count() {
+fn a_dependent_artifact_names_its_target_and_carries_its_own_count() {
     let fx = fixture();
     let engine = fx.open();
     engine
@@ -839,13 +856,26 @@ fn a_dependent_artifact_carries_its_targets_masked_count() {
                     .get("l-a1")
                     .expect("the label is served beside its cluster");
                 assert_eq!(
-                    label.masked_count, target.masked_count,
-                    "the label's count is its cluster's"
+                    label.target,
+                    Some(target.tessera_id),
+                    "the label names its cluster by the identifier this response served it under"
+                );
+                assert_eq!(
+                    label.masked_count, 10,
+                    "and its count is its own generating set's, never its cluster's"
                 );
                 assert!(
                     target.masked_count > 10,
-                    "and not the label's own membership"
+                    "the two are different numbers, so a copy would show here"
                 );
+                // The property the client's join rests on: the value is an identifier this same
+                // response carries.
+                assert!(out
+                    .artifacts
+                    .iter()
+                    .any(|a| Some(a.tessera_id) == label.target));
+                // A cluster is attached to nothing, and says so.
+                assert_eq!(target.target, None);
             }
             // The subset principal: `a1` fails the bar and `a` is served instead, so the label —
             // describing an artifact this response does not hold — is absent whole.

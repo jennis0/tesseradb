@@ -30,7 +30,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, Int32Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -88,10 +88,6 @@ fn score_of(e: u64) -> i32 {
     (e as i32 * 7 % 101) - 50
 }
 
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
-}
-
 fn write_points(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -116,32 +112,6 @@ fn write_points(path: &Path) {
             Arc::new(Float64Array::from(ys)),
             Arc::new(StringArray::from(archives)),
             Arc::new(Int32Array::from(scores)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn write_pairs(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..N {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
         ],
     )
     .unwrap();
@@ -214,7 +184,7 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
-    write_pairs(&pairs);
+    write_pairs_n(&pairs, N);
     let bundle = dir.path().join("bundle");
     let schema_path = dir.path().join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
@@ -233,22 +203,20 @@ fn fixture(criterion: Option<ExistenceCriterion>) -> Fixture {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: bundle.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     })
     .expect("the fixture builds");
     let engine = open_engine_publishing(
@@ -544,9 +512,8 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
     // its children. Suppression is the same withholding by a different door, and it is the door a
     // test can drive.
     let fx = fixture(None);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
     let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
-    let entity = fx.engine.resolve_tessera_ids(&[alpha], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[alpha]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .unwrap();
@@ -574,6 +541,151 @@ fn a_child_whose_parent_is_withheld_is_a_root() {
         );
         assert_eq!(row.rung, 0, "with nothing above it, it is at depth 0");
     }
+}
+
+/// **A row's `child_count` is the size of its children form**, counted over the children this
+/// principal is served.
+///
+/// Under a criterion the narrow principal clears only at the roots, the broad principal's roots
+/// count three children each and the narrow principal's count none. A child suppressed after the
+/// build leaves its parent's count at two. A leaf counts none.
+#[test]
+fn a_rows_child_count_counts_only_the_children_this_principal_is_served() {
+    let fx = fixture(Some(ExistenceCriterion::Count(50)));
+    let counts = |credential: &[u8]| -> Vec<(String, u64)> {
+        let mut rows: Vec<(String, u64)> =
+            browse(&fx.engine, credential, BrowseForm::Roots, None, 100)
+                .artifacts
+                .into_iter()
+                .map(|row| (row.key.unwrap_or_default(), row.child_count))
+                .collect();
+        rows.sort();
+        rows
+    };
+    let all = |n: u64| {
+        vec![
+            ("alpha".to_string(), n),
+            ("bravo".to_string(), n),
+            ("charlie".to_string(), n),
+        ]
+    };
+    assert_eq!(counts(&full_coverage_credential()), all(3));
+    assert_eq!(counts(&subset_credential()), all(0));
+
+    let alpha = id_of(&fx, &full_coverage_credential(), "alpha");
+    let children = browse(
+        &fx.engine,
+        &full_coverage_credential(),
+        BrowseForm::Children(alpha),
+        None,
+        100,
+    );
+    assert_eq!(children.artifacts.len(), 3);
+    assert!(
+        children.artifacts.iter().all(|row| row.child_count == 0),
+        "a leaf counts no children"
+    );
+
+    let one = id_of(&fx, &full_coverage_credential(), "alpha-one");
+    let entity = fx.engine.resolve_tessera_ids(&[one]).unwrap()[0].unwrap();
+    fx.engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .unwrap();
+    let after = counts(&full_coverage_credential());
+    assert_eq!(after[0], ("alpha".to_string(), 2), "the suppressed child is not counted");
+    assert_eq!(counts(&subset_credential()), all(0));
+
+    let two = id_of(&fx, &full_coverage_credential(), "alpha-two");
+    let entity = fx.engine.resolve_tessera_ids(&[two]).unwrap()[0].unwrap();
+    fx.engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .unwrap();
+    let after = counts(&full_coverage_credential());
+    assert_eq!(after[0], ("alpha".to_string(), 1), "nor is the deleted one");
+    let children = browse(
+        &fx.engine,
+        &full_coverage_credential(),
+        BrowseForm::Children(alpha),
+        None,
+        100,
+    );
+    assert_eq!(key_set(&children), vec!["alpha-three"]);
+}
+
+/// **On a `dag` layer a child counts under each parent the principal is served, once.**
+///
+/// `wide` (300 members) is served to both principals; `thin` (60) and `thin-child` (60) only to
+/// the broad one, since the narrow one sees 20 of each and the criterion asks for 50. `both`
+/// names `wide` twice and `thin` once. The narrow principal is served `both` under `wide` alone,
+/// counted once, and each count equals the length of that row's children page.
+#[test]
+fn a_dag_child_counts_once_under_each_served_parent() {
+    const DAG: &str = "clusters/dag";
+    let fx = fixture(None);
+    let mut declaration = declaration(Some(ExistenceCriterion::Count(50)));
+    declaration.name = DAG.into();
+    declaration.hierarchy.kind = HierarchyKind::Dag;
+    declaration.content = ContentDeclaration::default();
+    fx.engine.register_layer(declaration).unwrap();
+    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
+    let artifact = |key: &str, members: std::ops::Range<u64>, parents: &[&str]| {
+        let mut a = IncomingArtifact::from_entities(
+            Some(key.into()),
+            members.map(|s| EntityId::new(map[&s])),
+        );
+        a.parent_keys = parents.iter().map(|p| p.to_string()).collect();
+        a
+    };
+    fx.engine
+        .publish_artifacts(
+            DAG.into(),
+            0,
+            vec![
+                artifact("wide", 0..300, &[]),
+                artifact("thin", 600..660, &[]),
+                artifact("both", 0..200, &["wide", "wide", "thin"]),
+                artifact("thin-child", 700..760, &["wide"]),
+            ],
+        )
+        .unwrap();
+
+    let walk = |credential: &[u8]| -> Vec<(String, u64)> {
+        let session = fx.engine.authorise(credential).unwrap();
+        let ask = |form| {
+            fx.engine
+                .browse(
+                    &session,
+                    BrowseRequest {
+                        view: "s0",
+                        layer: DAG,
+                        level: None,
+                        form,
+                        filter: None,
+                        limit: 100,
+                        cursor: None,
+                    },
+                )
+                .unwrap()
+        };
+        let mut out = Vec::new();
+        for row in ask(BrowseForm::Roots).artifacts {
+            let children = ask(BrowseForm::Children(row.tessera_id)).artifacts;
+            assert_eq!(
+                children.len() as u64,
+                row.child_count,
+                "{:?}: the children page is as long as the count",
+                row.key
+            );
+            out.push((row.key.unwrap_or_default(), row.child_count));
+        }
+        out.sort();
+        out
+    };
+    assert_eq!(
+        walk(&full_coverage_credential()),
+        vec![("thin".to_string(), 1), ("wide".to_string(), 2)]
+    );
+    assert_eq!(walk(&subset_credential()), vec![("wide".to_string(), 1)]);
 }
 
 /// **The order is total and the cursor walks it exactly.**
@@ -684,6 +796,7 @@ fn a_filter_adds_a_count_per_row_and_moves_nothing_else() {
                     row.masked_count, plain_counts[&row.tessera_id.raw()],
                     "and the same masked count beside them"
                 );
+                assert_eq!(row.child_count, 3, "and the same children, whatever they match");
                 let key = row.key.clone().unwrap_or_default();
                 let base = ROOTS
                     .iter()
@@ -774,4 +887,381 @@ fn the_refusals_are_about_schema_and_an_artifact_is_an_empty_page() {
             "an unknown parent answers an empty page identically to a leaf"
         );
     }
+}
+
+/// **A session established before a fold counts none of the entity the fold retired** — the same
+/// session object, never re-authorised, over a filtered browse.
+///
+/// A fold retires the deletion's tombstone and rotates the bundle identity without moving the
+/// watermark, so this session's frozen fragment still names the retired entity and the overlay no
+/// longer denies it. A filtered browse composes that fragment into an entity-space candidate, and
+/// a row's `matched_count` is what a retired entity would reappear in.
+#[test]
+fn a_session_from_before_a_fold_counts_none_of_the_entity_the_fold_retired() {
+    let fx = fixture(None);
+    // A refresh pass rebuilds each resident session's fragment, which would make a request path
+    // that failed to notice the rotation indistinguishable from one that noticed.
+    fx.engine.set_background_refresh_for_test(false);
+    let session = fx
+        .engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential resolves");
+
+    // Source 0 is `alpha`'s first member and carries `xx`; `charlie` is the untouched control.
+    let doomed = EntityId::new(source_to_new_map(&fx._dir.path().join("bundle"), "v00000")[&0]);
+    assert_eq!(archive_of(0), "xx");
+    let xx = FilterExpr::Leaf {
+        column: "archive".into(),
+        operand: FilterOperand::Equals(tessera_types::AttrLocalId::new(fx.codes["xx"])),
+    };
+    let counted = |key: &str| -> u64 {
+        let out = fx
+            .engine
+            .browse(
+                &session,
+                BrowseRequest {
+                    view: "s0",
+                    layer: LAYER,
+                    level: None,
+                    form: BrowseForm::Roots,
+                    filter: Some(xx.clone()),
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .expect("a filtered browse answers");
+        out.artifacts
+            .iter()
+            .find(|row| row.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("'{key}' is served"))
+            .matched_count
+            .expect("a filtered row carries a matched count")
+    };
+
+    let alpha_before = counted("alpha");
+    let charlie_before = counted("charlie");
+    assert!(alpha_before > 1, "the count must have room to fall by one");
+
+    fx.engine
+        .accept_change(doomed, tessera_lifecycle::wal::ChangeOp::Delete)
+        .expect("a delete is accepted");
+    let before = fx.engine.write_executor_stats();
+    fx.engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = fx.engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        fx.engine.overlay_depth(),
+        0,
+        "the tombstone retired, so nothing but the folded corpus hides the entity now"
+    );
+    // The premise, without which the assertions below hold for the wrong reason.
+    assert!(
+        session.fragment_at_authorise_for_test().view().contains(doomed.raw() as u32),
+        "the frozen fragment must still name the retired entity"
+    );
+
+    assert_eq!(
+        counted("alpha"),
+        alpha_before - 1,
+        "the filtered count moved by exactly the retired entity"
+    );
+    assert_eq!(
+        counted("charlie"),
+        charlie_before,
+        "and an artifact the fold did not touch counts what it counted"
+    );
+}
+
+/// `clusters/bare`, a layer whose artifacts carry no text, over the browse fixture, and the label
+/// layers attached to it.
+///
+/// - `labels/a` serves a label while one of its own members is visible. Its label on `b1` holds
+///   only members the subset viewer cannot see. It holds two labels on `b4`, published `a4-z`
+///   first, and the viewport's order within a level puts `a4-a` first by key.
+/// - `labels/b` comes after `labels/a` in the order `/v1/meta` lists layers, so it names only the
+///   clusters `labels/a` leaves unnamed.
+/// - `labels/gated` is behind the layer label `1`, which the subset viewer holds and the broad
+///   viewer does not.
+const BARE: &str = "clusters/bare";
+
+struct Labelled {
+    fx: Fixture,
+    map: std::collections::BTreeMap<u64, u64>,
+    /// The label artifacts' identifiers, by key.
+    ids: HashMap<String, TesseraId>,
+}
+
+impl Labelled {
+    fn members(&self, sources: impl IntoIterator<Item = u64>) -> Vec<EntityId> {
+        sources
+            .into_iter()
+            .map(|s| EntityId::new(self.map[&s]))
+            .collect()
+    }
+
+    fn label(
+        &self,
+        key: &str,
+        target: &str,
+        text: &str,
+        sources: impl IntoIterator<Item = u64>,
+    ) -> IncomingArtifact {
+        let mut label = IncomingArtifact::from_entities(Some(key.into()), self.members(sources));
+        label.attached_to = Some(tessera_lifecycle::membership::IncomingAttachment {
+            layer: BARE.into(),
+            level: 0,
+            key: target.into(),
+        });
+        label.contents = vec![tessera_lifecycle::membership::IncomingContent {
+            values: vec![text.into()],
+            generated_from: Default::default(),
+        }];
+        label
+    }
+
+    fn publish(&mut self, layer: &str, labels: Vec<IncomingArtifact>) {
+        let keys: Vec<String> = labels.iter().map(|l| l.key.clone().unwrap()).collect();
+        let ids = self
+            .fx
+            .engine
+            .publish_artifacts(layer.into(), 0, labels)
+            .unwrap();
+        self.ids.extend(keys.into_iter().zip(ids));
+        tick(&self.fx.engine);
+    }
+
+    fn ask(&self, credential: &[u8], form: BrowseForm, filter: Option<FilterExpr>) -> BrowseOut {
+        let session = self.fx.engine.authorise(credential).unwrap();
+        self.fx
+            .engine
+            .browse(
+                &session,
+                BrowseRequest {
+                    view: "s0",
+                    layer: BARE,
+                    level: None,
+                    form,
+                    filter,
+                    limit: 100,
+                    cursor: None,
+                },
+            )
+            .expect("a browse answers")
+    }
+
+    fn names(&self, credential: &[u8]) -> Vec<(String, Option<String>)> {
+        named_rows(&self.ask(credential, BrowseForm::Roots, None))
+    }
+
+    /// The keys a search finds, and that the answer equals one for text nobody wrote where it
+    /// finds nothing.
+    fn search(&self, credential: &[u8], q: &str) -> Vec<String> {
+        let found = self.ask(credential, BrowseForm::Search(q.into()), None);
+        if found.artifacts.is_empty() {
+            assert_eq!(
+                found,
+                self.ask(
+                    credential,
+                    BrowseForm::Search("no such text anywhere".into()),
+                    None
+                ),
+                "a search finding nothing answers as text nobody wrote"
+            );
+        }
+        key_set(&found)
+    }
+}
+
+fn named_rows(out: &BrowseOut) -> Vec<(String, Option<String>)> {
+    let mut names: Vec<_> = out
+        .artifacts
+        .iter()
+        .map(|row| (row.key.clone().unwrap_or_default(), row.name.clone()))
+        .collect();
+    names.sort();
+    names
+}
+
+fn named(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    pairs
+        .iter()
+        .map(|(key, name)| (key.to_string(), name.map(str::to_string)))
+        .collect()
+}
+
+fn labelled() -> Labelled {
+    let fx = fixture(None);
+    let map = source_to_new_map(&fx._dir.path().join("bundle"), "v00000");
+    let mut lx = Labelled {
+        fx,
+        map,
+        ids: HashMap::new(),
+    };
+    let mut bare = declaration(None);
+    bare.name = BARE.into();
+    bare.hierarchy.kind = HierarchyKind::Flat;
+    bare.content = ContentDeclaration::default();
+    lx.fx.engine.register_layer(bare).unwrap();
+    let clusters: Vec<IncomingArtifact> = (0..6u64)
+        .map(|b| {
+            IncomingArtifact::from_entities(
+                Some(format!("b{b}")),
+                lx.members(b * 100..b * 100 + 100),
+            )
+        })
+        .collect();
+    lx.fx
+        .engine
+        .publish_artifacts(BARE.into(), 0, clusters)
+        .unwrap();
+    for (name, visibility) in [
+        ("labels/a", None),
+        ("labels/b", None),
+        ("labels/gated", Some("1")),
+    ] {
+        let mut declared = declaration(Some(ExistenceCriterion::Count(1)));
+        declared.name = name.into();
+        declared.visibility = visibility.map(str::to_string);
+        declared.hierarchy.kind = HierarchyKind::Flat;
+        declared.depends_on = vec![BARE.into()];
+        lx.fx.engine.register_layer(declared).unwrap();
+    }
+    // Source ids 100..130 not divisible by three: members only the broad viewer sees.
+    let hidden: Vec<u64> = (100..130).filter(|&s| !subset_sees(s)).collect();
+    let a = vec![
+        lx.label("a0", "b0", "Spin magnetic effect", 0..30),
+        lx.label("a1", "b1", "Quantum dots", hidden),
+        lx.label("a2", "b2", "Alpha topic", 200..230),
+        lx.label("a4-z", "b4", "Published first", 400..430),
+        lx.label("a4-a", "b4", "First by key", 400..430),
+    ];
+    lx.publish("labels/a", a);
+    let b = vec![
+        lx.label("x2", "b2", "Beta topic", 200..230),
+        lx.label("x3", "b3", "Only topic", 300..330),
+    ];
+    lx.publish("labels/b", b);
+    let gated = vec![lx.label("g5", "b5", "Gated topic", 500..530)];
+    lx.publish("labels/gated", gated);
+    lx
+}
+
+/// **A row with no text of its own is named by the label attached to it, where this viewer is
+/// served that label, and the search form reads that name.**
+#[test]
+fn an_attached_label_names_a_row_only_where_this_viewer_is_served_it() {
+    let lx = labelled();
+    let broad = full_coverage_credential();
+    let subset = subset_credential();
+    assert_eq!(
+        lx.names(&broad),
+        named(&[
+            ("b0", Some("Spin magnetic effect")),
+            ("b1", Some("Quantum dots")),
+            ("b2", Some("Alpha topic")),
+            ("b3", Some("Only topic")),
+            ("b4", Some("First by key")),
+            ("b5", None),
+        ]),
+        "the first layer names a row, and within it the first by key"
+    );
+    assert_eq!(
+        lx.names(&subset),
+        named(&[
+            ("b0", Some("Spin magnetic effect")),
+            ("b1", None),
+            ("b2", Some("Alpha topic")),
+            ("b3", Some("Only topic")),
+            ("b4", Some("First by key")),
+            ("b5", Some("Gated topic")),
+        ]),
+        "a label the viewer is not served names nothing"
+    );
+    for credential in [&broad, &subset] {
+        assert_eq!(lx.search(credential, "spin MAGNETIC"), vec!["b0"]);
+        assert!(
+            lx.search(credential, "beta").is_empty(),
+            "a label that is not the name"
+        );
+        assert!(lx.search(credential, "published first").is_empty());
+    }
+    assert_eq!(lx.search(&broad, "quantum"), vec!["b1"]);
+    assert!(
+        lx.search(&subset, "quantum").is_empty(),
+        "a label withheld by its members"
+    );
+    assert_eq!(lx.search(&subset, "gated"), vec!["b5"]);
+    assert!(
+        lx.search(&broad, "gated").is_empty(),
+        "a label layer behind a label not held"
+    );
+}
+
+/// **A filter neither withholds a label nor reveals one**: labels gate on the visible set.
+#[test]
+fn a_filter_moves_no_name() {
+    let lx = labelled();
+    // Matches no item at all.
+    let filter = FilterExpr::Leaf {
+        column: "score".into(),
+        operand: FilterOperand::Range {
+            lo: Some(Endpoint {
+                value: Scalar::Int(1000),
+                inclusive: true,
+            }),
+            hi: None,
+        },
+    };
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let plain = named_rows(&lx.ask(&credential, BrowseForm::Roots, None));
+        let filtered = named_rows(&lx.ask(&credential, BrowseForm::Roots, Some(filter.clone())));
+        assert_eq!(filtered, plain);
+        let q = || BrowseForm::Search("quantum".into());
+        assert_eq!(
+            key_set(&lx.ask(&credential, q(), Some(filter.clone()))),
+            key_set(&lx.ask(&credential, q(), None))
+        );
+    }
+}
+
+/// **A suppressed label names nothing and is not found**, and a label published after a browse
+/// names its target on the next. An attachment is fixed once published, so a publication is the
+/// only write that adds one.
+#[test]
+fn a_write_to_a_label_layer_moves_the_names_on_the_next_browse() {
+    let mut lx = labelled();
+    let broad = full_coverage_credential();
+    assert_eq!(lx.search(&broad, "only topic"), vec!["b3"]);
+
+    let x3 = artifact_entity(&lx.fx.engine, lx.ids["x3"]);
+    lx.fx
+        .engine
+        .accept_change(x3, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .unwrap();
+    let names = lx.names(&broad);
+    assert!(names.contains(&("b3".to_string(), None)), "{names:?}");
+    assert!(lx.search(&broad, "only topic").is_empty());
+
+    let late = vec![lx.label("x5", "b5", "Late topic", 500..530)];
+    lx.publish("labels/b", late);
+    let names = lx.names(&broad);
+    assert!(
+        names.contains(&("b5".to_string(), Some("Late topic".to_string()))),
+        "{names:?}"
+    );
+    assert_eq!(lx.search(&broad, "late topic"), vec!["b5"]);
 }

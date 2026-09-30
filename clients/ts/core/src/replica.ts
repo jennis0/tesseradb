@@ -5,165 +5,121 @@ import {rectToRequestBbox, tileXY} from './coords.js';
 import type {Quantisation, TileCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
- * Layer 1: the read-through replica.
+ * The read-through replica: callers ask for a region of tiles at a depth and get bands back.
  *
- * **Tile-shaped, with no opinion about which tiles.** Callers ask for a tile set and get bands
- * back; deciding *which* tiles to want — depth budget, prefetch ring, anticipation — belongs to the
- * layer above, and keeping the two apart is what lets a consumer with its own tile scheduler
- * (deck.gl's `TileLayer`, a MapLibre source) use this one without running two schedulers against
- * each other. It is also the shape the tile-addressed route batches, so serving these asks over
- * per-tile `GET`s later is a transport swap beneath an unchanged interface.
- *
- * **Coalescing, not just caching.** A tile-addressed consumer asks per tile, and a 1–2 × 10^6-mark
- * view spans 60–125 × 10^3 of them — the self-DoS `caching.md` §10 names. Asks made within one
- * microtask are gathered into a single request, which is what makes the per-tile interface
- * affordable at all.
+ * Which tiles to want (the depth budget, the prefetch ring, anticipation) belongs to the layer
+ * above. Keeping that out lets a consumer with its own tile scheduler, such as deck.gl's
+ * `TileLayer` or a MapLibre source, use this without two schedulers working against each other.
  */
 
-/** The byte budget for held bands, absent another. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
+/** The byte budget for held bands where none is given. */
 export const DEFAULT_CACHE_BYTES = 512 * 1024 * 1024;
 
+/** @internal */
 export type ReplicaOptions = {
   view: string;
-  /** The byte budget for held bands. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
+  /** The byte budget for held bands. */
   cacheBytes?: number;
   /**
-   * The budget to account this replica's bands against, shared with every other view's replica
-   * (`view-switching.md` §3) — one number bounds the total and eviction may take a band from any
-   * of them. Absent, the replica has {@link cacheBytes} to itself, which is what a consumer
-   * holding one view has.
+   * A budget shared with every other view's replica: one number bounds the total, and eviction may
+   * take a band from any of them. Absent, the replica has {@link cacheBytes} to itself.
    */
   budget?: BandBudget;
   /**
-   * When false the store holds nothing: every ask becomes a request and the wire traffic is
-   * byte-for-byte what a client without a replica produces. The A/B for the novelty-rate
-   * measurement, and the fallback if delta serving is ever suspected of a hole.
+   * When false the store holds nothing, and every ask becomes a request, as a client without a
+   * replica would make. For measuring what the replica saves.
    */
   cache?: boolean;
   /**
-   * How long an all-held ask may be answered without touching the server.
+   * How long an ask answered wholly from held tiles may go without touching the server.
    *
-   * A client that answers pans entirely from held tiles never observes a rotation, so an accepted
-   * change stays invisible indefinitely and cached counts are presented as current forever
-   * (`client-interaction.md` §4: *don't re-download* is free, *don't re-request* needs a bound).
-   * Past this age an otherwise-empty ask issues a counts-only request — `k = 0`, the tile stream
-   * and the validator alone, for the price of the counting stage — which refreshes the number
-   * channel and the content key without re-fetching a single mark.
-   *
-   * The owner's budget for this is minutes, in both directions.
+   * A client that answers pans from held tiles alone never sees a new content key, so accepted
+   * changes and new counts would not appear. Past this age such an ask issues a count-only request
+   * (`k = 0`), which refreshes the counts and the content key without fetching marks.
    */
   revalidateAfterMs?: number;
   now?: () => number;
-  /** The session artifact table the bands' membership is named through (design §5.10). */
+  /** The session artifact table the bands' membership is named through. */
   table?: SessionArtifactTable;
   /**
-   * Observability hook: how long a named phase inside the replica took, and over how many items.
-   *
-   * **Here because absorbing a response cannot be timed from outside.** Splitting a response into
-   * bands runs between the fetch resolving and the frame returning, on the calling thread, and it is
-   * the largest single block of main-thread work this client does — 41–119 ms per response at a 10^6
-   * mark budget. A consumer that wants to see it has nowhere else to stand.
-   *
-   * Never called when absent, and nothing here changes behaviour.
+   * Reports how long a named phase inside the replica took, and over how many items. Splitting a
+   * response into bands runs between the fetch resolving and the frame returning, so it cannot be
+   * timed from outside. Changes no behaviour.
    */
   onPhase?: (kind: string, ms: number, n: number) => void;
 };
 
-/** What one {@link Replica.fetchRegion} call resolved to. */
+/** What one {@link Replica.fetchRegion} call resolved to. @internal */
 export type ReplicaFrame = {
   depth: number;
   /** The region asked about, in tile-index space at `depth`. */
   want: TileRect;
-  /** Bands at this depth inside the region — the served set, drawable with counts. */
+  /** Bands at this depth inside the region: the served set, drawable with counts. */
   exact: Band[];
   /**
-   * Bands from another depth, each with the rectangle it may be drawn over — the part of the region
-   * not held at this depth. A superset of what the definition serves there: drawn, stale-marked,
-   * and never counted.
+   * Bands from another depth, each with the rectangle it may be drawn over: the part of the region
+   * not held at this depth. A superset of what is served there, so drawn stale and not counted.
    */
   fallback: {band: Band; clip: TileRect}[];
   /**
-   * The store's change counter when this frame was derived.
-   *
-   * A caller redrawing from the cache can compare it against `Replica.version` to know whether a
-   * frame it already has still answers, and skip re-deriving one — which is per-band work over
-   * every stand-in band, on every animation frame.
+   * The store's change counter when this frame was derived. A caller compares it with
+   * `Replica.version` to know whether a frame it has is still current.
    */
   version: number;
   /** Null when the region was answered entirely from the store. */
   response: ViewportResponse | null;
   /**
-   * How the ask was split — the cache's effectiveness, made visible rather than inferred.
-   *
-   * `omitted` is what the store proved it already held and so never asked for; that number is the
-   * whole point of the replica, and a client showing marks while this stays at zero has a cache
-   * that is costing memory and buying nothing.
+   * How the ask was split. `wanted - novel` tiles were answered from the store without a request.
    */
   plan: {
     /** Tiles the region spans, and how many of them had to be asked for. */
     wanted: number;
     novel: number;
-    /** How many requests were actually issued — pieces sent, not rectangles planned. */
+    /** How many requests were issued: pieces sent, not rectangles planned. */
     requests: number;
-    /**
-     * Response bytes across every piece. `response` keeps only the last piece under pipelining,
-     * so this is the only honest byte figure — the anticipation byte budget and the traces both
-     * read it, and both undercounted by the piece count before it existed.
-     */
+    /** Response bytes across every piece. `response` keeps only the last piece. */
     bytes: number;
   };
 };
 
 /**
- * Tiles per request, so one response cannot decode for seconds.
- *
- * Sized in tiles rather than points because the client cannot know the point count before asking;
- * at the demo corpus's density this is ~2 × 10^5 points, a few hundred milliseconds of decode.
+ * Tiles per request, so one response does not take seconds to decode. In tiles because the client
+ * does not know the point count before asking.
  */
 const MAX_TILES_PER_REQUEST = 25_000;
 
-/**
- * How long one absorb slice may hold the thread before a queued frame gets to draw.
- *
- * Half a 60 Hz frame: a slice never costs more than it leaves, so an arrival mid-drag degrades the
- * frame it lands in rather than owning it.
- */
+/** How long one absorb slice may hold the thread: half a 60 Hz frame. */
 const ABSORB_SLICE_MS = 6;
 
-/** A macrotask, which is what lets a pending `requestAnimationFrame` run. A microtask would not. */
 /**
- * A frame's worth of yield. **Measured, twice**: with `setTimeout(0)` between slices, and again
- * with `scheduler.yield()`, no animation frame ran while a million-point response was split —
- * the thread was never idle long enough for the frame to win, the composed slices sat behind a
- * tick that could not fire, and the first marks painted only after the last slice. So when a
- * frame is overdue (nothing has drawn for a frame's time), the loop waits for the next animation
- * frame and continues in a macrotask *after* it — the frame paints what the slices so far
- * composed — and otherwise yields a macrotask as before. One frame per overdue slice costs
- * throughput, which is the point: slow-while-loading is accepted, and a map that shows its first
- * response as it lands is the design's claim (§5.10).
+ * A frame's worth of time. Yielding a macrotask between slices, by `setTimeout(0)` or
+ * `scheduler.yield()`, does not let an animation frame run while a large response is split. So when
+ * nothing has drawn for a frame's time the absorb waits for the next animation frame, which paints
+ * what the slices so far stored, and otherwise yields a macrotask. Loading is slower and the first
+ * marks appear as the response lands.
  */
 const FRAME_MS = 16;
 /** The most an absorb slice waits for a frame before continuing anyway. */
 const FRAME_WAIT_MAX_MS = 300;
-/** How long after the last slice the frame pulse keeps listening, so a quiet page runs no loop. */
+/** How long after the last slice the frame pulse keeps listening; a quiet page runs no loop. */
 const PULSE_MS = 500;
 let lastFrameAt = 0;
 let lastFrameGap = 0;
 let pulseUntil = 0;
 let pulsing = false;
 /**
- * A frame slower than this is a renderer that cannot afford a paint per slice — software GL
- * draws a million marks in seconds — so the slices are stored without presenting and the
- * response paints once, as it did before slices could paint at all.
+ * A frame slower than this means a renderer that cannot afford a paint per slice (software GL
+ * draws a million marks in seconds). Slices are then stored without presenting, and the response
+ * paints once.
  */
 const SLOW_FRAME_MS = 250;
 function framesFlowing(): boolean {
   if (typeof requestAnimationFrame === 'undefined') return true;
-  // The last gap, and the current one: a frame overdue by more than the threshold is a slow
-  // renderer mid-paint, however quick the frames before it were.
+  // The last gap and the current one: a frame overdue past the threshold is a slow renderer
+  // mid-paint.
   return pulsing && lastFrameGap > 0 && lastFrameGap < SLOW_FRAME_MS && performance.now() - lastFrameAt < SLOW_FRAME_MS;
 }
-/** Note each animation frame's time while an absorb is running; stops itself when none is. */
+/** Notes each animation frame's time while an absorb runs; stops itself when none does. */
 function pulse(): void {
   if (pulsing || typeof requestAnimationFrame === 'undefined') return;
   pulsing = true;
@@ -182,10 +138,8 @@ function yieldToFrame(): Promise<void> {
     pulseUntil = now + PULSE_MS;
     pulse();
     if (now - lastFrameAt > FRAME_MS) {
-      // Bounded: under software GL a frame can take seconds, and an absorb paced one slice per
-      // frame would take minutes — so the wait is for a frame *or* {@link FRAME_WAIT_MAX_MS},
-      // whichever comes first. Folds coalesce on the presenter (the newest wins), so a slow
-      // renderer paints what has landed when it can.
+      // Waits for a frame or FRAME_WAIT_MAX_MS, whichever is first: under software GL one frame
+      // can take seconds.
       return new Promise((resolve) => {
         let done = false;
         const finish = () => {
@@ -201,7 +155,7 @@ function yieldToFrame(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Split a rectangle into row-strips of at most `maxTiles`, preserving full width. */
+/** Splits a rectangle into full-width row strips of at most `maxTiles`. */
 function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
   const width = rect.x1 - rect.x0 + 1;
   const rowsPerPiece = Math.max(1, Math.floor(maxTiles / width));
@@ -213,6 +167,7 @@ function splitRect(rect: TileRect, maxTiles: number): TileRect[] {
   return out;
 }
 
+/** @internal */
 export class Replica {
   private readonly cache: BandCache;
   private readonly now: () => number;
@@ -231,14 +186,11 @@ export class Replica {
         k?: number;
       },
       signal?: AbortSignal,
-      /** Speculative work rides its own decode lane — see `Decoder.decode`. */
+      /** Speculative work goes to its own decode lane; see `Decoder.decode`. */
       background?: boolean,
       /**
-       * Take each points frame as it lands — see `TesseraClient.viewport`.
-       *
-       * The response this resolves to then carries **no points**: they were all handed over
-       * here. A transport that cannot stream is free to ignore it and answer whole, in which
-       * case the response carries everything as it always did.
+       * Takes each points frame as it lands; see `TesseraClient.viewport`. The response then
+       * carries no points. A transport that cannot stream may ignore this and answer whole.
        */
       onPart?: (part: ViewportPart) => void | Promise<void>
     ) => Promise<ViewportResponse>,
@@ -249,11 +201,7 @@ export class Replica {
     this.now = opts.now ?? (() => performance.now());
   }
 
-  /**
-   * Drop everything held. Called when the token changes, before the new principal's first response
-   * can tell us its identity coordinate — so the store is never non-empty across a principal
-   * change even for one request (`client-interaction.md` §10).
-   */
+  /** Drops everything held, for a change of principal, filter or selection. */
   reset(): void {
     this.cache.dropIdentity();
     this.identityKey = '';
@@ -263,33 +211,28 @@ export class Replica {
   }
 
   /**
-   * The `x-tessera-region` verdict the last response observed carried — `null` where it carried
-   * none (`selection-operand.md` §6). A frame derived from held bands has no response of its
-   * own, so the store reads the verdict here rather than off the frame; a `reset` forgets it,
-   * since what follows answers a different question.
+   * The `x-tessera-region` verdict the last response carried, or `null` where it carried none. A
+   * frame derived from held bands has no response, so the store reads the verdict here. `reset`
+   * forgets it.
    */
   get lastRegionVerdict(): RegionVerdict | null {
     return this.regionVerdict;
   }
 
   /**
-   * Bytes held across every view sharing this replica's budget — the figure the budget bounds, and
-   * therefore the one a look-ahead sizes its ring against (`view-switching.md` §3). Identical to
-   * this view's own held bytes where the budget has one member.
-   *
-   * **The ring's fullness is measured across every view**, not this one alone (`ringMargin`): the
-   * budget a second view's bands are spending is not room this view's anticipation may buy with.
+   * Bytes held across every view sharing this replica's budget, which a look-ahead sizes its ring
+   * against: another view's bands spend the same budget.
    */
   get bytes(): number {
     return this.cache.sharedBytes;
   }
 
-  /** How many views hold any band — the `replica` projection's `views`. */
+  /** How many views hold any band. */
   get heldViews(): number {
     return this.cache.heldViews;
   }
 
-  /** Points held, and over how many bands — see {@link BandCache.points}. */
+  /** Points held; see {@link BandCache.points}. */
   get points(): number {
     return this.cache.points;
   }
@@ -298,41 +241,35 @@ export class Replica {
     return this.cache.bandCount;
   }
 
-  /** See {@link BandCache.exactIn} — the fast half of a frame, for folding an arrival into one. */
+  /** See {@link BandCache.exactIn}. */
   exactIn(want: TileRect, depth: number): Band[] {
     return this.cache.exactIn(want, depth);
   }
 
-  /** See {@link BandCache.retract} — the colour-stale refetch's first half; the caller reschedules. */
+  /** See {@link BandCache.retract}; the caller schedules the refetch. */
   retract(bands: readonly Band[]): void {
     this.cache.retract(bands);
   }
 
-  /** See {@link BandCache.version} — the store's change counter, for reusing a derived frame. */
+  /** The store's change counter; see {@link BandCache.version}. */
   get version(): number {
     return this.cache.version;
   }
 
   /**
-   * How many tiles of a region are not yet held — without fetching anything.
-   *
-   * Lets a scheduler pick the nearest band with work in it rather than re-asking for one already
-   * covered, which is what keeps a graded ring from re-fetching its inner bands forever.
+   * How many tiles of a region are not yet held, without fetching. Lets a scheduler skip a ring
+   * already covered.
    */
   novelIn(want: TileRect, depth: number, k: number): number {
     return this.cache.planRegion(want, depth, this.contentKey, k).novel;
   }
 
   /**
-   * A region's per-tile masked counts, without its marks — `k = 0`, the tiles frame and the
-   * validator alone, for the price of the counting stage.
+   * A region's per-tile masked counts, without marks: `k = 0`, the tile list and the content key.
    *
-   * **Nothing is stored.** A counts-only response carries no points, so absorbing it would put
-   * empty bands in the store and let a later plan subtract ground whose marks never arrived; the
-   * response's coordinates are observed (the validator is worth having) and the counts are handed
-   * back for the caller to keep. It is the same request {@link fetchRegion}'s revalidation makes,
-   * asked for a different reason: there, to bound staleness on a view answered entirely from the
-   * store; here, to know what the ground holds before paying for marks over it.
+   * Nothing is stored. The response carries no points, so absorbing it would store empty bands and
+   * let a later plan skip ground whose marks never arrived. The keys are observed and the counts
+   * returned to the caller.
    */
   async counts(want: TileRect, depth: number, signal?: AbortSignal): Promise<TileCounts[]> {
     const bbox = rectToRequestBbox(want, depth, this.quantisation);
@@ -351,37 +288,14 @@ export class Replica {
     return this.contentKey;
   }
 
-  // The tile-addressed ask (`tile()` + a microtask-batched flush) was DELETED here — D3,
-  // `client-architecture.md` §4: its batch coalesced by bounding rectangle and its error path
-  // resolved refused asks to the same `null` as empty ones, the exact conflation
-  // client-interaction §9 forbids. The supported path for a tile-based visualisation engine is
-  // an adapter over `fetchRegion`/`frameFromCache`: batch per-tile asks into region fetches,
-  // answer each from the store, and keep empty distinct from refused per ask.
-
   /**
-   * Ask for a tile set, answering from the store where it can and issuing at most one request for
-   * the rest.
-   *
-   * The request names the tiles it actually needs, so a tile the store already holds is not merely
-   * discarded on arrival — it is never derived, counted, selected or gathered. That is what makes
-   * server work scale with what is new rather than with the area on screen.
-   */
-  /**
-   * What the store can draw for a region **right now**, without touching the network.
-   *
-   * Separated from {@link fetchRegion} because drawing and fetching want opposite treatment.
-   * Fetching is rate-limited — a drag emits per frame and must not become a request per frame.
-   * Reading the store is local work costing microseconds, and gating it behind the same debounce
-   * makes every view change wait for a network policy before consulting a cache that could have
-   * answered at once. That is pop-in with a warm cache and nothing to fetch.
+   * What the store can draw for a region now, without the network. Separate from
+   * {@link fetchRegion} because fetching is rate-limited and reading the store is not: a view
+   * change draws from a warm store at once.
    */
   frameFromCache(want: TileRect, depth: number, k: number): ReplicaFrame {
-    // Split, because deriving a frame became the second-largest cost in a recorded session (mean
-    // 42.6 ms, growing from 4 ms to 111 ms as the cache filled, and 14.7x worse on a zoom out than
-    // a zoom in) and its two halves fail differently: the coverage subtraction is bounded by how
-    // fragmented the held region is, the band walk by how much is held at all. A synthetic at
-    // 6.6 x 10^4 bands and 800 coverage rectangles reproduced neither, so this is measured where it
-    // actually happens rather than modelled.
+    // Timed in two halves, which scale differently: the coverage subtraction with how fragmented
+    // the held region is, the band walk with how much is held.
     const started = this.opts.onPhase ? performance.now() : 0;
     const plan = this.cache.planRegion(want, depth, this.contentKey, k);
     const planned = this.opts.onPhase ? performance.now() : 0;
@@ -399,49 +313,36 @@ export class Replica {
     };
   }
 
+  /**
+   * Asks for a region, answering from the store where it can and requesting the rest. A request
+   * names only the tiles it needs, so a held tile costs the server nothing.
+   */
   async fetchRegion(
     want: TileRect,
     depth: number,
     k: number,
     signal?: AbortSignal,
     /**
-     * The region to *draw*, if wider than the region to fetch.
-     *
-     * They are different questions. What to fetch is bounded by what the budget will pay for; what
-     * to draw is bounded by what is already held, and drawing only the fetched box means the drawn
-     * buffer ends 30% beyond the screen — so a pan of more than 15% of the viewport runs off the
-     * edge of the marks and waits for a re-assembly even though every point was already in memory.
+     * The region to draw, where wider than the region to fetch. Drawing only the fetched box ends
+     * the drawn buffer near the screen edge, so a modest pan would wait for a re-assembly although
+     * every point is in memory.
      */
     render: TileRect = want,
     /**
-     * Most requests to issue in one call, for a caller that must not monopolise the main thread.
-     *
-     * **Decode is synchronous and on the render thread**, so the ceiling on anticipation is not the
-     * network or the server — measured, the server answers a ring in single-digit milliseconds —
-     * but how long the client spends turning the answer into typed arrays. A wide ring asked for
-     * 2.3 × 10^6 points, and the ~2.8 s of decode and absorb that followed queued behind it every
-     * gesture the user made: pan-to-paint went from 19 ms to 8.8 s while the server's own share
-     * stayed at 9 ms. Splitting the request does not help on its own — the total work is the same
-     * and the thread is the same.
-     *
-     * So a background caller takes one bite per idle pause and the region fills over several. The
-     * cache still reaches its target; it just stops doing it all at once.
+     * The most requests to issue in one call. Decode and absorb run on the render thread, so a wide
+     * anticipatory ring answered at once blocks every gesture behind it. A background caller takes
+     * one piece per idle pause and the region fills over several.
      */
     maxRequests = Infinity,
     /**
-     * Whether to derive the stand-in set for the returned frame.
-     *
-     * The stand-in walk is the expensive half of deriving a frame, and a caller holding an
-     * already-drawn frame for this region does not need it again to fold in an arrival — the held
-     * stand-ins are one arrival stale, which is drawable, and the full derivation runs when the
-     * gesture pauses. `false` returns `fallback: []`; it never changes what is fetched or stored.
+     * Whether to derive stand-ins for the returned frame. A caller folding an arrival into a frame
+     * already drawn does not need them. `false` returns `fallback: []` and changes nothing fetched
+     * or stored.
      */
     standIns = true,
     /**
-     * Whether these fetches are anticipation rather than something the user is waiting for.
-     *
-     * Routed to the decoder's speculative lane, so a multi-megabyte ring response never delays a
-     * foreground decode behind it — the priority inversion a serial worker otherwise builds in.
+     * Whether these fetches are anticipation. They go to the decoder's speculative lane, so a large
+     * anticipatory response does not delay a foreground decode.
      */
     background = false
   ): Promise<ReplicaFrame> {
@@ -453,23 +354,10 @@ export class Replica {
     let response: ViewportResponse | null = null;
     let fetched: Band[] = [];
 
-    // **One request per novel rectangle, and no rectangle large enough to block a frame.** A pan
-    // yields a single strip, so this is one request in the common case — `rectSubtractAll` bounds
-    // the fragmentation rather than letting it grow with the number of past fetches.
-    //
-    // Each is then split so no single response decodes for longer than a frame or two. Measured
-    // before this existed: a wide anticipatory ring asked for one rectangle of 188 × 10^3 tiles,
-    // got 2.3 × 10^6 points back, and spent 2.5 s decoding and 0.3 s absorbing them **on the main
-    // thread** — during which a pan the user had already made sat queued behind it and measured
-    // 7.5 s, against its own server time of 5 ms and its own response of 212 KB. Nothing was slow
-    // except the size of one bite.
-    // **Centre-first, and pipelined.** The first piece to land is the first thing painted, so the
-    // pieces are ordered by distance from the render centre — the part of the screen being looked
-    // at fills first, and the periphery follows. And piece N+1 goes on the wire while piece N
-    // decodes and absorbs: fetched serially, a four-piece viewport paid Σ(wire + decode + absorb)
-    // with the server idle between pieces — measured as 0.6–2 s pan-to-paint on novel ground over
-    // 60–100 ms of server time. The decode pool has two foreground lanes for exactly this overlap;
-    // absorbing stays serial on this thread, so main-thread pressure is unchanged.
+    // One request per novel rectangle, each split so no response decodes for more than a frame or
+    // two. Pieces are ordered by distance from the render centre, so the middle of the screen fills
+    // first. Piece N+1 goes on the wire while piece N decodes and absorbs; fetched serially, the
+    // server sits idle between pieces.
     const cx = (render.x0 + render.x1) / 2;
     const cy = (render.y0 + render.y1) / 2;
     const pieces = plan.fetch
@@ -482,16 +370,13 @@ export class Replica {
         const eb = (b.y0 + b.y1) / 2 - cy;
         return da * da + ea * ea - (db * db + eb * eb);
       });
-    // **A piece lands band by band, not all at once.** Its points frames are absorbed as the wire
-    // delivers them (`streamed-serving.md` §2; `TesseraClient.viewport`'s part sink), so the first
-    // tiles of a hundred-megabyte answer are stored — and drawable — while the rest is still being
-    // received. What the promise resolves to is then the piece's coordinates and its byte count,
-    // never its points.
+    // A piece is absorbed frame by frame as the wire delivers it, so the first tiles of a large
+    // answer are stored and drawable while the rest is received. The promise resolves to the
+    // piece's keys and byte count, without points.
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
       const piece = {landed: [] as Band[], parts: 0, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
-      // One touch time for the whole piece, so eviction sees its bands as one arrival and not as
-      // a sequence in which the first rows to land are the oldest (`EvictionFocus.protect`).
+      // One touch time for the whole piece, so eviction sees its bands as one arrival.
       const startedAt = this.now();
       piece.startedAt = startedAt;
       piece.fetching = this.fetchViewport(
@@ -503,8 +388,8 @@ export class Replica {
           for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
         }
       );
-      // The loop below may throw out of an earlier piece (an abort, a shed request) while this one
-      // is still flying; its refusal is then nobody's answer and must not surface as unhandled.
+      // The loop below may throw on an earlier piece while this one is in flight; this keeps this
+      // piece's refusal from going unhandled.
       piece.fetching.catch(() => {});
       return piece;
     };
@@ -517,34 +402,27 @@ export class Replica {
       issued += 1;
       responseBytes += response.bytes;
       pending = i + 1 < pieces.length ? request(pieces[i + 1]!) : null;
-      // **The sink is authoritative where it was used.** A streamed piece has already stored its
-      // points and the response it resolves to carries none, so all that is left of it is the
-      // coordinates — re-observed, so the validator's clock restarts from a complete answer. A
-      // transport that answered whole never called the sink, and its response is absorbed here as
-      // it always was.
+      // A streamed piece has stored its points already and its response carries none, so only its
+      // keys are observed. A transport that answered whole is absorbed here.
       if (piece.parts === 0) {
         for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
       } else {
         this.observe(response);
       }
       fetched = fetched.concat(piece.landed);
-      // **Once per response, never once per part.** A pass over the budget sorts every held band,
-      // which at 10^5 of them is not something to do a hundred times for one answer.
+      // Once per response, since eviction sorts every held band.
       if (this.opts.cache !== false && piece.landed.length > 0) {
         this.cache.evict({depth, prefix: piece.landed[0]!.prefix, protect: {depth, rect: render}});
       }
-      // Marked only after the bands are in. A region marked covered before its points are held
-      // would let the next plan subtract ground whose data never arrived. An aborted or truncated
-      // piece never reaches here, so what it did land stays as bands and its ground stays novel.
+      // Marked only after the bands are in, or the next plan would skip ground whose data never
+      // arrived. An aborted piece does not reach here, so its ground stays novel.
       if (this.opts.cache !== false && k > 0) {
         this.cache.markCovered(pieces[i]!, depth, this.contentKey, k);
       }
     }
 
     if (plan.fetch.length === 0 && this.dueForRevalidation()) {
-      // Everything is held, so the only thing left to refresh is the number channel and the content
-      // key — which is what keeps the staleness bound reachable for a client panning entirely from
-      // its replica (`delta-serving.md` §8).
+      // Everything is held, so only the counts and the content key are refreshed.
       const revalidatedAt = performance.now();
       const bbox = rectToRequestBbox(want, depth, this.quantisation);
       response = await this.fetchViewport(
@@ -552,14 +430,11 @@ export class Replica {
         signal
       );
       this.observe(response);
-      // Made visible because its *absence* is the finding that matters: the 2026-08-10 review
-      // showed the caller's covered-view path starves this branch entirely, so a trace with zero
-      // `revalidate` events over minutes of settled panning is the staleness bound failing.
+      // Reported so that minutes of settled panning with no revalidation show up in a trace.
       this.opts.onPhase?.('revalidate', performance.now() - revalidatedAt, 1);
     }
 
-    // With the store bypassed there is nothing to draw from but this response. The mode has to stay
-    // renderable — it is the measurement A/B, not a way to turn the client off.
+    // With the store bypassed the frame is this response alone.
     const {exact, fallback} =
       this.opts.cache === false
         ? {exact: fetched, fallback: [] as {band: Band; clip: TileRect}[]}
@@ -578,28 +453,15 @@ export class Replica {
     };
   }
 
-  /**
-   * Take a response into the store.
-   *
-   * A response under a content key different from the held one **replaces** the bands it covers
-   * rather than merging into them, which {@link BandCache.put} does by construction. Merging would
-   * let an item suppressed since the held band was fetched survive into a band the client now marks
-   * fresh (`delta-serving.md` §7).
-   */
   dueForRevalidation(): boolean {
     const after = this.opts.revalidateAfterMs ?? 60_000;
     return this.now() - this.validatedAt >= after;
   }
 
   /**
-   * Take a response's coordinates without taking its points.
-   *
-   * A counts-only response carries no marks, so there is nothing to absorb — but its validator is
-   * the whole point of having asked, and observing it is what bounds staleness.
-   *
-   * **A moved identity coordinate empties the store**, whatever the caller did or did not do about
-   * the token. That is the belt to `reset`'s braces: the partition key comes from the server, so a
-   * client cannot hold one principal's bands under another's by forgetting to call anything.
+   * Takes a response's keys without its points. A changed identity key empties the store,
+   * whatever the caller did about the token: the key comes from the server, so no call can be
+   * forgotten that would leave one principal's bands under another's.
    */
   private observe(from: {identityKey: string; contentKey: string; region?: RegionVerdict | null}): void {
     if (from.identityKey !== this.identityKey) {
@@ -612,31 +474,18 @@ export class Replica {
   }
 
   /**
-   * Split an arrival into bands and store them — in slices, so a frame can paint in between.
+   * Splits an arrival into bands and stores them, in slices so a frame can paint in between.
    *
-   * **An arrival is one points frame or one whole response, and the two are the same shape.** The
-   * server flushes at whole tiles, so a frame's counts and points line up exactly as a response's
-   * do, and this is why landing a response piecemeal needed no second splitter.
-   *
-   * Splitting was the last big block of per-response main-thread work: 18.5 ms mean, 49 ms max,
-   * landing in the same frame as deriving and uploading — which is where the p95 frame time lived.
-   * The work cannot leave this thread (bands must be copies, and 10^4 of them will not transfer to
-   * a worker cheaply), but nothing requires it to happen in one frame: each slice runs for
-   * {@link ABSORB_SLICE_MS}, then yields a macrotask so a queued animation frame draws. With the
-   * response arriving frame by frame the lane now sees a trickle rather than a wall, so the slice
-   * budget usually binds on the first slice of a part and not at all on the rest; the `slice`
-   * instrument is per arrival, and its maximum over a response is what it always was.
-   *
-   * The coverage invariant is unchanged: the caller marks a region covered only after every part
-   * has been taken and the response has completed, so a redraw between slices — or between parts —
-   * sees the arriving bands as extra exact ground and the rest still answered by stand-ins, never
-   * a hole.
+   * An arrival is one points frame or one whole response; they have the same shape because the
+   * server flushes at whole tiles. Each slice runs for {@link ABSORB_SLICE_MS} and then yields.
+   * The caller marks a region covered only after the whole response, so a redraw between slices
+   * sees the arrived bands as exact and the rest as stand-ins, with no hole.
    */
   private async absorb(
     arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string},
     depth: number,
     k: number,
-    /** The touch time every band of one piece shares — the piece's start, whichever part it landed in. */
+    /** The touch time every band of one piece shares: the piece's start. */
     at: number = this.now()
   ): Promise<Band[]> {
     this.observe(arrival);
@@ -661,8 +510,6 @@ export class Replica {
       const took = performance.now() - started;
       splitMs += took;
       if (took > longestSliceMs) longestSliceMs = took;
-      // Stored slice by slice: a redraw between slices then draws what has arrived so far, which
-      // is strictly more picture, not less.
       const stored = performance.now();
       if (this.opts.cache !== false) {
         for (const band of slice) this.cache.put(band);
@@ -670,14 +517,13 @@ export class Replica {
       for (const band of slice) bands.push(band);
       storeMs += performance.now() - stored;
       slices++;
-      // Each slice is drawable the moment it is stored: the consumer may present between slices,
-      // so the first marks of a large response are on screen while the rest is still being split.
+      // The consumer may present between slices.
       if (framesFlowing()) this.opts.onPhase?.('piece', took, slice.length);
       if (!splitter.done()) await yieldToFrame();
     }
     this.opts.onPhase?.('split', splitMs, bands.length);
     this.opts.onPhase?.('store', storeMs, slices);
-    // The longest single slice: the one figure that says whether the budget held the thread.
+    // The longest slice says whether the slice budget held the thread.
     this.opts.onPhase?.('slice', longestSliceMs, slices);
     return bands;
   }

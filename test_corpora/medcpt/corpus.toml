@@ -23,8 +23,7 @@ mesh            = "mesh-descriptors.parquet"
 mesh_members    = "mesh-descriptors-members.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "entity_id"
+source     = "points"
 
 # ---------------------------------------------------------------------------------------------
 # **One view.** MedCPT was trained on 255 million query-article click pairs for *retrieval*, and
@@ -61,6 +60,14 @@ width      = "u8"
 value_set  = "closed"
 visibility = "public"
 source     = "branch"
+
+# The row number `prepare.py` gives each article. Every file names an article by it: the points
+# file as `entity_id`, the member files as `entity`.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 # `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
 # than a convention it has to be told. Indexed as well as rendered: a map of forty years of
@@ -130,6 +137,7 @@ require_member_visibility = { count = 50 }
 
   [layer.members]
   source = "kmeans_members"
+  fields = { id = "entity" }
 
   [layer.content]
   computed = ["centroid", "box", "hull"]

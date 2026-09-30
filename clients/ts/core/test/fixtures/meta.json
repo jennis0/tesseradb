@@ -1,6 +1,6 @@
 {
   "api_version": 1,
-  "bundle_format": 2,
+  "bundle_format": 29,
   "declared_scalars": [
     {
       "analyser": null,
@@ -8,11 +8,15 @@
       "category": {
         "kind": "declared",
         "visibility": "public",
-        "vocabulary": "archive"
+        "vocabulary": "colour"
       },
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "archive",
-      "render": true
+      "name": "colour",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -20,23 +24,15 @@
       "category": {
         "kind": "declared",
         "visibility": "public",
-        "vocabulary": "primary_category"
+        "vocabulary": "family"
       },
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "primary_category",
-      "render": true
-    },
-    {
-      "analyser": null,
-      "arrow_type": "u16",
-      "category": {
-        "kind": "declared",
-        "visibility": "public",
-        "vocabulary": "primary_category"
-      },
-      "index": false,
-      "name": "secondary_category",
-      "render": true
+      "name": "family",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
@@ -44,136 +40,189 @@
       "category": {
         "kind": "discovered",
         "visibility": "derived",
-        "vocabulary": "category_suffix"
+        "vocabulary": "tag"
       },
+      "homes": [
+        "rendered",
+        "value_column"
+      ],
       "index": false,
-      "name": "category_suffix",
-      "render": true
+      "name": "tag",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "bool",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "is_cross_listed",
-      "render": true
-    },
-    {
-      "analyser": null,
-      "arrow_type": "bool",
-      "category": null,
-      "index": false,
-      "name": "is_single_author",
-      "render": true
+      "name": "flag",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "u8",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "author_count",
-      "render": true
-    },
-    {
-      "analyser": null,
-      "arrow_type": "u8",
-      "category": null,
-      "index": false,
-      "name": "category_count",
-      "render": true
-    },
-    {
-      "analyser": null,
-      "arrow_type": "u8",
-      "category": null,
-      "index": false,
-      "name": "submitted_month",
-      "render": true
+      "name": "small",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "u16",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "submitted_year",
-      "render": true
+      "name": "medium",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "u32",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "entity_rank",
-      "render": true
+      "name": "rank",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "u64",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "id_hash",
-      "render": true
+      "name": "hash",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "i8",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "decade_offset",
-      "render": true
+      "name": "tiny",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "i16",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "years_from_median",
-      "render": true
+      "name": "short",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "i32",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "days_from_median",
-      "render": true
+      "name": "offset",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "i64",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "submitted_offset_us",
-      "render": true
+      "name": "long",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "timestamp_us",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "submitted_at",
-      "render": true
+      "name": "at",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "f32",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "recency",
-      "render": true
+      "name": "ratio",
+      "render": true,
+      "unique": false
     },
     {
       "analyser": null,
       "arrow_type": "f64",
       "category": null,
+      "homes": [
+        "rendered"
+      ],
       "index": false,
-      "name": "exact_offset_days",
-      "render": true
+      "name": "exact",
+      "render": true,
+      "unique": false
+    },
+    {
+      "analyser": "unicode/icu4x-2.2/p1",
+      "arrow_type": "text",
+      "category": null,
+      "homes": [
+        "record"
+      ],
+      "index": true,
+      "name": "title",
+      "render": false,
+      "unique": false
+    },
+    {
+      "analyser": null,
+      "arrow_type": "keyword",
+      "category": null,
+      "homes": [
+        "value_column"
+      ],
+      "index": true,
+      "name": "code",
+      "render": false,
+      "unique": false
     }
   ],
   "filter_operands": [
     {
-      "column": "archive",
+      "column": "colour",
       "family": "category",
       "operands": [
         "eq",
@@ -181,7 +230,7 @@
       ]
     },
     {
-      "column": "primary_category",
+      "column": "family",
       "family": "category",
       "operands": [
         "eq",
@@ -189,7 +238,7 @@
       ]
     },
     {
-      "column": "secondary_category",
+      "column": "tag",
       "family": "category",
       "operands": [
         "eq",
@@ -197,15 +246,7 @@
       ]
     },
     {
-      "column": "category_suffix",
-      "family": "category",
-      "operands": [
-        "eq",
-        "in"
-      ]
-    },
-    {
-      "column": "is_cross_listed",
+      "column": "flag",
       "family": "numeric",
       "operands": [
         "eq",
@@ -214,7 +255,7 @@
       ]
     },
     {
-      "column": "is_single_author",
+      "column": "small",
       "family": "numeric",
       "operands": [
         "eq",
@@ -223,7 +264,7 @@
       ]
     },
     {
-      "column": "author_count",
+      "column": "medium",
       "family": "numeric",
       "operands": [
         "eq",
@@ -232,7 +273,7 @@
       ]
     },
     {
-      "column": "category_count",
+      "column": "rank",
       "family": "numeric",
       "operands": [
         "eq",
@@ -241,7 +282,7 @@
       ]
     },
     {
-      "column": "submitted_month",
+      "column": "hash",
       "family": "numeric",
       "operands": [
         "eq",
@@ -250,7 +291,7 @@
       ]
     },
     {
-      "column": "submitted_year",
+      "column": "tiny",
       "family": "numeric",
       "operands": [
         "eq",
@@ -259,7 +300,7 @@
       ]
     },
     {
-      "column": "entity_rank",
+      "column": "short",
       "family": "numeric",
       "operands": [
         "eq",
@@ -268,7 +309,7 @@
       ]
     },
     {
-      "column": "id_hash",
+      "column": "offset",
       "family": "numeric",
       "operands": [
         "eq",
@@ -277,7 +318,7 @@
       ]
     },
     {
-      "column": "decade_offset",
+      "column": "long",
       "family": "numeric",
       "operands": [
         "eq",
@@ -286,7 +327,7 @@
       ]
     },
     {
-      "column": "years_from_median",
+      "column": "at",
       "family": "numeric",
       "operands": [
         "eq",
@@ -295,7 +336,7 @@
       ]
     },
     {
-      "column": "days_from_median",
+      "column": "ratio",
       "family": "numeric",
       "operands": [
         "eq",
@@ -304,7 +345,7 @@
       ]
     },
     {
-      "column": "submitted_offset_us",
+      "column": "exact",
       "family": "numeric",
       "operands": [
         "eq",
@@ -313,59 +354,41 @@
       ]
     },
     {
-      "column": "submitted_at",
-      "family": "numeric",
+      "column": "title",
+      "family": "text",
       "operands": [
-        "eq",
-        "in",
-        "range"
+        "match",
+        "phrase"
       ]
     },
     {
-      "column": "recency",
-      "family": "numeric",
+      "column": "code",
+      "family": "keyword",
       "operands": [
         "eq",
         "in",
-        "range"
-      ]
-    },
-    {
-      "column": "exact_offset_days",
-      "family": "numeric",
-      "operands": [
-        "eq",
-        "in",
-        "range"
+        "prefix",
+        "contains"
       ]
     }
   ],
   "groups": [],
-  "idset": 1,
-  "layers": [
-    {
-      "depends_on": [],
-      "computed_content": [],
-      "hierarchy": {
-        "kind": "flat",
-        "prune_children": false
-      },
-      "levels": [],
-      "membership": "enumerated",
-      "name": "clusters/golden",
-      "views": [
-        "s0"
-      ],
-      "supplied_content": [],
-      "title": "k-means over 48 sampled points",
-      "version": 1
-    }
-  ],
+  "layers": [],
+  "scoped_scalars": [],
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
+    "max_browse_rows": 200,
     "max_category_values": 1000,
-    "max_k": 5000,
+    "max_k": 1000,
+    "max_page_bytes": 67108864,
+    "max_page_rows": 100000,
+    "max_region_cells": 262144,
+    "max_region_vertices": 10000,
+    "max_shape_vertices": 1000000,
+    "max_suggest_set_entities": 10000000,
+    "max_suggestion_walk": 100000,
+    "max_suggestions": 20,
     "max_tiles_per_request": 262144,
     "max_underlay_offset": 4,
     "theta_target_marks": 16
@@ -377,12 +400,16 @@
       "id": "s0",
       "key": null,
       "metadata": null,
+      "projection": "none",
       "quantisation": {
-        "x_max": 65536,
+        "x_max": 1000,
         "x_min": 0,
-        "y_max": 65536,
+        "y_max": 1000,
         "y_min": 0
-      }
+      },
+      "tile": null,
+      "tile_scheme": null,
+      "world_aspect": null
     }
   ]
 }

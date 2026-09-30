@@ -80,20 +80,20 @@ fn reader_at(tmp: &std::path::Path, root: &std::path::Path, wal: &str) -> Engine
     .expect("engine opens")
 }
 
-fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
+/// One item at `(x, y)` holding the `id` of `key`, under the batch id `key`.
+fn ingest(engine: &Engine, key: &str, x: f64, y: f64) {
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
         x,
         y,
-        scalars: Vec::new(),
+        scalars: keyed(key),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], key.to_string(), [0u8; 32])
         .expect("ingest is accepted");
 }
 
@@ -175,12 +175,11 @@ fn a_flush_refreshes_a_sessions_geometry_and_the_refresh_equals_a_rebuild() {
     );
 }
 
-/// A second flush refreshes from the first flush's entry, not from the build's — so the depth-1
-/// retention is sufficient for a *sequence* of flushes and not only for one.
+/// A second flush refreshes from the first flush's entry, not from the build's — so the retention
+/// is sufficient for a *sequence* of flushes and not only for one.
 ///
-/// The mutation this kills is a retention floor computed from the build generation rather than
-/// from the live one: that keeps generation 0 alive for ever and drops generation 1, so the second
-/// refresh has nothing to extend and rebuilds. Nothing else in the suite notices.
+/// **Mutation:** a prune that drops the entry the first refresh produced before the second refresh
+/// derives from it. The second refresh then has nothing to extend, and the request rebuilds.
 #[test]
 fn consecutive_flushes_each_refresh_from_the_one_before() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -269,11 +268,12 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
 
     // **And the staleness self-heals rather than compounding.** Stale-serve inserts nothing, so a
     // session whose refresh never runs would sit one generation behind for ever — which would
-    // silently falsify the ack→visibility bound. What stops it is the retention depth: at the next
-    // publication the entry is two generations back, `prune_generations_below` removes it, and the
-    // session's next request finds neither rung 1 nor rung 2 and builds. Fail-closed staleness is
-    // bounded at two publications, never permanent.
-    engine.set_background_refresh_for_test(true);
+    // silently falsify the ack→visibility bound. What stops it is that rung 2 serves only the
+    // generation immediately below the live one: at the next publication the entry is two
+    // generations back, and the session's next request finds neither rung 1 nor rung 2 and builds.
+    // Fail-closed staleness is bounded at two publications, never permanent. The refresh stays off:
+    // that is the session whose refresh never runs, and a refresh left free to run could patch
+    // from the entry, which serves the same rows without the build.
     ingest(&engine, "ext-2", 500.0, 500.0);
     wait_until("the second flush", || {
         engine.write_executor_stats().flushes >= 2
@@ -282,12 +282,71 @@ fn the_window_before_a_refresh_serves_stale_geometry_rather_than_rebuilding() {
     assert_eq!(
         after.tiles.iter().map(|t| t.visible).sum::<u64>(),
         visible_before + 2,
-        "both flushed items are drawn: the stale entry aged out and the session rebuilt"
+        "both flushed items are drawn: rung 2 no longer serves the entry and the session rebuilt"
     );
     assert_eq!(
         engine.full_projection_builds(),
         2,
-        "and it did so by a build — the one the retention depth forces when a refresh is missed"
+        "and it did so by a build — the one rung 2's depth forces when a refresh is missed"
+    );
+}
+
+/// **A refresh that starts two publications late still patches the session.** Two flushes publish
+/// before the refresh for the first has started, as a flush and a merge can under load. The
+/// session's only entry is then two generations back, and the refresh must derive from it rather
+/// than find nothing and leave the session to rebuild.
+///
+/// **Mutations:** prune by generation depth alone and the refresh finds no entry, produces nothing,
+/// and the request rebuilds; let the drill-down read below the retention floor and it answers from
+/// the kept entry and misses the first flush's item.
+#[test]
+fn a_refresh_two_publications_late_still_patches_the_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_at(tmp.path(), &root, "wal", 1);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let before = engine.viewport(&session, whole_extent()).unwrap();
+    let visible_before: u64 = before.tiles.iter().map(|t| t.visible).sum();
+
+    engine.set_refresh_paused_for_test(true);
+    ingest(&engine, "ext-1", 5.0, 5.0);
+    wait_until("the first flush", || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    ingest(&engine, "ext-2", 500.0, 500.0);
+    wait_until("the second flush", || {
+        engine.write_executor_stats().flushes >= 2
+    });
+
+    // The session's only entry is now two generations back and kept as the refresh's base. The
+    // drill-down must not answer from it: that would call the first flush's item absent while the
+    // viewport, finding neither rung, rebuilds and draws it.
+    let first = item_of_key(&engine, "ext-1").expect("the first flush's item resolves");
+    let id = engine.tessera_id_of(first).unwrap();
+    assert!(
+        engine.item(&session, id).unwrap().is_some(),
+        "the drill-down answers from no entry staler than the viewport's rung 2"
+    );
+
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the refreshes to finish", || engine.maintenance_idle_for_test());
+
+    let after = wait_for_viewport(&engine, &session);
+    assert_eq!(
+        after.tiles.iter().map(|t| t.visible).sum::<u64>(),
+        visible_before + 2,
+        "both flushed items are drawn"
+    );
+    assert_eq!(
+        engine.projection_builds_by_route().iter().sum::<u64>(),
+        1,
+        "and by the refresh's patch: the only projection built whole, by a request or by the \
+         refresh, is the session's establishment"
     );
 }
 
@@ -400,6 +459,29 @@ fn an_accepted_write_rotates_the_content_key() {
         before.coordinates.identity_key, after.coordinates.identity_key,
         "but not the render partition"
     );
+}
+
+/// **A restart rotates the content key**, so no band a client holds from before it is declared
+/// held and served back unchanged: a new process may encode the same rows differently.
+#[test]
+fn a_restart_rotates_the_content_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let before = {
+        let engine = engine_at(tmp.path(), &root, "wal", 3600);
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        engine.viewport(&session, whole_extent()).unwrap()
+    };
+    let engine = engine_at(tmp.path(), &root, "wal", 3600);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let after = wait_for_viewport(&engine, &session);
+    assert_eq!(before.points, after.points, "the same rows are served");
+    assert_ne!(before.coordinates.content_key, after.coordinates.content_key);
 }
 
 /// A viewport, retried past the bounded `ProjectionBuilding` a refresh window can answer with.

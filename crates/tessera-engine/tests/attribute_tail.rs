@@ -28,7 +28,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -106,11 +106,17 @@ fn score_of(entity: u64) -> f32 {
     (entity % 97) as f32 * 0.5
 }
 
-/// The fixture's points file, plus the three attribute columns keyed to `entity_id`.
+/// Where the fixture places entity `e`: spread over the whole extent.
+fn spread(e: u64) -> (f64, f64) {
+    (((e * 37) % 1000) as f64, ((e * 53) % 1000) as f64)
+}
+
+/// The fixture's points file, entity `e` at `at(e)`, plus the three attribute columns keyed to
+/// `entity_id`.
 ///
 /// The category arrives as its **key**, never as a code (§3.1): the code is assigned once, in the
 /// schema, and a data file supplying codes directly would be a second place codes are decided.
-fn write_points_with_attributes(path: &Path, n: u64) {
+fn write_points_with_attributes(path: &Path, n: u64, at: impl Fn(u64) -> (f64, f64)) {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
@@ -120,8 +126,8 @@ fn write_points_with_attributes(path: &Path, n: u64) {
         Field::new("score", DataType::Float32, false),
     ]));
     let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let xs: Vec<f64> = ids.iter().map(|&e| at(e).0).collect();
+    let ys: Vec<f64> = ids.iter().map(|&e| at(e).1).collect();
     let bands: Vec<&str> = ids.iter().map(|e| band_of(*e)).collect();
     let stamps: Vec<i64> = ids.iter().map(|e| ingested_at_of(*e)).collect();
     let scores: Vec<f32> = ids.iter().map(|e| score_of(*e)).collect();
@@ -152,9 +158,14 @@ fn parse_schema(tmp: &Path) -> Schema {
 
 /// Build a fixture bundle carrying the attribute tail.
 fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
+    build_placed_fixture(out, tmp, n, spread);
+}
+
+/// [`build_fixture_with_attributes`] with entity `e` at `at(e)`.
+fn build_placed_fixture(out: &Path, tmp: &Path, n: u64, at: impl Fn(u64) -> (f64, f64)) {
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
-    write_points_with_attributes(&points, n);
+    write_points_with_attributes(&points, n, at);
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
@@ -171,22 +182,20 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with a declared schema should succeed");
 }
@@ -265,40 +274,6 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 
 /// **The build writes the tail, and the manifest describes it.**
@@ -316,7 +291,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     let declared = &bundle.manifest.declared_scalars;
     assert_eq!(
         declared.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "declaration order is the column order and must survive compilation verbatim"
     );
     assert_eq!(
@@ -324,7 +299,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
             .iter()
             .map(|d| d.arrow_type.arrow_type_name())
             .collect::<Vec<_>>(),
-        vec!["u8", "i64", "f32"]
+        vec!["u8", "i64", "f32", "u64"]
     );
     // The category names its vocabulary; the two plain scalars name none.
     assert_eq!(declared[0].vocabulary.as_deref(), Some("band"));
@@ -354,8 +329,8 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
     // against a build that gave every item another item's attributes.** Entity ids are assigned
     // in signature-sorted order (§11.1), so the map is a permutation with no fixed points to
     // speak of — but a fixture whose items all carry one signature has an *identity* permutation,
-    // which is what let the wrong assertion look right. It is read from the external-id sidecar,
-    // which is the bundle's own record of the assignment rather than a second guess at it.
+    // which is what let the wrong assertion look right. It is read from the index of the unique
+    // `id` the build joins on, which is the bundle's own record of the assignment rather than a second guess at it.
     let tail = tail_by_identity(&root);
     assert_eq!(tail.len(), N_ITEMS as usize);
     let entity_of_source = source_to_new_map(&root, "v00000");
@@ -385,7 +360,7 @@ fn both_build_implementations_write_the_same_tail() {
     let tmp = tempfile::tempdir().unwrap();
     let points = tmp.path().join("points.parquet");
     let pairs = tmp.path().join("pairs.parquet");
-    write_points_with_attributes(&points, 2_000);
+    write_points_with_attributes(&points, 2_000, spread);
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
@@ -402,22 +377,20 @@ fn both_build_implementations_write_the_same_tail() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: schema.clone(),
+        schema: with_id(schema.clone()),
     };
 
     let streamed = tmp.path().join("streamed");
@@ -453,9 +426,8 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"ingested-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -476,7 +448,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         )
         .expect("an ingest carrying the declared tail is accepted")[0];
 
-    flush(&engine);
+    publish_buffered(&engine);
     drop(engine);
 
     let tail = tail_by_identity(&root);
@@ -517,9 +489,8 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
     let mut expected = BTreeMap::new();
     for batch in 0..6u64 {
         let entity = engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("merged-{batch}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     descriptors: vec![b"0".to_vec()],
@@ -539,7 +510,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                 [batch as u8; 32],
             )
             .expect("accepted")[0];
-        flush(&engine);
+        publish_buffered(&engine);
         let id = test_key().forward(0, entity).unwrap();
         expected.insert(
             id.raw(),
@@ -603,9 +574,8 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
     // An ingest and a flush first, so the fold has a delta to fold in as well as a base to rewrite
     // — a fold over the base alone would not exercise the k-way path the tail travels through.
     let ingested = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"folded-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -623,7 +593,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             [7u8; 32],
         )
         .expect("accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
     fold(&engine);
     drop(engine);
 
@@ -672,7 +642,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["band", "ingested_at", "score"],
+        vec!["band", "ingested_at", "score", "id"],
         "the tail's declared order survives the fold — it is what every reader reads by position"
     );
 }
@@ -703,9 +673,8 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let ingested = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"ingested-read-path".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -723,7 +692,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -758,9 +727,9 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 
     let truth = tail_by_identity(&root);
     let (band, ingested_at, score) = match (
-        &out.points.scalars[0],
-        &out.points.scalars[1],
-        &out.points.scalars[2],
+        &out.points.scalars[0].values,
+        &out.points.scalars[1].values,
+        &out.points.scalars[2].values,
     ) {
         (ColumnBuf::U8(b), ColumnBuf::I64(t), ColumnBuf::F32(s)) => (b, t, s),
         other => panic!("the tail came back at the wrong types: {other:?}"),
@@ -790,6 +759,230 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
         (band[position], ingested_at[position], score[position]),
         (2u8, 1_900_000_000_000_000i64, 99.5f32),
         "the flushed row's tail is what was ingested"
+    );
+}
+
+/// **Every served point's id, position and values come from the segment that holds it**, over a
+/// view of three segments (the build and two flushes, merging off) and tiles that each span a
+/// different set of them. Zoom 2 over the 1000-unit extent gives 250-unit tiles, served in raster
+/// order:
+///
+/// - `(0, 0)` holds build rows only, and is served first;
+/// - `(1, 0)` holds build rows and the second flush's, some of which have no score, so the nulls
+///   are in a part that is not the tile's first;
+/// - `(2, 0)` holds the first flush's rows only;
+/// - `(3, 3)` holds rows of all three segments.
+///
+/// The second flush's rows in `(1, 0)` climb a diagonal, which fixes their order in the segment:
+/// its rows 4 to 11 carry a score and the rest do not, and the build's rows in the same tile are
+/// its rows 4 to 7. Each point is checked against the segment files as stored.
+#[test]
+fn every_point_reads_the_segment_that_holds_it_across_tiles_of_several_segments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    // Four build rows in each of `(0, 0)`, `(1, 0)` and `(3, 3)`.
+    build_placed_fixture(&root, tmp.path(), 12, |e| {
+        let j = (e % 4) as f64;
+        match e / 4 {
+            0 => (20.0 + 30.0 * j, 20.0 + 30.0 * j),
+            1 => (310.0 + 40.0 * j, 230.0),
+            _ => (800.0 + 30.0 * j, 800.0 + 30.0 * j),
+        }
+    });
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+    engine.set_merge_for_test(false);
+
+    let ingest = |batch: &str, rows: Vec<((f64, f64), Option<f32>)>| {
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, ((x, y), score))| UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                descriptors: vec![b"0".to_vec()],
+                x,
+                y,
+                scalars: vec![
+                    WalScalar::U8(2),
+                    WalScalar::I64(1_900_000_000_000_000 + i as i64),
+                    score.map_or(WalScalar::Null, WalScalar::F32),
+                ],
+                terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
+            })
+            .collect();
+        engine
+            .ingest_rows(rows, batch.to_string(), [0u8; 32])
+            .expect("the ingest is accepted");
+        publish_buffered(&engine);
+    };
+    // Five rows in `(2, 0)` and two in `(3, 3)`, every one scored.
+    ingest(
+        "first",
+        (0..5)
+            .map(|i| (520.0 + 40.0 * i as f64, 30.0 + 40.0 * i as f64))
+            .chain((0..2).map(|i| (815.0 + 40.0 * i as f64, 905.0)))
+            .enumerate()
+            .map(|(i, at)| (at, Some(10.0 + i as f32)))
+            .collect(),
+    );
+    // Twenty rows up a diagonal of `(1, 0)`, then three in `(3, 3)` of which the first is scored.
+    ingest(
+        "second",
+        (0..20)
+            .map(|i| {
+                let at = (255.0 + 10.0 * i as f64, 5.0 + 10.0 * i as f64);
+                (at, (4..12).contains(&i).then_some(20.0 + i as f32))
+            })
+            .chain((0..3).map(|i| ((905.0 + 30.0 * i as f64, 955.0), (i == 0).then_some(40.0))))
+            .collect(),
+    );
+
+    // The stored truth, keyed by `tessera_id`: which segment holds the row, its position code and
+    // its three values, with the score read through the segment's presence record.
+    struct Stored {
+        segment: usize,
+        code: u64,
+        band: u8,
+        ingested_at: i64,
+        score: Option<f32>,
+    }
+    let bundle = open_bundle(&root).expect("the bundle opens");
+    let view_data = bundle
+        .partitions
+        .values()
+        .find_map(|p| p.views.get("s0"))
+        .expect("the bundle holds view s0");
+    let segments = tessera_engine::viewport::segments_with_row_bases("s0", view_data).unwrap();
+    assert_eq!(segments.len(), 3, "the build and two flushes, unmerged");
+    let mut stored = BTreeMap::new();
+    for (at, (segment, _)) in segments.iter().enumerate() {
+        let columns = &segment.columns;
+        let other = || panic!("segment {} holds the tail at other types", segment.seg_id);
+        let Some(ScalarSlice::U8(band)) = columns.scalar("band") else { other() };
+        let Some(ScalarSlice::I64(stamp)) = columns.scalar("ingested_at") else { other() };
+        let Some(ScalarSlice::F32(score)) = columns.scalar("score") else { other() };
+        let presence = columns.presence("score");
+        for row in 0..columns.row_count() as usize {
+            let high = (segment.morton.u32()[row] as u64) << 32;
+            stored.insert(
+                columns.tessera_id()[row],
+                Stored {
+                    segment: at,
+                    code: high | columns.residual()[row] as u64,
+                    band: band[row],
+                    ingested_at: stamp[row],
+                    score: presence.contains(row as u32).then_some(score[row]),
+                },
+            );
+        }
+    }
+    assert_eq!(stored.len(), 42);
+    assert_eq!(stored.values().filter(|s| s.score.is_none()).count(), 14);
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let out = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 2, [0.0, 0.0, 999.0, 999.0], u32::MAX as usize),
+        )
+        .expect("a viewport over the three segments");
+    // Prefixes at zoom 2, x in the even bits: `(0, 0)` 0, `(1, 0)` 1, `(2, 0)` 4, `(3, 3)` 15.
+    assert_eq!(
+        out.tiles.iter().map(|t| t.tile).collect::<Vec<_>>(),
+        vec![0, 1, 4, 15]
+    );
+    let (ColumnBuf::U8(band), ColumnBuf::I64(ingested_at), ColumnBuf::F32(score)) = (
+        &out.points.scalars[0].values,
+        &out.points.scalars[1].values,
+        &out.points.scalars[2].values,
+    ) else {
+        panic!("the tail came back at other types");
+    };
+    let score_column = &out.points.scalars[2];
+
+    let mut seen = BTreeSet::new();
+    let mut segments_of_tile = BTreeMap::new();
+    let mut i = 0;
+    for tile in &out.tiles {
+        let mut held = BTreeSet::new();
+        for _ in 0..tile.served {
+            let (id, code) = (out.points.tessera_ids[i], out.points.codes[i]);
+            let truth = stored
+                .get(&id)
+                .unwrap_or_else(|| panic!("point {i} has an id no segment holds"));
+            assert!(seen.insert(id), "point {i} is served twice");
+            assert_eq!(code, truth.code, "point {i}'s position");
+            assert_eq!(code >> 60, tile.tile, "point {i} lies in the tile it is served under");
+            assert_eq!(band[i], truth.band, "point {i}'s band");
+            assert_eq!(ingested_at[i], truth.ingested_at, "point {i}'s ingested_at");
+            assert_eq!(
+                score_column.is_present(i).then_some(score[i]),
+                truth.score,
+                "point {i}'s score"
+            );
+            held.insert((truth.segment, truth.score.is_none()));
+            i += 1;
+        }
+        segments_of_tile.insert(tile.tile, held);
+    }
+    assert_eq!(i, out.points.len());
+    assert_eq!(seen.len(), stored.len(), "every stored row is served");
+
+    let segments_in = |tile: u64| -> BTreeSet<usize> {
+        segments_of_tile[&tile].iter().map(|&(s, _)| s).collect()
+    };
+    assert_eq!(segments_in(0), BTreeSet::from([0]));
+    assert_eq!(segments_in(1), BTreeSet::from([0, 2]));
+    assert!(segments_of_tile[&1].contains(&(2, true)), "(1, 0) serves an unscored flushed row");
+    assert_eq!(segments_in(4), BTreeSet::from([1]));
+    assert_eq!(segments_in(15), BTreeSet::from([0, 1, 2]));
+}
+
+/// **A segment holding a render column at a type other than the declared one is refused.** The
+/// manifest is rewritten after the build to declare `score` as `f64` while the segment stores
+/// `f32`, and the digest in `CURRENT` follows it, so the bundle opens and the disagreement
+/// reaches the gather.
+#[test]
+fn a_segment_holding_a_render_column_at_another_type_is_refused() {
+    use sha2::{Digest, Sha256};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_attributes(&root, tmp.path(), N_ITEMS);
+
+    let current_path = root.join("CURRENT");
+    let mut current: tessera_store::manifest::CurrentPointer =
+        serde_json::from_slice(&std::fs::read(&current_path).unwrap()).unwrap();
+    let manifest_path = root.join(&current.prefix).join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let score = manifest["declared_scalars"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|d| d["name"] == "score")
+        .expect("the fixture declares score");
+    assert_eq!(score["arrow_type"], "f32");
+    score["arrow_type"] = "f64".into();
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&manifest_path, &bytes).unwrap();
+    current.manifest_digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::fs::write(&current_path, serde_json::to_vec(&current).unwrap()).unwrap();
+
+    let engine = engine_over(tmp.path(), &root, config_uncapped());
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let answer = engine.viewport(
+        &session,
+        ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], u32::MAX as usize),
+    );
+    assert!(
+        matches!(answer, Err(tessera_engine::EngineError::Malformed(_))),
+        "a segment storing score as f32 under an f64 declaration is refused: {:?}",
+        answer.map(|out| out.points.len())
     );
 }
 
@@ -900,22 +1093,20 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
 }
@@ -924,7 +1115,6 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 /// (the ingest plane's shape); the flush narrows to the render columns before it writes.
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(b"non-prefix-flushed".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -998,13 +1188,13 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let flushed_entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![non_prefix_row(&engine, 4242, 2, 9.25)],
             "batch-non-prefix".to_string(),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let out = engine
@@ -1043,11 +1233,11 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
             .position(|n| n.as_str() == name)
             .unwrap()
     };
-    let band = match &out.points.scalars[position("band")] {
+    let band = match &out.points.scalars[position("band")].values {
         ColumnBuf::U8(v) => v,
         other => panic!("the column named 'band' must be u8, found {other:?}"),
     };
-    let score = match &out.points.scalars[position("score")] {
+    let score = match &out.points.scalars[position("score")].values {
         ColumnBuf::F32(v) => v,
         other => panic!("the column named 'score' must be f32, found {other:?}"),
     };
@@ -1075,10 +1265,10 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     assert_eq!(counts_only.scalar_names, vec!["band", "score"]);
     assert_eq!(counts_only.points.scalars.len(), 2);
     assert!(
-        matches!(counts_only.points.scalars[0], ColumnBuf::U8(_)),
+        matches!(counts_only.points.scalars[0].values, ColumnBuf::U8(_)),
         "the seeded empty column carries the render column's type, not the declaration's first"
     );
-    assert!(matches!(counts_only.points.scalars[1], ColumnBuf::F32(_)));
+    assert!(matches!(counts_only.points.scalars[1].values, ColumnBuf::F32(_)));
 }
 
 /// **Drill-down under the same non-prefix declaration: every home's value under its own name.**
@@ -1094,21 +1284,27 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
     let engine = engine_over(tmp.path(), &root, config_uncapped());
 
     let flushed_entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![non_prefix_row(&engine, 4242, 2, 9.25)],
             "batch-non-prefix-drill".to_string(),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let expect_item = |id, audit: i64, band_key: &str, score: f32, label: &str| {
         let served = engine
-            .item(&session, id, None)
+            .item(&session, id)
             .expect("drill-down succeeds")
             .unwrap_or_else(|| panic!("{label} is visible to full coverage"));
-        let names: Vec<&str> = served.fields.iter().map(|f| f.name.as_str()).collect();
+        // `id` only finds the built items; the columns under test are the others.
+        let names: Vec<&str> = served
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|name| *name != "id")
+            .collect();
         assert_eq!(
             names,
             ["audit", "band", "score"],
@@ -1239,6 +1435,10 @@ fn record_fields_of(source: u64) -> Vec<tessera_filter::RecordField> {
             tag: 3,
             value: tessera_filter::RecordValue::U8(tier_code_of(source)),
         },
+        tessera_filter::RecordField {
+            tag: 4,
+            value: tessera_filter::RecordValue::U64(source),
+        },
     ]
 }
 
@@ -1311,32 +1511,22 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &with_id(schema.clone())),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: with_id(schema),
     };
     build(&args).expect("a build with blob-resident columns succeeds");
-}
-
-/// The prefix `CURRENT` names — read rather than assumed, because a fold publishes into a new one.
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
 }
 
 /// The partition's side-manifest, as the serving path holds it.
@@ -1365,9 +1555,8 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 }
 
 /// One ingest row for the record fixture: `band` code, blob-resident `note` and `revision`.
-fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
+fn record_row(engine: &Engine, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(external.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -1409,13 +1598,13 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     }
 
     let entity = engine
-        .accept_ingest(
-            vec![record_row(&engine, "flushed-1", "the-flushed-note", 77)],
+        .ingest_rows(
+            vec![record_row(&engine, "the-flushed-note", 77)],
             "batch-record-1".to_string(),
             [0u8; 32],
         )
         .expect("an ingest carrying blob-resident values is accepted")[0];
-    flush(&engine);
+    publish_buffered(&engine);
 
     // **Before the engine is dropped**: a published record extent that no *live* stack holds
     // answers no drill-down. The manifest entry below makes the bytes reachable to a reopen; this
@@ -1425,7 +1614,7 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     let flushed_id = engine.tessera_id_of(entity).unwrap();
     let served = engine
-        .item(&session, flushed_id, None)
+        .item(&session, flushed_id)
         .expect("drill-down on a flushed entity")
         .expect("the flushed entity is visible");
     let note = served
@@ -1505,17 +1694,17 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     let engine = engine_over(tmp.path(), &root, config());
 
     let entities = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![
-                record_row(&engine, "s", "the-suppressed-prose", 1),
-                record_row(&engine, "d", "the-deleted-prose", 2),
-                record_row(&engine, "c", "the-kept-prose", 3),
+                record_row(&engine, "the-suppressed-prose", 1),
+                record_row(&engine, "the-deleted-prose", 2),
+                record_row(&engine, "the-kept-prose", 3),
             ],
             "batch-deny".to_string(),
             [1u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
 
     let manifest = side_manifest(&root);
     assert_eq!(manifest.record_extents.len(), 1);
@@ -1546,13 +1735,13 @@ fn a_suppression_touches_no_blob_byte_and_only_the_fold_removes_a_deletion() {
     );
     // An unrelated publication leaves the extent alone too: a flush appends its own layer.
     engine
-        .accept_ingest(
-            vec![record_row(&engine, "later", "a-later-note", 4)],
+        .ingest_rows(
+            vec![record_row(&engine, "a-later-note", 4)],
             "batch-later".to_string(),
             [2u8; 32],
         )
         .expect("accepted");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         before,
         extent_files(),
@@ -1654,10 +1843,9 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
     let mut ingested = Vec::new();
     for i in 0..8u64 {
         let entity = engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![record_row(
                     &engine,
-                    &format!("co-{i}"),
                     &format!("coalesced-note-{i}"),
                     i as i64,
                 )],
@@ -1689,15 +1877,9 @@ fn a_coalesce_collapses_record_extents_and_every_row_still_answers() {
         "the live stack composes each flush's extent as it publishes"
     );
 
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().coalesces == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    tick_until(&engine, "the record extents to coalesce", std::time::Duration::from_secs(60), || {
+        engine.generation().filter_columns.record_layers() < 9
+    });
 
     // **The live stack shrank with the manifest, before any restart.** The blob's layers ride on
     // `Arc`s from one generation to the next, so a publication that edited only the manifest left

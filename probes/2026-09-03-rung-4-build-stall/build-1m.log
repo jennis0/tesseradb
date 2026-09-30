@@ -43,5 +43,5 @@ artifact layouts, chosen from the bundle's own row space (229 ms):
     level 3 [knn]: 4509 artifact(s), zoom 11–16
 stage        manifests      0.45s  rows=744299677    peak=  2398 MiB
 view 'knn': 1000000 point(s) landed in 996121 distinct cell(s) — 99.6% of them have a position of their own
-built /home/joe/code/tessera/data/ladder/paperseek-1m/bundle (v00000): 1000000 items, 12 terms, 1000000 pairs, 744299677 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
+built /home/user/code/tessera/data/ladder/paperseek-1m/bundle (v00000): 1000000 items, 12 terms, 1000000 pairs, 744299677 bytes on disk, 0 artifact(s) minted, 0 unclustered member row(s)
   view knn: 1000000 row(s)

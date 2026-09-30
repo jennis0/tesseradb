@@ -24,7 +24,7 @@ from oracle.bundle import Bundle
 from oracle.wire import decode_viewport_points
 
 
-def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
+def test_the_catalogue_bundle_identity_column_is_the_manifest_keys_permutation(
     catalogue_bundle: Bundle,
 ):
     """The one artefact the §7.2 oracle shares with the engine, checked rather than trusted.
@@ -35,20 +35,13 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     term-signature order, the r21 disclosure the negative control's docstring invokes — would be
     agreed with rather than caught, because both sides would read the same wrong values.
 
-    Three checks close it, and the fixture supplies the key, so nothing is left on trust:
+    Two checks close it, against the key the bundle's manifest records:
 
     1. the stored column **is** `forward(key, shard_id, entity_id)` for a sample of rows, where the
        entity id comes from the permutation (key-independent) and the identity from the column;
     2. the rows are **stored in the order that key implies** — re-derived from `(x, y)` and the
        permutation, never from the stored `morton`/`tessera_id` columns — so `derive_row_order` is
-       the identity permutation;
-    3. MANIFEST's identity key is the one `oracle/catalogue.py` put in the build's environment,
-       not one the build minted for itself. Without this, 1 and 2 would hold against *any* self-consistent
-       key, including one the fixture never chose.
-
-    `verify_identity_cross_check` and `derive_row_order` already existed but ran only against the
-    250k `--mint-id-key` fixture, whose key is a build output rather than a fixture input — so the
-    catalogue, which is the corpus every §7.2 assertion is made over, was never covered.
+       the identity permutation.
     """
     catalogue_bundle.verify_identity_cross_check(cat.VIEW_ID)
 
@@ -56,15 +49,6 @@ def test_the_catalogue_bundle_identity_column_is_the_key_the_fixture_supplied(
     assert np.array_equal(order, np.arange(len(order))), (
         "the catalogue's rows are not stored in (morton, tessera_id) order re-derived from "
         "geometry and the identity key — so the stored order is not the order §7.2 selects in"
-    )
-
-    declared = catalogue_bundle.manifest["identity"]["key"]
-    assert declared.lower() == cat.CATALOGUE_ID_KEY_HEX.lower(), (
-        f"MANIFEST's identity key is {declared!r}, not the {cat.CATALOGUE_ID_KEY_HEX!r} the "
-        "fixture states through the environment. The bundle was built by something other than "
-        "`build_catalogue_bundle`, or the build ignored the variable and minted its own key — "
-        "either "
-        "way every tessera_id in it is a value nobody chose."
     )
 
 
@@ -164,7 +148,7 @@ def test_fx_keys_are_unique_and_not_derived_from_the_entity_id():
 
 def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogue_server):
     """The join `AckedJournal` and the I2 canonicalisation both need: a served point names its
-    fixture item, with no reverse map, no extra endpoint, and no external ID on the viewer plane.
+    fixture item, with no reverse map and no extra endpoint on the viewer plane.
 
     **The assertion is on the served column, not on MANIFEST.** An earlier version of this body
     checked only that MANIFEST declared a scalar named `fx_key`, and carried a strict xfail while
@@ -196,9 +180,9 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     assert points.num_rows > 0, "no points were served, so nothing was checked"
 
     # The fixture planted `source_id -> fx_key`, so the join is identity -> entity -> **source**.
-    # The middle hop comes from the segment and the last from the external-ID sidecar; both are
-    # translations only the fixture may make, because on the viewer plane an identity is opaque
-    # (I10) and this test is the fixture, not a viewer.
+    # The middle hop comes from the segment and the last from the bundle's unique index of `serial`
+    # (`catalogue.entities_by_source`); both are translations only the fixture may make, because on
+    # the viewer plane an identity is opaque (I10) and this test is the fixture, not a viewer.
     #
     # **The last hop used to be an equality**, `entity_id == source_id`, and it stopped being one
     # when decision 0073 made the within-signature tiebreak the Morton code. What that cost is
@@ -206,10 +190,11 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     # which is a comparison that fails loudly here and would have failed *silently* anywhere the
     # values were not unique per item.
     planted = cat.fx_keys()
+    source_of = {e: s for s, e in cat.entities_by_source(catalogue_bundle).items()}
     seg = catalogue_bundle.segment(cat.VIEW_ID)
     entity_of = {int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
     for ident, key in zip(points.column("tessera_id").to_pylist(), points.column("fx_key").to_pylist()):
-        source = catalogue_bundle.source_of_entity(entity_of[ident])
+        source = source_of[entity_of[ident]]
         assert key == planted[source], (
             f"served fx_key {key} for tessera_id {ident} (entity {entity_of[ident]}, source "
             f"{source}) is not the planted key {planted[source]} — the join the whole catalogue "

@@ -1,4 +1,4 @@
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 100000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 100000 key
 == arm1 btree V=100000 entries=key hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 100000 over 100000 distinct folded values (1.00 entries/value), sort+derive 0.01s
   before build: heap 4.4 MB, RSS 6 MB
@@ -12,7 +12,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.46 us  p99 0.89 us  mean 0.50 us  max 27.8 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.37 us  p99 0.80 us  mean 0.40 us  max 1.1 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 4.4 MB, RSS 16 MB, peak RSS 16 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 100000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 100000 key
 == arm1 arena V=100000 entries=key hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 100000 over 100000 distinct folded values (1.00 entries/value), sort+derive 0.01s
   before build: heap 4.4 MB, RSS 6 MB
@@ -26,7 +26,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 0.38 us  p99 0.59 us  mean 0.40 us  max 12.3 us  | range width median 9 p99 463 (checksum 185714)
     arena prefix 8 chars: n=2000 median 0.39 us  p99 0.60 us  mean 0.41 us  max 13.8 us  | range width median 1 p99 277 (checksum 38362)
   end: heap 4.4 MB, RSS 7 MB, peak RSS 10 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 100000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 100000 key
 == arm1 arenaref V=100000 entries=key hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 100000 over 100000 distinct folded values (1.00 entries/value), sort+derive 0.01s
   before build: heap 4.4 MB, RSS 7 MB
@@ -40,7 +40,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 0.44 us  p99 0.58 us  mean 0.45 us  max 13.7 us  | range width median 9 p99 463 (checksum 185714)
     arenaref prefix 8 chars: n=2000 median 0.46 us  p99 0.60 us  mean 0.47 us  max 14.5 us  | range width median 1 p99 277 (checksum 38362)
   end: heap 4.4 MB, RSS 7 MB, peak RSS 10 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 100000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 100000 key
 == arm1 fst V=100000 entries=key hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 100000 over 100000 distinct folded values (1.00 entries/value), sort+derive 0.01s
   before build: heap 4.4 MB, RSS 6 MB
@@ -54,7 +54,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 0.93 us  p99 1.79 us  mean 1.00 us  max 14.5 us  | range width median 9 p99 463 (checksum 185714)
     fst prefix 8 chars: n=2000 median 1.33 us  p99 2.95 us  mean 1.43 us  max 20.9 us  | range width median 1 p99 277 (checksum 38362)
   end: heap 4.4 MB, RSS 13 MB, peak RSS 14 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 100000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 100000 key
 == arm1 dict V=100000 entries=key hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 100000 over 100000 distinct folded values (1.00 entries/value), sort+derive 0.01s
   before build: heap 4.4 MB, RSS 7 MB
@@ -68,7 +68,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 1.32 us  p99 1.84 us  mean 1.49 us  max 119.4 us  | range width median 9 p99 463 (checksum 185714)
     dict prefix 8 chars: n=2000 median 1.30 us  p99 2.07 us  mean 1.50 us  max 337.6 us  | range width median 1 p99 277 (checksum 38362)
   end: heap 4.4 MB, RSS 8 MB, peak RSS 9 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 100000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 100000 words
 == arm1 btree V=100000 entries=key+wordstart hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 219325 over 100000 distinct folded values (2.19 entries/value), sort+derive 0.06s
   before build: heap 6.0 MB, RSS 7 MB
@@ -82,7 +82,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.31 us  p99 0.56 us  mean 0.32 us  max 0.8 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.34 us  p99 0.72 us  mean 0.36 us  max 0.9 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 6.0 MB, RSS 28 MB, peak RSS 28 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 100000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 100000 words
 == arm1 arena V=100000 entries=key+wordstart hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 219325 over 100000 distinct folded values (2.19 entries/value), sort+derive 0.08s
   before build: heap 6.0 MB, RSS 7 MB
@@ -96,7 +96,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 0.40 us  p99 0.55 us  mean 0.41 us  max 17.3 us  | range width median 15 p99 580 (checksum 276296)
     arena prefix 8 chars: n=2000 median 0.42 us  p99 0.57 us  mean 0.42 us  max 0.8 us  | range width median 1 p99 277 (checksum 41846)
   end: heap 6.0 MB, RSS 8 MB, peak RSS 13 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 100000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 100000 words
 == arm1 arenaref V=100000 entries=key+wordstart hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 219325 over 100000 distinct folded values (2.19 entries/value), sort+derive 0.07s
   before build: heap 6.0 MB, RSS 8 MB
@@ -110,7 +110,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 0.67 us  p99 0.99 us  mean 0.69 us  max 25.2 us  | range width median 15 p99 580 (checksum 276296)
     arenaref prefix 8 chars: n=2000 median 0.62 us  p99 1.00 us  mean 0.78 us  max 65.1 us  | range width median 1 p99 277 (checksum 41846)
   end: heap 6.0 MB, RSS 8 MB, peak RSS 13 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 100000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 100000 words
 == arm1 fst V=100000 entries=key+wordstart hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 219325 over 100000 distinct folded values (2.19 entries/value), sort+derive 0.06s
   before build: heap 6.0 MB, RSS 7 MB
@@ -124,7 +124,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 0.98 us  p99 2.09 us  mean 1.04 us  max 16.5 us  | range width median 15 p99 580 (checksum 276296)
     fst prefix 8 chars: n=2000 median 1.43 us  p99 3.52 us  mean 1.59 us  max 31.1 us  | range width median 1 p99 277 (checksum 41846)
   end: heap 6.0 MB, RSS 16 MB, peak RSS 18 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 100000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 100000 words
 == arm1 dict V=100000 entries=key+wordstart hex=false  (keys loaded in 0.0s, 1.5 MB of key bytes, avg 14.9 B/key)
   entries: 219325 over 100000 distinct folded values (2.19 entries/value), sort+derive 0.06s
   before build: heap 6.0 MB, RSS 8 MB
@@ -138,7 +138,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 1.73 us  p99 3.86 us  mean 1.86 us  max 25.2 us  | range width median 15 p99 580 (checksum 276296)
     dict prefix 8 chars: n=2000 median 1.73 us  p99 3.51 us  mean 1.83 us  max 25.8 us  | range width median 1 p99 277 (checksum 41846)
   end: heap 6.0 MB, RSS 9 MB, peak RSS 14 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 1000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 1000000 key
 == arm1 btree V=1000000 entries=key hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.33s
   before build: heap 39.4 MB, RSS 34 MB
@@ -152,7 +152,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.87 us  p99 1.53 us  mean 0.87 us  max 13.5 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 1.04 us  p99 1.85 us  mean 1.06 us  max 14.0 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 39.4 MB, RSS 126 MB, peak RSS 126 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 1000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 1000000 key
 == arm1 arena V=1000000 entries=key hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.29s
   before build: heap 39.4 MB, RSS 34 MB
@@ -166,7 +166,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 0.57 us  p99 0.89 us  mean 0.59 us  max 15.5 us  | range width median 72 p99 4499 (checksum 1729020)
     arena prefix 8 chars: n=2000 median 0.56 us  p99 0.87 us  mean 0.58 us  max 13.7 us  | range width median 1 p99 2811 (checksum 377708)
   end: heap 39.4 MB, RSS 61 MB, peak RSS 62 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 1000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 1000000 key
 == arm1 arenaref V=1000000 entries=key hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.28s
   before build: heap 39.4 MB, RSS 34 MB
@@ -180,7 +180,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 1.40 us  p99 3.35 us  mean 1.53 us  max 32.3 us  | range width median 72 p99 4499 (checksum 1729020)
     arenaref prefix 8 chars: n=2000 median 0.79 us  p99 1.55 us  mean 0.86 us  max 45.4 us  | range width median 1 p99 2811 (checksum 377708)
   end: heap 39.4 MB, RSS 78 MB, peak RSS 78 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 1000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 1000000 key
 == arm1 fst V=1000000 entries=key hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.34s
   before build: heap 39.4 MB, RSS 34 MB
@@ -194,7 +194,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 1.13 us  p99 2.32 us  mean 1.21 us  max 31.8 us  | range width median 72 p99 4499 (checksum 1729020)
     fst prefix 8 chars: n=2000 median 1.16 us  p99 2.27 us  mean 1.25 us  max 33.5 us  | range width median 1 p99 2811 (checksum 377708)
   end: heap 39.4 MB, RSS 49 MB, peak RSS 61 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 1000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 1000000 key
 == arm1 dict V=1000000 entries=key hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.25s
   before build: heap 39.4 MB, RSS 34 MB
@@ -208,7 +208,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 1.78 us  p99 2.90 us  mean 1.84 us  max 35.3 us  | range width median 72 p99 4499 (checksum 1729020)
     dict prefix 8 chars: n=2000 median 1.68 us  p99 2.44 us  mean 1.71 us  max 36.0 us  | range width median 1 p99 2811 (checksum 377708)
   end: heap 39.4 MB, RSS 40 MB, peak RSS 51 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 1000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 1000000 words
 == arm1 btree V=1000000 entries=key+wordstart hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 2195653 over 1000000 distinct folded values (2.20 entries/value), sort+derive 1.33s
   before build: heap 55.4 MB, RSS 44 MB
@@ -222,7 +222,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.65 us  p99 1.27 us  mean 0.68 us  max 14.6 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.57 us  p99 0.99 us  mean 0.60 us  max 33.3 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 55.4 MB, RSS 247 MB, peak RSS 247 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 1000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 1000000 words
 == arm1 arena V=1000000 entries=key+wordstart hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 2195653 over 1000000 distinct folded values (2.20 entries/value), sort+derive 1.45s
   before build: heap 55.4 MB, RSS 44 MB
@@ -236,7 +236,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 0.63 us  p99 1.04 us  mean 0.66 us  max 21.2 us  | range width median 126 p99 5821 (checksum 2642402)
     arena prefix 8 chars: n=2000 median 0.62 us  p99 0.88 us  mean 0.64 us  max 27.5 us  | range width median 1 p99 2814 (checksum 421864)
   end: heap 55.4 MB, RSS 44 MB, peak RSS 100 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 1000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 1000000 words
 == arm1 arenaref V=1000000 entries=key+wordstart hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 2195653 over 1000000 distinct folded values (2.20 entries/value), sort+derive 1.34s
   before build: heap 55.4 MB, RSS 44 MB
@@ -250,7 +250,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 1.17 us  p99 2.07 us  mean 1.22 us  max 12.7 us  | range width median 126 p99 5821 (checksum 2642402)
     arenaref prefix 8 chars: n=2000 median 1.07 us  p99 1.88 us  mean 1.13 us  max 27.1 us  | range width median 1 p99 2814 (checksum 421864)
   end: heap 55.4 MB, RSS 44 MB, peak RSS 113 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 1000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 1000000 words
 == arm1 fst V=1000000 entries=key+wordstart hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 2195653 over 1000000 distinct folded values (2.20 entries/value), sort+derive 1.20s
   before build: heap 55.4 MB, RSS 44 MB
@@ -264,7 +264,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 0.83 us  p99 1.79 us  mean 0.90 us  max 13.5 us  | range width median 126 p99 5821 (checksum 2642402)
     fst prefix 8 chars: n=2000 median 1.30 us  p99 2.37 us  mean 1.40 us  max 56.4 us  | range width median 1 p99 2814 (checksum 421864)
   end: heap 55.4 MB, RSS 69 MB, peak RSS 87 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 1000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 1000000 words
 == arm1 dict V=1000000 entries=key+wordstart hex=false  (keys loaded in 0.1s, 14.9 MB of key bytes, avg 14.9 B/key)
   entries: 2195653 over 1000000 distinct folded values (2.20 entries/value), sort+derive 1.18s
   before build: heap 55.4 MB, RSS 44 MB
@@ -278,7 +278,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 1.91 us  p99 3.11 us  mean 1.98 us  max 27.8 us  | range width median 126 p99 5821 (checksum 2642402)
     dict prefix 8 chars: n=2000 median 1.84 us  p99 2.97 us  mean 1.89 us  max 31.1 us  | range width median 1 p99 2814 (checksum 421864)
   end: heap 55.4 MB, RSS 49 MB, peak RSS 90 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 10000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 10000000 key
 == arm1 btree V=10000000 entries=key hex=false  (keys loaded in 0.8s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 4.69s
   before build: heap 510.4 MB, RSS 312 MB
@@ -292,7 +292,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 1.11 us  p99 1.84 us  mean 1.10 us  max 16.5 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.94 us  p99 1.68 us  mean 0.99 us  max 31.5 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 510.4 MB, RSS 1233 MB, peak RSS 1233 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 10000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 10000000 key
 == arm1 arena V=10000000 entries=key hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 5.40s
   before build: heap 510.4 MB, RSS 312 MB
@@ -306,7 +306,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 1.05 us  p99 1.83 us  mean 1.16 us  max 72.6 us  | range width median 655 p99 44245 (checksum 18036546)
     arena prefix 8 chars: n=2000 median 0.95 us  p99 1.59 us  mean 1.11 us  max 255.8 us  | range width median 4 p99 24323 (checksum 2889976)
   end: heap 510.4 MB, RSS 313 MB, peak RSS 582 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 10000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 10000000 key
 == arm1 arenaref V=10000000 entries=key hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 5.98s
   before build: heap 510.4 MB, RSS 312 MB
@@ -320,7 +320,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 1.54 us  p99 2.92 us  mean 1.63 us  max 17.8 us  | range width median 655 p99 44245 (checksum 18036546)
     arenaref prefix 8 chars: n=2000 median 1.52 us  p99 2.76 us  mean 1.60 us  max 38.4 us  | range width median 4 p99 24323 (checksum 2889976)
   end: heap 510.4 MB, RSS 313 MB, peak RSS 622 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 10000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 10000000 key
 == arm1 fst V=10000000 entries=key hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 5.57s
   before build: heap 510.4 MB, RSS 312 MB
@@ -334,7 +334,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 0.69 us  p99 1.49 us  mean 0.76 us  max 16.8 us  | range width median 655 p99 44245 (checksum 18036546)
     fst prefix 8 chars: n=2000 median 1.20 us  p99 2.30 us  mean 1.27 us  max 13.2 us  | range width median 4 p99 24323 (checksum 2889976)
   end: heap 510.4 MB, RSS 331 MB, peak RSS 425 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 10000000 key
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 10000000 key
 == arm1 dict V=10000000 entries=key hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 5.57s
   before build: heap 510.4 MB, RSS 312 MB
@@ -348,7 +348,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 2.70 us  p99 4.25 us  mean 2.73 us  max 25.1 us  | range width median 655 p99 44245 (checksum 18036546)
     dict prefix 8 chars: n=2000 median 2.27 us  p99 3.43 us  mean 2.32 us  max 22.1 us  | range width median 4 p99 24323 (checksum 2889976)
   end: heap 510.4 MB, RSS 318 MB, peak RSS 409 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 10000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 10000000 words
 == arm1 btree V=10000000 entries=key+wordstart hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 21962285 over 10000000 distinct folded values (2.20 entries/value), sort+derive 35.66s
   before build: heap 670.4 MB, RSS 408 MB
@@ -362,7 +362,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.78 us  p99 1.44 us  mean 0.82 us  max 12.5 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.88 us  p99 1.50 us  mean 0.91 us  max 13.2 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 670.4 MB, RSS 2451 MB, peak RSS 2458 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 10000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 10000000 words
 == arm1 arena V=10000000 entries=key+wordstart hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 21962285 over 10000000 distinct folded values (2.20 entries/value), sort+derive 34.99s
   before build: heap 670.4 MB, RSS 408 MB
@@ -376,7 +376,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 1.32 us  p99 2.48 us  mean 1.40 us  max 15.4 us  | range width median 1081 p99 57426 (checksum 27407242)
     arena prefix 8 chars: n=2000 median 1.10 us  p99 1.90 us  mean 1.14 us  max 13.5 us  | range width median 4 p99 24873 (checksum 3237126)
   end: heap 670.4 MB, RSS 409 MB, peak RSS 899 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arenaref 10000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arenaref 10000000 words
 == arm1 arenaref V=10000000 entries=key+wordstart hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 21962285 over 10000000 distinct folded values (2.20 entries/value), sort+derive 38.36s
   before build: heap 670.4 MB, RSS 408 MB
@@ -390,7 +390,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arenaref prefix 4 chars: n=2000 median 2.39 us  p99 4.35 us  mean 2.65 us  max 153.1 us  | range width median 1081 p99 57426 (checksum 27407242)
     arenaref prefix 8 chars: n=2000 median 2.16 us  p99 4.05 us  mean 2.47 us  max 142.5 us  | range width median 4 p99 24873 (checksum 3237126)
   end: heap 670.4 MB, RSS 409 MB, peak RSS 813 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 10000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 10000000 words
 == arm1 fst V=10000000 entries=key+wordstart hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 21962285 over 10000000 distinct folded values (2.20 entries/value), sort+derive 33.67s
   before build: heap 670.4 MB, RSS 408 MB
@@ -404,7 +404,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 0.86 us  p99 2.28 us  mean 0.99 us  max 27.8 us  | range width median 1081 p99 57426 (checksum 27407242)
     fst prefix 8 chars: n=2000 median 1.57 us  p99 2.93 us  mean 1.64 us  max 14.1 us  | range width median 4 p99 24873 (checksum 3237126)
   end: heap 670.4 MB, RSS 429 MB, peak RSS 647 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 10000000 words
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 10000000 words
 == arm1 dict V=10000000 entries=key+wordstart hex=false  (keys loaded in 0.7s, 148.7 MB of key bytes, avg 14.9 B/key)
   entries: 21962285 over 10000000 distinct folded values (2.20 entries/value), sort+derive 34.75s
   before build: heap 670.4 MB, RSS 408 MB
@@ -418,7 +418,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 3.54 us  p99 6.04 us  mean 4.13 us  max 1013.5 us  | range width median 1081 p99 57426 (checksum 27407242)
     dict prefix 8 chars: n=2000 median 2.81 us  p99 4.36 us  mean 2.88 us  max 17.7 us  | range width median 4 p99 24873 (checksum 3237126)
   end: heap 670.4 MB, RSS 409 MB, peak RSS 675 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 1000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 1000000 key hex
 == arm1 btree V=1000000 entries=key hex=true  (keys loaded in 0.0s, 32.0 MB of key bytes, avg 32.0 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.37s
   before build: heap 57.8 MB, RSS 51 MB
@@ -432,7 +432,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 0.48 us  p99 0.77 us  mean 0.49 us  max 0.9 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 0.53 us  p99 0.93 us  mean 0.56 us  max 14.6 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 57.8 MB, RSS 158 MB, peak RSS 158 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 1000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 1000000 key hex
 == arm1 arena V=1000000 entries=key hex=true  (keys loaded in 0.0s, 32.0 MB of key bytes, avg 32.0 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.31s
   before build: heap 57.8 MB, RSS 52 MB
@@ -446,7 +446,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 0.63 us  p99 1.07 us  mean 0.67 us  max 23.2 us  | range width median 16 p99 27 (checksum 65434)
     arena prefix 8 chars: n=2000 median 0.74 us  p99 1.16 us  mean 0.78 us  max 16.7 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 57.8 MB, RSS 66 MB, peak RSS 97 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 1000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 1000000 key hex
 == arm1 fst V=1000000 entries=key hex=true  (keys loaded in 0.0s, 32.0 MB of key bytes, avg 32.0 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.36s
   before build: heap 57.8 MB, RSS 51 MB
@@ -460,7 +460,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 1.83 us  p99 2.76 us  mean 1.88 us  max 13.7 us  | range width median 16 p99 27 (checksum 65434)
     fst prefix 8 chars: n=2000 median 1.96 us  p99 3.11 us  mean 2.07 us  max 16.5 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 57.8 MB, RSS 66 MB, peak RSS 99 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 1000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 1000000 key hex
 == arm1 dict V=1000000 entries=key hex=true  (keys loaded in 0.0s, 32.0 MB of key bytes, avg 32.0 B/key)
   entries: 1000000 over 1000000 distinct folded values (1.00 entries/value), sort+derive 0.38s
   before build: heap 57.8 MB, RSS 52 MB
@@ -474,7 +474,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     dict prefix 4 chars: n=2000 median 1.42 us  p99 2.07 us  mean 1.49 us  max 39.7 us  | range width median 16 p99 27 (checksum 65434)
     dict prefix 8 chars: n=2000 median 1.33 us  p99 1.97 us  mean 1.43 us  max 59.4 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 57.8 MB, RSS 57 MB, peak RSS 87 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest btree 10000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest btree 10000000 key hex
 == arm1 btree V=10000000 entries=key hex=true  (keys loaded in 0.4s, 320.0 MB of key bytes, avg 32.0 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 5.31s
   before build: heap 804.0 MB, RSS 483 MB
@@ -488,7 +488,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     btree prefix 4 chars: n=2000 median 1.44 us  p99 2.35 us  mean 1.46 us  max 13.1 us  | range width median 1 p99 1 (checksum 4000)
     btree prefix 8 chars: n=2000 median 1.43 us  p99 2.27 us  mean 1.47 us  max 13.2 us  | range width median 1 p99 1 (checksum 4000)
   end: heap 804.0 MB, RSS 1546 MB, peak RSS 1546 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest arena 10000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest arena 10000000 key hex
 == arm1 arena V=10000000 entries=key hex=true  (keys loaded in 0.4s, 320.0 MB of key bytes, avg 32.0 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 6.71s
   before build: heap 804.0 MB, RSS 483 MB
@@ -502,7 +502,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     arena prefix 4 chars: n=2000 median 1.31 us  p99 2.21 us  mean 1.34 us  max 13.3 us  | range width median 154 p99 180 (checksum 614774)
     arena prefix 8 chars: n=2000 median 1.29 us  p99 2.31 us  mean 1.53 us  max 178.7 us  | range width median 1 p99 1 (checksum 4010)
   end: heap 804.0 MB, RSS 484 MB, peak RSS 923 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest fst 10000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest fst 10000000 key hex
 == arm1 fst V=10000000 entries=key hex=true  (keys loaded in 0.4s, 320.0 MB of key bytes, avg 32.0 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 6.13s
   before build: heap 804.0 MB, RSS 483 MB
@@ -516,7 +516,7 @@ cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/targ
     fst prefix 4 chars: n=2000 median 2.20 us  p99 3.08 us  mean 2.26 us  max 30.3 us  | range width median 154 p99 180 (checksum 614774)
     fst prefix 8 chars: n=2000 median 1.89 us  p99 2.35 us  mean 1.94 us  max 26.9 us  | range width median 1 p99 1 (checksum 4010)
   end: heap 804.0 MB, RSS 495 MB, peak RSS 813 MB
-cmd: /home/joe/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/joe/code/tessera/data/ladder/probe-suggest dict 10000000 key hex
+cmd: /home/user/code/tessera/probes/2026-09-02-value-suggestion/suggestprobe/target/release/suggestprobe arm1 /home/user/code/tessera/data/ladder/probe-suggest dict 10000000 key hex
 == arm1 dict V=10000000 entries=key hex=true  (keys loaded in 0.4s, 320.0 MB of key bytes, avg 32.0 B/key)
   entries: 10000000 over 10000000 distinct folded values (1.00 entries/value), sort+derive 6.10s
   before build: heap 804.0 MB, RSS 484 MB

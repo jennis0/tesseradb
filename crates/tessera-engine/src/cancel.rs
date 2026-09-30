@@ -50,6 +50,14 @@ impl Default for CancelToken {
     }
 }
 
+/// What lets a caller waiting on a single-flight build carry this token into the wait. The cache
+/// sits below this crate and cannot name [`CancelToken`], so the trait is how the two meet.
+impl tessera_cache::Cancel for CancelToken {
+    fn is_cancelled(&self) -> bool {
+        CancelToken::is_cancelled(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

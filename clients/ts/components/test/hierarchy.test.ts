@@ -1,17 +1,18 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {BrowseRow, Layer, Meta} from '@tesseradb/client';
 import '../src/hierarchy.js';
 import type {TesseraHierarchy} from '../src/hierarchy.js';
+import {UNNAMED} from '../src/base.js';
 import {deep, deepAll, deepText, fakeStore, mount, settle, status} from './fake-store.js';
 
 /**
- * `<tessera-hierarchy>` over `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §5.1): the
- * roots without a viewport, lazy children, *also under*, the two counts under a filter, and the
- * click that is a highlight.
+ * `<tessera-hierarchy>` over `POST /v1/artifacts/browse`: the roots without a viewport, lazy
+ * children, "also under", the two counts under a filter, and the click that highlights.
  */
 
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.useRealTimers();
 });
 
 const layer = (name: string, kind: Layer['hierarchy']['kind'], computedContent: string[]): Layer =>
@@ -30,7 +31,6 @@ const layer = (name: string, kind: Layer['hierarchy']['kind'], computedContent: 
 
 const META = {
   apiVersion: 1,
-  idset: 0,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
   groups: [],
   declaredScalars: [],
@@ -40,7 +40,7 @@ const META = {
   filterOperands: []
 } as unknown as Meta;
 
-const row = (id: bigint, name: string, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
+const row = (id: bigint, name: string | null, masked: bigint, extra: Partial<BrowseRow> = {}): BrowseRow => ({
   tesseraId: id,
   key: `d-${id}`,
   name,
@@ -48,6 +48,7 @@ const row = (id: bigint, name: string, masked: bigint, extra: Partial<BrowseRow>
   matchedCount: null,
   rung: 0,
   parentIds: [],
+  childCount: 0,
   ...extra
 });
 
@@ -55,7 +56,7 @@ async function panel(overrides: Partial<Parameters<typeof fakeStore>[0]> = {}) {
   const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
   const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
   const store = fakeStore({meta: META, status: status({}), ...overrides});
-  store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n), row(2n, 'Anatomy', 3_400n)], parents: [], next: 'p2'});
+  store.setBrowse('roots', {artifacts: [row(1n, 'Neoplasms', 27_000_000n, {childCount: 2}), row(2n, 'Anatomy', 3_400n, {childCount: 1})], parents: [], next: 'p2'});
   el.store = store;
   await settle(host);
   await settle(host);
@@ -73,6 +74,42 @@ describe('<tessera-hierarchy>', () => {
     // The request carried the layer and a limit and nothing about where the map is looking.
     const asked = store.calls.filter((c) => c.name === 'browse').map((c) => c.args[0] as Record<string, unknown>);
     expect(asked[0]).toEqual({layer: 'mesh/descriptors', limit: 50});
+  });
+
+  it('marks a row with no name as unnamed and never draws its key in the name’s place', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(3n, null, 10n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    const name = deep(host, '[part="row"] [part="name"]')!;
+    expect(name.hasAttribute('data-unnamed')).toBe(true);
+    expect(name.textContent).not.toContain('d-3');
+  });
+
+  it('names a row by the name the server serves it, and marks a row with none, or an empty one, unnamed', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.setBrowse('roots', {artifacts: [row(3n, 'spin magnetic effect', 10n), row(4n, null, 8n), row(5n, '', 6n)], parents: [], next: null});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    const names = deepAll(host, '[part="row"] [part="name"]');
+    expect(names.map((n) => n.textContent?.trim())).toEqual(['spin magnetic effect', UNNAMED, UNNAMED]);
+    expect(names.map((n) => n.hasAttribute('data-unnamed'))).toEqual([false, true, true]);
+  });
+
+  it('offers to expand only a row the server counts children under, and keeps every name in line', async () => {
+    const {host, store} = await panel();
+    store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n), row(12n, 'Tumours', 800n, {childCount: 4})], parents: [], next: null});
+    (deep(host, '[part="row"][data-id="1"] [part="expander"]') as HTMLButtonElement).click();
+    await settle(host);
+    await settle(host);
+    const leafAt = (id: string) => deep(host, `[part="row"][data-id="${id}"] [part="expander"]`)!.hasAttribute('data-leaf');
+    expect(['1', '11', '12', '2'].map(leafAt)).toEqual([false, true, false, false]);
   });
 
   it('fetches a node’s children on expansion, and pages them under More', async () => {
@@ -98,7 +135,18 @@ describe('<tessera-hierarchy>', () => {
     await settle(host);
     // The parent it is drawn under is not repeated, and the other is named rather than numbered:
     // the walk is the only place a name for one of these artifacts exists on this client.
-    expect(deepText(deep(host, '[part="also"]'))).toContain('also under Anatomy');
+    expect(deepText(deep(host, '[part="also"]'))).toContain('Anatomy');
+  });
+
+  it('marks a parent the walk has no name for as unnamed in *also under*, never by its id', async () => {
+    const {host, store} = await panel();
+    store.setBrowse('p:1', {artifacts: [row(11n, 'Cysts', 900n, {parentIds: [1n, 77n]})], parents: [], next: null});
+    (deep(host, '[part="expander"]') as HTMLButtonElement).click();
+    await settle(host);
+    await settle(host);
+    const also = deepText(deep(host, '[part="also"]'));
+    expect(also).toContain(UNNAMED);
+    expect(also).not.toContain('77');
   });
 
   it('a click is a highlight, and the actions carry the filter beside it', async () => {
@@ -111,6 +159,47 @@ describe('<tessera-hierarchy>', () => {
     // And *fit* is absent on a filter layer — its artifacts are spread and there is nothing to fit.
     expect(deep(host, '[part="fit"]')).toBeNull();
     expect(deep(host, '[part="filter"]')).not.toBeNull();
+  });
+
+  it('holds a filter and a highlight on one row at once, and withdraws each on its own', async () => {
+    const both = [
+      {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'filter' as const},
+      {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight' as const}
+    ];
+    const {host, store} = await panel();
+    store.set('filters', {...store.get('filters'), members: both.slice(0, 1)});
+    await settle(host);
+    (deep(host, '[part="row"] [part="highlight"]') as HTMLButtonElement).click();
+    const added = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(added.map((c) => c.verb)).toEqual(['filter', 'highlight']);
+
+    store.set('filters', {...store.get('filters'), members: both});
+    await settle(host);
+    const first = deep(host, '[part="row"]')!;
+    expect([first.querySelector('[part="filter"]')!.getAttribute('aria-pressed'), first.querySelector('[part="highlight"]')!.getAttribute('aria-pressed')]).toEqual(['true', 'true']);
+    expect(first.getAttribute('data-clause')!.split(' ').sort()).toEqual(['filter', 'highlight']);
+    (first.querySelector('[part="filter"]') as HTMLButtonElement).click();
+    const left = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(left.map((c) => c.verb)).toEqual(['highlight']);
+  });
+
+  it('carries a × per clause on its row, which takes that clause off', async () => {
+    const {host, store} = await panel();
+    expect(deep(host, '[part="dismiss"]')).toBeNull();
+    store.set('filters', {
+      ...store.get('filters'),
+      members: [
+        {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'filter'},
+        {layer: 'mesh/descriptors', artifact: 1n, outside: false, verb: 'highlight'}
+      ]
+    });
+    await settle(host);
+    const row = deep(host, '[part="row"]')!;
+    const dismiss = [...row.querySelectorAll<HTMLButtonElement>('[part="dismiss"]')];
+    expect(dismiss.map((b) => b.getAttribute('data-verb'))).toEqual(['filter', 'highlight']);
+    dismiss[1]!.click();
+    const left = store.calls.filter((c) => c.name === 'setMembers').at(-1)!.args[0] as {verb: string}[];
+    expect(left.map((c) => c.verb)).toEqual(['filter']);
   });
 
   /**
@@ -147,7 +236,7 @@ describe('<tessera-hierarchy>', () => {
 
   it('shows the matched count beside the masked one where the map carries a filter', async () => {
     const {host} = await panel({
-      filters: {draft: {}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0}
+      filters: {draft: {filter: {}, highlight: {}}, expr: {archive: {in: ['cs']}}, highlight: null, members: [], suggestions: {}, suggestErrors: {}, suggestEpoch: 0}
     });
     // Existence and the masked count never move with the filter; the second figure is what does.
     expect(deep(host, '[part="count-masked"]')).not.toBeNull();
@@ -158,17 +247,18 @@ describe('<tessera-hierarchy>', () => {
     store.setBrowse('q:lymph', {artifacts: [row(7n, 'Lymphocytes', 400_000n)], parents: [], next: null});
     const box = deep(host, '[part="search"] input') as HTMLInputElement;
     box.value = 'lymph';
+    vi.useFakeTimers();
     box.dispatchEvent(new Event('input'));
-    await new Promise((r) => setTimeout(r, 400));
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
     await settle(host);
     await settle(host);
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Lymphocytes']);
   });
 
   it('a panel that is not being shown asks for nothing, and browses when it is', async () => {
-    // The roots are the widest request this panel makes, and a host with the panel in a closed
-    // drawer was paying for it on the page's first meta — beside the first viewport, against a
-    // server still materialising the session.
+    // The roots are the widest request this panel makes; a hidden panel should not send it
+    // alongside the first viewport.
     const host = await mount('<tessera-hierarchy style="display:none"></tessera-hierarchy>');
     const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
     const store = fakeStore({meta: META, status: status({})});
@@ -186,4 +276,48 @@ describe('<tessera-hierarchy>', () => {
     expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Neoplasms']);
   });
 
+});
+
+describe('<tessera-hierarchy> refused', () => {
+  it('carries the refusal’s code and says nothing more about the empty tree', async () => {
+    const host = await mount('<tessera-hierarchy></tessera-hierarchy>');
+    const el = host.querySelector('tessera-hierarchy') as TesseraHierarchy;
+    const store = fakeStore({meta: META, status: status({})});
+    store.browse = () => Promise.reject({code: 'layer-withheld', detail: ''});
+    el.store = store;
+    await settle(host);
+    await settle(host);
+    expect(deep(host, '[part="refusal"]')?.getAttribute('data-code')).toBe('layer-withheld');
+    expect(deep(host, '[part="state"][data-state="empty"]')).toBeNull();
+  });
+});
+
+describe('<tessera-hierarchy> across a change of viewer', () => {
+  it('drops the roots and names it fetched when the store’s meta goes null, and asks again', async () => {
+    const {host, store} = await panel();
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Neoplasms', 'Anatomy']);
+    const asked = store.calls.filter((c) => c.name === 'browse').length;
+
+    // A clear or a new identity key: meta goes, and returns for the next viewer.
+    store.set('meta', null);
+    await settle(host);
+    expect(deepAll(host, '[part="row"]')).toEqual([]);
+    store.setBrowse('roots', {artifacts: [row(9n, 'Other', 12n)], parents: [], next: null});
+    store.set('meta', META);
+    await settle(host);
+    await settle(host);
+    expect(store.calls.filter((c) => c.name === 'browse').length).toBeGreaterThan(asked);
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Other']);
+  });
+
+  it('shows the adopted store’s roots, not the previous store’s, under the same layer and filters', async () => {
+    const {host, el} = await panel();
+    const next = fakeStore({meta: META, status: status({})});
+    next.setBrowse('roots', {artifacts: [row(9n, 'Other', 12n)], parents: [], next: null});
+    el.store = next;
+    await settle(host);
+    await settle(host);
+    expect(next.calls.filter((c) => c.name === 'browse')).toHaveLength(1);
+    expect(deepAll(host, '[part="row"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['Other']);
+  });
 });

@@ -1,4 +1,4 @@
-cmd: ./suggestprobe/target/release/suggestprobe gen /home/joe/code/tessera/data/ladder/probe-suggest 10000000 100000000 uniform
+cmd: ./suggestprobe/target/release/suggestprobe gen /home/user/code/tessera/data/ladder/probe-suggest 10000000 100000000 uniform
 gen uniform: 100000000 entities over 10000000 values, max 31 empty 453
 gen: value column written (4.8s)
 gen: postings.arrow written: 10000000 records, 0 tag-1 (Roaring), 410000000 record bytes, 2.5s; file 491.3 MB; total 9.2s

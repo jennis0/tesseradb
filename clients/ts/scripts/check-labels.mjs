@@ -1,29 +1,24 @@
 #!/usr/bin/env node
-// Stage 3's check, run from outside the viewer: **which description a principal is served, and
-// whether a label outlives the cluster it labels.**
+// Checks, against a running deployment, which label description each principal is served and
+// that a label does not outlive the cluster it labels.
 //
 //   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
 //     --presets ../../tessera-demo/presets/stage3.json --clusters centroids/kmeans-2026-08 \
 //     --labels topics/ctfidf-2026-08 --term 46
 //
-// Publish the two layers with `publish-clusters.mjs --labels … --label-term …` first; this reads
-// them back and asserts what the design claims, so it **fails** rather than printing a table if the
-// answers stop depending on the principal.
+// Publish the two layers with `publish-clusters.mjs --labels … --label-term …` first. The script
+// exits non-zero if a claim fails:
 //
-// Three claims, and each fails loudly:
-//
-//  1. **Containment decides which description, and it is not a coverage fraction.** A viewer is
-//     served the first variation whose generating set they contain *entirely*. So the principals
-//     holding the label term are served the per-term description — including one who can see 0.6%
-//     of the corpus — while a principal seeing 7.5% of it, generated from other terms, is served
-//     **no label at all**. What decides is which documents, never how many.
-//  2. **A label is absent, never short.** Every served label carries its text; a viewer who
-//     contains no variation receives no artifact, not the cluster's identity with a hole in it.
-//  3. **A label does not outlive what it labels.** Suppressing a *cluster* stops its label serving
-//     on the identifier route — the route that traverses no edge and would otherwise go on
-//     answering with the description of the thing that was just hidden.
+//  1. A viewer is served the first variation whose generating set they can see entirely, whatever
+//     fraction of the corpus they see. Principals holding the label term are served the per-term
+//     description; a principal who sees more of the corpus through other terms is served no label.
+//  2. Every served label carries its text; a viewer who contains no variation gets no artifact.
+//  3. Suppressing a cluster stops its label being served, on the identifier route too.
 import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
+// Loading a `.ts` module needs Node 22.18 or later, which strips its types.
+import {Control} from '../core/src/control.ts';
+import {accepted} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -32,17 +27,17 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const control = args.control ?? 'http://127.0.0.1:45721';
 const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
 if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
 const clusterLayer = args.clusters ?? 'centroids/kmeans-2026-08';
 const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
 const presets = JSON.parse(await readFile(args.presets ?? '../../tessera-demo/presets/stage3.json', 'utf8'));
 
-/** This deployment's one view and its idset — read from `/v1/meta`, as any client reads them. */
+/** This deployment's `/v1/meta`. */
 async function metaOf(token) {
   const r = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
   if (!r.ok) throw new Error(`meta: ${r.status} ${await r.text()}`);
@@ -76,12 +71,11 @@ function frames(buf) {
 /** Every artifact this principal is served for these layers, as `(layer, key) → row`. */
 async function artifacts(token, layers) {
   const meta = await metaOf(token);
-  const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
+  const q = meta.views[0].quantisation;
   const r = await fetch(`${viewer}/v1/viewport`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    // `k = 0`: the annotation channel's own request shape. No points come back, so nothing here
-    // depends on which documents the sampler happened to draw.
+    // `k = 0` asks for no points, so nothing depends on which documents were sampled.
     body: JSON.stringify({view: meta.views[0].id, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 0, layers})
   });
   if (!r.ok) throw new Error(`viewport: ${r.status} ${await r.text()}`);
@@ -124,14 +118,13 @@ const expect = (claim, held) => {
   if (!held) failures.push(claim);
 };
 
-// ---------------------------------------------------------------- what each principal is served
+// What each principal is served.
 
 const rows = [];
 const served = new Map();
 /**
- * One label followed across every principal, so the table shows what two viewers served the *same*
- * description are each told beside it. The count is the viewer's own — a label carries its
- * cluster's membership, so it is the same masked quantity the cluster is served with.
+ * One label followed across every principal, so the table shows what viewers served the same
+ * description are each told. The count is each viewer's masked count of the label's members.
  */
 const WITNESS = args.witness ?? 'l-c-0001';
 for (const preset of presets) {
@@ -155,8 +148,7 @@ for (const preset of presets) {
     `${preset.label}: every served label carries its text`,
     labels.every((l) => l.text)
   );
-  // The claim the whole containment test turns on: holding the label term is what decides, and
-  // corpus coverage is not.
+  // Holding the label term decides, not corpus coverage.
   if (preset.terms.includes(labelTerm)) {
     expect(`${preset.label} holds term ${labelTerm} and is served labels`, labels.length > 0);
   }
@@ -165,9 +157,8 @@ console.table(rows);
 
 const holders = presets.filter((p) => p.terms.includes(labelTerm)).map((p) => p.label);
 const nonHolders = presets.filter((p) => !p.terms.includes(labelTerm) && p.terms.length === 1);
-// **A principal holding the label term and nothing else is served the per-term description** —
-// stated of the single-term holders specifically, because accepting either description of every
-// holder is an assertion that passes whichever one containment picked.
+// A principal holding only the label term is served the per-term description. Checked for the
+// single-term holders, since any holder accepting either description would always pass.
 expect(
   `a principal whose only term is ${labelTerm} is served the per-term description`,
   presets
@@ -178,8 +169,7 @@ expect(
         .every((l) => l.text.endsWith(`term ${labelTerm}`))
     )
 );
-// And the whole-cluster description reaches somebody — otherwise the ranking's first entry is
-// never exercised and the table's contrast is an artefact of nobody containing anything.
+// The whole-cluster description reaches someone, so the first variation is exercised.
 expect(
   'some principal contains the whole cluster and is served the description generated from it',
   holders.some((label) =>
@@ -193,10 +183,9 @@ expect(
   nonHolders.every((p) => [...served.get(p.label).all.values()].every((a) => a.layer !== labelLayer))
 );
 
-// -------------------------------------------------- and whether a label outlives its own cluster
+// Whether a label outlives its cluster.
 
-// The principal to run it as: the one that sees everything, so nothing below can be explained by a
-// mask rather than by the suppression.
+// Run as the principal that sees everything, so only the suppression can explain a change.
 const witness = presets[presets.length - 1];
 const {token: witnessToken, all} = served.get(witness.label);
 const label = [...all.values()].find((a) => a.layer === labelLayer);
@@ -207,19 +196,10 @@ if (!cluster) throw new Error(`no cluster ${label.key.replace(/^l-/, '')} served
 expect('the label answers on its identifier before the suppression', (await byIdentifier(witnessToken, label.id)) !== null);
 
 const change = async (op) => {
-  const r = await fetch(`${control}/control/changes`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${operatorCred}`, 'content-type': 'application/json'},
-    // A bare array of items, each carrying its own idset: a `tessera_id` is only meaningful under
-    // the identity lineage that minted it.
-    body: JSON.stringify([{tessera_id: cluster.id.toString(), idset: (await metaOf(witnessToken)).idset, op}])
-  });
-  if (!r.ok) throw new Error(`${op}: ${r.status} ${await r.text()}`);
+  accepted(op, await control.changes([{op, match: {tessera_id: cluster.id.toString()}}]));
 };
 
-// **The unsuppress runs whatever happens in between.** This suppresses a cluster on a live
-// deployment; a throw between the two calls — a non-404 from the drill-down, an interrupt — would
-// otherwise leave an operator's cluster hidden with nothing saying so.
+// The unsuppress runs in `finally`, so a throw does not leave the cluster hidden.
 await change('suppress');
 try {
   const afterSuppression = await artifacts(witnessToken, [clusterLayer, labelLayer]);

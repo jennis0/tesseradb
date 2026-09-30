@@ -29,15 +29,14 @@
 //! Drop tombstones the name for ever. Bookmarks, edges and suppressions all travel by it, so a name
 //! that once meant something must not come to mean something else — a recreated `clusters/topics`
 //! would silently inherit every stale reference to the old one. The ids do not come back either:
-//! the allocator is monotone with no free list, and reclaiming them is decision 0072's work, which
-//! is settled and unbuilt.
+//! the allocator frees no row-less id.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use tessera_types::layer::{
     DeclarationError, EntityRun, LayerDeclaration, MembershipSource, RegisteredLayer, ReservedRuns,
 };
-use tessera_types::{EntityId, TermId};
+use tessera_types::EntityId;
 
 use crate::alloc::{AllocError, Allocator};
 use crate::membership::{serialise_members, ArtifactStore, IncomingArtifact};
@@ -76,6 +75,15 @@ pub enum RegistryError {
     /// tested is refused for the opposite reason: a claim the service carries and never checks
     /// reads, to anyone auditing it, as a control that is running.
     Content { layer: String, detail: String },
+    /// An artifact carries an access label on a layer whose `artifact_visibility` names no field,
+    /// so nothing would read it.
+    Access { layer: String, key: Option<String> },
+    /// An artifact created on a layer whose `artifact_visibility` names a field does not state its
+    /// labels, as a build's artifact source without that column does not. A record states no
+    /// label with an explicit empty or null `access`.
+    LabelsUnstated { layer: String, key: Option<String> },
+    /// An artifact's access labels are more, or longer, than a stored record can hold.
+    AccessTooLong { layer: String, key: Option<String> },
     /// A layer named in `depends_on` is not registered. Refused at create rather than discovered at
     /// the first edge, because an edge's target must exist before the edge (`annotation-write-cycle.md`
     /// §5.0.4) and a dangling dependency is that ordering constraint already broken.
@@ -86,6 +94,9 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
+    /// An artifact attaches into a layer drawn on none of the views its own layer is drawn on. It
+    /// is served only on a view where its target is, so it could never be served.
+    NoSharedView { layer: String, target: String },
     /// An artifact declares no dependency in a layer that declares one.
     ///
     /// **Fail-closed, because a dependency edge is a visibility term**
@@ -133,8 +144,8 @@ pub enum RegistryError {
     /// minted artifact could not be served: a minted artifact carries nothing but its name, and
     /// this layer requires more of every artifact it publishes.
     ///
-    /// **The same two refusals a publication already makes**, hoisted to admission so they refuse
-    /// the one batch rather than the window it would have joined — and the same two a build makes
+    /// **The same refusals a publication already makes**, hoisted to admission so they refuse
+    /// the one batch rather than the window it would have joined — and the same ones a build makes
     /// over a member table, which is what keeps one declaration from meaning two things at the two
     /// entry points ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
     Unmintable {
@@ -148,9 +159,8 @@ pub enum RegistryError {
     ///
     /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
     /// different parents for one cluster. There is no correct output — choosing between them would
-    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: there a
-    /// parent the child does not hold is an edge a growth cannot add, reported as
-    /// [`EdgeCheck::Unrecorded`] (`dag-hierarchies.md` §4).
+    /// publish a hierarchy the caller did not write. **A `dag` layer never makes it**: its list
+    /// column declares no edges, so no edge reaches here from one.
     ContradictedParent {
         layer: String,
         level: u32,
@@ -246,6 +256,32 @@ pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
     None
 }
 
+/// The views of each group, as whoever publishes sees them: a build its declared roster, a running
+/// service its live one. A publication into a group-scoped layer stamps each artifact with its
+/// view's incarnation and refuses a view the group does not have.
+pub trait GroupViews {
+    /// The live incarnation of `group`'s view `key`, or `None` where the group has no such view.
+    fn incarnation_of(
+        &self,
+        group: &str,
+        key: &str,
+    ) -> Option<tessera_types::view::ViewIncarnation>;
+    /// Every key of `group`, which a refusal names.
+    fn keys_of(&self, group: &str) -> Vec<String>;
+}
+
+/// No group has a view: what a publication into an entity-scoped layer is prepared against.
+struct NoGroupViews;
+
+impl GroupViews for NoGroupViews {
+    fn incarnation_of(&self, _: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
+        None
+    }
+    fn keys_of(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// What [`LayerRegistry::prepare_put`] prepared for one `PUT` batch: the records to append, in
 /// the order to apply them, and what the acknowledgement reports.
 ///
@@ -267,7 +303,8 @@ pub struct PreparedPut {
     pub created: u64,
     /// How many created artifacts carry no content on a layer that declares some (R5).
     pub without_content: u64,
-    /// How many members joined held artifacts that did not already hold them.
+    /// How many memberships the batch adds: every member of a created artifact, and every member
+    /// a held artifact did not already hold ([`crate::membership::members_added`]).
     pub joined: u64,
 }
 
@@ -344,13 +381,13 @@ fn prepare_set_page(
 pub enum EdgeCheck {
     /// The layer holds exactly this edge.
     Agrees,
-    /// The child exists and holds no parent at all, so there is no edge to disagree with — and the
-    /// growth route cannot create one. The caller reports it; see [`LayerRegistry::check_edge`].
-    Unrecorded,
+    /// The child exists and holds no parent at all, so the edge is the one the artifact is missing.
+    /// The caller carries it to the close and records it there through
+    /// [`LayerRegistry::prepare_parent_fill`].
+    Records,
     /// The child does not exist yet and is one of the keys this batch is about to mint, so the edge
-    /// is the minted artifact's own parent rather than a claim about a stored one. **The one route
-    /// by which the wire creates an edge**, and it creates it where the artifact is created — which
-    /// is where lineage has always been settled.
+    /// is the minted artifact's own parent rather than a claim about a stored one. It travels on the
+    /// publication that creates the child.
     Mints,
 }
 
@@ -436,6 +473,39 @@ impl std::fmt::Display for RegistryError {
             RegistryError::Content { layer, detail } => {
                 write!(f, "{layer}: {detail}")
             }
+            RegistryError::LabelsUnstated { layer, key } => write!(
+                f,
+                "{layer} reads each artifact's own labels, and the artifact{} states none. State \
+                 labels for every artifact created: `access` on a publication record, null or \
+                 empty for no label of its own; at a build, the layer's label column in the \
+                 artifact source, `access = []` on an inline row, or a row in the artifact source \
+                 for a key a member file names",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+            ),
+            RegistryError::AccessTooLong { layer, key } => write!(
+                f,
+                "{layer}: the artifact{} carries more than {} access labels, or one longer than {} \
+                 bytes; send fewer or shorter labels",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                },
+                u16::MAX - 1,
+                u16::MAX - 1
+            ),
+            RegistryError::Access { layer, key } => write!(
+                f,
+                "{layer}: the artifact{} carries an access label, and this layer's \
+                 `artifact_visibility` names no field, so nothing would read it. Declare \
+                 `artifact_visibility.field` on the layer, or send the artifact without `access`",
+                match key {
+                    Some(key) => format!(" keyed {key}"),
+                    None => String::new(),
+                }
+            ),
             RegistryError::MissingDependency { layer, depends_on } => write!(
                 f,
                 "{layer} declares depends_on {depends_on}, which is not registered — an edge's \
@@ -446,6 +516,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached into {target}, which it does not declare in \
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
+            ),
+            RegistryError::NoSharedView { layer, target } => write!(
+                f,
+                "{layer} attaches an artifact into {target}, which is drawn on none of the views \
+                 {layer} is drawn on, so the artifact could never be served; declare {layer} on a \
+                 view {target} is drawn on"
             ),
             RegistryError::MissingAttachment { layer, key } => write!(
                 f,
@@ -718,6 +794,34 @@ fn scoped_view<'a>(
     }
 }
 
+/// The one rule on what access label an artifact may carry: any a stored record can hold, on a
+/// layer whose `artifact_visibility` names a field, and none elsewhere.
+fn check_access(
+    layer_name: &str,
+    declaration: &LayerDeclaration,
+    key: Option<&str>,
+    access: &[Vec<u8>],
+) -> Result<(), RegistryError> {
+    if access.is_empty() {
+        return Ok(());
+    }
+    if !declaration.artifact_visibility.carries_own_labels() {
+        return Err(RegistryError::Access {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    // A packed record counts its labels and their lengths in a `u16`, whose top value marks a
+    // record it could not write.
+    if access.len() >= u16::MAX as usize || access.iter().any(|d| d.len() >= u16::MAX as usize) {
+        return Err(RegistryError::AccessTooLong {
+            layer: layer_name.to_string(),
+            key: key.map(str::to_string),
+        });
+    }
+    Ok(())
+}
+
 impl std::error::Error for RegistryError {}
 
 impl From<DeclarationError> for RegistryError {
@@ -830,7 +934,7 @@ impl LayerRegistry {
     /// On any error nothing has moved: the checks all run before the first allocation.
     pub fn prepare_create(
         &mut self,
-        declaration: LayerDeclaration,
+        mut declaration: LayerDeclaration,
         alloc: &mut Allocator,
     ) -> Result<WalRecord, RegistryError> {
         declaration.validate()?;
@@ -866,6 +970,7 @@ impl LayerRegistry {
             declaration: Box::new(declaration),
             layer_entity,
             runs,
+            version: self.version + 1,
         })
     }
 
@@ -896,6 +1001,7 @@ impl LayerRegistry {
     /// them ([`no_pending`] is the empty answer).
     ///
     /// [`parent_ref`]: LayerRegistry::parent_ref
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_publish(
         &self,
         layer_name: &str,
@@ -904,6 +1010,7 @@ impl LayerRegistry {
         store: &ArtifactStore,
         alloc: &mut Allocator,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        views_of: &dyn GroupViews,
     ) -> Result<WalRecord, RegistryError> {
         let layer = self
             .layers
@@ -923,7 +1030,7 @@ impl LayerRegistry {
                 layer: layer_name.to_string(),
             });
         }
-        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending)
+        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending, views_of)
             .map(|(record, _)| record)
     }
 
@@ -953,6 +1060,7 @@ impl LayerRegistry {
         incoming: &[IncomingArtifact],
         store: &ArtifactStore,
         alloc: &mut Allocator,
+        views_of: &dyn GroupViews,
     ) -> Result<PreparedPut, RegistryError> {
         let layer = self
             .layers
@@ -1075,7 +1183,6 @@ impl LayerRegistry {
         // The delta and never the whole list, so a re-`PUT` whose members are all held appends
         // no growth: a set part already in the state the record asks for is a no-op.
         let mut joins: Vec<(u32, croaring::Bitmap)> = Vec::new();
-        let mut joined = 0u64;
         for ((artifact, ordinal), view) in incoming.iter().zip(&held).zip(&views) {
             let Some(ordinal) = *ordinal else { continue };
             let key = artifact.key.as_deref().expect("a held key is a key");
@@ -1104,6 +1211,7 @@ impl LayerRegistry {
                     .map(|(rank, content)| (rank as u16, content.values.clone()))
                     .collect(),
                 shape: artifact.shape.clone(),
+                access: artifact.access.clone().unwrap_or_default(),
             };
             let prepared = self.prepare_fills(
                 layer_name,
@@ -1153,9 +1261,9 @@ impl LayerRegistry {
                 ordinal,
                 part,
             }));
-            let delta = artifact.members.andnot(&record.members);
+            let mut delta = artifact.members.clone();
+            record.members.remove_from(&mut delta);
             if !delta.is_empty() {
-                joined += delta.cardinality();
                 joins.push((ordinal, delta));
             }
         }
@@ -1173,7 +1281,15 @@ impl LayerRegistry {
             // from it. The argument is for a caller minting artifacts *elsewhere* — the ingest
             // route's mint pass — which is entity-scoped.
             let (record, without_content) =
-                self.prepare_artifacts(layer_name, level, &fresh, store, alloc, &no_pending)?;
+                self.prepare_artifacts(
+                    layer_name,
+                    level,
+                    &fresh,
+                    store,
+                    alloc,
+                    &no_pending,
+                    views_of,
+                )?;
             (Some(record), without_content)
         };
 
@@ -1201,6 +1317,11 @@ impl LayerRegistry {
             })
             .collect();
 
+        let joined = publish
+            .iter()
+            .chain(&growth)
+            .map(|record| crate::membership::members_added(record, store))
+            .sum();
         Ok(PreparedPut {
             publish,
             fills,
@@ -1327,6 +1448,16 @@ impl LayerRegistry {
                 None => fills.push(ArtifactPart::Shape(shape.clone())),
                 Some(held) if held.digest() == shape.digest() => {}
                 Some(_) => return Err(conflict("shape".to_string())),
+            }
+        }
+
+        if !parts.access.is_empty() {
+            check_access(layer_name, &layer.declaration, Some(key), &parts.access)?;
+            let access = crate::membership::canonical_access(&parts.access);
+            if record.access.is_empty() {
+                fills.push(ArtifactPart::Access(access));
+            } else if record.access != access {
+                return Err(conflict("access".to_string()));
             }
         }
 
@@ -1571,6 +1702,7 @@ impl LayerRegistry {
                 attached_to: None,
                 parent_keys: Vec::new(),
                 shape: None,
+                access: None,
             })
             .collect();
         self.prepare_artifacts(
@@ -1580,6 +1712,7 @@ impl LayerRegistry {
             store,
             alloc,
             &crate::no_pending,
+            &NoGroupViews,
         )
         .map(|(record, _)| record)
     }
@@ -1593,6 +1726,7 @@ impl LayerRegistry {
     /// implementation.
     ///
     /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    #[allow(clippy::too_many_arguments)]
     fn prepare_artifacts(
         &self,
         layer_name: &str,
@@ -1601,6 +1735,7 @@ impl LayerRegistry {
         store: &ArtifactStore,
         alloc: &mut Allocator,
         pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        views_of: &dyn GroupViews,
     ) -> Result<(WalRecord, u64), RegistryError> {
         let layer = self
             .layers
@@ -1626,6 +1761,26 @@ impl LayerRegistry {
                     artifact.key.as_deref(),
                     artifact.view.as_deref(),
                 )
+            })
+            .collect::<Result<_, _>>()?;
+        let incarnations: Vec<tessera_types::view::ViewIncarnation> = incoming
+            .iter()
+            .zip(&views)
+            .map(|(artifact, view)| {
+                match (layer.declaration.scope.group(), view) {
+                    (Some(group), Some(key)) => views_of.incarnation_of(group, key).ok_or_else(|| {
+                        RegistryError::ViewIdentity {
+                            layer: layer_name.to_string(),
+                            key: artifact.key.clone().unwrap_or_else(|| "<no key>".to_string()),
+                            detail: format!(
+                                "it names view '{key}', and group '{group}' has no such key. Its \
+                                 keys are: {}. Name one of them, or create the view first",
+                                views_of.keys_of(group).join(", ")
+                            ),
+                        }
+                    }),
+                    _ => Ok(tessera_types::view::DECLARED_INCARNATION),
+                }
             })
             .collect::<Result<_, _>>()?;
 
@@ -1669,6 +1824,18 @@ impl LayerRegistry {
             .iter()
             .filter(|artifact| !declared.is_empty() && artifact.contents.is_empty())
             .count() as u64;
+        for artifact in incoming {
+            let Some(access) = &artifact.access else {
+                if layer.declaration.artifact_visibility.carries_own_labels() {
+                    return Err(RegistryError::LabelsUnstated {
+                        layer: layer_name.to_string(),
+                        key: artifact.key.clone(),
+                    });
+                }
+                continue;
+            };
+            check_access(layer_name, &layer.declaration, artifact.key.as_deref(), access)?;
+        }
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -1785,59 +1952,20 @@ impl LayerRegistry {
                     }
                     return Ok(None);
                 };
-                if !layer.declaration.depends_on.contains(&wanted.layer) {
-                    return Err(RegistryError::UndeclaredAttachment {
-                        layer: layer_name.to_string(),
-                        target: wanted.layer.clone(),
-                    });
+                // A new attachment is stored only here: every artifact of a layer that declares
+                // a dependency is published with its attachment, so a later fill of one can only
+                // repeat it.
+                if let Some(target) = self.layers.get(&wanted.layer) {
+                    if !layer.declaration.shares_a_view_with(&target.declaration) {
+                        return Err(RegistryError::NoSharedView {
+                            layer: layer_name.to_string(),
+                            target: wanted.layer.clone(),
+                        });
+                    }
                 }
-                let missing = || RegistryError::NoSuchAttachmentTarget {
-                    layer: layer_name.to_string(),
-                    target: wanted.layer.clone(),
-                    level: wanted.level,
-                    key: wanted.key.clone(),
-                };
-                let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
-                // The target's own view, on `resolve_attachment`'s rule: inside this artifact's
-                // view where the target layer is group-scoped, and a key held only in another
-                // view is the crossing rather than a missing target (`views.md` §3.5).
-                let in_view = target.declaration.scope.group().and(*view);
-                let ordinal =
-                    match store.ordinal_of_key(&wanted.layer, wanted.level, in_view, &wanted.key) {
-                        Some(ordinal) => ordinal,
-                        None => {
-                            let held_in = store.views_holding_key(
-                                &wanted.layer,
-                                wanted.level,
-                                in_view,
-                                &wanted.key,
-                            );
-                            if !held_in.is_empty() {
-                                return Err(RegistryError::CrossViewEdge {
-                                    layer: layer_name.to_string(),
-                                    level: wanted.level,
-                                    child: artifact
-                                        .key
-                                        .clone()
-                                        .unwrap_or_else(|| "<no key>".to_string()),
-                                    parent: wanted.key.clone(),
-                                    held_in,
-                                });
-                            }
-                            return Err(missing());
-                        }
-                    };
-                let entity = target
-                    .runs
-                    .get(wanted.level as usize)
-                    .and_then(|runs| runs.entity_of(ordinal as u64))
-                    .ok_or_else(missing)?;
-                Ok(Some(crate::membership::Attachment {
-                    layer: wanted.layer.clone(),
-                    level: wanted.level,
-                    ordinal,
-                    entity: EntityId::new(entity),
-                }))
+                let key = artifact.key.as_deref().unwrap_or("<no key>");
+                self.resolve_attachment(layer_name, *view, key, wanted, store)
+                    .map(Some)
             })
             .collect::<Result<_, _>>()?;
 
@@ -1988,6 +2116,7 @@ impl LayerRegistry {
                     // checked against the layer's scope above and recorded here, so replay lands
                     // the artifact in the view it was acked in.
                     view: artifact.view.clone(),
+                    incarnation: incarnations[i],
                     members: serialise_members(&artifact.members),
                     contents: artifact
                         .contents
@@ -2009,6 +2138,9 @@ impl LayerRegistry {
                         }),
                     parents: parents[i].clone(),
                     shape: artifact.shape.clone(),
+                    access: crate::membership::canonical_access(
+                        artifact.access.as_deref().unwrap_or_default(),
+                    ),
                 }
             })
             .collect();
@@ -2094,11 +2226,10 @@ impl LayerRegistry {
         // design does not answer; a caller who wants two pages sends two requests, and each one's
         // ranks are read against the state the previous acknowledgement reported.
         //
-        // The growth route carries no view and addresses no group-scoped layer
-        // (`resolve_growth_key`), so every key here is in the one set.
+        // Per `(view, key)`: on a group-scoped layer one key in two views is two artifacts.
         if let Some(key) = repeated_key_with_parts(incoming.iter().map(|join| {
             (
-                None,
+                join.view.as_deref(),
                 Some(join.key.as_str()),
                 !join.parts.is_empty() || join.rank.is_some(),
             )
@@ -2111,7 +2242,8 @@ impl LayerRegistry {
         let mut batch_edges = BTreeMap::new();
         let mut withdrawn = Vec::new();
         for (index, join) in incoming.iter().enumerate() {
-            let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
+            let ordinal =
+                self.resolve_growth_key(layer_name, level, join.view.as_deref(), &join.key, store)?;
             if let Some(rank) = join.rank {
                 if !join.parts.is_empty() {
                     return Err(RegistryError::SetBesidePart {
@@ -2147,7 +2279,7 @@ impl LayerRegistry {
                 layer_name,
                 level,
                 ordinal,
-                None,
+                join.view.as_deref(),
                 &join.key,
                 &join.parts,
                 store,
@@ -2164,9 +2296,22 @@ impl LayerRegistry {
             if join.joining.is_empty() {
                 continue;
             }
+            // **What the artifact already holds is not a join.** A page restating a membership the
+            // store carries would otherwise append a delta that changes nothing and pin the log at
+            // it — the log is reclaimed up to the oldest record a generation still needs, and a
+            // growth pin is released by the compaction fold alone. Taken against the membership as
+            // it stands before the batch, which is the state every row of the batch is prepared
+            // against and the state `growth_receipt` counts `joined` over.
+            let mut joining = join.joining.clone();
+            if let Some(record) = store.get(layer_name, level, ordinal) {
+                record.members.remove_from(&mut joining);
+            }
+            if joining.is_empty() {
+                continue;
+            }
             growth.push(crate::wal::MembershipGrowth {
                 ordinal,
-                joining: crate::membership::serialise_members(&join.joining),
+                joining: crate::membership::serialise_members(&joining),
                 leaving: Vec::new(),
                 set: crate::wal::GrownSet::Membership,
             });
@@ -2186,9 +2331,10 @@ impl LayerRegistry {
     /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
     /// — the resolution the ingest route makes at admission (`artifacts-from-points.md` §6.3).
     ///
-    /// `None` is *this key will be minted at the close*, and it is returned only after the two
+    /// `None` is *this key will be minted at the close*, and it is returned only after the
     /// checks a minted artifact could not pass are made: a layer declaring supplied content kinds,
-    /// and a layer declaring a dependency, each refuse here rather than at the close, so one
+    /// a layer declaring a dependency and a layer reading labels each refuse here rather than at
+    /// the close, so one
     /// caller's key refuses one batch instead of the window it would have joined.
     ///
     /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
@@ -2203,10 +2349,11 @@ impl LayerRegistry {
         &self,
         layer_name: &str,
         level: u32,
+        view: Option<&str>,
         key: &str,
         store: &ArtifactStore,
     ) -> Result<Option<u32>, RegistryError> {
-        match self.resolve_growth_key(layer_name, level, key, store) {
+        match self.resolve_growth_key(layer_name, level, view, key, store) {
             Ok(ordinal) => Ok(Some(ordinal)),
             Err(RegistryError::NoSuchArtifact { layer, level, key }) => {
                 let declaration = &self
@@ -2224,7 +2371,7 @@ impl LayerRegistry {
                         why: why.to_string(),
                     })
                 };
-                // The two refusals `prepare_publish` would make of an artifact carrying only a key,
+                // The refusals `prepare_publish` would make of an artifact carrying only a key,
                 // made here where the batch can still be rejected without effect. Both are
                 // declarations about *every* artifact of the layer, so neither depends on which key
                 // arrived — a layer is mintable or it is not.
@@ -2240,6 +2387,12 @@ impl LayerRegistry {
                     return unmintable(
                         "the layer declares depends_on, so every artifact it publishes attaches to \
                          one, and an artifact with no dependency would be gated on nothing",
+                    );
+                }
+                if declaration.artifact_visibility.carries_own_labels() {
+                    return unmintable(
+                        "the layer reads each artifact's own labels from a field, and a minted \
+                         artifact states none",
                     );
                 }
                 Ok(None)
@@ -2262,10 +2415,14 @@ impl LayerRegistry {
     /// [`resolve_or_mint`], where the alternative reading would mint).
     ///
     /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    ///
+    /// `view` is the key of the view the artifact is in, required on a group-scoped layer and
+    /// refused on an entity-scoped one. The growth route names none.
     pub fn resolve_growth_key(
         &self,
         layer_name: &str,
         level: u32,
+        view: Option<&str>,
         key: &str,
         store: &ArtifactStore,
     ) -> Result<u32, RegistryError> {
@@ -2284,13 +2441,9 @@ impl LayerRegistry {
                 level,
             });
         }
-        // **This route carries no view, so it addresses no group-scoped layer** (`ingest.md`
-        // §1.5): a key there names one artifact per view of the group, and resolving it under
-        // `None` would either miss every one of them or, worse, pick one. Refused where it is
-        // asked, naming what the caller has to use instead.
-        scoped_view(layer_name, &layer.declaration.scope, Some(key), None)?;
+        let view = scoped_view(layer_name, &layer.declaration.scope, Some(key), view)?;
         store
-            .ordinal_of_key(layer_name, level, None, key)
+            .ordinal_of_key(layer_name, level, view, key)
             .ok_or_else(|| RegistryError::NoSuchArtifact {
                 layer: layer_name.to_string(),
                 level,
@@ -2298,28 +2451,25 @@ impl LayerRegistry {
             })
     }
 
-    /// Whether the edge a caller's list column declared is the edge this layer already holds.
+    /// What one edge a caller's list column declared is against the edge this layer holds: the same
+    /// one, one to record, or a contradiction.
     ///
-    /// **A growth adds members and never lineage**, so this checks rather than writes: the edge was
-    /// settled when the artifact was published, and a point's list is a second spelling of it. The
-    /// two disagreeing is the build's `two_parents` refusal at the other entry point — there is no
-    /// correct output, and picking one would publish a hierarchy nobody wrote.
+    /// The edge is decided here, at admission, so a contradiction refuses the one batch that carries
+    /// it rather than the window it would have joined. Recording happens at the close, where the
+    /// ordinals are claimed — [`LayerRegistry::prepare_parent_fill`].
     ///
-    /// [`EdgeCheck::Unrecorded`] is the third state and is **not** an error: the artifact exists and
-    /// holds no parent, so the column states an edge this route cannot create. Reported by the
-    /// caller and accepted, because the membership half of the same entry is unambiguous and
-    /// refusing it would block a batch over a roster published without its edges — which discloses
-    /// nothing and costs a republication.
+    /// A parent other than the one the child holds is the build's `two_parents` refusal at this entry
+    /// point: there is no correct output, and picking one would publish a hierarchy nobody wrote.
     ///
     /// The two `minting` arguments answer *is this key one the batch is about to create?* — the keys
     /// [`resolve_or_mint`] returned `None` for. They decide two of the three answers:
     ///
     /// - **the child is minting** → [`EdgeCheck::Mints`]: the edge is the new artifact's own
-    ///   parent, settled where every edge is settled, at the publication that creates it.
-    /// - **the parent is minting** and the child exists → the layer holds no such parent *yet*, and
-    ///   a growth adds members and never lineage. A child holding no parent is
-    ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
-    ///   because a parent that does not exist cannot be the parent it already has.
+    ///   parent, carried on the publication that creates it.
+    /// - **the parent is minting** and the child exists → the layer holds no such parent yet, so a
+    ///   child holding no parent is [`EdgeCheck::Records`] and takes the ordinal the close assigns;
+    ///   a child holding a different one is the contradiction, because a parent that does not exist
+    ///   cannot be the parent it already has.
     ///
     /// **Every edge reaching here is a tree's.** Only a `nested` or `tiered` list column declares
     /// edges; a `dag` layer's list is memberships alone and its several parents arrive on the
@@ -2344,17 +2494,18 @@ impl LayerRegistry {
         let crate::command::BatchEdge {
             layer,
             level,
+            view,
             child,
             parent,
         } = edge;
-        let (layer, level) = (layer.as_str(), *level);
+        let (layer, level, view) = (layer.as_str(), *level, view.as_deref());
         if child_mints {
             return Ok(EdgeCheck::Mints);
         }
         if !self.layers.contains_key(layer) {
             return Err(RegistryError::NoSuchLayer(layer.to_string()));
         }
-        let ordinal = self.resolve_growth_key(layer, level, child, store)?;
+        let ordinal = self.resolve_growth_key(layer, level, view, child, store)?;
         let held: Vec<crate::wal::ParentRef> = store
             .get(layer, level, ordinal)
             .map(|r| r.parents.clone())
@@ -2372,19 +2523,63 @@ impl LayerRegistry {
         };
         if parent_mints(parent) {
             return match held.first() {
-                None => Ok(EdgeCheck::Unrecorded),
+                None => Ok(EdgeCheck::Records),
                 Some(held) => Err(contradicted(*held)),
             };
         }
         let claimed =
-            self.parent_ref(layer, level, None, Some(child), parent, store, &no_pending)?;
+            self.parent_ref(layer, level, view, Some(child), parent, store, &no_pending)?;
         if held.contains(&claimed) {
             return Ok(EdgeCheck::Agrees);
         }
         match held.first() {
-            None => Ok(EdgeCheck::Unrecorded),
+            None => Ok(EdgeCheck::Records),
             Some(held) => Err(contradicted(*held)),
         }
+    }
+
+    /// The record that gives an existing artifact the parent a list column named, or `None` where it
+    /// already holds it.
+    ///
+    /// A parent list is a fixed part, so this is [`Self::prepare_fills`]'s rule reached from the
+    /// ingest door: absent is filled, identical is nothing, a different parent is a refusal, and the
+    /// cycle walk runs over the layer's held edges and `window_edges` — every edge this close is
+    /// recording — as one graph. `pending` answers a parent key the same close is minting.
+    ///
+    /// Called at the close and not at admission, because a parent minted here has no ordinal until
+    /// the publication that claims it.
+    pub fn prepare_parent_fill(
+        &self,
+        edge: &crate::command::BatchEdge,
+        store: &ArtifactStore,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+        window_edges: &mut BTreeMap<crate::wal::ParentRef, Vec<crate::wal::ParentRef>>,
+    ) -> Result<Option<WalRecord>, RegistryError> {
+        let (layer, level, view) = (edge.layer.as_str(), edge.level, edge.view.as_deref());
+        let ordinal = self.resolve_growth_key(layer, level, view, &edge.child, store)?;
+        let parts = crate::membership::FixedParts {
+            parent_keys: vec![edge.parent.clone()],
+            ..Default::default()
+        };
+        let part = self
+            .prepare_fills(
+                layer,
+                level,
+                ordinal,
+                view,
+                &edge.child,
+                &parts,
+                store,
+                pending,
+                window_edges,
+            )?
+            .pop();
+        Ok(part.map(|part| WalRecord::ArtifactFill {
+            layer: layer.to_string(),
+            level,
+            ordinal,
+            part,
+        }))
     }
 
     /// The caller's own name for the artifact at a resolved position, for a refusal that has to
@@ -2530,6 +2725,7 @@ impl LayerRegistry {
         }
         Ok(WalRecord::LayerDrop {
             name: name.to_string(),
+            version: self.version + 1,
         })
     }
 
@@ -2541,9 +2737,11 @@ impl LayerRegistry {
     /// publication — gate and all, reachable again by whoever the old declaration admitted. It is
     /// the same seed-before-replay ordering the overlay follows, and for the same reason.
     ///
-    /// The version is set past every seeded layer's, so a subsequent registration cannot mint a
-    /// version a session has already cached a resolution against.
-    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String]) {
+    /// `version` is the counter the manifest saved. The counter resumes from it or from the highest
+    /// seeded layer's version, whichever is higher, so a registration replayed or made after the
+    /// seed is never given a version lower than one already served.
+    pub fn seed(&mut self, layers: &[RegisteredLayer], tombstones: &[String], version: u64) {
+        self.version = self.version.max(version);
         for layer in layers {
             self.version = self.version.max(layer.version);
             self.layers
@@ -2611,7 +2809,12 @@ impl LayerRegistry {
                 declaration,
                 layer_entity,
                 runs,
+                version,
             } => {
+                // The record's own version, so a replay over a seed that already counts it moves
+                // nothing.
+                let version = *version;
+                self.version = self.version.max(version);
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
@@ -2632,15 +2835,14 @@ impl LayerRegistry {
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
-                        version: self.version + 1,
+                        version,
                     },
                 );
-                self.version += 1;
             }
-            WalRecord::LayerDrop { name } => {
+            WalRecord::LayerDrop { name, version } => {
                 self.layers.remove(name);
                 self.tombstones.insert(name.clone());
-                self.version += 1;
+                self.version = self.version.max(*version);
             }
             // A publication's only effect on the *registry* is the reservation it grew. The
             // artifacts themselves belong to the store, applied from the same record.
@@ -2674,26 +2876,20 @@ impl LayerRegistry {
 
     /// Resolves which layers this principal may know exist, once per session.
     ///
-    /// `resolve_label` maps a gate label to its term, returning `None` for a label the dictionary
-    /// does not hold — which makes the layer reachable by nobody. **Fail-closed, and the right
-    /// answer**: a gate naming a term no document carries grants nothing, and treating an
-    /// unresolvable label as "no gate" would publish every such layer to everyone.
+    /// `admits` answers whether the principal holds a layer's gate label. A label it cannot
+    /// resolve admits nobody: treating one as no gate would publish every such layer to everyone.
     ///
     /// Satisfaction is **intersection** with the principal's satisfied set, never a conservative
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
     /// principal. That error has been made once already in this codebase, in the view gate, and
     /// was caught in review.
-    pub fn resolve_for(
-        &self,
-        is_satisfied: impl Fn(TermId) -> bool,
-        resolve_label: impl Fn(&str) -> Option<TermId>,
-    ) -> ResolvedLayers {
+    pub fn resolve_for(&self, admits: impl Fn(&str) -> bool) -> ResolvedLayers {
         let names = self
             .layers
             .iter()
             .filter(|(_, layer)| match &layer.declaration.visibility {
                 None => true,
-                Some(label) => resolve_label(label).is_some_and(&is_satisfied),
+                Some(label) => admits(label),
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -2768,6 +2964,18 @@ impl LayerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every group has every view, at the incarnation a build gives it.
+    struct AnyView;
+
+    impl GroupViews for AnyView {
+        fn incarnation_of(&self, _: &str, _: &str) -> Option<tessera_types::view::ViewIncarnation> {
+            Some(tessera_types::view::DECLARED_INCARNATION)
+        }
+        fn keys_of(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
     use tessera_types::layer::{
         ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, RESERVED_BLOCK,
     };
@@ -2851,13 +3059,7 @@ mod tests {
         .unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(
-            |t| t == TermId::new(7),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let resolved = reg.resolve_for(|_| false);
 
         assert!(resolved.contains("clusters/open"));
         assert!(!resolved.contains("clusters/secret"));
@@ -2866,27 +3068,8 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(
-            |t| t == TermId::new(7) || t == TermId::new(99),
-            |label| match label {
-                "clearance:ts" => Some(TermId::new(99)),
-                _ => None,
-            },
-        );
+        let cleared = reg.resolve_for(|label| label == "clearance:ts");
         assert!(cleared.contains("clusters/secret"));
-    }
-
-    #[test]
-    fn a_gate_label_the_dictionary_does_not_hold_reaches_nobody() {
-        // Fail-closed. Treating an unresolvable label as "no gate" would publish the layer to
-        // everyone, which is the direction a mistake must never take.
-        let mut reg = LayerRegistry::new();
-        let mut alloc = Allocator::new(0);
-        register(&mut reg, &mut alloc, gated("clusters/x", "team:nobody")).unwrap();
-
-        let resolved = reg.resolve_for(|_| true, |_| None);
-        assert!(!resolved.contains("clusters/x"));
-        assert_eq!(resolved.names().count(), 0);
     }
 
     #[test]
@@ -2896,7 +3079,7 @@ mod tests {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
-        let resolved = reg.resolve_for(|_| false, |_| None);
+        let resolved = reg.resolve_for(|_| false);
         assert!(resolved.is_current_for(reg.version()));
 
         register(&mut reg, &mut alloc, declaration("clusters/b")).unwrap();
@@ -3029,6 +3212,7 @@ mod tests {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: None,
         }
     }
 
@@ -3040,7 +3224,15 @@ mod tests {
         layer: &str,
         incoming: &[IncomingArtifact],
     ) -> Result<WalRecord, RegistryError> {
-        let record = reg.prepare_publish(layer, 0, incoming, store, alloc, &no_pending)?;
+        let record = reg.prepare_publish(
+            layer,
+            0,
+            incoming,
+            store,
+            alloc,
+            &no_pending,
+            &AnyView,
+        )?;
         reg.apply(&record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
@@ -3509,12 +3701,28 @@ mod tests {
 
         // And a level the layer never declared is a refusal too, not an implicit creation.
         assert_eq!(
-            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc, &no_pending),
+            reg.prepare_publish(
+                "clusters/nope",
+                0,
+                &[],
+                &store,
+                &mut alloc,
+                &no_pending,
+                &AnyView,
+            ),
             Err(RegistryError::NoSuchLayer("clusters/nope".into()))
         );
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         assert_eq!(
-            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc, &no_pending),
+            reg.prepare_publish(
+                "clusters/a",
+                3,
+                &[],
+                &store,
+                &mut alloc,
+                &no_pending,
+                &AnyView,
+            ),
             Err(RegistryError::NoSuchLevel {
                 layer: "clusters/a".into(),
                 level: 3
@@ -3549,6 +3757,7 @@ mod tests {
                 &store,
                 &mut alloc,
                 &no_pending,
+                &AnyView,
             )
             .unwrap();
         reg.apply(&publication);
@@ -3595,7 +3804,15 @@ mod tests {
             .map(|i| incoming(&format!("c{i}"), &[i as u32]))
             .collect();
         let publication = reg
-            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc, &no_pending)
+            .prepare_publish(
+                "clusters/a",
+                0,
+                &full,
+                &store,
+                &mut alloc,
+                &no_pending,
+                &AnyView,
+            )
             .unwrap();
         reg.apply(&publication);
         assert_eq!(store.apply(&publication, 0), 0);
@@ -3694,6 +3911,7 @@ mod tests {
                 &[incoming("root", &[1, 2, 3]), incoming("child", &[1])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         assert_eq!((first.created, first.without_content), (2, 2));
@@ -3709,7 +3927,7 @@ mod tests {
         )];
         let mark = alloc.low_water();
         let second = reg
-            .prepare_put("topics/t", 0, &[child.clone()], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[child.clone()], &store, &mut alloc, &AnyView)
             .unwrap();
         assert_eq!(alloc.low_water(), mark, "a held key allocates nothing");
         assert!(second.publish.is_none());
@@ -3747,7 +3965,7 @@ mod tests {
 
         // Identical again: no record at all.
         let third = reg
-            .prepare_put("topics/t", 0, &[child], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[child], &store, &mut alloc, &AnyView)
             .unwrap();
         assert!(third.publish.is_none() && third.fills.is_empty() && third.growth.is_none());
         assert_eq!((third.created, third.joined), (0, 0));
@@ -3759,7 +3977,7 @@ mod tests {
             [],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[differing], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[differing], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert_eq!(
             refused,
@@ -3778,13 +3996,13 @@ mod tests {
         // A differing parent, the same way.
         let other = incoming("other", &[7]);
         let put = reg
-            .prepare_put("topics/t", 0, &[other], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[other], &store, &mut alloc, &AnyView)
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
         let mut reparented = incoming("child", &[]);
         reparented.parent_keys = vec!["other".into()];
         let refused = reg
-            .prepare_put("topics/t", 0, &[reparented], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[reparented], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::PartConflict { part, .. } if part == "parent"),
@@ -3827,6 +4045,7 @@ mod tests {
                 ],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         assert_eq!(prepared.created, 2);
@@ -3919,6 +4138,7 @@ mod tests {
                 &[under("d", &["a"]), a_under_d],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap_err();
         assert!(
@@ -3956,7 +4176,7 @@ mod tests {
             key: "c0".into(),
         });
         let put = reg
-            .prepare_put("topics/x", 0, &[label], &store, &mut alloc)
+            .prepare_put("topics/x", 0, &[label], &store, &mut alloc, &AnyView)
             .unwrap();
         assert_eq!(put.without_content, 1);
         apply_put(&mut reg, &mut store, &put);
@@ -4059,7 +4279,14 @@ mod tests {
             tessera_types::layer::SuppliedRequirement::All;
         register(&mut reg, &mut alloc, layer).unwrap();
         let put = reg
-            .prepare_put("topics/all", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "topics/all",
+                0,
+                &[incoming("t0", &[1])],
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
         let mut join = crate::membership::IncomingGrowth::from_entities("t0".into(), []);
@@ -4105,6 +4332,7 @@ mod tests {
                 &[under("k", &["a"]), under("k", &["b"])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap_err();
         assert_eq!(
@@ -4125,6 +4353,7 @@ mod tests {
                 &[under("k", &["a"]), members_only],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap_err();
         assert!(
@@ -4138,6 +4367,7 @@ mod tests {
                 &[under("n", &["a"]), under("n", &["b"])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap_err();
         assert!(
@@ -4195,7 +4425,14 @@ mod tests {
         let mut alloc = Allocator::new(0);
         register(&mut reg, &mut alloc, described("topics/t")).unwrap();
         let put = reg
-            .prepare_put("topics/t", 0, &[incoming("t0", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "topics/t",
+                0,
+                &[incoming("t0", &[1])],
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
             .unwrap();
         apply_put(&mut reg, &mut store, &put);
 
@@ -4205,7 +4442,7 @@ mod tests {
             [EntityId::new(1)],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[with_set], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("a content fill carries none")),
@@ -4219,7 +4456,7 @@ mod tests {
             [EntityId::new(2)],
         )];
         let refused = reg
-            .prepare_put("topics/t", 0, &[new_with_set], &store, &mut alloc)
+            .prepare_put("topics/t", 0, &[new_with_set], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::Content { detail, .. } if detail.contains("declares a generating set, and none of this layer's content requires")),
@@ -4240,6 +4477,106 @@ mod tests {
         artifact
     }
 
+    /// One group's views at their incarnations.
+    struct Quarter(&'static [(&'static str, tessera_types::view::ViewIncarnation)]);
+
+    impl GroupViews for Quarter {
+        fn incarnation_of(
+            &self,
+            group: &str,
+            key: &str,
+        ) -> Option<tessera_types::view::ViewIncarnation> {
+            (group == "quarter")
+                .then(|| self.0.iter().find(|(held, _)| *held == key).map(|(_, at)| *at))
+                .flatten()
+        }
+        fn keys_of(&self, group: &str) -> Vec<String> {
+            match group {
+                "quarter" => self.0.iter().map(|(key, _)| key.to_string()).collect(),
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    /// A publication into a view the group does not have is refused with nothing allocated, and
+    /// one into a view it has is stamped with that view's incarnation.
+    #[test]
+    fn a_view_the_group_lacks_is_refused_and_a_held_one_stamps_its_incarnation() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        let views = Quarter(&[("q1", 4)]);
+
+        let refused = reg
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q9", &[1])], &store, &mut alloc, &views)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::ViewIdentity { .. }), "{refused:?}");
+        assert_eq!(store.next_ordinal("clusters/q", 0), 0);
+
+        let prepared = reg
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q1", &[1])], &store, &mut alloc, &views)
+            .unwrap();
+        let Some(WalRecord::ArtifactPublish { artifacts, .. }) = prepared.publish else {
+            panic!("a new key is published");
+        };
+        assert_eq!(artifacts[0].incarnation, 4);
+    }
+
+    /// A label on a layer drawn on none of its target layer's views is refused at publication with
+    /// nothing allocated; one on a layer sharing a view with its target publishes.
+    #[test]
+    fn an_attachment_into_a_layer_on_none_of_its_views_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let on = |name: &str, group: &str, views: &[&str]| {
+            let mut d = scoped(name, group);
+            d.views = views.iter().map(|view| view.to_string()).collect();
+            d
+        };
+        register(
+            &mut reg,
+            &mut alloc,
+            on("clusters/q", "quarter", &["quarter:q1", "halves:q1"]),
+        )
+        .unwrap();
+        let put = reg
+            .prepare_put("clusters/q", 0, &[in_view("c1", "q1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        apply_put(&mut reg, &mut store, &put);
+        let label = || {
+            let mut label = in_view("n1", "q1", &[1]);
+            label.attached_to = Some(crate::membership::IncomingAttachment {
+                layer: "clusters/q".into(),
+                level: 0,
+                key: "c1".into(),
+            });
+            label
+        };
+        for (name, group, view) in [
+            ("labels/t", "tally", "tally:q1"),
+            ("labels/w", "wholes", "wholes:q1"),
+            ("labels/h", "halves", "halves:q1"),
+        ] {
+            let mut d = on(name, group, &[view]);
+            d.depends_on = vec!["clusters/q".into()];
+            register(&mut reg, &mut alloc, d).unwrap();
+        }
+
+        for refused_layer in ["labels/t", "labels/w"] {
+            let refused = reg
+                .prepare_put(refused_layer, 0, &[label()], &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::NoSharedView { .. }), "{refused:?}");
+            assert_eq!(store.next_ordinal(refused_layer, 0), 0);
+        }
+        let put = reg
+            .prepare_put("labels/h", 0, &[label()], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(put.created, 1);
+    }
+
     /// **`view` is part of the identity** (`ingest.md` §1.5, `views.md` §3.5): required on a
     /// group-scoped layer, refused on an entity-scoped one, and the same key in two views is two
     /// artifacts with two ordinals and two entities.
@@ -4253,7 +4590,14 @@ mod tests {
 
         // Absent where the layer is a set per view.
         let refused = reg
-            .prepare_put("clusters/q", 0, &[incoming("c1", &[1])], &store, &mut alloc)
+            .prepare_put(
+                "clusters/q",
+                0,
+                &[incoming("c1", &[1])],
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ViewIdentity { detail, .. } if detail.contains("scoped to the group 'quarter'")),
@@ -4267,6 +4611,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap_err();
         assert!(
@@ -4283,6 +4628,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1, 2]), in_view("c1", "q2", &[3])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         assert_eq!(prepared.created, 2);
@@ -4312,6 +4658,7 @@ mod tests {
                 &[in_view("c1", "q1", &[1, 2])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         assert_eq!(prepared.created, 0);
@@ -4336,6 +4683,7 @@ mod tests {
                 &[in_view("root", "q1", &[1])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
@@ -4343,7 +4691,7 @@ mod tests {
         let mut child = in_view("leaf", "q2", &[2]);
         child.parent_keys = vec!["root".into()];
         let refused = reg
-            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::CrossViewEdge { held_in, .. } if held_in == &["q1".to_string()]),
@@ -4353,7 +4701,7 @@ mod tests {
         let mut child = in_view("leaf", "q1", &[2]);
         child.parent_keys = vec!["root".into()];
         let prepared = reg
-            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc)
+            .prepare_put("clusters/q", 0, &[child], &store, &mut alloc, &AnyView)
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
         assert_eq!(
@@ -4381,6 +4729,7 @@ mod tests {
                 &[incoming("c1", &[1, 2, 3])],
                 &store,
                 &mut alloc,
+                &AnyView,
             )
             .unwrap();
         apply_put(&mut reg, &mut store, &prepared);
@@ -4388,7 +4737,7 @@ mod tests {
         let mut again = incoming("c1", &[]);
         again.exclude([EntityId::new(4)]);
         let refused = reg
-            .prepare_put("clusters/a", 0, &[again], &store, &mut alloc)
+            .prepare_put("clusters/a", 0, &[again], &store, &mut alloc, &AnyView)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ExclusionOnHeldKey { key, .. } if key == "c1"),
@@ -4396,20 +4745,249 @@ mod tests {
         );
     }
 
-    /// The growth route carries no view, so it addresses no group-scoped layer: refused naming
-    /// what the caller has instead, rather than resolving one view's artifact by accident.
+    /// A growth naming no view on a group-scoped layer is refused rather than resolving one
+    /// view's artifact by accident.
     #[test]
-    fn the_growth_route_refuses_a_group_scoped_layer() {
+    fn a_growth_naming_no_view_on_a_group_scoped_layer_is_refused() {
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
         let store = ArtifactStore::default();
         register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
         let refused = reg
-            .resolve_growth_key("clusters/q", 0, "c1", &store)
+            .resolve_growth_key("clusters/q", 0, None, "c1", &store)
             .unwrap_err();
         assert!(
             matches!(&refused, RegistryError::ViewIdentity { .. }),
             "{refused:?}"
         );
+    }
+
+    /// A member key on a group-scoped layer resolves inside the view it names, and on an open
+    /// layer a key that view does not hold is minted there, whatever another view holds.
+    #[test]
+    fn a_member_key_resolves_in_its_own_view_on_a_group_scoped_layer() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = scoped("clusters/q", "quarter");
+        d.value_set = tessera_types::layer::ValueSet::Open;
+        register(&mut reg, &mut alloc, d).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/q",
+            &[in_view("c1", "q1", &[1])],
+        )
+        .unwrap();
+
+        let held = reg.resolve_or_mint("clusters/q", 0, Some("q1"), "c1", &store);
+        assert!(matches!(held, Ok(Some(_))), "{held:?}");
+        let minted = reg.resolve_or_mint("clusters/q", 0, Some("q2"), "c1", &store);
+        assert!(matches!(minted, Ok(None)), "{minted:?}");
+        let refused = reg.resolve_or_mint("clusters/q", 0, None, "c1", &store);
+        assert!(
+            matches!(refused, Err(RegistryError::ViewIdentity { .. })),
+            "{refused:?}"
+        );
+    }
+
+    /// A growth on a group-scoped layer reaches the artifact in the view it names, and the same
+    /// key in another view is another artifact.
+    #[test]
+    fn a_growth_reaches_the_artifact_in_the_view_it_names() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, scoped("clusters/q", "quarter")).unwrap();
+        publish(
+            &mut reg,
+            &mut store,
+            &mut alloc,
+            "clusters/q",
+            &[in_view("c1", "q1", &[1]), in_view("c1", "q2", &[2])],
+        )
+        .unwrap();
+        let mut join = crate::membership::IncomingGrowth::from_entities(
+            "c1".into(),
+            [EntityId::new(7)],
+        );
+        join.view = Some("q2".into());
+        let prepared = reg.prepare_grow("clusters/q", 0, &[join], &store).unwrap();
+        let record = prepared.growth.expect("a join");
+        assert_eq!(store.apply(&record, 0), 0);
+        let q1 = store.ordinal_of_key("clusters/q", 0, Some("q1"), "c1").unwrap();
+        let q2 = store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1").unwrap();
+        assert!(!store.get("clusters/q", 0, q1).unwrap().members.contains(7));
+        assert!(store.get("clusters/q", 0, q2).unwrap().members.contains(7));
+    }
+
+    /// A label on a layer whose `artifact_visibility` names no field is refused at publication
+    /// and at a fill, before anything is allocated.
+    #[test]
+    fn an_access_label_on_a_layer_naming_no_field_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
+        let mut labelled = incoming("c1", &[1]);
+        labelled.access = Some(vec![b"team-a".to_vec()]);
+        let refused = reg
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&labelled),
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
+
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[incoming("c1", &[1])]).unwrap();
+        let refused = reg
+            .prepare_put("clusters/a", 0, &[labelled], &store, &mut alloc, &AnyView)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::Access { .. }), "{refused:?}");
+    }
+
+    /// An artifact stating no label of its own, on [`IncomingArtifact::access`]'s terms.
+    fn unlabelled(key: &str, members: &[u32]) -> IncomingArtifact {
+        let mut artifact = incoming(key, members);
+        artifact.access = Some(Vec::new());
+        artifact
+    }
+
+    /// On a layer naming a field, an artifact that states no labels is refused with nothing
+    /// allocated, whether alone or beside one that states them, and one stating an empty list
+    /// publishes with no label.
+    #[test]
+    fn an_artifact_stating_no_labels_on_a_layer_reading_them_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        let mark = alloc.low_water();
+        for batch in [vec![incoming("c1", &[1])], vec![unlabelled("c0", &[2]), incoming("c1", &[1])]]
+        {
+            let refused = reg
+                .prepare_put("clusters/a", 0, &batch, &store, &mut alloc, &AnyView)
+                .unwrap_err();
+            assert!(matches!(refused, RegistryError::LabelsUnstated { .. }), "{refused:?}");
+            assert_eq!(alloc.low_water(), mark, "nothing is allocated for a refused batch");
+        }
+        let prepared = reg
+            .prepare_put("clusters/a", 0, &[unlabelled("c1", &[1])], &store, &mut alloc, &AnyView)
+            .unwrap();
+        assert_eq!(prepared.created, 1);
+    }
+
+    /// On a layer naming a field, a label is published in canonical order, filled once on a held
+    /// artifact that has none, accepted again unchanged, and a different one is a part conflict.
+    #[test]
+    fn an_access_label_is_published_and_filled_on_the_fill_rule() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+
+        let mut first = incoming("c1", &[1]);
+        first.access = Some(vec![b"b".to_vec(), b"a".to_vec(), b"b".to_vec()]);
+        let prepared = reg
+            .prepare_put(
+                "clusters/a",
+                0,
+                &[first, unlabelled("c2", &[2])],
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
+            .unwrap();
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(
+            store.get("clusters/a", 0, 0).unwrap().access,
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert!(store.get("clusters/a", 0, 1).unwrap().access.is_empty());
+
+        let mut fill = incoming("c2", &[]);
+        fill.access = Some(vec![b"c".to_vec()]);
+        let prepared = reg
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&fill),
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
+            .unwrap();
+        assert!(matches!(
+            part_of(&prepared.fills[0]),
+            crate::wal::ArtifactPart::Access(_)
+        ));
+        apply_put(&mut reg, &mut store, &prepared);
+        assert_eq!(store.get("clusters/a", 0, 1).unwrap().access, vec![b"c".to_vec()]);
+
+        let again = reg
+            .prepare_put(
+                "clusters/a",
+                0,
+                std::slice::from_ref(&fill),
+                &store,
+                &mut alloc,
+                &AnyView,
+            )
+            .unwrap();
+        assert!(again.fills.is_empty());
+
+        let mut other = incoming("c2", &[]);
+        other.access = Some(vec![b"d".to_vec()]);
+        let refused = reg
+            .prepare_put("clusters/a", 0, &[other], &store, &mut alloc, &AnyView)
+            .unwrap_err();
+        assert!(matches!(refused, RegistryError::PartConflict { .. }), "{refused:?}");
+    }
+
+    /// A label longer than a stored record can hold, or more labels than it can count, is refused
+    /// at publication and at a fill, rather than packed into a record the next open cannot read.
+    #[test]
+    fn an_access_label_too_long_to_store_is_refused() {
+        let mut reg = LayerRegistry::new();
+        let mut alloc = Allocator::new(0);
+        let mut store = ArtifactStore::default();
+        let mut d = declaration("clusters/a");
+        d.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("team");
+        register(&mut reg, &mut alloc, d).unwrap();
+        publish(&mut reg, &mut store, &mut alloc, "clusters/a", &[unlabelled("held", &[1])]).unwrap();
+
+        let long = vec![b'x'; u16::MAX as usize];
+        let many: Vec<Vec<u8>> = (0..u16::MAX as u32).map(|i| i.to_le_bytes().to_vec()).collect();
+        for access in [vec![long.clone()], many.clone()] {
+            let mut fresh = incoming("c1", &[1]);
+            fresh.access = Some(access.clone());
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fresh], &store, &mut alloc, &AnyView)
+                .is_err());
+            let mut fill = incoming("held", &[]);
+            fill.access = Some(access);
+            assert!(reg
+                .prepare_put("clusters/a", 0, &[fill], &store, &mut alloc, &AnyView)
+                .is_err());
+        }
+        let mut fits = incoming("c2", &[1]);
+        fits.access = Some(vec![vec![b'x'; u16::MAX as usize - 1]]);
+        assert!(reg.prepare_put(
+            "clusters/a",
+            0,
+            &[fits],
+            &store,
+            &mut alloc,
+            &AnyView,
+        ).is_ok());
     }
 }

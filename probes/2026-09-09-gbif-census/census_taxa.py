@@ -8,7 +8,7 @@ import collections, glob, json, random, sys, time
 import pyarrow.parquet as pq
 import concurrent.futures as cf
 
-PARTS = sorted(glob.glob('/mnt/nas/joe/tessera/datasets/gbif/2026-06-01/occurrence.parquet/*'))
+PARTS = sorted(glob.glob('/mnt/nas/tessera/datasets/gbif/2026-06-01/occurrence.parquet/*'))
 random.seed(0)
 SAMPLE = random.sample(PARTS, 200)
 COLS = ['kingdom', 'phylum', 'class', 'family', 'species', 'basisofrecord', 'countrycode', 'year']

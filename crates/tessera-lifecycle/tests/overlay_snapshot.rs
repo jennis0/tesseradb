@@ -3,13 +3,13 @@
 //! The overlay's only durable home is the WAL, so a rotation that reclaimed a file holding change
 //! records without first re-stating them would silently un-deny. These tests pin the things that
 //! make the snapshot a faithful re-statement rather than an approximation of one: that it is keyed
-//! by entity rather than by external id, that it reproduces the overlay exactly, and that it
-//! replays in the position it occupies.
+//! by entity, that it reproduces the overlay exactly, and that it replays in the position it
+//! occupies.
 
 use tempfile::TempDir;
 
 use tessera_authz::Dict;
-use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::overlay::Replay;
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
 use tessera_lifecycle::Overlay;
 use tessera_types::EntityId;
@@ -29,10 +29,9 @@ fn round_trip(overlay: &Overlay) -> Overlay {
     restored
 }
 
-/// **Keyed by entity, never by external id.** An entity deleted before it was ever flushed has no
-/// row and may have no external-id extent entry, so an external-id-keyed snapshot could not be
-/// resolved at replay and the node would refuse to open — a benign rotation turned into a
-/// permanently unopenable node.
+/// **Keyed by entity.** An entity deleted before it was ever flushed has no row and may hold no
+/// value, so a snapshot keyed by anything else could not be resolved at replay and the node would
+/// refuse to open.
 #[test]
 fn a_deleted_entity_with_no_row_round_trips_the_snapshot() {
     let mut overlay = Overlay::new();
@@ -121,10 +120,9 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
     before.apply(EntityId::new(7), ChangeOp::Suppress);
 
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: EntityId::new(8),
-            op: ChangeOp::Delete,
+        let mut wal = Wal::open(&path).unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(8), ChangeOp::Delete)],
         })
         .unwrap();
         wal.append(&WalRecord::OverlaySnapshot {
@@ -134,13 +132,13 @@ fn a_snapshot_replays_in_position_and_never_displaces_what_precedes_it() {
         wal.fsync().unwrap();
     }
 
-    let (_wal, records) = Wal::open(&path).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(
-        &records,
-        &dict,
-        Overlay::new(),
-        &tessera_lifecycle::owner_id_only,
-    );
+    let wal = Wal::open(&path).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, _buffer, _resolver) = replay.finish();
 
     assert!(
         overlay.is_suppressed(EntityId::new(7)),

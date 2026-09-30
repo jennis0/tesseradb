@@ -1,8 +1,8 @@
 #!/bin/bash
 # Arm 1: one process per (structure, V, entry set) so peak RSS is that build's own.
 set -u
-P=/home/joe/code/tessera/probes/2026-09-02-value-suggestion
-D=/home/joe/code/tessera/data/ladder/probe-suggest
+P=/home/user/code/tessera/probes/2026-09-02-value-suggestion
+D=/home/user/code/tessera/data/ladder/probe-suggest
 B=$P/suggestprobe/target/release/suggestprobe
 LOG=$P/logs/arm1.log
 : > $LOG

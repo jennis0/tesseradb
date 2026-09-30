@@ -562,13 +562,11 @@ def ingest_server(tmp_path_factory, private_catalogue_bundle):
 
 
 def _ingest_batch(rows: int, access: str) -> bytes:
-    """A minimal `/control/ingest` body: `(external_id, x, y, access, fx_key)`, Arrow IPC stream.
+    """A minimal `/control/ingest` body: `(fx_key, x, y, access, ...)`, Arrow IPC stream.
     `access` is the one label every row carries, sent as a one-element list (contracts §3.4).
 
-    `fx_key` is present because the catalogue declares it, and a declared column must be in every
-    batch (contracts §2.2): the scalar tail is read back positionally, so an omitted column shifts
-    every later scalar rather than defaulting to absent. The values come from the fixture, which
-    owns the join key.
+    No row carries the catalogue's unique `serial`, so each row creates an item. `fx_key` comes
+    from the fixture, which owns the join key.
     """
     import io  # noqa: PLC0415
 
@@ -577,13 +575,11 @@ def _ingest_batch(rows: int, access: str) -> bytes:
 
     schema = pa.schema(
         [
-            pa.field("external_id", pa.binary()),
+            pa.field("fx_key", pa.uint64()),
             pa.field("x", pa.float32()),
             pa.field("y", pa.float32()),
             pa.field("access", pa.list_(pa.utf8())),
-            pa.field("fx_key", pa.uint64()),
-            # The catalogue's filter columns, present for the same contracts §2.2 reason as
-            # fx_key. A category value must be a declared key ("alpha" is), and the values are
+            # The catalogue's filter columns. A category value must be a declared key ("alpha" is), and the values are
             # inert here: nothing in this module filters, and attribute ingest writes no
             # artefact today (filter-index §5 ⊘).
             pa.field("department", pa.utf8()),
@@ -608,11 +604,10 @@ def _ingest_batch(rows: int, access: str) -> bytes:
     )
     batch = pa.record_batch(
         [
-            pa.array([(950_000_000 + i).to_bytes(8, "little") for i in range(rows)], pa.binary()),
+            pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
             pa.array([1000.0 + i for i in range(rows)], pa.float32()),
             pa.array([2000.0 + i for i in range(rows)], pa.float32()),
             pa.array([[access]] * rows, pa.list_(pa.utf8())),
-            pa.array(cat.ingest_fx_keys(rows), pa.uint64()),
             pa.array(["alpha"] * rows, pa.utf8()),
             pa.array(["red"] * rows, pa.utf8()),
             pa.array([f"ingested-{i}" for i in range(rows)], pa.utf8()),
@@ -637,7 +632,7 @@ def test_an_acked_ingest_moves_the_watermark_and_nobody_s_mask(
 
     The half of the journal that models **acked ≠ applied**, exercised end to end: a 200 is
     recorded as durable-and-not-yet-applied, `barrier` polls `/control/status` until the watermark
-    reflects the rows the service said it accepted, and only then is the batch marked applied. The
+    reflects the rows the service said created an item, and only then is the batch marked applied. The
     rule-level cases — a barrier that times out must not mark anything applied, a refused ingest
     must journal nothing — are in `reference/tests/test_journal.py` against a stub, where the
     states can be produced on demand.
@@ -666,7 +661,7 @@ def test_an_acked_ingest_moves_the_watermark_and_nobody_s_mask(
 
     assert len(journal.ingests) == 1
     op = journal.ingests[0]
-    assert op.accepted == 3
+    assert op.created == 3
     assert op.applied is False, "an ingest is acked on WAL fsync, which is not a visibility promise"
     assert op.required_high_water == before_high_water + 3
 
@@ -688,7 +683,7 @@ def test_a_refused_operation_is_not_journalled_and_changes_nothing(
 ):
     """The whole point of `AckedJournal`: submitted is not acked.
 
-    A `/control/changes` item naming an external ID the deployment has never seen is refused
+    A `/control/changes` item naming a `tessera_id` the deployment has never issued is refused
     (`ApiError::Unknown`). Three things must then be true, and only the first is obvious: the
     refusal is recorded so a test can assert on it; it contributes **nothing** to the composed
     mask; and the engine's own view has not moved either. A journal that recorded intent would
@@ -704,10 +699,11 @@ def test_a_refused_operation_is_not_journalled_and_changes_nothing(
     before_counts = _engine_counts(overlay_server, token)
     before_mask = journal.resolve(base_mask, session_terms)
 
-    # `external_id_b64` names an id the deployment has never seen — base64("not-an-id"). It goes
-    # through the journal's own submission path, so what is under test is the journal's rule and
-    # not a hand-built record of it.
-    response = journal.change(-1, "suppress", external_id_b64="bm90LWFuLWlk")
+    # The `tessera_id` of an entity far past any the deployment has allocated, under its own key,
+    # so it names nothing. It goes through the journal's own submission path, so what is under
+    # test is the journal's rule and not a hand-built record of it.
+    never_issued = catalogue_bundle.tessera_id_of(2_000_000_000)
+    response = journal.change(-1, "suppress", tessera_id=never_issued)
     assert response.status_code != 200, "this call was supposed to be refused"
 
     assert journal.ops == [], "a refused operation must not enter the journal"
@@ -723,8 +719,8 @@ def test_the_withdrawn_predicate_op_is_refused_and_composes_nothing(
 ):
     """`op: "predicate"` is refused with a typed 422, and refusing it changes nothing.
 
-    Decision 0047 withdrew the op: an access edit is a delete plus a re-ingest under the same
-    `external_id`. This is the conformance-side pin on that, and it is a **fail-closed** check
+    Decision 0047 withdrew the op: an access edit is an ingest row naming the item with its new
+    label. This is the conformance-side pin on that, and it is a **fail-closed** check
     rather than a tidiness one. The withdrawal is what dissolves the novel-descriptor silent hide
     (the invariants review's F4): a predicate change naming a descriptor the dictionary never held
     minted an unsatisfiable extension id that nothing ever promoted, leaving the item invisible to
@@ -755,10 +751,7 @@ def test_the_withdrawn_predicate_op_is_refused_and_composes_nothing(
             f"the withdrawn predicate op was answered {response.status_code}, not 422: "
             f"{response.text}"
         )
-        assert "predicate" in response.text and "delete" in response.text, (
-            "the 422 must name the op and the flow that replaces it, or a caller cannot act on "
-            f"it: {response.text}"
-        )
+        assert response.json()["error"] == "contract", response.text
 
     assert journal.ops == [], "a refused operation must not enter the journal"
     assert len(journal.refused) == 2

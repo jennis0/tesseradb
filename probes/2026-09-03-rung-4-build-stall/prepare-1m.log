@@ -1,5 +1,5 @@
-staging /home/joe/code/tessera/data/ladder/paperseek/staging
-output  /home/joe/code/tessera/data/ladder/paperseek-1m
+staging /home/user/code/tessera/data/ladder/paperseek/staging
+output  /home/user/code/tessera/data/ladder/paperseek-1m
 [sample] ...
 [sample] 0.06s
 1,000,000 works sampled from 102,117,343
@@ -31,9 +31,9 @@ licence: 223,783 of 1,000,000 (22.4%) carry a real one, over 11 keys; 968,528 (9
 [write the demo's terms] ...
 11 terms; top five unlicensed 776,217, cc-by 137,868, cc-by-nc-nd 27,922, cc-by-nc 20,721, other-oa 14,805
 [write the demo's terms] 0.0s
-minted TESSERA_IDENTITY_KEY, TESSERA_PAPERSEEK_SESSION_CRED, TESSERA_PAPERSEEK_OPERATOR_CRED in /home/joe/code/tessera/data/ladder/paperseek-1m/.env
+minted TESSERA_IDENTITY_KEY, TESSERA_PAPERSEEK_SESSION_CRED, TESSERA_PAPERSEEK_OPERATOR_CRED in /home/user/code/tessera/data/ladder/paperseek-1m/.env
 
-wrote to /home/joe/code/tessera/data/ladder/paperseek-1m:
+wrote to /home/user/code/tessera/data/ladder/paperseek-1m:
   .env                                     0.00 MB
   clusters-kmeans-members.parquet          1.25 MB
   clusters-kmeans.parquet                  0.00 MB
@@ -50,4 +50,4 @@ wrote to /home/joe/code/tessera/data/ladder/paperseek-1m:
   vocab-type.parquet                       0.00 MB
 
 next:
-  cd /home/joe/code/tessera/data/ladder/paperseek-1m && tessera check --payloads && tessera build --stage-timings
+  cd /home/user/code/tessera/data/ladder/paperseek-1m && tessera check --payloads && tessera build --stage-timings

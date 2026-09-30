@@ -1,14 +1,10 @@
-//! **A polygon smaller than one depth-16 cell holds the point inside it**, by the direct test and
-//! by the boundary-cell route the segment resolution takes — the two must agree.
+//! A polygon smaller than one depth-16 cell holds the point inside it, by the direct test and by
+//! the boundary-cell route the segment resolution takes: the two must agree.
 //!
-//! The polygons are Overture divisions from the ladder's part 0 (`test_corpora/overture`), each a
-//! few thousand grid units across — a few metres — and the point beside each is the one place
-//! whose lineage names it, at the coordinates the source gives. The build reported these as
-//! holding a shape and no row (2026-08-29), and this test is half of why that is right: both
-//! routes agree the source coordinates are inside. The other half is that a point's **stored**
-//! position is its `f32` coordinates quantised, which at this extent moves it by up to ~128 grid
-//! units, and for both of these that is across the edge — the membership is of the stored
-//! position, exactly, as the design says (`polygon-membership.md` §4.1).
+//! The polygons are Overture divisions, each a few thousand grid units across, and the point
+//! beside each is the one place whose lineage names it, at the coordinates the source gives.
+//! Membership is of a point's stored position, its `f32` coordinates quantised, not its source
+//! coordinates, and for both fixtures that quantisation moves the point across the edge.
 
 use tessera_spatial::morton::{fixed32, split32, Bounds};
 use tessera_spatial::shape::{contexts_at, read_wkt, Rect, ShapeF64, Space};
@@ -33,16 +29,14 @@ const CASES: &[(&str, f64, f64)] = &[
     ),
 ];
 
-/// The two routes agree **and both say inside**, over a shape canonicalisation kept whole.
+/// The two routes agree and both say inside, over a shape canonicalisation kept whole.
 ///
-/// The agreement alone is not the claim: two routes answering *outside* agree too, and a
+/// The agreement alone is not the claim: two routes answering outside agree too, and a
 /// canonicalisation that dropped a sub-cell ring is exactly what makes them both say it. So the
-/// survival of the ring, the containment itself and the route the boundary answer took are each
-/// asserted here rather than printed.
+/// ring's survival, the containment itself and the route taken are each asserted, not printed.
 ///
-/// Mutations this kill: a canonicalisation that drops a ring smaller than one depth-16 cell (the
-/// report's `rings_dropped`, and the emptied shape's `contains`); a decomposition that offers a
-/// sub-cell shape no boundary cell, leaving the resolution's route with nothing to descend into.
+/// Mutations this kills: a canonicalisation that drops a ring smaller than one depth-16 cell; a
+/// decomposition that offers a sub-cell shape no boundary cell to descend into.
 #[test]
 fn a_polygon_smaller_than_a_cell_holds_its_one_point_by_both_routes() {
     for (wkt, x, y) in CASES {

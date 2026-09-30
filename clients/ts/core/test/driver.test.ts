@@ -1,114 +1,41 @@
 import {describe, expect, it} from 'vitest';
-import {Driver, type Clock} from '../src/driver.js';
+import {Driver} from '../src/driver.js';
 import {Replica} from '../src/replica.js';
 import {TesseraError} from '../src/client.js';
-import type {Quantisation, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Quantisation, ViewportResponse} from '../src/types.js';
+import {fakeClock, response, result, tile} from './support.js';
 
 /**
- * The driver under a fake clock — the tests the old shape could not have.
- *
- * The first three pin the live defects the 2026-08-10 review found in the timer-soup controller:
- * a staleness bound the covered path starved, anticipation budgets nothing ever re-armed, and a
- * retry `setTimeout` that survived `cancel()`. Each was invisible precisely because scheduling
- * lived in the viewer where no clock could be injected.
+ * The driver under a fake clock: the staleness bound is reachable from the covered path,
+ * anticipation budgets re-arm, and a retry timer does not outlive `cancel()`.
  */
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
 function emptyResponse(pin = 'p1'): ViewportResponse {
-  const result: ViewportResult = {
-    tiles: [],
-    ids: new BigUint64Array(0),
-    codes: new BigUint64Array(0),
-    positions: new Float64Array(0),
-    world: new Float32Array(0),
-    scalars: {},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: pin,
-    pin,
-    stale: false,
-    bytes: 0
-  };
+  return response(result(), {contentKey: pin});
 }
 
 /**
- * A block of saturated tiles — prefixes `0 … n-1`, which at any depth is the 4x2 arrangement of
- * tiles (0..3, 0..1) for `n = 8` — each carrying one served point and a visible count far above the
- * cap.
+ * A block of saturated tiles, prefixes `0 … n-1` (for `n = 8`, tiles (0..3, 0..1) at any depth),
+ * each carrying one served point and a visible count far above the cap.
  *
- * An all-empty response reports `visibleInView = 0` and no counts at all, which reads as saturation
- * to both depth models and pins every later choice at the floor — so any test about the budget's
- * depth arithmetic needs a response with ground under it. Saturated tiles, because the count-driven
- * choice is `Σ min(k, count)`: a capped tile costs `k` wherever it sits, so the arithmetic a test
- * asserts on follows from the tile *layout* alone.
+ * An empty response reports no counts and `visibleInView = 0`, which reads as saturation and pins
+ * the depth at the floor, so tests of the depth arithmetic need ground. A capped tile costs `k`
+ * wherever it sits, so the arithmetic follows from the tile layout alone.
  */
 function servedResponse(visible: bigint, tiles = 1): ViewportResponse {
   const prefixes = Array.from({length: tiles}, (_, i) => BigInt(i));
-  const result: ViewportResult = {
-    tiles: prefixes.map((tile) => ({tile, visible, matched: visible, served: 1n})),
-    ids: BigUint64Array.from(prefixes.map((p) => p + 1n)),
-    codes: BigUint64Array.from(prefixes.map((p) => p + 1n)),
-    positions: Float64Array.from(prefixes.flatMap(() => [1, 1])),
-    world: Float32Array.from(prefixes.flatMap(() => [0.1, 0.1])),
-    scalars: {},
-    subCells: null,
-    membership: {},
-    artifacts: []
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: 'p1',
-    pin: 'p1',
-    stale: false,
-    bytes: 0
-  };
-}
-
-function fakeClock(): Clock & {advance(ms: number): Promise<void>; t(): number} {
-  let now = 0;
-  let seq = 0;
-  const timers = new Map<number, {at: number; fire: () => void}>();
-  const drain = async () => {
-    for (let i = 0; i < 8; i++) await Promise.resolve();
-  };
-  return {
-    now: () => now,
-    t: () => now,
-    after(ms, fire) {
-      const id = ++seq;
-      timers.set(id, {at: now + ms, fire});
-      return id;
-    },
-    cancel(handle) {
-      timers.delete(handle as number);
-    },
-    async advance(ms) {
-      const target = now + ms;
-      for (;;) {
-        let nextId = -1;
-        for (const [id, t] of timers) {
-          if (t.at <= target && (nextId < 0 || t.at < timers.get(nextId)!.at)) nextId = id;
-        }
-        if (nextId < 0) break;
-        const t = timers.get(nextId)!;
-        timers.delete(nextId);
-        now = t.at;
-        t.fire();
-        await drain();
-      }
-      now = target;
-      await drain();
-    }
-  };
+  return response(
+    result({
+      tiles: prefixes.map((p) => tile(p, visible, {served: 1n})),
+      ids: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+      codes: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+      positions: Float64Array.from(prefixes.flatMap(() => [1, 1])),
+      world: Float32Array.from(prefixes.flatMap(() => [0.1, 0.1]))
+    }),
+    {contentKey: 'p1'}
+  );
 }
 
 function harness(opts: {
@@ -120,7 +47,7 @@ function harness(opts: {
 } = {}) {
   const clock = fakeClock();
   const calls: {zoom: number; k?: number; background?: boolean}[] = [];
-  const traces: {kind: string; fields: Record<string, number>}[] = [];
+  const traces: {kind: string; fields: Record<string, number | string>}[] = [];
   const hung: (() => void)[] = [];
   const replica = new Replica(
     async (req, _signal, background) => {
@@ -150,7 +77,7 @@ function harness(opts: {
 }
 
 describe('driver', () => {
-  it('revalidates through the covered path once the interval lapses — the bound is reachable at a warm cache', async () => {
+  it('revalidates through the covered path once the interval lapses: the bound is reachable at a warm cache', async () => {
     const h = harness({revalidateAfterMs: 60_000});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(1);
@@ -163,7 +90,7 @@ describe('driver', () => {
     await h.clock.advance(1_000);
     const warm = h.calls.length;
 
-    // Past the interval, the covered pan itself carries the counts-only refresh.
+    // Past the interval, the covered pan carries the count-only refresh.
     await h.clock.advance(120_000);
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(1_000);
@@ -172,15 +99,15 @@ describe('driver', () => {
     expect(h.traces.some((t) => t.kind === 'revalidate')).toBe(true);
   });
 
-  it('takes up to three anticipation bites per pause — deferral re-arms instead of discarding', async () => {
+  it('takes up to three anticipation bites per pause: deferral re-arms instead of discarding', async () => {
     const h = harness();
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(2_000); // request settles, idle fires, bites chain
     const rings = h.traces.filter((t) => t.kind === 'ring').length;
     const budgetStops = h.traces.filter((t) => t.kind === 'ringskip' && t.fields.why === 3).length;
     const noNovel = h.traces.filter((t) => t.kind === 'ringskip' && t.fields.why === 5).length;
-    // Either the ring runs to its bite budget, or it genuinely exhausted the novel ground first —
-    // both are the designed behaviours; firing once and stopping for the pause is the defect.
+    // The ring runs to its per-pause allowance or exhausts the new ground first; firing once and
+    // stopping would be wrong.
     expect(rings + noNovel).toBeGreaterThan(1);
     if (noNovel === 0) expect(rings === 3 ? budgetStops : rings).toBeGreaterThan(0);
   });
@@ -193,11 +120,11 @@ describe('driver', () => {
     expect(h.traces.some((t) => t.kind === 'ringskip' && t.fields.why === 1)).toBe(true);
     while (h.hung.length > 0) h.hung.shift()!();
     await h.clock.advance(2_000);
-    // The arrival that cleared the slot re-evaluated eligibility: anticipation ran after all.
+    // The arrival that cleared the slot re-evaluated eligibility, and anticipation ran.
     expect(h.calls.some((c) => c.background)).toBe(true);
   });
 
-  it('cancel() kills a pending retry — no request fires after a principal switch', async () => {
+  it('cancel() kills a pending retry: no request fires after a principal switch', async () => {
     const h = harness({fail: () => true});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(10);
@@ -208,9 +135,8 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
-  it('retries a 503 not-ready on a short backoff and recovers — a starting server is not a refusal', async () => {
-    // The built driver retried only 429; a 503 gave up at once, turning an unready bundle into a
-    // refusal the client could not recover from.
+  it('retries a 503 not-ready on a short backoff and recovers: a starting server is not a refusal', async () => {
+    // A 503 from a server still starting is retried like a 429.
     const statuses: string[] = [];
     const clock = fakeClock();
     let call = 0;
@@ -235,14 +161,13 @@ describe('driver', () => {
     driver.schedule({target: [0.5, 0.5, 0], zoom: 3}, 400, 300);
     await clock.advance(10); // first attempt fails
     expect(statuses).toContain('retrying');
-    await clock.advance(250); // first backoff → second attempt, fails
-    await clock.advance(500); // second backoff → third attempt, succeeds
-    // Three attempts in all — two 503s and the success — never a refusal.
+    await clock.advance(250); // first backoff, second attempt fails
+    await clock.advance(500); // second backoff, third attempt succeeds
     expect(call).toBeGreaterThanOrEqual(3); // two 503s, then a success (plus the margin leg)
     expect(statuses).not.toContain('refused');
   });
 
-  it('a gesture pays the full derivation at most once per gap — the walk never runs per frame', async () => {
+  it('a gesture pays the full derivation at most once per gap: the walk never runs per frame', async () => {
     const h = harness();
     const derives: number[] = [];
     const driver = new Driver(
@@ -255,8 +180,7 @@ describe('driver', () => {
         }
       }
     );
-    // A zoom: depth changes every emission, so the covered test fails on each one — the shape
-    // that ran the stand-in walk at animation-frame rate before the reconciler existed.
+    // A zoom: the depth changes on every emission, so the covered test fails on each one.
     for (let i = 0; i < 12; i++) {
       driver.schedule({target: [0.5, 0.5, 0], zoom: 3 + i * 0.2}, 400, 300);
       await h.clock.advance(16);
@@ -269,7 +193,7 @@ describe('driver', () => {
     expect(derives.length).toBeLessThan(6);
   });
 
-  it('an unchanged store under a covering frame reuses — no verdict reaches the consumer', async () => {
+  it('an unchanged store under a covering frame reuses: no verdict reaches the consumer', async () => {
     const h = harness();
     const verdicts: string[] = [];
     const driver = new Driver(
@@ -290,20 +214,20 @@ describe('driver', () => {
     expect(verdicts.filter((v) => v === 'fold' || v === 'derive').length).toBe(before);
   });
 
-  it('a due revalidation never displaces a live fetch — latency-neutral by construction', async () => {
+  it('a due revalidation never displaces a live fetch: latency-neutral', async () => {
     const h = harness({revalidateAfterMs: 1, hang: () => true});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(5_000); // interval long lapsed; foreground still hung
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(10);
-    // The cold view's counts seed is a `k = 0` call and is the first one (it hangs here, like
-    // everything else); what must not appear is a *second* — the revalidation, beside a live fetch.
+    // The cold view's count seed is the first `k = 0` call (it hangs here too); a second, a
+    // revalidation beside a live fetch, must not appear.
     expect(h.calls.slice(1).filter((c) => c.k === 0)).toHaveLength(0);
   });
 
-  it('a real fetch never queues behind a running revalidation — it displaces it', async () => {
-    // Review finding 3: the refresh in the foreground slot made a warm-cache pan wait out a
-    // full counting pass. It has its own slot now, and a request aborts it on sight.
+  it('a real fetch never queues behind a running revalidation: it displaces it', async () => {
+    // The refresh has its own slot, and a request aborts it, so a pan does not wait behind a
+    // counting pass.
     const h = harness({revalidateAfterMs: 1, hang: (_n, k) => k === 0});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(3_000); // cold fetch settles; revalidation becomes due
@@ -317,11 +241,8 @@ describe('driver', () => {
   });
 
   it('a settle readies the bank and the next motion suspends the depth-hold once', async () => {
-    // Review finding 1: nothing released the hold, so the derive it forced wrote the held depth
-    // back into `presented` and banked calibration was inert. The mechanics pinned here: settle
-    // sets the bank, the next schedule consumes it into a one-shot suspension, and the derive
-    // that adopts a depth re-arms the hold. (The end-to-end density-boundary test needs an
-    // in-bbox serving fixture — a recorded follow-up, not a substitute for this.)
+    // The settle sets the bank, the next schedule consumes it into a one-shot suspension, and the
+    // derive that adopts a depth re-arms the hold.
     const h = harness();
     const d = h.driver as unknown as {bankReady: boolean; holdSuspended: boolean};
     h.driver.schedule(h.view, 400, 300);
@@ -333,35 +254,28 @@ describe('driver', () => {
     expect(d.holdSuspended).toBe(false);
   });
 
-  it('a budget change replans at its depth on the very next schedule — no motion, no settle', async () => {
-    // The budget was frozen into the options at construction, so the viewer's density control
-    // wrote a store field no plan ever read again — the map's density could not be reduced at
-    // all mid-session. Two mechanics are pinned together: `setBudget` reaches the next plan,
-    // and it suspends the depth hold, which would otherwise pin a one-step depth change to the
-    // presented depth and turn the covered path's early return into "the control does nothing".
+  it('a budget change replans at its depth on the very next schedule: no motion, no settle', async () => {
+    // `setBudget` reaches the next plan and suspends the depth hold, which would otherwise keep a
+    // one-step depth change at the presented depth.
     const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
     h.driver.schedule(h.view, 400, 300);
-    await h.clock.advance(600); // fetch, calibration, settle → presented at the budget's depth
+    await h.clock.advance(600); // fetch, calibration, settle: presented at the budget's depth
     // Same view again: covered, and the settle's banked suspension is consumed and re-armed.
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(50);
     expect(h.calls.length).toBeGreaterThan(0);
     expect(h.calls.every((c) => c.zoom === 10)).toBe(true);
 
-    // At this harness's view the default budget chooses depth 10 and 2,000 chooses depth 9 — one
-    // step, exactly what the un-suspended hold would defer. The figures are the counts' own: the
-    // eight capped tiles cost 8 x k = 4,000 marks at depth 10 and fold into two tiles, 1,000 marks,
-    // at depth 9.
+    // At this view the default budget chooses depth 10 and 2,000 chooses depth 9: the eight capped
+    // tiles cost 8 x k = 4,000 marks at depth 10 and fold into two tiles, 1,000 marks, at depth 9.
     h.driver.setBudget(2_000);
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(1_000);
     expect(h.calls.some((c) => c.zoom === 9)).toBe(true);
   });
-  it('a redraw asks for nothing, however uncovered it is — a view stepped through is silent', async () => {
-    // The settle asks for a depth the replica holds nothing at (`Driver.askUncovered`), and
-    // `redraw` reconciles on the settle's terms — so this is the pairing that has to hold:
-    // a view switch's immediate publish stays silent (`view-switching.md` §8) while the settle
-    // of a view being looked at does not.
+  it('a redraw asks for nothing, however uncovered it is: a view stepped through is silent', async () => {
+    // The settle asks for a depth the replica holds nothing at, and `redraw` reconciles on the
+    // settle's terms, so a view switch's redraw must stay silent while a settle asks.
     const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(3_000);
@@ -372,11 +286,9 @@ describe('driver', () => {
     expect(h.calls.length).toBe(settled);
   });
 
-  it('the cold view buys counts before marks — the first marks request is at the counted depth, not the average model\'s', async () => {
-    // The defect this pins, measured on rung 3 (2026-09-02): with no counts to plan from, the
-    // average model asked the first view of a session at depth 8 and was answered with 1,014,597
-    // points in 33.5 MB against a 500,000 budget, and the frame was then derived two levels
-    // shallower from 2.4 MB. The seed asks the same question for the price of the counting stage.
+  it('the cold view buys counts before marks: the first marks request is at the counted depth, not the average model\'s', async () => {
+    // With no counts, the first view of a session would be planned by the average model; the
+    // count-only seed plans it from counts.
     const clock = fakeClock();
     const calls: {zoom: number; k?: number}[] = [];
     const traces: {kind: string; fields: Record<string, number | string>}[] = [];
@@ -384,21 +296,14 @@ describe('driver', () => {
       async (req) => {
         calls.push({zoom: req.zoom, k: req.k});
         if (req.k !== 0) return servedResponse(10_000n, 8);
-        // Every tile of this depth, saturated: the counted cost of a request here is `k` per
-        // tile, so the count-driven choice is bounded by the budget rather than by `maxTiles`.
+        // Every tile saturated, so a request costs `k` per tile and the budget bounds the choice.
         const n = Math.min(4 ** req.zoom, 4096);
         const result = emptyResponse().result;
         return {
           ...emptyResponse(),
           result: {
             ...result,
-            tiles: Array.from({length: n}, (_, i) => ({
-              tile: BigInt(i),
-              visible: 10_000n,
-              matched: 10_000n,
-              served: 0n,
-              highlighted: 10_000n
-            }))
+            tiles: Array.from({length: n}, (_, i) => tile(BigInt(i), 10_000n))
           }
         };
       },
@@ -417,7 +322,7 @@ describe('driver', () => {
     driver.schedule({target: [0.5, 0.5, 0], zoom: 3}, 400, 300);
     await clock.advance(50);
 
-    // The seed is first, and it is counts-only.
+    // The seed is first, and it asks for counts only.
     expect(calls[0]!.k).toBe(0);
     expect(traces.some((t) => t.kind === 'seed')).toBe(true);
     const marks = calls.find((c) => c.k !== 0);
@@ -425,8 +330,8 @@ describe('driver', () => {
     // The marks request was planned from those counts, not from the average.
     const request = traces.find((t) => t.kind === 'request')!;
     expect(request.fields.from).not.toBe('average');
-    // Saturated ground: `sum min(k, count)` over a 50,000 budget admits 100 tiles, which is
-    // shallower than the average model's own choice at m_target = 10.
+    // Saturated ground: `sum min(k, count)` under a 50,000 budget admits 100 tiles, shallower than
+    // the average model's choice at m_target = 10.
     expect(marks!.zoom).toBeLessThan(calls[0]!.zoom);
     expect(request.fields.depth).toBe(marks!.zoom);
 
@@ -438,7 +343,7 @@ describe('driver', () => {
     expect(seeds()).toBe(seedsAfterFirst);
   });
 
-  it('a refused seed is not a refused view — the marks request the average model planned still goes', async () => {
+  it('a refused seed is not a refused view: the marks request the average model planned still goes', async () => {
     const clock = fakeClock();
     const calls: {zoom: number; k?: number}[] = [];
     const traces: {kind: string; fields: Record<string, number | string>}[] = [];

@@ -1,8 +1,8 @@
-//! A reader for OGC well-known text — `POLYGON` and `MULTIPOLYGON`, with `Z`, `M` and `ZM`
+//! A reader for OGC well-known text: `POLYGON` and `MULTIPOLYGON`, with `Z`, `M` and `ZM`
 //! ordinates skipped and `EMPTY` accepted as no rings.
 //!
-//! The inline spelling for a shape in `corpus.toml` (`polygon-membership.md` §4.2): what every
-//! tool prints, and what a person can type.
+//! The inline spelling for a shape in `corpus.toml`: what every tool prints, and what a person
+//! can type.
 
 use super::canon::RingsF64;
 

@@ -1,53 +1,91 @@
-import {css, html, nothing, type TemplateResult} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
-import {
-  composeFilters,
-  isPopulated,
-  type ColumnDraft,
-  type FilterOperandSet,
-  type MatchSpan,
-  type Refusal,
-  type SuggestValue,
-  type TextMode
-} from '@tesseradb/client';
-import {TesseraElement, emit} from './base.js';
+import {composeFilters, emptyDraft, isPopulated, type ClauseVerb, type ColumnDraft, type FilterOperandSet, type MatchSpan, type Refusal, type SuggestionPage, type SuggestValue} from '@tesseradb/client';
+import {HeldAggregate, listedGroups, type GroupCount} from './aggregate.js';
+import {FloatingList} from './float.js';
+import {TesseraElement, columnCaption, emit, keyTitle, parseDateText, shortDateText} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 
-/**
- * `<tessera-filter column="…">` — one operand, rendered by its type from `meta` (design §5.3
- * tier 2), as the boards draw it: a text column is a search field with an *all words / phrase*
- * toggle; a category is a typeahead over `/v1/categories/{column}/suggest`
- * (`value-suggestion.md`) — a search field, the matched values with the matched span marked, the
- * chosen ones as chips above it; a number or a date is two inputs with *to* between them; a
- * keyword or string is a field with its operator.
- *
- * **A typed value is submitted, never validated against the suggestion page.** A category's
- * suggestions are what `/v1/categories/{column}/suggest` was willing to offer, and a key it did
- * not offer may still be one this principal can filter by; an unresolvable one is an empty answer
- * by contract (contracts §3.2), indistinguishable from a value that does not exist. So the search
- * field submits whatever is typed on Enter, and the control never says "no such value". A refused
- * suggestion renders as a refusal beside the field, not as an absent control.
- *
- * **The suggestion page is rendered only while it answers the box in front of it.** The store
- * echoes `q` back on the projection precisely so a stale page — a slower response to an earlier
- * keystroke, landing after a faster response to a later one — is never mistaken for an answer to
- * what is now typed; this element applies the same `q` check the store already used to decide
- * whether to keep the page at all, because a page can go stale here too, between the store's tick
- * and this element's next render, in the case fewest visits: a very fast keystroke arriving inside
- * one microtask queue flush.
- *
- * The draft is local to the element while a user is typing; the store's draft re-seeds it only
- * when it changes under the element (a *clear all*). Typing asks the store's typeahead action on
- * every keystroke, which debounces and single-flights it; a tick, a mode or a date lands at once.
- * Emits `tessera-filterchange` with the composed expression.
- */
+/** The operators a keyword control can send. */
+const KEYWORD_OPERATORS = ['contains', 'prefix', 'eq'] as const;
+type KeywordOperator = (typeof KEYWORD_OPERATORS)[number];
+/** Each operator as the select and a chip say it. */
+export const OPERATOR_WORDS: Record<KeywordOperator, string> = {contains: 'contains', prefix: 'starts with', eq: 'is'};
 
 /** How long a typed control must be quiet before its change is sent. */
 const TYPING_DEBOUNCE_MS = 350;
 
+/** The narrowest bar a suggested value with any items draws, as a percentage, so it still shows. */
+const BAR_FLOOR = 2;
+
+/** How many of a category's commonest values show under its box before anything is typed. */
+const TOP_VALUES = 5;
+
+/**
+ * One filter control for the column `column`, drawn by the family `/v1/meta` gives the column, under
+ * the column's name. `verb` is the position it edits: the column's filter clause or its highlight
+ * clause. The two are separate clauses; the control shows the one in its position and leaves the
+ * other alone.
+ *
+ * A text column is one search box. Its words must all appear; words in double quotes are a phrase,
+ * or plain words where the column takes no phrase; `OR` between terms asks for either. A line under
+ * the box says so. A text clause set from outside that no query writes shows read-only, with Clear.
+ *
+ * A category is a search box over `/v1/categories/{column}/suggest`, with the five commonest values
+ * in the current set under it before anything is typed, each with a checkbox, its exact count and
+ * a bar, its share of the set. The five are counted by the aggregate route (`Store.setAggregate`):
+ * in the filter position without the column's own clause, so a value its clause excludes is still
+ * counted, and in the highlight position under the whole filter. The control keeps that aggregate
+ * registered while it is drawn. The heading says how many values that set holds, once the
+ * aggregate has answered.
+ *
+ * The suggestions open over what sits below the box while the box has focus and holds text. Each
+ * value suggested shows its count in the current view among the items passing the filter, and a
+ * bar, its share of the total the server counted over. In the filter position the count leaves out
+ * the column's own clause, so a value counts what choosing it as well would add. In the highlight
+ * position the count is under the whole filter, and a value counted 0 is greyed, marked "none
+ * match" and cannot be chosen, though one already chosen can be taken out. The arrow keys move
+ * through the suggestions, and Enter chooses the one reached, the first by default, or takes it out
+ * where it is chosen; text that suggests nothing chooses nothing. Emptying the box, or removing the
+ * control, has the store stop asking for the column. The values chosen that are not among the five
+ * sit under them as chips, each with a ×.
+ *
+ * A number is two inputs, and a date two text inputs that read and write dates as day, month and
+ * year (`1 Jan 2019`); a date typed as a month or a year means its first day in the lower input
+ * and its last in the upper. A keyword column is a text box with its operator (`contains`,
+ * `prefix` or `eq`).
+ *
+ * Typing is sent 350 ms after the last keystroke; a choice is sent at once, and so is typing still
+ * waiting when the position changes. Each change replaces the column's control in the control's
+ * position of the store's draft (`Store.setFilters`). The host carries `data-on` while the control
+ * holds a value.
+ *
+ * @summary One filter control, drawn by the column's type.
+ * @tagname tessera-filter
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-filterchange']>} tessera-filterchange - The
+ *   control changed, with the column, its position and the expression that position composes.
+ * @csspart label - The column's name, as a caption.
+ * @csspart aside - The heading's right-hand text: how many values a category has, or a number or
+ *   date control's Clear button.
+ * @csspart entry - A text, number or date input, with `aria-invalid` on a date that does not read.
+ * @csspart hint - The line under a text column's box saying how to write a query.
+ * @csspart mode - The keyword column's operator select.
+ * @csspart values - The typeahead's suggestions.
+ * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` in the highlight
+ *   position where it is counted 0 and not chosen.
+ * @csspart bar - A suggested value's share of the items its count is taken over.
+ * @csspart value-count - A suggested value's count.
+ * @csspart top - The commonest values, under the box while nothing is typed.
+ * @csspart top-value - One of them: a label holding its checkbox, with `data-key`.
+ * @csspart chosen - A chosen category value's chip.
+ * @csspart more - The hint that more values match than one page holds.
+ * @csspart refusal - The words "Values unavailable" where the values could not be listed, with
+ *   `data-code` set to the refusal's code.
+ */
 export class TesseraFilter extends TesseraElement {
   static override styles = [
     tokens,
@@ -55,15 +93,31 @@ export class TesseraFilter extends TesseraElement {
     css`
       :host {
         display: block;
-        margin-top: 12px;
       }
-      :host(:first-of-type) {
-        margin-top: 0;
+      .head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
       }
       [part='label'] {
         display: block;
-        margin-bottom: 6px;
-        font-size: 11px;
+        font-weight: 600;
+        color: var(--_tessera-ink);
+      }
+      [part='aside'] {
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
+      }
+      button[part='aside'] {
+        font-weight: 500;
+        color: var(--_tessera-ink-2);
+      }
+      :host([verb='highlight']) .input:focus-within {
+        outline: 0;
+        border: 1.5px solid var(--_tessera-highlight);
+        padding: 0 9.5px;
       }
       .ctl-row {
         display: flex;
@@ -74,245 +128,404 @@ export class TesseraFilter extends TesseraElement {
         flex: 1 1 0;
         min-width: 0;
       }
-      .seg {
-        margin-top: 6px;
+      .range {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
       }
-      [part='value-chips'] {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-top: 6px;
+      .range input {
+        width: 100%;
+        height: 28px;
+        padding: 0 8px;
+        font-variant-numeric: tabular-nums;
       }
+      .range input[aria-invalid='true'] {
+        border-color: var(--_tessera-refuse);
+      }
+      [part='hint'] {
+        display: block;
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
+      }
+      .combo {
+        position: relative;
+      }
+      /* The suggestions open over what sits below the box, in the top layer. */
       [part='values'] {
-        margin-top: 4px;
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
+        overflow-y: auto;
         display: flex;
         flex-direction: column;
-        gap: 2px;
+        padding: 4px;
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        background: var(--_tessera-surface);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
-      /* A row is a button (keyboard-operable, role=option inside [part=values]'s role=listbox),
-         stretched to the list's width by its column-flex parent; text-align is the one thing the
-         shared button reset does not set for us. */
-      [part='tick'] {
+      [part~='tick'] {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 10px;
+        padding: 5px 8px;
+        border-radius: 4px;
         text-align: left;
       }
-      [part='tick'] .t {
+      [part~='tick']:hover,
+      [part~='tick'][data-active] {
+        background: var(--_tessera-surface-2);
+      }
+      [part~='tick'][aria-selected='true'] {
+        background: var(--_tessera-surface-2);
+        font-weight: 600;
+      }
+      :host([verb='highlight']) [part~='tick'][aria-selected='true'] {
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
+      }
+      [part~='tick'][aria-disabled='true'] {
+        cursor: default;
+        background: none;
+        color: var(--_tessera-ink-3);
+      }
+      .opt {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 0;
+      }
+      .opt .t {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+      }
+      .opt .name {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /** The matched span, in the served string, exactly where the server said it sits. */
-      [part='tick'] mark {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
-        border-radius: 2px;
+      .opt .out {
+        flex: none;
+        font-size: 11px;
+        font-weight: 400;
+        color: var(--_tessera-ink-3);
       }
-      /**
-       * **The title leads and the key follows it, muted**, where the two differ. A value's key is
-       * what the filter is written in and it is not always what the value is called: a boundary
-       * set keys its divisions by uuid, so a key-then-title line put 36 characters of
-       * hexadecimal in front of every name and a column of them read as a column of nothing. Where a key is the name
-       * — an arXiv category, a country code — the two are one string and only it is drawn.
-       */
-      [part='tick'] .k {
+      /* The matched span the server gave. */
+      [part~='tick'] mark {
+        background: none;
+        color: inherit;
+        font-weight: 600;
+      }
+      /* The key follows the title, muted, since a key may be an opaque identifier such as a uuid. */
+      [part~='tick'] .k {
         margin-left: 0.45em;
         opacity: 0.55;
         font-size: 0.85em;
         font-variant-numeric: tabular-nums;
       }
+      .track {
+        height: 3px;
+        border-radius: 2px;
+        background: var(--_tessera-surface-3);
+      }
+      [part='bar'] {
+        height: 3px;
+        border-radius: 2px;
+        background: color-mix(in srgb, var(--_tessera-ink-2) 75%, var(--_tessera-surface));
+      }
+      [aria-selected='true'] [part='bar'] {
+        background: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [aria-selected='true'] [part='bar'] {
+        background: var(--_tessera-highlight);
+      }
+      [part='value-count'] {
+        font-size: 12px;
+        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+        color: var(--_tessera-ink-2);
+      }
+      [aria-disabled='true'] [part='value-count'] {
+        color: var(--_tessera-ink-3);
+      }
+      [part='top'] {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      [part~='top-value'] {
+        display: grid;
+        grid-template-columns: 16px minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 8px;
+        cursor: pointer;
+      }
+      [part~='top-value'] input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [part~='top-value'] input {
+        accent-color: var(--_tessera-highlight);
+      }
+      [part~='top-value'] input:checked ~ .opt [part='bar'] {
+        background: var(--_tessera-ink);
+      }
+      :host([verb='highlight']) [part~='top-value'] input:checked ~ .opt [part='bar'] {
+        background: var(--_tessera-highlight);
+      }
+      .chosen {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
       [part='more'] {
-        text-align: left;
-        height: 24px;
-        color: var(--tessera-ink-3);
+        display: block;
+        margin-top: 6px;
+        color: var(--_tessera-ink-3);
         font-size: 12px;
       }
-      .to {
-        color: var(--tessera-ink-3);
+      [part='refusal'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+        font-size: 12px;
       }
-      input.mono {
-        font-family: var(--tessera-font-mono);
+      .skel {
+        margin-top: 8px;
+      }
+      .to {
+        color: var(--_tessera-ink-3);
       }
     `
   ];
 
+  /** The column this control filters, a name `meta.filterOperands` lists. Unset or unknown, the control renders nothing. */
   @property() accessor column = '';
-  /** The operand set by property, for a host with no store on the page. */
+  /** The column's operands, for a host that sets them itself in place of the store's `meta`. */
   @property({attribute: false}) accessor operand: FilterOperandSet | null = null;
+  /** The position the control edits: the column's `filter` clause or its `highlight` clause. */
+  @property({reflect: true}) accessor verb: ClauseVerb = 'filter';
 
+  /** @internal */
   @state() accessor draft: ColumnDraft | null = null;
+  /** @internal */
   @state() accessor search = '';
-  /**
-   * The title last seen for a chosen key, so a chip shows a name rather than a bare key once its
-   * value has scrolled out of the current suggestion page. Filled in the moment a value is picked
-   * from a page that carried one; never fetched for its own sake — a chosen key with no title on
-   * record renders as its key, exactly as an unresolved one would.
-   */
-  @state() accessor labels: Record<string, string> = {};
-  /**
-   * Which of the two category shapes this control draws (round 2 of `value-suggestion.md` §5.1):
-   * `null` while the empty-`q` page for this `(column, view)` has not yet answered, `'checklist'`
-   * once it has and said `more: false` — the whole visible set fits on one page, so a search box
-   * has nothing to narrow — and `'lookahead'` once it has said `more: true`. Decided **once** from
-   * that page and held afterwards: a later keystroke's page in `'lookahead'` mode must not flip
-   * this back and forth as its own `more` varies with the prefix typed. Re-set to `null` when the
-   * store's `suggestEpoch` moves — see `lastEpoch` below — so the next empty-`q` page decides
-   * again.
-   */
-  @state() accessor shape: 'checklist' | 'lookahead' | null = null;
+  /** The suggestion the arrow keys moved to, by code; `null` is the first that can be chosen. @internal */
+  @state() accessor activeCode: number | null = null;
+  /** Whether the category box has focus, which its suggestions show only while it does. @internal */
+  @state() accessor focused = false;
+  /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
+  @state() accessor invalid: {gte?: string; lte?: string} = {};
   private sent: ColumnDraft | null = null;
+  /** The commonest values under a category's box. */
+  private readonly top = new HeldAggregate('filter');
+  private readonly floating = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="values"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.combo');
+    return list && anchor ? {list, anchor} : null;
+  });
   private typing: ReturnType<typeof setTimeout> | null = null;
+  /** The change `typing` is waiting to send, so a change of position can send it first. */
+  private pending: (() => void) | null = null;
   /**
-   * The last `q` this element actually asked the store's typeahead for. `onStoreChange` fires on
-   * every store tick — status, replica, points churn, none of it about this control — and asking
-   * again each time re-arms the store's own debounce without ever letting it fire: under fast
-   * enough churn no request goes out at all. Asking only when `q` has moved on from this makes a
-   * store tick a no-op here, the way it already is for every other projection this element reads.
+   * The last `q` this element asked the store's typeahead for. Store changes arrive for every
+   * projection, and re-asking on each would keep re-arming the store's debounce so no request went
+   * out; asking only on a new `q` avoids that.
    */
   private lastAsked: string | null = null;
   /**
-   * The store's `filters.suggestEpoch` as last seen here, `-1` before the first tick. A change
-   * against the live projection is what says every held page was invalidated (a view switch or a
-   * re-authorise, `store.ts`'s `resetSuggestions`) — **tested instead of `shape`**, because a
-   * column that never finished deciding a shape (still loading, or sitting on a refusal) carries
-   * no signal of its own that a reset happened: `suggestions[column]` and `suggestErrors[column]`
-   * are both already absent in that state, before and after the reset alike, so comparing them
-   * cannot tell an invalidation from "nothing has landed yet". The epoch can.
+   * The store's `filters.suggestEpoch` as last seen, `-1` before the first update. A change means
+   * every held page was invalidated (a view switch or re-authorisation), so a typed `q` is asked
+   * again.
    */
   private lastEpoch = -1;
+
+  protected override resetServerData(): void {
+    this.search = '';
+    this.lastAsked = null;
+    this.lastEpoch = -1;
+    // The draft being edited was the previous store's; the next is seeded from the one adopted.
+    this.draft = null;
+    this.sent = null;
+  }
 
   private get resolvedOperand(): FilterOperandSet | null {
     if (this.operand) return this.operand;
     return this.resolvedStore?.get('meta')?.filterOperands.find((o) => o.column === this.column) ?? null;
   }
 
-  /** The suggestion page for `this.search`, or `null` while it is stale or has not landed. */
-  private get resolvedSuggestion(): {q: string; values: SuggestValue[]; more: boolean} | null {
+  /** The suggestion page for `this.search` in this position, or `null` while it is stale or has not landed. */
+  private get resolvedSuggestion(): SuggestionPage | null {
     const s = this.resolvedStore?.get('filters').suggestions[this.column];
-    return s && s.q === this.search ? s : null;
+    return s && s.q === this.search && s.verb === this.verb ? s : null;
   }
 
   private get resolvedSuggestRefusal(): Refusal | null {
     return this.resolvedStore?.get('filters').suggestErrors[this.column] ?? null;
   }
 
-  /** Ask the store's typeahead for `q`, but only once per distinct `q` this element has asked. */
+  /**
+   * The number the suggestion counts are counted over, which a value's bar is a share of: the
+   * page's `total`. `null` where the page has none or it is 0.
+   */
+  private countedOver(page: SuggestionPage | null): number | null {
+    return page?.total ? page.total : null;
+  }
+
+  /**
+   * Ask the store's typeahead for `q`, once per distinct `q`. An emptied box asks nothing and has
+   * the store forget the column, so a change of filter does not ask for it.
+   */
   private ask(q: string): void {
     const s = this.resolvedStore;
     if (!s || this.lastAsked === q) return;
+    if (q === '') {
+      if (this.lastAsked !== null) s.forgetSuggestions(this.column);
+      this.lastAsked = null;
+      return;
+    }
     this.lastAsked = q;
-    s.suggest(this.column, q);
+    s.suggest(this.column, q, this.verb);
+  }
+
+  override disconnectedCallback(): void {
+    this.ask('');
+    this.top.set(null, null);
+    this.floating.stop();
+    super.disconnectedCallback();
   }
 
   protected override onStoreChange(): void {
-    // Re-seed from the store only when its draft moved under this control — a clear-all, or the
-    // first meta — never while the user's own edit is the one in flight.
-    const stored = this.resolvedStore?.get('filters').draft[this.column] ?? null;
+    // Re-seed from the store only when its draft changed underneath (a clear all, or the first
+    // meta), not while the user's own edit is in flight.
+    const stored = this.resolvedStore?.get('filters').draft[this.verb][this.column] ?? null;
     if (stored && stored !== this.sent && JSON.stringify(stored) !== JSON.stringify(this.draft)) {
       this.draft = structuredClone(stored);
       this.sent = stored;
     }
     if (this.resolvedOperand?.family === 'category') {
-      const filters = this.resolvedStore?.get('filters');
-      const epoch = filters?.suggestEpoch ?? -1;
-      // **Invalidated**, unconditionally on the epoch moving — never on `shape`, `suggestions` or
-      // `suggestErrors` alone: a column stuck loading or sitting on a refusal shows the identical
-      // absence of both before and after a reset, so those cannot say a reset happened at all, and
-      // gating on `shape !== null` (the earlier version of this check) left exactly that column
-      // sitting on its skeleton forever after a view switch or a re-authorise. Forgetting
-      // `lastAsked` and the typed `q` is what makes the next tick's `ask('')` actually reach the
-      // store instead of reading as already-asked, and returns the control to the
-      // picker's-list-before-typing state the design gives it on first mount.
+      const epoch = this.resolvedStore?.get('filters').suggestEpoch ?? -1;
       if (epoch !== this.lastEpoch) {
         this.lastEpoch = epoch;
-        this.shape = null;
         this.lastAsked = null;
-        this.search = '';
       }
-      // Not an `else`: the first tick after mount moves `lastEpoch` from its `-1` starting value
-      // in the branch above, and a page can already be sitting on the store at that same tick
-      // (every test that seeds `filters` before connecting does exactly this) — gating the decision
-      // behind the reset branch not firing would leave a pre-seeded page undecided until a second,
-      // unrelated tick happened to come along.
-      const page = filters?.suggestions[this.column];
-      if (page && page.q === '' && this.shape === null) this.shape = page.more ? 'lookahead' : 'checklist';
-      // The picker's list before anything is typed (`value-suggestion.md` §4): an empty `q`
-      // matches every value, so the first ask is for `this.search` as it stands — `''` on mount
-      // and after an invalidation, above. `ask`'s own guard is what makes this safe to call on
-      // every store tick: it only ever reaches the store once for a `q` this element has not
-      // already asked for.
       this.ask(this.search);
     }
     super.onStoreChange();
   }
 
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    // A new position shows that position's clause, once any typing for the old one is sent.
+    if (changed.has('verb') && changed.get('verb') !== undefined) {
+      if (this.typing) clearTimeout(this.typing);
+      this.pending?.();
+      this.draft = null;
+      this.sent = null;
+      // The other position counts under another filter.
+      this.lastAsked = null;
+      this.ask(this.search);
+      this.invalid = {};
+    }
+  }
+
+  /** Moves focus to the control's first input. */
+  override focus(options?: FocusOptions): void {
+    const target = this.renderRoot.querySelector<HTMLElement>('#ctl');
+    if (target) target.focus(options);
+    else super.focus(options);
+  }
+
   protected override updated(): void {
     if (this.draft && isPopulated(this.draft)) this.setAttribute('data-on', '');
     else this.removeAttribute('data-on');
+    this.floating.update();
+    const category = this.isConnected && this.resolvedOperand?.family === 'category';
+    this.top.set(
+      this.resolvedStore,
+      category ? {groupings: [{by: {field: this.column, top: TOP_VALUES}}], ...(this.verb === 'filter' ? {without: this.column} : {})} : null
+    );
+  }
+
+  /** The commonest values and the number of values in the set, once the aggregate has answered. */
+  private topValues(): {values: GroupCount[]; total: number; groups: number | null} | null {
+    const table = this.top.entry()?.result?.tables[0];
+    return table ? {values: listedGroups(table), total: table.total, groups: table.groups} : null;
   }
 
   /**
-   * The empty control. **`verb: 'filter'` is the default position**, so a control the user has
-   * not spoken to about the mode narrows the map, which is what one always did; the chip's toggle
-   * moves it (`highlight-and-hierarchy.md` §5.2), and the store's draft keeps the choice, so a
-   * control re-entered under a highlight stays a highlight.
+   * The control's draft: the one being edited, else the store's, else the client's empty draft for
+   * this operand, which also sets a keyword control's starting operator.
    */
-  private emptyDraft(o: FilterOperandSet): ColumnDraft {
-    const verb = this.resolvedStore?.get('filters').draft[this.column]?.verb ?? 'filter';
-    switch (o.family) {
-      case 'text':
-        return {family: 'text', query: '', mode: 'all', verb};
-      case 'string':
-      case 'keyword':
-        return {family: o.family, needle: '', op: 'contains', verb};
-      case 'category':
-        return {family: 'category', keys: [], verb};
-      case 'numeric':
-        return {family: 'numeric', gte: null, lte: null, verb};
-    }
+  private currentDraft(o: FilterOperandSet): ColumnDraft | null {
+    return this.draft ?? this.resolvedStore?.get('filters').draft[this.verb][this.column] ?? emptyDraft([o]).filter[o.column] ?? null;
   }
 
   private change(next: ColumnDraft, immediate: boolean): void {
     this.draft = next;
     if (this.typing) clearTimeout(this.typing);
+    const {column, verb} = this;
     const apply = () => {
       this.typing = null;
+      this.pending = null;
       const s = this.resolvedStore;
       if (!s) return;
-      const draft = {...s.get('filters').draft, [this.column]: next};
+      const held = s.get('filters').draft;
+      const draft = {...held, [verb]: {...held[verb], [column]: next}};
       this.sent = next;
       s.setFilters(draft);
-      emit(this, 'tessera-filterchange', {column: this.column, expr: composeFilters(draft)});
+      emit(this, 'tessera-filterchange', {column, verb, expr: composeFilters(draft, verb)});
     };
     if (immediate) apply();
-    else this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
+    else {
+      this.pending = apply;
+      this.typing = setTimeout(apply, TYPING_DEBOUNCE_MS);
+    }
   }
 
-  /** The column's name for a label: `submitted_at` reads as *Submitted at*. */
-  private heading(): string {
-    const name = this.column.replace(/_/g, ' ');
-    return name.charAt(0).toUpperCase() + name.slice(1);
-  }
-
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const o = this.resolvedOperand;
     if (!o) return nothing;
-    const draft = this.draft ?? this.emptyDraft(o);
-    // Every other shape's body carries an `id="ctl"` element `for` can bind to (an `input`); the
-    // checklist's body is a `role="group"` of checkboxes, which `for` cannot label at all — a
-    // `for="ctl"` pointing at nothing there was a dangling reference, not a working association.
-    const checklist = draft.family === 'category' && this.shape === 'checklist';
-    const label = checklist
-      ? html`<span part="label" class="muted" id="ctl-label">${this.heading()}</span>`
-      : html`<label part="label" class="muted" for="ctl">${this.heading()}</label>`;
-    return html`${label}${this.body(o, draft)}`;
+    const draft = this.currentDraft(o);
+    if (!draft) return nothing;
+    return html`<div class="head"><label part="label" for="ctl">${columnCaption(this.column)}</label>${this.aside(draft)}</div>${this.body(o, draft)}`;
+  }
+
+  /** The heading's right-hand side: a category's number of values, or Clear on a range. */
+  private aside(draft: ColumnDraft): TemplateResult | typeof nothing {
+    if (draft.family === 'category') {
+      const n = this.topValues()?.groups ?? null;
+      return n === null ? nothing : html`<span part="aside">${n.toLocaleString('en-GB')} ${n === 1 ? 'value' : 'values'}</span>`;
+    }
+    if (draft.family === 'numeric' && isPopulated(draft)) {
+      return html`<button part="aside" type="button" @click=${() => {
+        this.invalid = {};
+        this.change({family: 'numeric', gte: null, lte: null}, true);
+      }}>Clear</button>`;
+    }
+    if (draft.family === 'text' && draft.expr !== undefined) {
+      return html`<button part="aside" type="button" @click=${() => this.change({family: 'text', query: '', phrase: draft.phrase}, true)}>Clear</button>`;
+    }
+    return nothing;
   }
 
   private body(o: FilterOperandSet, draft: ColumnDraft) {
     switch (draft.family) {
       case 'text':
-        return this.text(o, draft);
-      case 'string':
+        return this.text(draft);
       case 'keyword':
-        return this.string(draft);
+        return this.keyword(o, draft);
       case 'category':
         return this.category(draft);
       case 'numeric':
@@ -320,35 +533,35 @@ export class TesseraFilter extends TesseraElement {
     }
   }
 
-  private text(o: FilterOperandSet, draft: ColumnDraft & {family: 'text'}) {
-    const modes: [TextMode, string][] = [['all', 'all words']];
-    if (o.operands.includes('phrase')) modes.push(['phrase', 'phrase']);
-    else modes.push(['any', 'any word']);
-    return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="" autocomplete="off"
-        aria-label=${`${o.column} words`}
-        @input=${(e: Event) => this.change({...draft, query: (e.target as HTMLInputElement).value}, false)} /></div>
-      <div class="seg" part="mode" role="group" aria-label=${`${o.column} mode`}>
-        ${modes.map(([v, t]) => html`<button type="button" data-mode=${v} aria-pressed=${draft.mode === v ? 'true' : 'false'} @click=${() => this.change({...draft, mode: v}, true)}>${t}</button>`)}
-      </div>`;
+  private text(draft: ColumnDraft & {family: 'text'}) {
+    // An expression set from outside that no query writes is shown as it is, and cannot be typed over.
+    if (draft.expr !== undefined) {
+      return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" readonly .value=${JSON.stringify(draft.expr)} aria-describedby="hint" /></div>
+        <span part="hint" id="hint">Set from outside. Clear it to type a search.</span>`;
+    }
+    const hint = draft.phrase ? 'Words match together. Use “quotes” for a phrase, OR for either.' : 'Words match together. Use OR for either.';
+    return html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.query} placeholder="Search the text" autocomplete="off"
+        aria-describedby="hint"
+        @input=${(e: Event) => this.change({family: 'text', query: (e.target as HTMLInputElement).value, phrase: draft.phrase}, false)} /></div>
+      <span part="hint" id="hint">${hint}</span>`;
   }
 
-  private string(draft: ColumnDraft & {family: 'string' | 'keyword'}) {
+  /** A keyword control, offering the operators the column publishes. */
+  private keyword(o: FilterOperandSet, draft: ColumnDraft & {family: 'keyword'}) {
+    const ops = o.operands.filter((op): op is KeywordOperator => (KEYWORD_OPERATORS as readonly string[]).includes(op));
     return html`<div class="ctl-row">
       <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
-        aria-label=${`${this.column} value`}
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
-      <select part="mode" style="width:auto" aria-label=${`${this.column} operator`} .value=${draft.op}
-        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as 'eq' | 'prefix' | 'contains'}, true)}>
-        ${(['contains', 'prefix', 'eq'] as const).map((op) => html`<option value=${op} ?selected=${draft.op === op}>${op}</option>`)}
+      <select part="mode" style="width:auto" aria-label=${`${columnCaption(this.column)} operator`} .value=${draft.op}
+        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as KeywordOperator}, true)}>
+        ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${OPERATOR_WORDS[op]}</option>`)}
       </select>
     </div>`;
   }
 
   /**
-   * `field`'s text, the matched span marked where the server said it sits — in **characters of
-   * the served string**, so this never re-runs the fold (`value-suggestion.md` §5.1). Split on
-   * code points rather than UTF-16 units: the offsets are characters, and a naive `.slice` would
-   * cut a surrogate pair in half on any served string outside the basic plane.
+   * `field`'s text with the matched span the server gave marked. The offsets count code points of
+   * the served string, so the text is split by code point, not UTF-16 unit.
    */
   private markedField(v: SuggestValue, field: MatchSpan['field'], text: string): TemplateResult | string {
     if (v.match.field !== field) return text;
@@ -357,7 +570,7 @@ export class TesseraFilter extends TesseraElement {
     return html`${chars.slice(0, start).join('')}<mark>${chars.slice(start, start + len).join('')}</mark>${chars.slice(start + len).join('')}`;
   }
 
-  /** One suggested value's text: title leading, key muted after it, as a chosen value's does. */
+  /** One suggested value's text: the title, then the key muted. */
   private suggestionText(v: SuggestValue): TemplateResult {
     const title = v.title ?? v.key;
     return v.title && v.title !== v.key
@@ -365,123 +578,141 @@ export class TesseraFilter extends TesseraElement {
       : html`${this.markedField(v, 'key', v.key)}`;
   }
 
-  /**
-   * A checklist row's text — the same title-leads-key layout as {@link suggestionText}, with no
-   * match span: a checklist never asks with a typed `q`, so there is nothing a server-supplied
-   * span could be marking against.
-   */
-  private checklistText(v: SuggestValue): TemplateResult {
-    const title = v.title ?? v.key;
-    return v.title && v.title !== v.key ? html`${title}<span class="k">${v.key}</span>` : html`${v.key}`;
-  }
-
   private category(draft: ColumnDraft & {family: 'category'}) {
+    const s = this.resolvedStore;
     const suggestion = this.resolvedSuggestion;
     const refusal = this.resolvedSuggestRefusal;
     const chosen = new Set(draft.keys);
-
-    const pick = (v: SuggestValue) => {
-      if (v.title) this.labels = {...this.labels, [v.key]: v.title};
-      this.change(chosen.has(v.key) ? {...draft, keys: draft.keys.filter((k) => k !== v.key)} : {...draft, keys: [...draft.keys, v.key]}, true);
+    const total = this.countedOver(suggestion);
+    const toggle = (key: string) => this.change({...draft, keys: chosen.has(key) ? draft.keys.filter((k) => k !== key) : [...draft.keys, key]}, true);
+    const typed = this.search !== '';
+    // The suggestions show while the box has focus and holds text; the list closes as focus leaves.
+    const rows = typed && this.focused ? (suggestion?.values ?? []) : [];
+    // In the highlight position, a value no item passing the filter carries cannot be lit; one
+    // already lit can still be taken out.
+    const out = (v: SuggestValue) => this.verb === 'highlight' && v.count === 0 && !chosen.has(v.key);
+    // The row the keys act on: the one the arrows reached, else the first that can be chosen.
+    const choosable = rows.filter((v) => !out(v));
+    const active = choosable.find((v) => v.code === this.activeCode) ?? choosable[0] ?? null;
+    const move = (by: 1 | -1) => {
+      if (choosable.length === 0) return;
+      const at = active ? choosable.indexOf(active) : -1;
+      this.activeCode = choosable[(at + by + choosable.length) % choosable.length]!.code;
     };
-    const remove = (key: string) => this.change({...draft, keys: draft.keys.filter((k) => k !== key)}, true);
-
-    const chips =
-      draft.keys.length > 0
-        ? html`<div part="value-chips">
-            ${repeat(
-              draft.keys,
-              (k) => k,
-              (k) => html`<span part="value-chip" class="chip">${this.labels[k] ?? k}<button type="button" aria-label=${`Remove ${k}`} @click=${() => remove(k)}>${icon('close', 12)}</button></span>`
-            )}
-          </div>`
-        : nothing;
-
-    // **The checklist shape** (round 2 of `value-suggestion.md` §5.1): the empty-`q` page said
-    // `more: false`, so the whole visible set is on it and there is nothing a search box would
-    // narrow. A checkbox per value — ticked for a chosen one, native `<input>` keyboard operation,
-    // no entry field and no match span — using the same `pick`/`chips` a lookahead uses, so
-    // `setFilters` is sent the identical draft either way. `aria-labelledby` rather than `for` on
-    // the heading label (`render`): `for` only binds a labelable element (an `input`, not a
-    // `role="group"` div), which is what the lookahead's entry field is and this group is not.
-    if (this.shape === 'checklist') {
-      const rows = suggestion?.values ?? [];
-      // A refusal is defensive here rather than reachable today — a checklist never re-asks, so
-      // nothing on the current epoch can turn a landed page into one — but it costs nothing to
-      // show rather than silently drop should that stop being true.
-      const refusalNote = refusal ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>` : nothing;
-      return html`${chips}<div part="values" class="list" role="group" aria-labelledby="ctl-label">
-        ${repeat(
-          rows,
-          (v) => v.code,
-          (v) => html`<label part="tick" class="item">
-              <input type="checkbox" .checked=${chosen.has(v.key)} @change=${() => pick(v)} aria-label=${v.title ?? v.key} />
-              <span class="t">${this.checklistText(v)}</span>
-            </label>`
-        )}
-      </div>${refusalNote}`;
-    }
-
-    // What is typed is submitted on Enter whether or not it matched a suggestion (contracts
-    // §3.2): a key the page never offered may still be one this principal can filter by, and an
-    // unresolvable one is an empty answer, indistinguishable from one that does not exist — never
-    // a rejected keystroke.
-    const submit = () => {
-      const key = this.search.trim();
-      if (!key || chosen.has(key)) return;
-      this.search = '';
-      this.ask('');
-      this.change({...draft, keys: [...draft.keys, key]}, true);
-    };
-    const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off"
-        aria-label=${`${this.column} value`} .value=${this.search}
+    const field = html`<div class="input">${icon('search', 14)}<input id="ctl" part="entry" type="search" autocomplete="off" placeholder="Type a value"
+        role="combobox" aria-expanded=${rows.length > 0 ? 'true' : 'false'} aria-controls="values" aria-activedescendant=${active ? `value-${active.code}` : nothing}
+        .value=${this.search}
+        @focus=${() => (this.focused = true)}
+        @blur=${() => (this.focused = false)}
         @input=${(e: Event) => {
+          this.focused = true;
           this.search = (e.target as HTMLInputElement).value;
+          this.activeCode = null;
           this.ask(this.search);
         }}
         @keydown=${(e: KeyboardEvent) => {
-          if (e.key === 'Enter') submit();
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            move(e.key === 'ArrowDown' ? 1 : -1);
+          } else if (e.key === 'Enter') {
+            if (active) toggle(active.key);
+          } else if (e.key === 'Escape' && this.search) {
+            e.stopPropagation();
+            this.search = '';
+            this.ask('');
+          }
         }} /></div>`;
 
-    const rows = suggestion?.values ?? [];
+    const option = (v: SuggestValue) => {
+      const left = out(v);
+      const count = v.count;
+      const share = count === undefined || total === null ? null : count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * count) / total));
+      return html`<button type="button" part="tick" role="option" id=${`value-${v.code}`} tabindex="-1" ?data-active=${v === active}
+        aria-selected=${chosen.has(v.key) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
+        @mousedown=${(e: Event) => e.preventDefault()} @click=${() => !left && toggle(v.key)}>
+        <span class="opt">
+          <span class="t"><span class="name">${this.suggestionText(v)}</span>${left ? html`<span class="out">none match</span>` : nothing}</span>
+          ${share === null ? nothing : html`<span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span>`}
+        </span>
+        ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
+      </button>`;
+    };
     const list =
       rows.length > 0
-        ? html`<div part="values" class="list" role="listbox" aria-label=${`${this.column} suggestions`}>
-            ${repeat(
-              rows,
-              (v) => v.code,
-              (v) => html`<button type="button" part="tick" class="item" role="option" aria-selected=${chosen.has(v.key) ? 'true' : 'false'} @click=${() => pick(v)}>
-                  <span class="t">${this.suggestionText(v)}</span>
-                </button>`
-            )}
+        ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        : nothing;
+    const top = this.topValues();
+    const topKeys = new Set(top?.values.map((v) => v.key) ?? []);
+    const topList =
+      top && top.values.length > 0
+        ? html`<div part="top" role="group" aria-label=${`Commonest ${columnCaption(this.column)} values`}>
+            ${top.values.map((v) => {
+              const title = v.title ?? keyTitle(s, this.column, v.key);
+              const on = chosen.has(v.key);
+              const share = top.total > 0 ? (v.count === 0 ? 0 : Math.min(100, Math.max(BAR_FLOOR, (100 * v.count) / top.total))) : 0;
+              return html`<label part="top-value" data-key=${v.key}>
+                <input type="checkbox" .checked=${on} @change=${() => toggle(v.key)} />
+                <span class="opt"><span class="name" title=${v.key}>${title}</span><span class="track"><span part="bar" style=${`display:block;width:${share.toFixed(1)}%`}></span></span></span>
+                <span part="value-count">${v.count.toLocaleString('en-GB')}</span>
+              </label>`;
+            })}
           </div>`
         : nothing;
-
-    const note = refusal
-      ? html`<span part="refusal" class="xs">${refusal.code}: values not listable</span>`
-      : suggestion === null
-        ? html`<span class="skel" aria-hidden="true"></span>`
-        : suggestion.more
-          ? html`<span part="more" class="xs">type more to narrow</span>`
-          : nothing;
-
-    return html`${field}${chips}${list}${note}`;
+    const note = !typed
+      ? nothing
+      : refusal
+        ? html`<span part="refusal" data-code=${refusal.code}><span class="dot refuse"></span>Values unavailable</span>`
+        : suggestion === null
+          ? html`<span class="skel" aria-hidden="true"></span>`
+          : rows.length === 0
+            ? html`<span part="more">No value starts with that</span>`
+            : suggestion.more
+              ? html`<span part="more">Type more to narrow the list</span>`
+              : nothing;
+    const rest = draft.keys.filter((key) => !topKeys.has(key));
+    const chips =
+      rest.length > 0
+        ? html`<div class="chosen">
+            ${rest.map((key) => {
+              const title = keyTitle(s, this.column, key);
+              return html`<span part="chosen" class="chip" data-verb=${this.verb}>${title}<button type="button" aria-label=${`Remove ${title} from ${columnCaption(this.column)}`} @click=${() => toggle(key)}>${icon('close', 12)}</button></span>`;
+            })}
+          </div>`
+        : nothing;
+    return html`<div class="combo">${field}${list}</div>${note}${topList}${chips}`;
   }
 
   private numeric(draft: {family: 'numeric'; gte: number | null; lte: number | null}) {
     const column = this.resolvedStore?.get('meta')?.declaredScalars.find((c) => c.name === this.column);
     const date = column?.arrowType === 'timestamp_us';
-    const toValue = (raw: string): number | null => {
-      if (raw === '') return null;
-      const n = date ? Date.parse(raw) * 1000 : Number(raw);
-      return Number.isFinite(n) ? n : null;
+    const caption = columnCaption(this.column);
+    const bound = (which: 'gte' | 'lte') => {
+      const held = draft[which];
+      const invalid = this.invalid[which];
+      const shown = invalid ?? (held === null ? '' : date ? shortDateText(held) : String(held));
+      const read = (raw: string): number | null | undefined => {
+        if (raw.trim() === '') return null;
+        const n = date ? parseDateText(raw, which === 'lte') : Number(raw);
+        return n !== null && Number.isFinite(n) ? n : undefined;
+      };
+      const commit = (e: Event) => {
+        const raw = (e.target as HTMLInputElement).value;
+        const value = read(raw);
+        if (value === undefined) {
+          this.invalid = {...this.invalid, [which]: raw};
+          return;
+        }
+        const {[which]: _dropped, ...rest} = this.invalid;
+        this.invalid = rest;
+        if (value !== held) this.change({...draft, [which]: value} as ColumnDraft, true);
+        else this.requestUpdate();
+      };
+      return html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" type=${date ? 'text' : 'number'} inputmode=${date ? nothing : 'decimal'}
+        placeholder=${date ? (which === 'gte' ? 'Earliest' : 'Latest') : which === 'gte' ? 'Lowest' : 'Highest'} .value=${shown}
+        aria-label=${`${caption} ${which === 'gte' ? 'from' : 'to'}`} aria-invalid=${invalid !== undefined ? 'true' : 'false'}
+        @change=${commit} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && commit(e)} />`;
     };
-    const fromValue = (v: number | null): string => (v === null ? '' : date ? new Date(v / 1000).toISOString().slice(0, 10) : String(v));
-    const bound = (which: 'gte' | 'lte') =>
-      html`<input id=${which === 'gte' ? 'ctl' : nothing} part="entry" class="grow mono" type=${date ? 'date' : 'number'}
-        .value=${fromValue(draft[which])} aria-label=${`${this.column} ${which === 'gte' ? 'from' : 'to'}`}
-        @change=${(e: Event) => this.change({...draft, [which]: toValue((e.target as HTMLInputElement).value)} as ColumnDraft, true)} />`;
-    return html`<div class="ctl-row">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
+    return html`<div class="range">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
   }
 }
 

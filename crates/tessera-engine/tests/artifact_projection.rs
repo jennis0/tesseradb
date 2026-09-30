@@ -23,7 +23,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
-use tessera_corpus::{Corpus, Grant, BAY_VALUES};
+use tessera_corpus::{Corpus, BAY_VALUES};
 use tessera_engine::filter::{FilterExpr, FilterOperand};
 use tessera_engine::{ArtifactOut, ArtifactRows, Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::IncomingArtifact;
@@ -35,7 +35,6 @@ use tessera_types::{AttrLocalId, EntityId};
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 const TREED: &str = "clusters/tree";
 const PRUNED: &str = "clusters/pruned";
@@ -65,16 +64,6 @@ fn tag_is_absent() -> FilterExpr {
         column: "tag".into(),
         operand: FilterOperand::TextEquals("kw-nothing".into()),
     }
-}
-
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 fn declaration(name: &str, kind: HierarchyKind, prune_children: bool) -> LayerDeclaration {
@@ -214,7 +203,7 @@ fn artifacts(
     filter: Option<FilterExpr>,
     rows: ArtifactRows,
 ) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize)
         .layers(LayerSelection::Named(layers))
         .artifact_budget(budget)

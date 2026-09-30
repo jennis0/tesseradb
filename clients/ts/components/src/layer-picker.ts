@@ -1,4 +1,4 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {isFilterLayer, layerEntries, type LayerEntry} from '@tesseradb/client';
 import {TesseraElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -6,17 +6,24 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-layer-picker>` — which annotation layers the map draws, from `meta.layers` (design
- * §5.3 tier 2, decision 0096): the LAYERS checklist of the boards, one entry per layer **with its
- * closure** — a clustering's labels are a second layer that `depends_on` it, so one entry names
- * both and the store names every layer in it in the request. Never a count of a layer's
- * artifacts: the wire carries none.
+ * A checkbox per annotation layer in `meta.layers`, choosing which layers the map draws. A layer
+ * that others depend on (a clustering and its labels) is one entry that turns on the whole group;
+ * the entry's tooltip names the layers in it. A filter layer has nothing to draw and gets no
+ * checkbox: a quiet note beneath the list names the filter layers, which are applied as clauses
+ * through `<tessera-hierarchy>`.
  *
- * **A filter layer is still a layer** (`highlight-and-hierarchy.md` §5.4, owner ruling
- * 2026-09-02): a layer declaring `computed = []` is listed here, in its own group and with no
- * checkbox, because there is nothing to draw and a draw toggle would offer one. It is reached
- * through `<tessera-hierarchy>` and applied as a clause. It is never named in a viewport
- * request's `layers`, which is the store's own rule and not this element's.
+ * @summary Which annotation layers the map draws.
+ * @tagname tessera-layer-picker
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-layerchange']>} tessera-layerchange - A checkbox
+ *   changed, with the layers now drawn.
+ * @csspart title - The heading.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - The words "View refused", with `data-code`, in the refused state.
+ * @csspart entry - One layer that draws, with `data-layer`.
+ * @csspart name - A layer's title, or its name where it declares none.
+ * @csspart note - The note naming the filter layers, such as "Venues can be used as a filter
+ *   only.", with `data-layers` listing their names.
  */
 export class TesseraLayerPicker extends TesseraElement {
   static override styles = [
@@ -30,20 +37,15 @@ export class TesseraLayerPicker extends TesseraElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        height: 26px;
+        min-height: 28px;
         cursor: pointer;
       }
-      [part='group'] {
-        margin: 10px 0 2px;
-      }
-      [part='entry'][data-filter-layer] {
-        cursor: default;
-        color: var(--tessera-ink-2);
-        padding-left: 22px;
+      [part='note'] {
+        margin: 8px 0 0;
+        font-size: 12px;
+        color: var(--_tessera-ink-3);
       }
       [part='name'] {
-        font-family: var(--tessera-font-mono);
-        font-size: 12px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -73,7 +75,7 @@ export class TesseraLayerPicker extends TesseraElement {
     emit(this, 'tessera-layerchange', {layers: roots});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const heading = html`<h2 part="title">Layers</h2>`;
     const meta = s?.get('meta') ?? null;
@@ -87,22 +89,21 @@ export class TesseraLayerPicker extends TesseraElement {
         ${drawn.map(
           (e) => html`<label part="entry" class="check" data-layer=${e.root.name} title=${e.closure.length > 1 ? e.closure.join(' + ') : nothing}>
             <input type="checkbox" .checked=${on.has(e.root.name)} @change=${(ev: Event) => this.toggle(e, (ev.target as HTMLInputElement).checked)} />
-            <span part="name">${e.root.name}</span>
+            <span part="name">${e.root.title || e.root.name}</span>
           </label>`
         )}
       </div>
       ${filters.length > 0
-        ? html`<div part="group" class="xs muted">Filter layers</div>
-            <div class="col">
-              ${filters.map(
-                (e) => html`<div part="entry" data-layer=${e.root.name} data-filter-layer title="Listed, not drawn — reached through the hierarchy panel and applied as a clause">
-                  <span part="name">${e.root.name}</span>
-                </div>`
-              )}
-            </div>`
+        ? html`<p part="note" data-layers=${filters.map((e) => e.root.name).join(' ')}>${filterNote(filters.map((e) => e.root.title || e.root.name))}</p>`
         : nothing}
     </div>`;
   }
+}
+
+/** "Venues can be used as a filter only.", or for several, "Venues and Countries can be used as filters only." */
+function filterNote(titles: string[]): string {
+  if (titles.length === 1) return `${titles[0]} can be used as a filter only.`;
+  return `${titles.slice(0, -1).join(', ')} and ${titles.at(-1)} can be used as filters only.`;
 }
 
 attachContextRoot();

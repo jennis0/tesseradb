@@ -30,7 +30,7 @@ use std::sync::Arc;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::tiler::{ScalarType, ScalarValue};
 
 use crate::manifest::{
     DeclaredScalar, ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyExtension,
@@ -95,6 +95,52 @@ impl std::fmt::Display for MintError {
 
 impl std::error::Error for MintError {}
 
+/// One category cell resolved against its vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// The key's bound code, or [`ABSENT_CODE`] for a null cell.
+    Code(u32),
+    /// A key a discovered vocabulary binds no code to yet, for the caller to mint.
+    Novel(&'a str),
+}
+
+/// Why a category cell has no code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unresolved {
+    EmptyKey,
+    /// A key a declared vocabulary does not list.
+    Unlisted { key: String, vocabulary: String },
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::EmptyKey => write!(
+                f,
+                "carries the empty string, which is not a value key; use null for an item with no \
+                 value"
+            ),
+            Unresolved::Unlisted { key, vocabulary } => write!(
+                f,
+                "carries value '{key}', which declared vocabulary '{vocabulary}' does not list; \
+                 use a key it lists"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Unresolved {}
+
+/// A code at the width its category column is declared at: `u8`, `u16` or `u32`, into which the
+/// vocabulary's codes fit.
+pub fn code_value(width: ScalarType, code: u32) -> ScalarValue {
+    match width {
+        ScalarType::U8 => ScalarValue::U8(code as u8),
+        ScalarType::U16 => ScalarValue::U16(code as u16),
+        _ => ScalarValue::U32(code),
+    }
+}
+
 /// A binding that contradicts one already held — the same key at a different code, or the same
 /// code under a different key.
 ///
@@ -145,6 +191,26 @@ impl std::fmt::Display for BindingConflict {
 }
 
 impl std::error::Error for BindingConflict {}
+
+/// Why a declared vocabulary could not be given its codes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclareError {
+    /// A pinned code clashes with another pin or with a reserved code.
+    Conflict(BindingConflict),
+    /// A key is empty, or the width has no code left to draw.
+    Mint(MintError),
+}
+
+impl std::fmt::Display for DeclareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeclareError::Conflict(e) => e.fmt(f),
+            DeclareError::Mint(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DeclareError {}
 
 /// Whether [`VocabularyMinter::mint`] found the key or created it.
 ///
@@ -205,6 +271,17 @@ pub struct VocabularyMinter {
     /// alike. [`ABSENT_CODE`] is excluded by the draw itself rather than held here, so that a
     /// vocabulary's assigned count is the number of codes it has actually spent.
     assigned: BTreeSet<u32>,
+    /// Bindings and titles laid down since [`Self::seed_manifest`] returned — what a publication
+    /// could owe `vocabulary_extensions` beyond the bundle's own manifest.
+    ///
+    /// **A count, not the keys.** [`Vocabularies::extensions_beyond`] walks every binding to find
+    /// what a manifest does not already carry, and it is called at every publication; on a corpus
+    /// with half a million bound keys that was 188 ms a publication, on the write thread, to
+    /// discover nothing. Zero here says there is nothing to discover and the walk is skipped. The
+    /// keys themselves would answer the same question without the fallback walk, and a build mints
+    /// every value it discovers through `bind`, so holding them would put an interned key and an
+    /// ordered insert per value on the build's streaming path to buy a publication's time.
+    beyond_manifest: u64,
 }
 
 impl VocabularyMinter {
@@ -228,7 +305,32 @@ impl VocabularyMinter {
             by_code: HashMap::new(),
             titles: BTreeMap::new(),
             assigned: BTreeSet::new(),
+            beyond_manifest: 0,
         }
+    }
+
+    /// A vocabulary as declared, at a build or at a running service: `reserved` set aside, each
+    /// `pinned` binding held, and a code drawn for every other key of `keys` in turn.
+    pub fn declared<'a>(
+        name: impl Into<String>,
+        kind: VocabularyKind,
+        visibility: Visibility,
+        width: ScalarType,
+        reserved: &[u32],
+        pinned: impl IntoIterator<Item = (&'a str, u32)>,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, DeclareError> {
+        let mut minter = VocabularyMinter::new(name, kind, visibility, width);
+        for &code in reserved {
+            minter.seed_reserved(code);
+        }
+        for (key, code) in pinned {
+            minter.seed_value(key, code).map_err(DeclareError::Conflict)?;
+        }
+        for key in keys {
+            minter.mint(key).map_err(DeclareError::Mint)?;
+        }
+        Ok(minter)
     }
 
     /// Seed one already-durable binding. Idempotent for an identical one, so seed-then-replay is
@@ -272,6 +374,7 @@ impl VocabularyMinter {
         let key: Arc<str> = Arc::from(key);
         self.codes.insert(Arc::clone(&key), code);
         self.by_code.insert(code, key);
+        self.beyond_manifest += 1;
     }
 
     /// Seed a retired code (§3.4's `reserved`). Spent, so never drawn, but bound to no key.
@@ -297,6 +400,9 @@ impl VocabularyMinter {
         for &code in &vocabulary.reserved {
             self.seed_reserved(code);
         }
+        // Everything above came out of the manifest, so none of it is owed to an extension. This
+        // runs once, before any extension is seeded and before the first mint.
+        self.beyond_manifest = 0;
         Ok(())
     }
 
@@ -312,27 +418,6 @@ impl VocabularyMinter {
 
     pub fn width(&self) -> ScalarType {
         self.width
-    }
-
-    /// Bound this minter's code space to `width`, for a column declared at a running service over
-    /// a vocabulary no column named before (`ingest.md` §1.3).
-    ///
-    /// A vocabulary no column names is seeded at `u32`, the widest domain, and the first column
-    /// to name it is what fixes the width the rows store; the same rule a build applies through
-    /// the columns it compiles (`Vocabularies::seed`). Refused where a code already bound would
-    /// not fit: narrowing past a bound code would leave a row whose stored code the column cannot
-    /// hold, and the offending code is returned so the refusal can name it. Widening is never
-    /// asked for, because a column that names the vocabulary already fixed the width and a
-    /// differing declaration is refused before this is reached.
-    pub fn narrow_to(&mut self, width: ScalarType) -> std::result::Result<(), u32> {
-        let max = usable_max(width);
-        if let Some(&code) = self.assigned.iter().next_back() {
-            if code > max {
-                return Err(code);
-            }
-        }
-        self.width = width;
-        Ok(())
     }
 
     /// Whether a key this minter does not carry is a typo or a value waiting for a code.
@@ -351,6 +436,28 @@ impl VocabularyMinter {
     /// postings, a visibility consequence.
     pub fn code_of(&self, key: &str) -> Option<u32> {
         self.codes.get(key).copied()
+    }
+
+    /// One category cell, `None` where it is null. A declared vocabulary refuses a key it does
+    /// not list, and a discovered one returns it as [`Resolved::Novel`]; the empty string is
+    /// refused by either.
+    pub fn resolve<'a>(&self, key: Option<&'a str>) -> Result<Resolved<'a>, Unresolved> {
+        let Some(key) = key else {
+            return Ok(Resolved::Code(ABSENT_CODE));
+        };
+        if key.is_empty() {
+            return Err(Unresolved::EmptyKey);
+        }
+        if let Some(code) = self.code_of(key) {
+            return Ok(Resolved::Code(code));
+        }
+        match self.kind {
+            VocabularyKind::Declared => Err(Unresolved::Unlisted {
+                key: key.to_string(),
+                vocabulary: self.name.clone(),
+            }),
+            VocabularyKind::Discovered => Ok(Resolved::Novel(key)),
+        }
     }
 
     /// The key `code` is bound to, or `None` where nothing is — an unbound code, a `reserved`
@@ -383,6 +490,11 @@ impl VocabularyMinter {
         self.codes.iter().map(|(k, &c)| (&**k, c))
     }
 
+    /// Whether anything is bound or titled beyond what [`Self::seed_manifest`] established.
+    pub fn has_bindings_beyond_manifest(&self) -> bool {
+        self.beyond_manifest > 0
+    }
+
     /// This value's presentation title, where an author wrote one. `None` is ordinary — the key is
     /// the display fallback, and a discovered value never has one.
     pub fn title_of(&self, key: &str) -> Option<&str> {
@@ -401,6 +513,8 @@ impl VocabularyMinter {
         // Keyed by the `Arc` the binding interned, so a title costs no second copy of its key.
         if let Some((interned, _)) = self.codes.get_key_value(key) {
             self.titles.insert(Arc::clone(interned), title);
+            // A title a manifest does not carry is owed to an extension exactly as a binding is.
+            self.beyond_manifest += 1;
         }
     }
 
@@ -439,7 +553,7 @@ impl VocabularyMinter {
     /// Two branches, both uniform over exactly the free set. The mask makes the raw draw uniform
     /// over `0..=max` without modulo bias; `0` and the assigned set are rejected.
     fn draw(&self) -> Result<u32, MintError> {
-        let max = usable_max(self.width);
+        let max = crate::declaration::max_code(self.width);
         let free = u64::from(max) - self.assigned.len() as u64;
         if free == 0 {
             return Err(MintError::Exhausted {
@@ -483,9 +597,7 @@ pub enum SeedError {
     /// A column names a vocabulary the manifest does not carry. Its codes would decode to nothing,
     /// so the bundle does not open rather than serving marks of unknowable colour.
     UndeclaredVocabulary { column: String, vocabulary: String },
-    /// Two columns share a vocabulary at different widths. One code space, and one of the columns
-    /// cannot hold the other's codes (§3.9) — caught at build, so reaching it means a hand-edited
-    /// or corrupt manifest.
+    /// A column stores its vocabulary at a width other than the vocabulary's own.
     WidthDisagreement {
         vocabulary: String,
         column: String,
@@ -514,9 +626,7 @@ impl std::fmt::Display for SeedError {
                 other_width,
             } => write!(
                 f,
-                "vocabulary '{vocabulary}' is shared by columns declared {} and {} (at '{column}'). \
-                 A shared vocabulary is one code space, and one column cannot hold the other's \
-                 codes (per-point-attributes §3.9)",
+                "vocabulary '{vocabulary}' is declared {} and column '{column}' stores it as {}",
                 other_width.arrow_type_name(),
                 width.arrow_type_name()
             ),
@@ -547,79 +657,64 @@ impl From<BindingConflict> for SeedError {
 ///
 /// **Its completeness *is* the never-reuse invariant.** Every home must be represented before the
 /// first draw; see this module's header.
+/// **Each minter is behind an `Arc`, so cloning this is a table of pointers.** A commit window
+/// takes a mutable copy of the whole set to mint into and publishes it if the window survives;
+/// almost every window binds no novel key and so changes no minter. [`Self::get_mut`] copies the
+/// one minter it hands out, and only where a published generation still shares it.
 #[derive(Debug, Clone, Default)]
 pub struct Vocabularies {
-    by_name: BTreeMap<String, VocabularyMinter>,
+    by_name: BTreeMap<String, Arc<VocabularyMinter>>,
 }
 
 impl Vocabularies {
     /// Assemble the live view from a bundle's `MANIFEST.json` and the served
     /// `SEGMENTS-<n>.json`'s extensions.
     ///
-    /// The width comes from the `declared_scalars` entry that names the vocabulary, not from the
-    /// vocabulary itself: a value set is a set of keys and codes, and what bounds the code space is
-    /// the column that stores them.
+    /// A category column must store its vocabulary's width.
     pub fn seed(
         vocabularies: &[ManifestVocabulary],
         declared_scalars: &[DeclaredScalar],
         extensions: &[VocabularyExtension],
     ) -> std::result::Result<Self, SeedError> {
-        let mut widths: BTreeMap<&str, (ScalarType, &str)> = BTreeMap::new();
         for scalar in declared_scalars {
             let Some(name) = scalar.vocabulary.as_deref() else {
                 continue;
             };
-            if !vocabularies.iter().any(|v| v.name == name) {
+            let Some(vocabulary) = vocabularies.iter().find(|v| v.name == name) else {
                 return Err(SeedError::UndeclaredVocabulary {
                     column: scalar.name.clone(),
                     vocabulary: name.to_string(),
                 });
-            }
-            match widths.get(name) {
-                Some(&(width, _)) if width != scalar.arrow_type => {
-                    return Err(SeedError::WidthDisagreement {
-                        vocabulary: name.to_string(),
-                        column: scalar.name.clone(),
-                        width: scalar.arrow_type,
-                        other_width: width,
-                    });
-                }
-                _ => {
-                    widths.insert(name, (scalar.arrow_type, scalar.name.as_str()));
-                }
+            };
+            if vocabulary.width != scalar.arrow_type {
+                return Err(SeedError::WidthDisagreement {
+                    vocabulary: name.to_string(),
+                    column: scalar.name.clone(),
+                    width: scalar.arrow_type,
+                    other_width: vocabulary.width,
+                });
             }
         }
 
         let mut by_name = BTreeMap::new();
         for vocabulary in vocabularies {
-            // **A column that names the vocabulary is the authority; the declaration's own width
-            // is the answer where none does.** A built vocabulary no column names is carried but
-            // unusable, so either answer would serve; one declared at a running service is minted
-            // into before any column names it (`ingest.md` §1.3), and taking the widest domain
-            // there would draw codes the column later declared for it cannot hold. A width this
-            // build cannot parse is `u32`, the widest domain, which can only fail to exhaust and
-            // never to collide.
-            let width = widths
-                .get(vocabulary.name.as_str())
-                .map(|&(w, _)| w)
-                .or_else(|| ScalarType::parse(&vocabulary.width))
-                .unwrap_or(ScalarType::U32);
             let mut minter = VocabularyMinter::new(
                 vocabulary.name.clone(),
                 vocabulary.kind,
                 vocabulary.visibility,
-                width,
+                vocabulary.width,
             );
             minter.seed_manifest(vocabulary)?;
-            by_name.insert(vocabulary.name.clone(), minter);
+            by_name.insert(vocabulary.name.clone(), Arc::new(minter));
         }
 
         for extension in extensions {
-            let minter = by_name.get_mut(&extension.name).ok_or_else(|| {
-                SeedError::ExtensionWithoutVocabulary {
+            let minter = by_name
+                .get_mut(&extension.name)
+                .map(Arc::make_mut)
+                .ok_or_else(|| SeedError::ExtensionWithoutVocabulary {
                     vocabulary: extension.name.clone(),
-                }
-            })?;
+                })?;
             for value in &extension.values {
                 minter.seed_value(&value.key, value.code)?;
                 // **The extension's title wins over the manifest's**, the manifest having been
@@ -635,7 +730,7 @@ impl Vocabularies {
     }
 
     pub fn get(&self, name: &str) -> Option<&VocabularyMinter> {
-        self.by_name.get(name)
+        self.by_name.get(name).map(|minter| &**minter)
     }
 
     /// Add a vocabulary declared while the service runs (`ingest.md` §1.3), replacing any minter
@@ -646,11 +741,14 @@ impl Vocabularies {
     /// caller has already refused a redeclaration under a different identity, so a replacement
     /// here is the same vocabulary seen twice.
     pub fn insert(&mut self, minter: VocabularyMinter) {
-        self.by_name.insert(minter.name().to_string(), minter);
+        self.by_name
+            .insert(minter.name().to_string(), Arc::new(minter));
     }
 
+    /// The minter under `name`, ready to be mutated: it is copied here where another generation
+    /// still holds it, so a caller that only reads a binding should use [`Self::get`].
     pub fn get_mut(&mut self, name: &str) -> Option<&mut VocabularyMinter> {
-        self.by_name.get_mut(name)
+        self.by_name.get_mut(name).map(Arc::make_mut)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -683,6 +781,11 @@ impl Vocabularies {
     ) -> Vec<VocabularyExtension> {
         let mut out = Vec::new();
         for (name, minter) in &self.by_name {
+            // A vocabulary that has bound nothing and retitled nothing since its manifest seed
+            // owes an extension nothing, so its bindings are not walked at all.
+            if !minter.has_bindings_beyond_manifest() {
+                continue;
+            }
             let held: BTreeMap<&str, Option<&str>> = vocabularies
                 .iter()
                 .find(|v| &v.name == name)
@@ -760,16 +863,6 @@ pub fn fold_extensions_into(
     }
 }
 
-/// The highest usable code at `width` — also the mask that makes a raw `u32` draw uniform over the
-/// width's domain. Code 0 is reserved, so the count of usable codes equals this value.
-fn usable_max(width: ScalarType) -> u32 {
-    match width {
-        ScalarType::U8 => u32::from(u8::MAX),
-        ScalarType::U16 => u32::from(u16::MAX),
-        _ => u32::MAX,
-    }
-}
-
 /// A uniform `0..n`, rejecting the biased tail rather than taking a plain remainder.
 fn uniform_below(rng: &mut OsRng, n: u64) -> u64 {
     debug_assert!(n > 0);
@@ -819,7 +912,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: (1..=100)
                 .map(|c| ManifestVocabularyValue {
                     key: format!("built-{c}"),
@@ -967,6 +1060,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         }
     }
 
@@ -975,7 +1069,7 @@ mod tests {
             name: name.to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: values
                 .iter()
                 .map(|(key, code)| ManifestVocabularyValue {
@@ -988,33 +1082,14 @@ mod tests {
         }
     }
 
-    /// The width bounding a vocabulary's code space is the *column's*, not the vocabulary's — a
-    /// value set is keys and codes, and what bounds the space is what stores it.
     #[test]
-    fn a_vocabularys_width_comes_from_the_column_that_stores_it() {
-        let v = Vocabularies::seed(
-            &[vocabulary("departments", &[("ops", 9)])],
-            &[declared("department", ScalarType::U8, Some("departments"))],
-            &[],
-        )
-        .expect("a consistent bundle seeds");
-        assert_eq!(v.get("departments").unwrap().width(), ScalarType::U8);
-        assert_eq!(v.get("departments").unwrap().code_of("ops"), Some(9));
-    }
-
-    /// §3.9: a shared vocabulary is one code space, so two widths over it is one column unable to
-    /// hold the other's codes. Caught at build; reaching it means a hand-edited manifest.
-    #[test]
-    fn two_widths_over_one_vocabulary_refuse_to_open() {
+    fn a_column_storing_another_width_than_its_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[vocabulary("shared", &[])],
-            &[
-                declared("a", ScalarType::U8, Some("shared")),
-                declared("b", ScalarType::U16, Some("shared")),
-            ],
+            &[declared("a", ScalarType::U8, Some("shared"))],
             &[],
         )
-        .expect_err("one code space cannot have two widths");
+        .expect_err("the vocabulary is u32 and the column u8");
         assert!(matches!(err, SeedError::WidthDisagreement { .. }), "{err}");
     }
 
@@ -1024,7 +1099,7 @@ mod tests {
     fn a_column_naming_no_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[],
-            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[],
         )
         .expect_err("a category with no value set is not openable");
@@ -1042,7 +1117,7 @@ mod tests {
         let built = vec![vocabulary("departments", &[("ops", 9)])];
         let mut v = Vocabularies::seed(
             &built,
-            &[declared("department", ScalarType::U16, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[],
         )
         .unwrap();
@@ -1069,7 +1144,7 @@ mod tests {
         // which is what makes a restart lossless.
         let reopened = Vocabularies::seed(
             &built,
-            &[declared("department", ScalarType::U16, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &extensions,
         )
         .expect("the two homes agree");
@@ -1077,6 +1152,18 @@ mod tests {
         assert_eq!(
             reopened.get("departments").unwrap().code_of("k9-unit"),
             Some(minted.code())
+        );
+        // And it still owes the extension those bindings came from. A publication after a restart
+        // carries `vocabulary_extensions` forward, so a view that offered nothing here would drop
+        // every binding made since the build at the first publication after one.
+        assert_eq!(
+            reopened
+                .extensions_beyond(&built)
+                .iter()
+                .flat_map(|extension| extension.values.iter())
+                .map(|value| (value.key.clone(), value.code))
+                .collect::<Vec<_>>(),
+            vec![("k9-unit".to_string(), minted.code())]
         );
     }
 
@@ -1086,7 +1173,7 @@ mod tests {
     fn an_extension_with_no_vocabulary_refuses_to_open() {
         let err = Vocabularies::seed(
             &[vocabulary("departments", &[])],
-            &[declared("department", ScalarType::U8, Some("departments"))],
+            &[declared("department", ScalarType::U32, Some("departments"))],
             &[VocabularyExtension {
                 name: "ghosts".to_string(),
                 values: vec![ManifestVocabularyValue {
@@ -1142,7 +1229,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u16".to_string(),
+            width: ScalarType::U16,
             values: vec![ManifestVocabularyValue {
                 key: "alpha".to_string(),
                 code: alpha,
@@ -1183,7 +1270,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u16".to_string(),
+            width: ScalarType::U16,
             values: vec![ManifestVocabularyValue {
                 key: "alpha".to_string(),
                 code: 41,
@@ -1239,7 +1326,7 @@ mod tests {
             name: "departments".to_string(),
             kind: VocabularyKind::Declared,
             visibility: Visibility::Derived,
-            width: "u32".to_string(),
+            width: ScalarType::U32,
             values: vec![ManifestVocabularyValue {
                 key: "ops".to_string(),
                 code: 4711,
@@ -1324,5 +1411,44 @@ mod tests {
         ));
         // Code 0 stays absent's, which is why a u8 holds 255 values and not 256.
         assert!(m.bindings().all(|(_, code)| code != ABSENT_CODE));
+    }
+
+    #[test]
+    fn a_cell_resolves_to_its_code_absence_or_a_novel_key_by_the_vocabulary_kind() {
+        let declared = VocabularyMinter::declared(
+            "v",
+            VocabularyKind::Declared,
+            Visibility::Public,
+            ScalarType::U16,
+            &[],
+            [("ops", 7)],
+            [],
+        )
+        .unwrap();
+        assert_eq!(declared.resolve(Some("ops")), Ok(Resolved::Code(7)));
+        assert_eq!(declared.resolve(None), Ok(Resolved::Code(ABSENT_CODE)));
+        assert!(matches!(
+            declared.resolve(Some("k9")),
+            Err(Unresolved::Unlisted { .. })
+        ));
+        assert_eq!(declared.resolve(Some("")), Err(Unresolved::EmptyKey));
+
+        let mut discovered = VocabularyMinter::new(
+            "v",
+            VocabularyKind::Discovered,
+            Visibility::Public,
+            ScalarType::U8,
+        );
+        assert_eq!(discovered.resolve(Some("k9")), Ok(Resolved::Novel("k9")));
+        assert_eq!(discovered.resolve(Some("")), Err(Unresolved::EmptyKey));
+        let code = discovered.mint("k9").unwrap().code();
+        assert_eq!(discovered.resolve(Some("k9")), Ok(Resolved::Code(code)));
+    }
+
+    #[test]
+    fn a_code_takes_its_columns_width() {
+        assert_eq!(code_value(ScalarType::U8, 200), ScalarValue::U8(200));
+        assert_eq!(code_value(ScalarType::U16, 60_000), ScalarValue::U16(60_000));
+        assert_eq!(code_value(ScalarType::U32, 70_000), ScalarValue::U32(70_000));
     }
 }

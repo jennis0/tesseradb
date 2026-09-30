@@ -42,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "conformance"))
 
 @pytest.fixture(scope="session")
 def catalogue_bundle_root() -> Path:
-    """The adversarial mask catalogue's bundle, built once per machine at a fixed path."""
+    """The adversarial mask catalogue's bundle, built once per `tessera` binary."""
     from oracle.catalogue import build_catalogue_bundle  # noqa: PLC0415
 
     root, _fx = build_catalogue_bundle()
@@ -55,12 +55,11 @@ def catalogue_bundle(catalogue_bundle_root: Path):
 
     Attached, not optional: `columns.arrow` stores a residual rather than coordinates, so the
     oracle's geometry comes from the points file the build consumed and a driver has to supply it
-    (`harness.open_bundle_with_source`).
+    (`catalogue.open_catalogue_bundle`).
     """
-    from oracle.catalogue import catalogue_points_path  # noqa: PLC0415
-    from oracle.harness import open_bundle_with_source  # noqa: PLC0415
+    from oracle.catalogue import open_catalogue_bundle  # noqa: PLC0415
 
-    return open_bundle_with_source(catalogue_bundle_root, catalogue_points_path())
+    return open_catalogue_bundle(catalogue_bundle_root)
 
 
 @pytest.fixture(scope="session")
@@ -77,12 +76,12 @@ def catalogue_filter_columns(catalogue_bundle):
     entity space. Those coincided until decision 0073 made the within-signature tiebreak the Morton
     code, and the equality was written into this docstring as something `verify()` re-derived — it
     did not: its block check compares sets, and a within-block permutation preserves one. Joining
-    through `Bundle.entities_by_source` is what makes each entity's planted value its own.
+    through `catalogue.entities_by_source` is what makes each entity's planted value its own.
     """
     from oracle import catalogue as cat  # noqa: PLC0415
     from oracle.filters import CategoryColumn, KeywordColumn  # noqa: PLC0415
 
-    entity_of = catalogue_bundle.entities_by_source()
+    entity_of = cat.entities_by_source(catalogue_bundle)
 
     def planted(generate):
         """`entity -> value` for every source the generator gives a value to."""
@@ -115,22 +114,15 @@ def catalogue_filter_columns(catalogue_bundle):
 
 @pytest.fixture(scope="session")
 def private_catalogue_bundle(tmp_path_factory, catalogue_bundle_root: Path):
-    """A factory for **private copies** of the catalogue bundle, one per server that will accept a
-    control operation.
+    """A factory for private copies of the catalogue bundle. Every server over the catalogue gets
+    its own.
 
-    An accepted deny is not server-local state. The overlay is published *into the bundle prefix*
-    as a new `SEGMENTS-<n>.json` carrying `deny` and `tombstones` (contracts §2.3; the loader
-    applies it to the initial overlay and WAL replay unions on top), so a private cache directory
-    and a private WAL isolate nothing — the deny lane does not go there. A server pointed at the
-    shared cached fixture therefore rewrites the fixture that every later module, and every later
-    run on this machine, reads. That is `(checkout, /tmp state)` deciding whether the suite is
-    green, arriving by a second route; the receipt closed the first.
+    A server writes into its bundle root: an accepted deny or ingest is published there, not only
+    into its WAL and cache. And the server holds an exclusive lock on the root while it runs, so a
+    second server over the same root refuses to start. A copy per server keeps each server's writes
+    to itself and lets any number run at once.
 
-    **One copy per server, not per module.** Two servers sharing a copy would compose each other's
-    denies, which is the same failure at a shorter range.
-
-    The *oracle* side keeps reading the pristine root: the copy is byte-identical at the moment it
-    is made, and comparing against a bundle the engine is free to mutate is the thing being fixed.
+    The oracle keeps reading the pristine root, which no server is given.
     """
     def make(label: str) -> Path:
         dest = tmp_path_factory.mktemp(f"bundle-{label}") / "bundle-catalogue"
@@ -141,7 +133,7 @@ def private_catalogue_bundle(tmp_path_factory, catalogue_bundle_root: Path):
 
 
 @pytest.fixture(scope="session")
-def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_server(tmp_path_factory, private_catalogue_bundle):
     """θ **saturated** — selection reduces to "serve every visible row up to the cap".
 
     Right for the clauses that are not θ: the floor, the cap, and the ordering. With θ live every
@@ -151,13 +143,13 @@ def catalogue_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir)
+    srv, proc = spawn_server(private_catalogue_bundle("serve"), tmp_dir)
     yield srv
     stop_server(proc)
 
 
 @pytest.fixture(scope="session")
-def catalogue_capped_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_capped_server(tmp_path_factory, private_catalogue_bundle):
     """`k_max_marks = 128` — §7.2's *K*<sub>max</sub>, at the value the design actually names.
 
     Every other server in this suite defaults it to 1,000,000 (`harness.write_config`), which is
@@ -173,13 +165,13 @@ def catalogue_capped_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve-capped")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, k_max_marks=128)
+    srv, proc = spawn_server(private_catalogue_bundle("capped"), tmp_dir, k_max_marks=128)
     yield srv
     stop_server(proc)
 
 
 @pytest.fixture(scope="session")
-def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
+def catalogue_density_server(tmp_path_factory, private_catalogue_bundle):
     """θ **live** — the configuration §7.2's density rule actually ships in.
 
     `theta_target_marks = 16` against the 150,000-item catalogue puts `P_0` at 16/V_total for each
@@ -190,7 +182,7 @@ def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
     from oracle.harness import spawn_server, stop_server  # noqa: PLC0415
 
     tmp_dir = tmp_path_factory.mktemp("catalogue-serve-density")
-    srv, proc = spawn_server(catalogue_bundle_root, tmp_dir, theta_target_marks=16)
+    srv, proc = spawn_server(private_catalogue_bundle("density"), tmp_dir, theta_target_marks=16)
     yield srv
     stop_server(proc)
 
@@ -206,7 +198,7 @@ def catalogue_density_server(tmp_path_factory, catalogue_bundle_root: Path):
 
 @pytest.fixture(scope="session")
 def multiview_bundle_root() -> Path:
-    """The multi-view corpus's bundle — four views over one entity space, built once per machine."""
+    """The multi-view corpus's bundle: four views over one entity space, built once per binary."""
     from oracle.multiview import build_multiview_bundle  # noqa: PLC0415
 
     return build_multiview_bundle()
@@ -230,7 +222,12 @@ def multiview_bundle(multiview_bundle_root: Path):
     # answer for the principal who passes it.
     for view_id in mv.ALL_VIEW_IDS:
         bundle.attach_source_geometry(
-            read_source_geometry(mv.points_path(view_id), mv.extent_of(view_id)),
+            read_source_geometry(
+                mv.points_path(view_id),
+                mv.extent_of(view_id),
+                field=mv.JOIN_FIELD,
+                column=mv.JOIN_COLUMN,
+            ),
             view_id=view_id,
         )
     return bundle

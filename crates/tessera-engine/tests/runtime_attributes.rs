@@ -5,11 +5,14 @@
 //! failing the flush, a restart replays the declaration, the fold writes the column into the
 //! base, and a redeclaration answers the column that exists or refuses a different identity.
 //!
-//! The fixture declares two columns at the build (a rendered `u8` category and a rendered,
-//! indexed `f32`), so every case runs over a schema in which the build's columns and the runtime
-//! ones are one list, and the runtime ones append after positions the build already filled.
+//! The fixture declares three columns at the build (a rendered `u8` category, a rendered, indexed
+//! `f32`, and the indexed unique `id` its access relation names items by), so every case runs over a
+//! schema in which the build's columns and the runtime ones are one list, and the runtime ones
+//! append after positions the build already filled.
 
 mod common;
+
+use tessera_engine::SuggestRequest;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -24,7 +27,8 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{
-    AcceptError, AttributeRequest, CategoryQuery, Engine, ScalarOut, Session, ViewportRequest,
+    AcceptError, AttributeRequest, CategoryQuery, Engine, EngineConfig, ScalarOut, Session,
+    ViewportRequest,
 };
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::WalScalar;
@@ -70,6 +74,14 @@ name   = "score"
 type   = "f32"
 render = true
 index  = true
+
+# Indexed, so no build column is blob-resident and a built item's card opens no blob.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+index  = true
+field  = "entity_id"
 "#;
 
 fn band_of(entity: u64) -> &'static str {
@@ -140,14 +152,12 @@ fn build_fixture_with_schema(root: &Path, tmp: &Path) {
         attribute_sources: tessera_build::config::AttributeSource::over(points, &schema),
         out: root.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
@@ -195,69 +205,32 @@ fn restart(fx: &Fixture, engine: Engine) -> Engine {
     engine_over(fx)
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 fn request(name: &str, ty: &str) -> AttributeRequest {
     AttributeRequest {
         name: name.to_string(),
         title: None,
         ty: ty.to_string(),
         vocabulary: None,
-        width: None,
         analyser: None,
         index: false,
         render: false,
         scope: LayerScope::Entity,
+        unique: false,
     }
 }
 
-/// One row carrying the build's two columns and nothing else, at the arity the build declared,
-/// under the label every principal of the fixture holds.
-fn row(external_id: &str, terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
-    row_under(external_id, terms, b"0", scalars)
+/// One row carrying `scalars`, under the label every principal of the fixture holds.
+fn row(terms: &Engine, scalars: Vec<WalScalar>) -> UnallocatedRow {
+    row_under(terms, b"0", scalars)
 }
 
 /// [`row`] under one label of the caller's choosing.
 fn row_under(
-    external_id: &str,
     terms: &Engine,
     label: &[u8],
     scalars: Vec<WalScalar>,
 ) -> UnallocatedRow {
     UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![label.to_vec()],
@@ -269,15 +242,20 @@ fn row_under(
     }
 }
 
+/// The build's columns, with no `id`, so the row creates an item.
 fn build_columns(band: &str, score: f32) -> Vec<WalScalar> {
-    vec![WalScalar::Utf8(band.to_string()), WalScalar::F32(score)]
+    vec![
+        WalScalar::Utf8(band.to_string()),
+        WalScalar::F32(score),
+        WalScalar::Null,
+    ]
 }
 
 fn ingest(engine: &Engine, batch: &str, rows: Vec<UnallocatedRow>) -> Vec<EntityId> {
     let mut hash = [0u8; 32];
     hash[..batch.len().min(32)].copy_from_slice(&batch.as_bytes()[..batch.len().min(32)]);
     engine
-        .accept_ingest(rows, batch.to_string(), hash)
+        .ingest_rows(rows, batch.to_string(), hash)
         .unwrap_or_else(|e| panic!("batch {batch} is accepted: {e}"))
 }
 
@@ -320,7 +298,7 @@ fn at_least(value: f64) -> FilterOperand {
 fn fields_of(engine: &Engine, session: &Session, entity: EntityId) -> BTreeMap<String, ScalarOut> {
     let id = engine.tessera_id_of(entity).unwrap();
     engine
-        .item(session, id, None)
+        .item(session, id)
         .unwrap()
         .expect("the item is visible to a full principal")
         .fields
@@ -336,11 +314,6 @@ fn declared_names(engine: &Engine) -> Vec<String> {
         .iter()
         .map(|d| d.name.clone())
         .collect()
-}
-
-/// The entity id the build gave source row 0, through the external-id map the sidecar holds.
-fn built_entity(root: &Path, source: u64) -> EntityId {
-    EntityId::new(source_to_new_map(root, "v00000")[&source])
 }
 
 /// How many of the prefix's partitions hold an entity-space base value file for `column`, over the
@@ -395,7 +368,6 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         },
         AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             index: true,
             ..request("tag", "category")
         },
@@ -413,7 +385,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     }
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment", "note", "prose", "tag", "memo"],
+        ["band", "score", "id", "sentiment", "note", "prose", "tag", "memo"],
         "the runtime columns append after the build's, in declaration order"
     );
     let meta = engine.meta();
@@ -426,7 +398,7 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     assert_eq!(tag.vocabulary.as_deref(), Some("dept"));
 
     // Rows carrying every column, ingestable at the ack.
-    let full = |id: &str, sentiment: f32, note: &str, prose: &str, tag: &str, memo: u16| {
+    let full = |sentiment: f32, note: &str, prose: &str, tag: &str, memo: u16| {
         let mut scalars = build_columns("mid", 1.0);
         scalars.extend([
             WalScalar::F32(sentiment),
@@ -435,18 +407,18 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
             WalScalar::Utf8(tag.to_string()),
             WalScalar::U16(memo),
         ]);
-        row(id, &engine, scalars)
+        row(&engine, scalars)
     };
     let new = ingest(
         &engine,
         "carrying",
         vec![
-            full("n1", 0.9, "alpha", "the quick brown fox", "eng", 7),
-            full("n2", 0.2, "beta", "a slow red hen", "ops", 8),
-            full("n3", 0.7, "alpha", "the quick grey wolf", "eng", 9),
+            full(0.9, "alpha", "the quick brown fox", "eng", 7),
+            full(0.2, "beta", "a slow red hen", "ops", 8),
+            full(0.7, "alpha", "the quick grey wolf", "eng", 9),
         ],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = session(&engine);
     let out = viewport(&engine, &session, None);
@@ -455,14 +427,15 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
         ["band", "score"],
         "the render tail is the build's alone: this route does not accept `render`"
     );
-    let old = built_entity(&fx.root, 0);
+    // A built item: a build issues entity ids from 0.
+    let old = EntityId::new(0);
 
     // The drill-down: absent for the older entity, from the schema, with no blob read.
     let reads_before = engine.generation().filter_columns.record_reads();
     let old_fields = fields_of(&engine, &session, old);
     assert_eq!(
         old_fields.keys().cloned().collect::<Vec<_>>(),
-        ["band", "score"],
+        ["band", "id", "score"],
         "an entity that predates the declaration carries none of the new columns"
     );
     assert_eq!(
@@ -564,7 +537,20 @@ fn every_family_declares_at_runtime_and_earlier_entities_read_absent_without_a_b
     // And the suggest verb, whose index the declaration built for a vocabulary no build column
     // named: a value a visible member carries is offered, one nothing carries is not.
     let suggested = engine
-        .suggest(&session, "tag", "e", 20, false, 100_000, 0)
+        .suggest(
+            &session,
+            SuggestRequest {
+                column: "tag",
+                view: None,
+                filter: None,
+                q: "e",
+                limit: 20,
+                counts: false,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
         .expect("a runtime category's vocabulary has a suggestion index")
         .expect("the column answers");
     let keys: Vec<&str> = suggested.values.iter().map(|v| v.key.as_str()).collect();
@@ -584,7 +570,7 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let before = ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, build_columns("low", 2.0))],
+        vec![row(&engine, build_columns("low", 2.0))],
     );
     engine
         .declare_attribute(AttributeRequest {
@@ -596,14 +582,14 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let after = ingest(
         &engine,
         "after-short",
-        vec![row("a1", &engine, build_columns("mid", 3.0))],
+        vec![row(&engine, build_columns("mid", 3.0))],
     );
     // And a row longer than the schema is refused before anything is admitted.
     let mut long = build_columns("high", 4.0);
     long.extend([WalScalar::F32(1.0), WalScalar::F32(2.0)]);
     let refused = engine
-        .accept_ingest(
-            vec![row("too-long", &engine, long)],
+        .ingest_rows(
+            vec![row(&engine, long)],
             "after-long".to_string(),
             [7u8; 32],
         )
@@ -612,8 +598,8 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
         matches!(
             refused,
             AcceptError::ScalarArity {
-                got: 4,
-                expected: 3,
+                got: 5,
+                expected: 4,
                 ..
             }
         ),
@@ -622,14 +608,14 @@ fn a_declaration_mid_ingest_pads_earlier_rows_and_neither_panics_nor_fails_the_f
     let carrying = ingest(
         &engine,
         "after-full",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("high", 4.0);
             s.push(WalScalar::F32(0.75));
             s
         })],
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
 
     let session = session(&engine);
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
@@ -662,7 +648,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let before = ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, build_columns("low", 2.0))],
+        vec![row(&engine, build_columns("low", 2.0))],
     );
     engine
         .declare_attribute(AttributeRequest {
@@ -672,7 +658,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
         .expect("the declaration is accepted");
     // Nothing published: the declaration is in the log alone.
     let engine = restart(&fx, engine);
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
     assert!(
         engine
             .declare_attribute(AttributeRequest {
@@ -685,13 +671,13 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
     let carrying = ingest(
         &engine,
         "carrying",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.push(WalScalar::F32(0.6));
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     let side = open_bundle(&fx.root).unwrap();
     let published: Vec<&str> = side
         .partitions
@@ -706,7 +692,7 @@ fn a_restart_replays_the_declaration_from_the_log_and_from_the_manifest() {
 
     // Published: the manifest carries it, and the log may not.
     let engine = restart(&fx, engine);
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
     let session = session(&engine);
     let id = |e: EntityId| engine.tessera_id_of(e).unwrap().raw();
     assert!(!fields_of(&engine, &session, before[0]).contains_key("sentiment"));
@@ -743,13 +729,13 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     let carrying = ingest(
         &engine,
         "carrying",
-        vec![row("c1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.extend([WalScalar::F32(0.6), WalScalar::Null]);
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         partitions_with_base(&fx.root, "sentiment"),
         (0, 1),
@@ -771,7 +757,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        ["band", "score", "sentiment", "never"],
+        ["band", "score", "id", "sentiment", "never"],
         "the new MANIFEST.json declares the runtime columns after the build's"
     );
     assert!(
@@ -808,7 +794,7 @@ fn the_fold_carries_a_runtime_column_into_the_base() {
     let engine = restart(&fx, engine);
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment", "never"]
+        ["band", "score", "id", "sentiment", "never"]
     );
     let session = self::session(&engine);
     assert_eq!(
@@ -829,24 +815,23 @@ fn a_runtime_category_offers_a_restricted_principal_only_its_visible_values() {
     engine
         .declare_attribute(AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             index: true,
             ..request("tag", "category")
         })
         .expect("the declaration is accepted");
-    let tagged = |id: &str, label: &[u8], tag: &str| {
+    let tagged = |label: &[u8], tag: &str| {
         let mut scalars = build_columns("mid", 1.0);
         scalars.push(WalScalar::Utf8(tag.to_string()));
-        row_under(id, &engine, label, scalars)
+        row_under(&engine, label, scalars)
     };
     // `eng` only on a row under label 0, which the principal holding term 1 cannot see; `ops`
     // only on a row under label 1, which the principal holding term 0 cannot.
     ingest(
         &engine,
         "labelled",
-        vec![tagged("e1", b"0", "eng"), tagged("o1", b"1", "ops")],
+        vec![tagged(b"0", "eng"), tagged(b"1", "ops")],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     let offered = |credential: &[u8]| -> Vec<String> {
         let session = engine.authorise(credential).unwrap();
@@ -891,13 +876,13 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     ingest(
         &engine,
         "before",
-        vec![row("b1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("mid", 1.0);
             s.push(WalScalar::F32(0.25));
             s
         })],
     );
-    flush(&engine);
+    publish_buffered(&engine);
 
     engine.set_fold_paused_for_test(true);
     let stats_before = engine.write_executor_stats();
@@ -910,7 +895,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    // Declared while the fold holds: after `before`, at position 3.
+    // Declared while the fold holds: after `before`, at position 4.
     engine
         .declare_attribute(AttributeRequest {
             index: true,
@@ -920,7 +905,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     let during = ingest(
         &engine,
         "during",
-        vec![row("d1", &engine, {
+        vec![row(&engine, {
             let mut s = build_columns("high", 2.0);
             s.extend([WalScalar::F32(0.5), WalScalar::F32(0.75)]);
             s
@@ -946,7 +931,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
 
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "before", "during"],
+        ["band", "score", "id", "before", "during"],
         "the folded column keeps its place and the one declared during the fold follows it"
     );
     let folded = open_bundle(&fx.root).unwrap();
@@ -957,7 +942,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
             .iter()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        ["band", "score", "before"],
+        ["band", "score", "id", "before"],
         "the fold's MANIFEST.json carries the schema as it stood at the plan"
     );
     let side: Vec<&str> = folded
@@ -971,7 +956,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
         "the declaration made during the fold is on the side manifest"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     let check = |engine: &Engine| {
         let session = session(engine);
         assert_eq!(
@@ -996,7 +981,7 @@ fn a_declaration_during_a_fold_survives_the_publication_at_the_same_tail_positio
     let engine = restart(&fx, engine);
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "before", "during"]
+        ["band", "score", "id", "before", "during"]
     );
     check(&engine);
 }
@@ -1016,7 +1001,7 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         engine.declare_attribute(sentiment.clone()).unwrap(),
         "identical: accepted with no effect"
     );
-    assert_eq!(declared_names(&engine), ["band", "score", "sentiment"]);
+    assert_eq!(declared_names(&engine), ["band", "score", "id", "sentiment"]);
 
     let conflict = |r: AttributeRequest| match engine.declare_attribute(r) {
         Err(AcceptError::Exec(ExecError::AttributeConflict { .. })) => {}
@@ -1049,29 +1034,15 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         Err(AcceptError::Exec(ExecError::AttributeRefused { detail })) => detail,
         other => panic!("refused at the door: {other:?}"),
     };
-    assert!(refused(request("region", "u8")).contains("may not take it"));
-    assert!(refused(request("weird", "utf8")).contains("retired"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("nothing".to_string()),
-        width: Some("u8".to_string()),
-        ..request("tag", "category")
-    })
-    .contains("names no vocabulary"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("dept".to_string()),
-        ..request("tag", "category")
-    })
-    .contains("say `width`"));
-    assert!(refused(AttributeRequest {
-        vocabulary: Some("band".to_string()),
-        width: Some("u16".to_string()),
-        ..request("band2", "category")
-    })
-    .contains("stored at u8"));
-    // **`render` is refused for every type, as an interim** (decision 0136's amendment): the
-    // reason is that this route addresses entities rather than rows, so it does not depend on the
-    // type, and the message says the refusal is not a rule about rendered columns.
+    // The shared rules are tested in `tessera_store::declaration`; this checks the route applies
+    // them, and adds its own: no `render`, and a group that exists.
     for r in [
+        request("region", "u8"),
+        request("weird", "utf8"),
+        AttributeRequest {
+            vocabulary: Some("nothing".to_string()),
+            ..request("tag", "category")
+        },
         AttributeRequest {
             index: true,
             render: true,
@@ -1079,45 +1050,117 @@ fn an_identical_redeclaration_is_a_no_op_and_a_differing_one_conflicts() {
         },
         AttributeRequest {
             vocabulary: Some("dept".to_string()),
-            width: Some("u8".to_string()),
             render: true,
             ..request("tag", "category")
         },
         AttributeRequest {
-            vocabulary: Some("band".to_string()),
-            width: Some("u8".to_string()),
-            render: true,
-            ..request("band3", "category")
-        },
-        AttributeRequest {
-            render: true,
-            ..request("blurb", "text")
+            scope: LayerScope::Group("nowhere".to_string()),
+            ..request("scoped", "i32")
         },
     ] {
-        let name = r.name.clone();
-        let detail = refused(r);
-        assert!(
-            detail.contains("`render` is not accepted at a running service")
-                && detail.contains("interim"),
-            "'{name}': {detail}"
-        );
+        refused(r);
     }
-    // The build's own rendered column cannot be restated through this route either: the flag is
-    // refused before the held-name comparison.
-    assert!(refused(AttributeRequest {
-        index: true,
-        render: true,
-        ..request("score", "f32")
-    })
-    .contains("`render` is not accepted at a running service"));
-    assert!(refused(AttributeRequest {
-        scope: LayerScope::Group("nowhere".to_string()),
-        ..request("scoped", "i32")
-    })
-    .contains("does not declare"));
+    // A column the build declared with `render` is the one it is when restated as it stands.
+    assert!(engine
+        .declare_attribute(AttributeRequest {
+            index: true,
+            render: true,
+            ..request("score", "f32")
+        })
+        .expect("restating a held column answers it"));
     assert_eq!(
         declared_names(&engine),
-        ["band", "score", "sentiment"],
+        ["band", "score", "id", "sentiment"],
         "a refusal declares nothing"
     );
+}
+
+/// **A record coalesce publishes over a blob whose only column was declared at a running
+/// service.** The build declared no blob-resident column, so the prefix has no `attrs/record`
+/// base and the stack is the flushes' extents alone — which is what `FilterColumns::open` opens
+/// at a restart. A publication that demanded a base the schema does not owe would discard every
+/// coalesce of such a bundle, so the record stack would grow one layer per flush until a fold.
+#[test]
+fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
+    let fx = fixture();
+    let mut engine = Engine::open(
+        &fx.root,
+        &fx.tmp.path().join("cache"),
+        &fx.tmp.path().join("wal.log"),
+        tessera_plugin::Passthrough::new(),
+        EngineConfig {
+            // Every flush below is one this case asked for, and two extents are enough to select
+            // a window — so the pass fires on a fixture of four.
+            flush_max_age_secs: 3600,
+            flush_max_items: usize::MAX,
+            coalesce_width: Some(2),
+            ..config_uncapped()
+        },
+    )
+    .expect("the engine opens");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    engine.set_merge_for_test(false);
+
+    // Neither flag: blob-resident, and the only such column in the schema.
+    assert!(
+        !engine
+            .declare_attribute(request("memo", "u16"))
+            .expect("the declaration is accepted"),
+        "'memo' is a new column"
+    );
+
+    let flushes = 4u16;
+    // Taken before the flushes, since a tick between them selects the pass as readily as the one
+    // below does.
+    let stats = engine.write_executor_stats();
+    let mut ingested: Vec<EntityId> = Vec::new();
+    for i in 0..flushes {
+        let mut scalars = build_columns("mid", 1.0);
+        scalars.push(WalScalar::U16(i + 1));
+        let batch = format!("memo-{i}");
+        ingested.push(ingest(&engine, &batch, vec![row(&engine, scalars)])[0]);
+        publish_buffered(&engine);
+    }
+    engine.request_flush();
+    wait_until(
+        "a coalesce to publish or be discarded",
+        std::time::Duration::from_secs(60),
+        || {
+            let now = engine.write_executor_stats();
+            now.coalesces > stats.coalesces || now.coalesce_failures > stats.coalesce_failures
+        },
+    );
+    assert_eq!(
+        engine.write_executor_stats().coalesce_failures,
+        0,
+        "the coalesce was discarded rather than published"
+    );
+    // Held off from here, so the counts below are the ones this case set rather than a later
+    // tick's.
+    engine.set_coalesce_for_test(false);
+
+    let after = engine.generation().filter_columns.record_layers();
+    assert!(
+        after < flushes as usize,
+        "the live record stack still holds a layer per flush ({after}), so the bound arrives only \
+         at the next restart"
+    );
+    let served = |engine: &Engine| {
+        let session = session(engine);
+        ingested
+            .iter()
+            .map(|entity| fields_of(engine, &session, *entity)["memo"].clone())
+            .collect::<Vec<_>>()
+    };
+    let expected: Vec<ScalarOut> = (0..flushes).map(|i| ScalarOut::U16(i + 1)).collect();
+    assert_eq!(served(&engine), expected, "a coalesced blob row reads back");
+
+    let engine = restart(&fx, engine);
+    let reopened = engine.generation().filter_columns.record_layers();
+    assert!(
+        reopened <= after && reopened < flushes as usize,
+        "the reopened bundle holds {reopened} layers where the live stack held {after}"
+    );
+    assert_eq!(served(&engine), expected);
 }

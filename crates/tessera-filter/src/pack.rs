@@ -29,7 +29,7 @@ pub(crate) fn pack_block<T>(
 ) -> u32 {
     debug_assert_eq!(values.len(), BLOCK, "a packed block is whole");
     let mut card = 0u32;
-    for (wi, chunk) in values.chunks_exact(64).enumerate() {
+    for (wi, chunk) in values.as_chunks::<64>().0.iter().enumerate() {
         let mut w = 0u64;
         for (bi, v) in chunk.iter().enumerate() {
             w |= u64::from(pred(v)) << bi;

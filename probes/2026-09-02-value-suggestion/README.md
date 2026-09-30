@@ -449,9 +449,9 @@ ms median / p99).
 
 ```bash
 cd probes/2026-09-02-value-suggestion/suggestprobe && cargo build --release
-D=/home/joe/code/tessera/data/ladder/probe-suggest        # gitignored under data/
+D=/home/user/code/tessera/data/ladder/probe-suggest        # gitignored under data/
 B=./target/release/suggestprobe
-$B prep /home/joe/code/tessera/data/ladder/geonames/allCountries.txt $D
+$B prep /home/user/code/tessera/data/ladder/geonames/allCountries.txt $D
 ../run_arm1.sh                                           # every (structure, V, entries) cell + hex
 $B gen $D 10000000 100000000 zipf; $B gen $D 10000000 100000000 uniform   # ~10 s each, 0.9 GB each
 $B arm2 $D 10000000 zipf; $B arm2 $D 10000000 uniform

@@ -142,8 +142,7 @@ This whole theme is written against `segment`, which the views epic renames — 
 
 ### Authorisation and sessions
 
-> [#6 Ship reference authorisation plugins for OIDC and role-based access][#6] ·
-> [#55 Bind sessions to an idset with a signed token][#55]
+> [#6 Ship reference authorisation plugins for OIDC and role-based access][#6]
 
 The differentiator is the access control. The only plugin that ships is `Passthrough`, which
 splits a string on commas, and the WebAssembly sandbox does not exist. A release on that footing
@@ -155,16 +154,6 @@ means — is identified in the specification as the system's largest unverifiabl
 nothing downstream can check it. Under passthrough both functions are the same string comparison,
 so I5 is trivially true and cannot be tested. A non-trivial plugin is the precondition for
 testing it at all, and therefore for [#11] closing.
-
-[#55] makes a key rotation invalidate sessions by itself rather than by a sweep, on
-[decision 0025](decisions/0025-rotation-is-a-session-invalidation-event.md)'s ruling that a
-rotation is a session invalidation event. **It has to be sequenced with the views fold-in**,
-which separately proposes splitting rotation into *roll* (multi-idset key retention, identifiers
-translate, no break) and *revoke* (today's 409 semantics) and weakens C17's time-bound as the
-point of the change. Two epics redefining what a rotation means: one decision, taken once, or
-[#55] is built against a definition the same release has already changed. [#55] also requires I6
-to be amended through its own review — it currently reads that the service never infers, looks up
-or refreshes credentials, and retrieving a visible set by reference is literally a lookup.
 
 ### Attributes and filtering
 
@@ -452,7 +441,6 @@ and has no single position. Every downstream property rests on it. No design exi
 [#52]: https://github.com/jennis0/tessera-index/issues/52
 [#53]: https://github.com/jennis0/tessera-index/issues/53
 [#54]: https://github.com/jennis0/tessera-index/issues/54
-[#55]: https://github.com/jennis0/tessera-index/issues/55
 [#56]: https://github.com/jennis0/tessera-index/issues/56
 [#82]: https://github.com/jennis0/tessera-index/issues/82
 [#83]: https://github.com/jennis0/tessera-index/issues/83

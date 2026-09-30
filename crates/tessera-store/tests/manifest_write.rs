@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
-    IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
+    EntitySet, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
     SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::manifest_write::{write_current, write_manifest_json};
@@ -117,26 +117,6 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     let segments_manifest = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
-        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-        layers: Vec::new(),
-        layer_tombstones: Vec::new(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
-        membership_extents: Vec::new(),
-        level_versions: Vec::new(),
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
-        shape_rows_extents: Vec::new(),
-        shape_held_extents: Vec::new(),
-        term_image_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,
             view: "main".to_string(),
@@ -147,16 +127,11 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         }],
         deltas: vec![],
         dict_extents: vec![],
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
-        external_id_runs: vec![],
-        locator_extents: vec![],
-        tombstones: vec![],
-        deny: vec![],
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         vocabulary_extensions: vec![],
         files: segments_files,
+        ..SegmentsManifest::empty()
     };
     fs::write(
         partition_dir.join("SEGMENTS-0.json"),
@@ -178,7 +153,6 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
             shard_id: 0,
-            idset: 1,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -224,7 +198,6 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
     assert_eq!(bundle.manifest.bundle_format, tessera_types::BUNDLE_FORMAT);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
-    assert_eq!(bundle.manifest.identity.idset, 1);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     let view = partition.views.get("main").expect("main view");
@@ -333,41 +306,8 @@ fn write_manifest_json_digest_changes_when_the_manifest_changes() {
 /// two writers' manifests are distinguishable in the committed bytes.
 fn manifest_fixture() -> SegmentsManifest {
     SegmentsManifest {
-        watermark: 0,
-        entity_id_high_water: 0,
-        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-        layers: Vec::new(),
-        layer_tombstones: Vec::new(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
-        membership_extents: Vec::new(),
-        level_versions: Vec::new(),
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
-        shape_rows_extents: Vec::new(),
-        shape_held_extents: Vec::new(),
-        term_image_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
-        segments: Vec::new(),
-        deltas: Vec::new(),
-        dict_extents: Vec::new(),
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
-        external_id_runs: Vec::new(),
-        locator_extents: Vec::new(),
-        tombstones: Vec::new(),
-        deny: Vec::new(),
         vocabulary_extensions: vec![],
-        files: BTreeMap::new(),
+        ..SegmentsManifest::empty()
     }
 }
 
@@ -536,4 +476,52 @@ fn the_side_manifest_floor_follows_symlinked_directories() {
         Some(8),
         "a broken link holds no numbers and is not a failure"
     );
+}
+
+/// The pruner keeps the newest side-manifests and the highest `n` above all, whatever wrote it,
+/// and leaves a directory it cannot read whole.
+#[test]
+fn pruning_keeps_the_newest_manifests_and_never_the_lowest() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prefix_dir = tmp.path().join("v00000");
+    let dir = prefix_dir.join("partitions").join("default");
+    fs::create_dir_all(&dir).unwrap();
+
+    let names = || {
+        let mut found: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    };
+
+    // Fewer than the number kept: nothing to prune.
+    for n in [0u64, 1] {
+        fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
+    }
+    assert_eq!(
+        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        0
+    );
+    assert_eq!(names(), vec!["SEGMENTS-0.json", "SEGMENTS-1.json"]);
+
+    for n in [2u64, 3, 40] {
+        fs::write(dir.join(format!("SEGMENTS-{n}.json")), b"{}").unwrap();
+    }
+    assert_eq!(
+        tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").unwrap(),
+        2
+    );
+    assert_eq!(
+        names(),
+        vec!["SEGMENTS-2.json", "SEGMENTS-3.json", "SEGMENTS-40.json"],
+        "the three highest stay, and 40 — the number a writer's floor comes from — above all"
+    );
+
+    // A name this reader would not open is a name it will not delete around, either: the
+    // directory is left as it stands.
+    fs::write(dir.join("SEGMENTS-05.json"), b"{}").unwrap();
+    assert!(tessera_store::prune_superseded_segments_manifests(&prefix_dir, "default").is_err());
+    assert_eq!(names().len(), 4);
 }

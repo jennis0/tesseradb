@@ -13,7 +13,9 @@
 //! wrote a different bitmap — or none — fails there, on the comparison that exists for exactly
 //! that class of divergence.
 
-use std::collections::{BTreeMap, HashMap};
+mod common;
+
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,7 +25,9 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::config::{Attribute, Schema, ValueSet, Visibility, Vocabulary};
+use tessera_build::config::{
+    Attribute, Schema, ValueSet, Visibility, Vocabulary, VocabularyKind, VocabularyMinter,
+};
 use tessera_build::{build, BuildArgs};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
@@ -117,6 +121,7 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
         value_set: None,
         index: false,
         render: true,
+        unique: false,
     }
 }
 
@@ -131,6 +136,7 @@ fn schema() -> Schema {
         value_set: Some(ValueSet::Closed),
         index: false,
         render: true,
+        unique: false,
     };
     Schema {
         attributes: vec![
@@ -145,12 +151,16 @@ fn schema() -> Schema {
                 title: None,
                 value_set: ValueSet::Closed,
                 width: ScalarType::U8,
-                visibility: Visibility::Public,
-                codes: ARCHIVE_VALUES
-                    .iter()
-                    .map(|(k, c)| (k.to_string(), *c))
-                    .collect::<BTreeMap<_, _>>(),
-                titles: BTreeMap::new(),
+                values: VocabularyMinter::declared(
+                    "archive",
+                    VocabularyKind::Declared,
+                    Visibility::Public,
+                    ScalarType::U8,
+                    &[],
+                    ARCHIVE_VALUES.iter().map(|(k, c)| (*k, *c)),
+                    [],
+                )
+                .expect("distinct pinned codes"),
                 reserved: Vec::new(),
             },
         )]),
@@ -158,7 +168,7 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
-    let schema = schema();
+    let schema = common::with_id(schema());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -184,14 +194,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

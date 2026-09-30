@@ -34,7 +34,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
@@ -217,6 +218,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
     let seg = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "seg0".into(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
@@ -235,7 +237,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let postings = PostingsReader::open(&postings_path, false).unwrap();
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
+        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
         .unwrap();
     let perm_path = temp.path().join("permutation.bin");
     let identity: Vec<EntityId> = (0..bound).map(EntityId::new).collect();
@@ -254,6 +256,7 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
         &perm,
         // Nothing denied — this example measures the selection route.
         &croaring::Bitmap::new(),
+        Some(&[]),
     );
     (temp, seg, mask)
 }

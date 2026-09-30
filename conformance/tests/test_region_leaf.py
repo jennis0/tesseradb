@@ -33,12 +33,11 @@ import subprocess
 import pytest
 
 from oracle.filters import NumericColumn, RegionColumn, evaluate
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, spawn_server, stop_server, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
 from oracle.wire import FRAME_TRAILER, decode_viewport, decode_viewport_artifacts, split_frames
 
 from test_shape_membership import (
     BOXES,
-    ID_KEY_HEX,
     PRINCIPALS,
     SHAPES,
     VIEW_ID,
@@ -117,9 +116,8 @@ def region_server(tmp_path_factory):
     bundle = work / "bundle-gated"
     deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     server, proc = spawn_server(
@@ -286,13 +284,12 @@ def test_an_unknown_a_suppressed_and_a_withheld_artifact_are_one_response(region
     # Suppressed: served to the broad principal a moment ago, and an empty operand from the ack.
     before, _ = matched_sum(server, broad, withheld)
     assert before == strip.masked_count
-    idset = server.meta(broad)["idset"]
-    resp = server.changes([{"tessera_id": str(strip.tessera_id), "idset": idset, "op": "suppress"}])
+    resp = server.changes([{"op": "suppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     body_suppressed, head_suppressed = bytes_of(broad, withheld)
     body_unknown_broad, head_unknown_broad = bytes_of(broad, unknown)
     assert body_suppressed == body_unknown_broad and head_suppressed == head_unknown_broad
-    resp = server.changes([{"tessera_id": str(strip.tessera_id), "idset": idset, "op": "unsuppress"}])
+    resp = server.changes([{"op": "unsuppress", "match": {"tessera_id": str(strip.tessera_id)}}], strict=True)
     assert resp.status_code in (200, 202), resp.text
     after, _ = matched_sum(server, broad, withheld)
     assert after == before
@@ -310,9 +307,8 @@ def test_region_is_a_reserved_column_name(tmp_path):
     )
     deployment = write_deployment(work / "tessera-reserved.toml", bundle=work / "bundle-reserved", schema=config)
     result = subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved"), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved")],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         capture_output=True,
         text=True,
     )

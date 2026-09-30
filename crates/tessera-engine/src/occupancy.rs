@@ -13,7 +13,7 @@
 //! # It is a composed quantity, and I2 requires it
 //!
 //! `N_occ(d)` is counted over the **composed** mask — the [`EffectiveMask`] after the overlay
-//! diff — and never over the cached [`crate::compose::RowProjection`], which is `M_auth` *before*
+//! diff — and never over the cached [`crate::projection::RowProjection`], which is `M_auth` *before*
 //! that diff. The argument is [`EffectiveMask::visible_total`]'s, term for term: a viewer can
 //! aggregate mark counts across tiles, solve for θ, and difference it against the per-tile
 //! `visible` §7.1 discloses exactly. If either factor of θ were pre-overlay, that difference is a
@@ -809,35 +809,23 @@ pub(crate) struct OccupancyKey {
 /// 32 MiB admits 65,536 entries, which is 480 publications' worth of ladders for eight sessions
 /// over one view before the LRU begins removing the coldest — and the coldest are exactly the
 /// superseded ones, because a live rung is re-read on every request that composes θ. A bound below
-/// the live set would cost walks, not correctness ([`crate::single_flight`]'s rule 3).
+/// the live set would cost walks, not correctness (`tessera-cache`'s rule 3).
 ///
-/// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is
-/// [`OCCUPANCY_LIVE_BYTES_PER_SESSION`] per concurrently-querying session per view, and the
-/// headroom above it is how many publications of superseded ladders the memo carries before the
-/// LRU takes them. This default is the live set of eight sessions over one view — the
-/// `serve.expected_concurrent_sessions` default — with about 480 publications of headroom. A
-/// deployment that raises `expected_concurrent_sessions` to 1,000 needs 8.7 MB for the live set
-/// alone and should raise this in proportion if it wants the same headroom; leaving it here costs
-/// walks rather than correctness, and `/control/status`' `occupancy.evictions` beside `walks` is
-/// where that shows.
+/// **What a deployment should set it to** (`serve.occupancy_cache_bytes`): the live set is 17
+/// rungs, one per depth in `0..=16`, at the cache's per-entry floor, per concurrently-querying
+/// session per view, and the headroom above it is how many publications of superseded ladders
+/// the memo carries before the LRU takes them. This default is the live set of eight sessions
+/// over one view, with about 480 publications of headroom. A deployment serving 1,000 concurrent sessions needs 8.7 MB for the
+/// live set alone and should raise this in proportion if it wants the same headroom; leaving it
+/// here costs walks rather than correctness, and `/control/status`' `occupancy.evictions` beside
+/// `walks` is where that shows.
 pub const DEFAULT_OCCUPANCY_CACHE_BYTES: u64 = 32 * 1024 * 1024;
-
-/// What one session's live ladder charges the memo, over one view: one rung per depth at the
-/// cache's per-entry floor.
-///
-/// The 17 depths are `0..=16`, the whole quantisation grid — a session touches a handful, and the
-/// background fill ([`crate::stage`]) takes it to [`crate::stage::BACKGROUND_DEPTH`], so this is
-/// the ceiling rather than the typical charge. It is `pub` because
-/// `tessera_server::validate_cache_bounds` weighs the configured bound against it and the
-/// arithmetic must have one home.
-pub const OCCUPANCY_LIVE_BYTES_PER_SESSION: u64 =
-    17 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
 
 /// One memoised `N_occ(d)`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OccupiedTiles(pub u64);
 
-impl crate::single_flight::CacheWeight for OccupiedTiles {
+impl tessera_cache::CacheWeight for OccupiedTiles {
     fn cache_weight_bytes(&self) -> u64 {
         // The value is a `u64`; the per-entry floor the cache applies is what actually bounds the
         // entry count, and it is the honest charge for a key holding a view name.
@@ -864,14 +852,13 @@ mod tests {
 
     /// **The memo is bounded, and the bound is above the live set by orders of magnitude.**
     ///
-    /// The two halves the figure has to satisfy. Seventeen depths for each of eight sessions —
-    /// `serve.expected_concurrent_sessions`' default, the concurrency every other bound is sized
-    /// against — is the live set, and it must be resident together, because evicting a rung a
-    /// request is about to read costs a mask walk. And a key space that moves with every
-    /// publication must not accumulate, which is what the bound is for.
+    /// The two halves the figure has to satisfy. Seventeen depths for each of eight sessions is
+    /// the live set, and it must be resident together, because evicting a rung a request is about
+    /// to read costs a mask walk. And a key space that moves with every publication must not
+    /// accumulate, which is what the bound is for.
     #[test]
     fn the_memo_holds_the_live_set_and_bounds_the_superseded_one() {
-        let cache = crate::single_flight::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
+        let cache = tessera_cache::SingleFlightCache::new(DEFAULT_OCCUPANCY_CACHE_BYTES);
         for token_id in 0..8u64 {
             for depth in 0..=16u8 {
                 let _ = cache.get_or_derive(rung(token_id, depth, 0), None, |_| OccupiedTiles(1));
@@ -885,7 +872,7 @@ mod tests {
         // one at a time to watch the 65,537th evict is a minute of a debug build for a property
         // the per-entry charge already fixes. `an_undersized_bound_evicts` below is where the
         // eviction itself is exercised.
-        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / crate::single_flight::PER_ENTRY_FLOOR_BYTES;
+        let admitted = DEFAULT_OCCUPANCY_CACHE_BYTES / tessera_cache::PER_ENTRY_FLOOR_BYTES;
         assert_eq!(admitted, 65_536);
         assert!(
             admitted > 400 * (8 * 17),
@@ -901,8 +888,8 @@ mod tests {
     /// [`DEFAULT_OCCUPANCY_CACHE_BYTES`], whose size is argued there.
     #[test]
     fn an_undersized_bound_evicts() {
-        let bound = 8 * crate::single_flight::PER_ENTRY_FLOOR_BYTES;
-        let cache = crate::single_flight::SingleFlightCache::new(bound);
+        let bound = 8 * tessera_cache::PER_ENTRY_FLOOR_BYTES;
+        let cache = tessera_cache::SingleFlightCache::new(bound);
         for publication in 0..32u64 {
             let _ = cache.get_or_derive(rung(0, 0, publication), None, |_| OccupiedTiles(1));
         }

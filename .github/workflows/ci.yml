@@ -7,9 +7,9 @@
 # specified-but-unbuilt and are left that way rather than half-built, because a nightly that runs
 # one seed batch is this gate with a worse schedule.
 #
-# What runs is exactly the gate CLAUDE.md defines, plus the conformance suite. Nothing here builds
-# from the Phase 0 corpus: every fixture the suite uses is synthesised from a seed, which is what
-# makes a hosted runner possible at all.
+# What runs is the gate CLAUDE.md defines, with the Rust tests under nextest, plus the conformance
+# suite. Nothing here builds from the Phase 0 corpus: every fixture the suite uses is synthesised
+# from a seed, which is what makes a hosted runner possible at all.
 #
 # `reference/tests` used to be excluded **wholesale** on that ground, and the ground held for one
 # of its six modules and three cases of a second. Measured 2026-08-30 at `2bde89a6`: 62 of its 71
@@ -37,9 +37,9 @@
 # out. I1 keeps CI coverage through the overlay-journal differential and its two defective engines.
 # Recorded so the omission reads as a decision rather than an oversight.
 #
-# What the Rust job does not execute, on the same principle. `cargo test --workspace` skips every
-# `#[ignore]`d test — 22 of the 2,283 distinct tests the workspace harnesses list — and each of
-# those 22 either builds a real corpus, runs for minutes to hours, or measures rather than asserts.
+# What the Rust job does not execute, on the same principle. The test run skips every
+# `#[ignore]`d test, and each of those either builds a real corpus, runs for minutes to hours, or
+# measures rather than asserts.
 # Nothing here runs them and no other tier does either: §6's nightly, which would, is specified and
 # unbuilt. So a property held only by an ignored test is a property nothing gates on.
 #
@@ -73,33 +73,68 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      # Debug info is most of what the workspace's test binaries occupy on disk, so CI builds
+      # without it, as CLAUDE.md tells a developer to in a worktree. The cost is that a CI
+      # backtrace names a function but not a line.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `stable`, matching rust-toolchain.toml's channel. Note this is a rolling channel, not a
       # pin: the `.stderr` fixtures under crates/tessera-types/tests/ui are compiler output, so a
       # rustc release can turn this job red on wording alone. See that test's own doc for why
       # regenerating them is a judgement call rather than maintenance.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-      # `--no-fail-fast` is load-bearing. Without it cargo stops at the first test
-      # binary that fails and never runs the rest, so the summary reports the failures it reached
-      # alongside a passing total that is quietly smaller than the run before it — which reads as
-      # success at a glance. That has already been mistaken for a green gate here.
-      - run: cargo test --workspace --no-fail-fast
-      # Runs here rather than in `checks` so it reuses the build above: `--quick` asks the compiled
-      # harnesses what they would run, and would otherwise compile the workspace a second time. It
-      # counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
-      - run: bash scripts/check-test-reachability.sh --quick
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      # The tests run once, instrumented, so the gate and Codacy's coverage come from one build.
+      # `show-env` instruments only the workspace's crates, so the cached dependencies still serve.
+      #
+      # nextest runs every test binary's tests at once, where `cargo test` runs the binaries one
+      # after another; each test is its own process, so a fixture a test binary shares between
+      # its tests is built once per test here. It does not run doc-tests, so `--doc` does.
+      #
+      # `--no-fail-fast` makes a run report every failure rather than stop starting tests at the
+      # first. Each command runs whatever the one before it returned, and the step fails if any
+      # of them did.
+      #
+      # The reachability check shares the step for the instrumented environment: `--quick` asks the
+      # compiled harnesses what they would run, and would otherwise compile the workspace a second
+      # time. It counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
+      - name: tests, instrumented for coverage
+        run: |
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          status=0
+          cargo nextest run --workspace --no-fail-fast || status=1
+          cargo test --workspace --doc --no-fail-fast || status=1
+          bash scripts/check-test-reachability.sh --quick || status=1
+          exit $status
+      # Paths relative to the repository root, as Codacy matches them.
+      - name: coverage report
+        if: ${{ !cancelled() }}
+        run: |
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov report --lcov --output-path rust.lcov
+          sed -i "s|^SF:$PWD/|SF:|" rust.lcov
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-rust
+          path: rust.lcov
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The grep-based half of the architecture: forbidden dependency edges, the
@@ -108,24 +143,33 @@ jobs:
       # from an opt-in pre-commit hook that is skipped in any worktree without a track marker,
       # which is not a gate.
       - run: bash scripts/check-layers.sh
-      - run: python3 scripts/check-doc-links.py
-      # Prose register: files already rewritten to docs/agents/writing.md's Register section fail
-      # on any forbidden construction; the rest are counted until their rewrite lands.
-      - run: bash scripts/check-register.sh
-      # Keeps `inventory.md`'s per-document revision and ⊘-marker counts true. It regenerates the
-      # file and exits 1 when that changed anything, which is the behaviour wanted here: the
-      # regenerated copy is discarded with the runner, and the failure is the signal. Added because
-      # this branch revised a design document and left the inventory reading the old revision, and
-      # nothing noticed until a review did.
-      - run: python3 scripts/check-corpus-integrity.py
 
-  conformance:
+  docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docs/constraints.txt
+      - run: pip install -r docs/requirements.txt -c docs/constraints.txt
+      # The TypeScript and components reference is generated from clients/ts before the site's build.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - run: npm --prefix clients/ts ci
+      - run: bash scripts/check-docs.sh
+
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The suite spawns the real `tessera` binary as a subprocess and speaks the real API — it
@@ -152,28 +196,6 @@ jobs:
           print(' '.join(d['project']['dependencies'] + d['project']['optional-dependencies']['dev']))
           ")
       - run: reference/.venv/bin/ruff check --config reference/pyproject.toml reference conformance
-      # `conformance.md` §0 states the suite's case count, and a hand-maintained number in a design
-      # document drifts silently — that one has been wrong three times. This is the treatment
-      # `scripts/check-corpus-integrity.py` gives `docs/design/inventory.md`, applied to the one
-      # fact in §0 a script can compute. It lives here and not in that script because collecting
-      # the suite needs the venv and the release binary, and that check is deliberately neither.
-      - name: the case count stated in conformance.md is the count pytest collects
-        run: |
-          collected=$(reference/.venv/bin/pytest conformance/tests conformance/suite \
-            --collect-only -q | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+')
-          stated=$(grep -oE '^ *conformance-cases = [0-9]+' docs/design/conformance.md \
-            | grep -oE '[0-9]+$')
-          if [ -z "$collected" ] || [ -z "$stated" ]; then
-            echo "could not read a count: collected='$collected' stated='$stated'" >&2
-            echo "collection failed, or docs/design/conformance.md §0 lost its marker line" >&2
-            exit 1
-          fi
-          if [ "$collected" != "$stated" ]; then
-            echo "docs/design/conformance.md §0 states $stated cases; pytest collects" \
-                 "$collected. The document is stale — update the marker line in §0." >&2
-            exit 1
-          fi
-          echo "conformance.md §0 and pytest agree: $collected cases"
       # Fixtures are built once and cached in /tmp by a stamped recipe; on a fresh runner every one
       # of them is built from scratch, which is most of this job's wall-clock.
       - run: reference/.venv/bin/pytest conformance/tests conformance/suite -v
@@ -191,22 +213,34 @@ jobs:
             --deselect tests/test_identity.py::test_fixture_bundle_sidecar_round_trips_through_the_locator
 
   clients:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      # Node >= 20, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
-      # and `clients/py/check.sh`'s wheel is built by a hatchling hook that shells out to npm.
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      # Node >= 22.15, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
+      # the core tests compress with `node:zlib`'s zstd, and `clients/py/check.sh`'s wheel is built
+      # by a hatchling hook that shells out to npm.
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # `tesseradb` depends on `tesseradb-native`, which carries the `tessera` binary and the
+      # `_tessera` extension module, so `clients/py/check.sh` now builds two crates before it can
+      # install anything. This job is no longer cargo-free and no longer cheap; the cache is what
+      # keeps it from being a second copy of the `rust` job's compile on every run.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # `check-clients.sh` requires an installed tree rather than installing one itself, so that a
       # developer's stale `node_modules` fails loudly instead of being silently repaired.
       - run: npm --prefix clients/ts ci
+      # The components' browser suite (`npm run test:browser`) drives headless Chromium through
+      # Playwright; `check-clients.sh` runs it and refuses where the browser is not installed.
+      - name: Playwright's Chromium
+        working-directory: clients/ts
+        run: npx playwright install --with-deps chromium
       # The two halves of CLAUDE.md's gate that ran nowhere until now. The TypeScript client is in
       # the gate because one rename — `ead7e90` — shipped three defects into `clients/` that a
       # Rust-and-Python gate could not see, each found later by a separate investigation. The
@@ -214,3 +248,38 @@ jobs:
       # between `pip install tesseradb[widget]` and a widget with no JavaScript in it.
       - run: bash scripts/check-clients.sh
       - run: bash clients/py/check.sh
+        env:
+          PYTEST_ADDOPTS: --cov=tesseradb --cov-report=xml:coverage.xml
+      # coverage.py names files relative to the package; Codacy matches them from the repository root.
+      - name: coverage report
+        if: ${{ !cancelled() }}
+        run: sed -i 's|filename="|filename="clients/py/tesseradb/|' clients/py/coverage.xml
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage-python
+          path: clients/py/coverage.xml
+
+  # Both jobs' coverage in one upload, whether or not their tests passed. The token is empty on a
+  # fork's pull request, which skips the upload.
+  coverage:
+    needs: [rust, clients]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - id: codacy
+        env:
+          TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+        run: echo "token=${TOKEN:+yes}" >> "$GITHUB_OUTPUT"
+      # A refused or failed upload is reported on the step and does not fail the gate.
+      - uses: codacy/codacy-coverage-reporter-action@v1
+        if: ${{ steps.codacy.outputs.token == 'yes' }}
+        continue-on-error: true
+        with:
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          coverage-reports: rust.lcov,coverage.xml

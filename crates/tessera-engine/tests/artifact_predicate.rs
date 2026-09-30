@@ -44,7 +44,6 @@ const SEED: u64 = 0x5EED;
 const BY_LIST: &str = "generator/partition-enumerated";
 const BY_RULE: &str = "generator/partition-attribute";
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 /// The tile depth the narrow viewports are asked at. **A request's tiles come from its own `zoom`**,
 /// so at zoom 0 a bbox resolves to the single tile covering the whole grid and narrows nothing — a
 /// viewport case asked there would be comparing the whole map with itself five times.
@@ -77,16 +76,6 @@ fn corpus() -> Corpus {
     Corpus::new(SEED, N, extent()).expect("the generator accepts the fixture's extent")
 }
 
-fn credential(grant: &str) -> Vec<u8> {
-    let terms: Vec<String> = Grant::parse(grant)
-        .expect("the grant is inside the generator's term space")
-        .terms()
-        .iter()
-        .map(|t| format!("\"{}\"", t.raw()))
-        .collect();
-    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
-}
-
 /// What one layer serves one principal at one viewport: every artifact's key against its masked
 /// count, plus whether it carried a parent — the whole of what a client can read off an artifact
 /// row that is not an identifier.
@@ -97,7 +86,7 @@ fn served(
     zoom: u8,
     bbox: [f64; 4],
 ) -> BTreeMap<String, u64> {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -267,7 +256,7 @@ fn scalars_with_partition(value: u32, columns: usize, at: usize) -> Vec<WalScala
 #[allow(clippy::too_many_arguments)]
 fn ingest_point_into(
     engine: &Engine,
-    external_id: &str,
+    batch: &str,
     value: u32,
     term: u32,
     x: f64,
@@ -277,13 +266,12 @@ fn ingest_point_into(
 ) -> u64 {
     let descriptors = vec![term.to_string().into_bytes()];
     let mut hash = [0u8; 32];
-    for (slot, byte) in hash.iter_mut().zip(external_id.as_bytes()) {
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
         *slot = *byte;
     }
     let ids = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: descriptors.clone(),
@@ -293,7 +281,7 @@ fn ingest_point_into(
                 terms: engine.resolve_terms(&descriptors),
                 scoped: Vec::new(),
             }],
-            external_id.to_string(),
+            batch.to_string(),
             hash,
         )
         .expect("an ordinary point with a declared scalar is an ordinary write");
@@ -301,26 +289,13 @@ fn ingest_point_into(
 }
 
 /// The generator's own schema: seven declared columns, `partition` at [`PARTITION_SCALAR`].
-fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
-    ingest_point_into(engine, external_id, value, term, x, y, 7, PARTITION_SCALAR)
+fn ingest_point(engine: &Engine, batch: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
+    ingest_point_into(engine, batch, value, term, x, y, 7, PARTITION_SCALAR)
 }
 
 /// This file's own declaration: one column, so `partition` is at 0.
-fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
-    ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+fn ingest_own(engine: &Engine, batch: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
+    ingest_point_into(engine, batch, value, term, x, y, 1, 0)
 }
 
 /// **A point ingested with value *v* counts against *v*'s artifact on the next request, with
@@ -351,7 +326,7 @@ fn a_point_ingested_with_a_value_counts_on_the_next_request() {
     let versions = fx.engine.write_executor_stats();
 
     ingest_point(&fx.engine, "fresh-1", value, 0, 5.0, 5.0);
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
@@ -404,7 +379,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         "the novel value minted no artifact at the window's close"
     );
 
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     let after = served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP);
     assert_eq!(
         after.get(&novel.to_string()),
@@ -420,7 +395,7 @@ fn a_new_value_mints_its_artifact_at_the_windows_close() {
         artifacts_before + 1,
         "the same value minted a second artifact"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert_eq!(
         served(&fx.engine, grant, BY_RULE, 0, WHOLE_MAP).get(&novel.to_string()),
         Some(&2)
@@ -471,6 +446,12 @@ name  = "partition"
 type  = "u32"
 index = true
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[layer]]
 name                      = "{BANDS}"
 views                     = ["s0"]
@@ -490,7 +471,7 @@ artifact_visibility       = {{ default = "inherited" }}
 require_member_visibility = "none"
 depends_on                = ["{BANDS}"]
 artifacts = [
-  {{ key = "l0", members = [{}], attached_layer = "{BANDS}", attached_key = "{}" }},
+  {{ key = "l0", members = {{ id = [{}] }}, attached_layer = "{BANDS}", attached_key = "{}" }},
 ]
 "#,
         members.join(", "),
@@ -559,7 +540,7 @@ fn an_absolute_criterion_fires_on_an_attribute_predicate() {
 /// The entity behind a served artifact, through the admin plane's own resolver — the address a
 /// suppression names, and the one drill-down inverts.
 fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tessera_types::TesseraId {
-    let session = engine.authorise(&credential(grant)).unwrap();
+    let session = engine.authorise(&grant_credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
@@ -583,12 +564,11 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let by_viewport = served(&fx.engine, grant, BANDS, 0, WHOLE_MAP);
     let (key, count) = by_viewport.iter().next().expect("something is served");
     let id = served_entity(&fx.engine, grant, BANDS, key);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
 
-    let session = fx.engine.authorise(&credential(grant)).unwrap();
+    let session = fx.engine.authorise(&grant_credential(grant)).unwrap();
     let row = fx
         .engine
-        .artifact(&session, id, Some(idset), "s0", None)
+        .artifact(&session, id, "s0", None)
         .expect("the identifier route answers")
         .expect("the artifact the viewport just served is reachable by its identifier");
     assert_eq!(row.key.as_deref(), Some(key.as_str()));
@@ -601,7 +581,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let blind = fx.engine.authorise(b"{\"terms\": []}").unwrap();
     assert_eq!(
         fx.engine
-            .artifact(&blind, id, Some(idset), "s0", None)
+            .artifact(&blind, id, "s0", None)
             .expect("the identifier route answers")
             .map(|row| row.masked_count),
         Some(0)
@@ -615,12 +595,11 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
         .cloned()
         .expect("something clears a bar of one");
     let id = served_entity(&gated.engine, grant, BANDS, &key);
-    let idset = gated.engine.generation().bundle.manifest.identity.idset;
     let blind = gated.engine.authorise(b"{\"terms\": []}").unwrap();
     assert!(
         gated
             .engine
-            .artifact(&blind, id, Some(idset), "s0", None)
+            .artifact(&blind, id, "s0", None)
             .expect("the identifier route answers")
             .is_none(),
         "a band below its own bar is reachable by identifier"
@@ -645,8 +624,7 @@ fn a_label_attached_to_a_predicate_artifact_follows_its_target() {
 
     // Suppress the band; the label goes with it, without anything being said about the label.
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
-    let entity = fx.engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a served artifact's identifier names an entity");
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
@@ -674,8 +652,7 @@ fn a_suppressed_values_key_never_mints_again() {
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
     let id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
-    let entity = fx.engine.resolve_tessera_ids(&[id], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
         .expect("a suppression is accepted");
@@ -694,32 +671,11 @@ fn a_suppressed_values_key_never_mints_again() {
         artifacts,
         "a point carrying a suppressed value minted a second artifact for it"
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
     assert!(
         !served(&fx.engine, grant, BANDS, 0, WHOLE_MAP).contains_key(&anchor),
         "the suppression was defeated by ingesting a point"
     );
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A deleted value's key mints again, and what comes back is a new object.**
@@ -735,9 +691,8 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
     let fx = own_fixture("\"none\"");
     let grant = "0";
     let anchor = anchor_value(&fx.corpus).to_string();
-    let idset = fx.engine.generation().bundle.manifest.identity.idset;
     let before_id = served_entity(&fx.engine, grant, BANDS, &anchor);
-    let entity = fx.engine.resolve_tessera_ids(&[before_id], idset).unwrap()[0].unwrap();
+    let entity = fx.engine.resolve_tessera_ids(&[before_id]).unwrap()[0].unwrap();
 
     fx.engine
         .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
@@ -756,7 +711,7 @@ fn a_deleted_values_key_returns_as_a_new_artifact() {
         13.0,
         13.0,
     );
-    flush(&fx.engine);
+    publish_buffered(&fx.engine);
 
     let after = served(&fx.engine, grant, BANDS, 0, WHOLE_MAP);
     assert!(

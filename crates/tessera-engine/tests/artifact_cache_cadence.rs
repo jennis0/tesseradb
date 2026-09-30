@@ -20,16 +20,15 @@
 mod common;
 
 use common::*;
+use rustc_hash::FxHashSet;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
+use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 /// **No existence criterion**, so a count that moved is a membership that moved rather than an
 /// artifact that appeared or vanished — the distinction these cases turn on.
@@ -65,29 +64,6 @@ fn flat(name: &str) -> LayerDeclaration {
 
 fn treed(name: &str) -> LayerDeclaration {
     declaration(name, HierarchyKind::Nested)
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
 }
 
 impl Fixture {
@@ -128,49 +104,16 @@ fn publish(engine: &Engine, layer: &str, artifacts: Vec<IncomingArtifact>) {
     tick(engine);
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// One layer's served keys with their masked counts, sorted — what a request said about a layer,
 /// in the form a later request can be compared against.
 fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, &full_coverage_credential())
         .into_iter()
         .filter(|a| a.layer == layer)
         .filter_map(|a| a.key.clone().map(|key| (key, a.masked_count)))
         .collect();
     out.sort();
     out
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **The headline: a write to one layer does not rebuild another layer's row form.**
@@ -210,7 +153,7 @@ fn a_write_to_one_layer_leaves_another_layers_row_form_alone() {
     let warm = engine.artifact_cache_builds().0;
     assert!(warm > cold, "the first request has to derive something");
 
-    artifacts_of(&engine);
+    artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         engine.artifact_cache_builds().0,
         warm,
@@ -265,7 +208,7 @@ fn a_publication_into_a_new_layer_rebuilds_only_its_own_level() {
             fx.members(0..100),
         )],
     );
-    artifacts_of(&engine);
+    artifacts_of(&engine, &full_coverage_credential());
     let warm = engine.artifact_cache_builds().0;
 
     engine.register_layer(flat("clusters/c")).unwrap();
@@ -656,4 +599,153 @@ fn two_principals_over_one_artifact_get_two_shapes() {
         "the broad principal's shape was served to the narrow one"
     );
     assert_eq!(engine.derived_cache_stats().misses, 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pruners: what a revoked session takes with it.
+// ---------------------------------------------------------------------------------------------
+
+/// The three per-session gauges a prune must move, read together so one assertion names all of
+/// them: masked counts, the occupancy ladder and derived geometry.
+fn per_session_entries(engine: &Engine) -> [usize; 3] {
+    [
+        engine.masked_count_cache_stats().entries,
+        engine.occupancy_cache_stats().entries,
+        engine.derived_cache_stats().entries,
+    ]
+}
+
+/// A level served row-major, which is the only shape a masked-count histogram is built for: the
+/// column has no per-artifact route to a count, so the histogram is what answers.
+fn row_major(name: &str) -> LayerDeclaration {
+    let mut declaration = flat(name);
+    declaration.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
+    declaration
+}
+
+/// Two layers, because the two caches want different ones: a masked-count histogram is built only
+/// for a level served column-only, and a hull is what a shape is held for. The background fill is
+/// off so every entry below is one a request made.
+fn pruning_fixture(fx: &Fixture) -> Engine {
+    let engine = fx.open();
+    engine.set_occupancy_stage_for_test(false);
+    engine.register_layer(row_major("clusters/counts")).unwrap();
+    engine.register_layer(hulled("clusters/shapes")).unwrap();
+    for layer in ["clusters/counts", "clusters/shapes"] {
+        publish(
+            &engine,
+            layer,
+            (0..4)
+                .map(|k| node(fx, &format!("c{k}"), None, k * 2_000..(k + 1) * 2_000))
+                .collect(),
+        );
+    }
+    engine
+}
+
+/// One request that warms all three: artifacts give the masked counts and the hulls, the request
+/// itself takes the occupancy ladder.
+fn warm(engine: &Engine, session: &tessera_engine::Session) {
+    let out = engine
+        .viewport(
+            session,
+            ViewportRequest::new("s0", 4, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport");
+    for layer in ["clusters/counts", "clusters/shapes"] {
+        assert!(
+            out.artifacts.iter().any(|a| a.layer == layer),
+            "the request must serve {layer}'s artifacts, or it warms nothing"
+        );
+    }
+}
+
+/// **A prune drops every cache the session warmed, not only its row projections.**
+///
+/// The revoked session's masked-count histograms, occupancy rungs and derived shapes are each the
+/// largest per-session structure in their own right — a masked-count histogram alone is ~4 B per
+/// artifact — and nothing else holds them once the session is gone. The surviving session keeps
+/// all of its own and is still served.
+#[test]
+fn a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes() {
+    let fx = fixture();
+    let engine = pruning_fixture(&fx);
+
+    let doomed = engine.authorise(&full_coverage_credential()).unwrap();
+    warm(&engine, &doomed);
+    let doomed_entries = per_session_entries(&engine);
+    assert!(
+        doomed_entries.iter().all(|&n| n > 0),
+        "every cache under test must hold something for the doomed session: {doomed_entries:?}"
+    );
+
+    let survivor = engine.authorise(&subset_credential()).unwrap();
+    warm(&engine, &survivor);
+    let both = per_session_entries(&engine);
+    for (cache, (&both, &doomed)) in both.iter().zip(doomed_entries.iter()).enumerate() {
+        assert!(
+            both > doomed,
+            "cache {cache}: the second session must add entries of its own, {both} against \
+             {doomed}"
+        );
+    }
+
+    engine.prune_token(doomed.token_id());
+
+    let after = per_session_entries(&engine);
+    for (cache, ((&after, &both), &doomed)) in after
+        .iter()
+        .zip(both.iter())
+        .zip(doomed_entries.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            after,
+            both - doomed,
+            "cache {cache}: the prune must remove exactly the pruned session's entries"
+        );
+    }
+
+    // And the survivor is still served, from what it still holds.
+    warm(&engine, &survivor);
+    assert_eq!(
+        per_session_entries(&engine),
+        after,
+        "the surviving session re-reads from its own entries rather than rebuilding them"
+    );
+}
+
+/// [`a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes`] through the sweep's batch form,
+/// which walks each cache once with a set membership test rather than once per victim.
+#[test]
+fn a_batch_prune_drops_the_same_caches_as_a_single_one() {
+    let fx = fixture();
+    let engine = pruning_fixture(&fx);
+
+    let doomed = engine.authorise(&full_coverage_credential()).unwrap();
+    warm(&engine, &doomed);
+    let doomed_entries = per_session_entries(&engine);
+    assert!(doomed_entries.iter().all(|&n| n > 0), "{doomed_entries:?}");
+
+    let survivor = engine.authorise(&subset_credential()).unwrap();
+    warm(&engine, &survivor);
+    let both = per_session_entries(&engine);
+
+    engine.prune_tokens(&FxHashSet::from_iter([doomed.token_id()]));
+
+    let after = per_session_entries(&engine);
+    for (cache, ((&after, &both), &doomed)) in after
+        .iter()
+        .zip(both.iter())
+        .zip(doomed_entries.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            after,
+            both - doomed,
+            "cache {cache}: a batch of one removes exactly what the single prune removes"
+        );
+    }
+    warm(&engine, &survivor);
+    assert_eq!(per_session_entries(&engine), after);
 }

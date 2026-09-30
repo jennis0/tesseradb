@@ -4,7 +4,7 @@
 //! without breaking it. What that tolerance must *not* extend to is a field naming state the
 //! reader would have to act on; [`HONOURED_STATE`] is where that line is drawn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +96,11 @@ pub struct DeclaredScalar {
     /// No `serde(default)`: pre-release there is no bundle to stay compatible with (decision 0048),
     /// and a defaulted placement is one that reads as declared when it was inferred.
     pub render: bool,
+    /// Declared `unique`: no two live or suppressed items hold one value, and `eq` and `in` are
+    /// answered from the column's index ([`crate::unique`]). The served value is set from the
+    /// partition manifest's `unique_indexes` at open ([`crate::unique::with_unique_flags`]), so a
+    /// declaration made at a running service reads the same as one made at the build.
+    pub unique: bool,
 }
 
 impl DeclaredScalar {
@@ -208,19 +213,10 @@ pub struct ManifestVocabulary {
     /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
     /// `/v1/categories` gates on.
     pub visibility: Visibility,
-    /// The code space's width, by its contracts §2.2 name (`u8`, `u16`, `u32`) — the declaration's
-    /// own `width` key (`configuration.md` §1, per-point-attributes §3.6).
-    ///
-    /// **A column that names this vocabulary is still the authority**, and this is the answer
-    /// where none does. The width bounds every code drawn into the set, so a vocabulary declared
-    /// at a running service and not yet named by a column would otherwise come back from a
-    /// restart at `u32` and draw codes the column declared for it cannot hold
-    /// ([`crate::vocabulary::Vocabularies::seed`]).
-    ///
-    /// **Required, not `default`.** A defaulted `u32` is the widest domain, so a vocabulary whose
-    /// width went missing mints codes no narrower column can store, and the refusal arrives at
-    /// the column rather than at the manifest.
-    pub width: String,
+    /// The width every code of this vocabulary is stored at (`u8`, `u16` or `u32`). A category
+    /// column stores its vocabulary's width.
+    #[serde(with = "scalar_type_name")]
+    pub width: ScalarType,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
@@ -258,14 +254,8 @@ pub struct Quantisation {
 }
 
 impl Quantisation {
-    /// Whether `(x, y)` has a cell in this extent — **the one definition**, because a second copy
-    /// is how ingest and flush come to disagree about which points exist.
-    ///
-    /// Morton codes are a *fraction of the declared extent* (contracts §2.5), so a point outside it
-    /// has no cell. The quantiser clamps rather than failing, which is why this must be checked
-    /// before a point ever reaches it: a clamped point at the boundary is indistinguishable from
-    /// one that legitimately sits there, so clamping silently moves data with nothing left to
-    /// notice afterwards.
+    /// Whether `(x, y)` has a cell in this extent. A row read from an ingest batch is clamped
+    /// into the extent by [`crate::coordinates::place`] before it reaches this check.
     ///
     /// Inclusive of the maxima, matching the quantiser's own domain: a point exactly at `x_max`
     /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is
@@ -276,19 +266,14 @@ impl Quantisation {
     }
 }
 
-/// A safe-to-print stand-in for a deployment identity key: `fp:` plus the first 8 hex characters
-/// of a domain-separated SHA-256 over the key's canonical hex form.
+/// A safe-to-print stand-in for a bundle's identity key: `fp:` plus the first 8 hex characters of
+/// a domain-separated SHA-256 over the key's canonical hex form.
 ///
-/// **Why this exists.** `IdentityKey` has a redacted `Debug` and no hex accessor, but the key's
-/// plaintext hex is deliberately carried alongside it (MANIFEST must record it), and that hex
-/// then sits in `Debug`-deriving carriers — `IdentityDescriptor`, and through it `Manifest` and
-/// `Bundle`. One `tracing::error!("{bundle:?}")` would print the deployment key. Operators still
-/// need to be able to say "these two keys differ" (a rotation refusal, a support ticket), so the
-/// answer is a fingerprint rather than nothing: it distinguishes keys without disclosing one.
-///
-/// Domain-separated so a fingerprint can never be confused with, or compared against, one of the
-/// bundle's file digests; truncated because 32 bits is ample to tell two keys apart and leaves
-/// nothing worth attacking.
+/// The manifest records the key's plaintext hex, and the manifest is reachable from `Debug`
+/// carriers such as `Bundle`, so a `{bundle:?}` in a log line would print the key. The fingerprint
+/// tells two keys apart without disclosing either. It is domain-separated so that it cannot be
+/// compared against one of the bundle's file digests, and truncated to 32 bits, which is enough to
+/// tell two keys apart.
 pub fn identity_key_fingerprint(key_hex: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -302,13 +287,12 @@ pub fn identity_key_fingerprint(key_hex: &str) -> String {
     out
 }
 
-/// `MANIFEST.json`'s `identity` object (contracts §2.2/§2.6 r6): the `tessera_id`
-/// permutation's construction, round count, per-deployment key and shard id. **Required** —
-/// no `#[serde(default)]` — because an absent object cannot invert a `tessera_id`, and a
-/// *defaulted* key would invert every identifier to the wrong entity, suppressing the wrong
-/// item on `/control/changes`.
+/// `MANIFEST.json`'s `identity` object: the `tessera_id` permutation's construction, round count,
+/// key and shard id. The key is generated when the bundle is created and is never configured or
+/// changed, so a copy of the bundle keeps its `tessera_id`s and a rebuild gives new ones. The
+/// object is required: without it no `tessera_id` can be inverted.
 ///
-/// `Debug` is hand-written and redacting — see the impl below.
+/// `Debug` is hand-written and prints the key's fingerprint.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct IdentityDescriptor {
     pub construction: String,
@@ -317,25 +301,10 @@ pub struct IdentityDescriptor {
     /// case-folding — contracts §2.6).
     pub key: String,
     pub shard_id: u32,
-    /// The idset — which set of `tessera_id` values this bundle's identifiers belong to
-    /// (contracts §2.2, §2.6 r6). Advanced whenever the partitioning or sharding changes,
-    /// carried forward verbatim by a normal rebuild, and reset to 1 by a key rotation.
-    ///
-    /// **Not `#[serde(default)]`, deliberately.** `tessera_id` is stable across rebuilds but
-    /// *not* across a repartition, and the churn is **partial** — so without this signal a
-    /// stale identifier does not fail, it silently names whichever entity now occupies that
-    /// permutation input. A defaulted idset would make every bundle claim idset 0 and defeat
-    /// the one mechanism that distinguishes "your identifier is old" from "your identifier
-    /// resolved". An absent `idset` is a typed reader error, exactly as an absent `identity`
-    /// object is.
-    pub idset: u32,
 }
 
-/// **Hand-written, not derived: `key` is the deployment's identity key in plaintext hex.**
-/// `IdentityKey`'s own `Debug` is redacted, but that redaction is worthless if the same bytes
-/// print from the `String` carried beside it — and this struct is reachable from `Manifest` and
-/// `Bundle`, both `Debug`, so a single `{:?}` on either would emit the key. `Serialize` is
-/// untouched: MANIFEST.json must still contain the key verbatim.
+/// Hand-written because `key` is the key in plaintext hex, and `Manifest` and `Bundle` reach this
+/// struct through derived `Debug`s. `Serialize` writes the key verbatim.
 impl std::fmt::Debug for IdentityDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IdentityDescriptor")
@@ -343,7 +312,6 @@ impl std::fmt::Debug for IdentityDescriptor {
             .field("rounds", &self.rounds)
             .field("key", &identity_key_fingerprint(&self.key))
             .field("shard_id", &self.shard_id)
-            .field("idset", &self.idset)
             .finish()
     }
 }
@@ -368,17 +336,6 @@ impl IdentityDescriptor {
                     "identity rounds {} does not match this reader's {IDENTITY_ROUNDS}",
                     self.rounds
                 ),
-            });
-        }
-        // Contracts §2.2: the idset is "reset to 1 by a key rotation" and advanced from there,
-        // so 0 is not a value any conforming writer produces. Refusing it here means a
-        // hand-edited or partially-written manifest fails closed rather than presenting an
-        // idset that no client can meaningfully compare against.
-        if self.idset == 0 {
-            return Err(StoreError::InvalidIdentity {
-                detail: "idset is 0; conforming writers start at 1 and advance \
-                         (contracts §2.2)"
-                    .to_string(),
             });
         }
         Ok(())
@@ -446,7 +403,7 @@ pub struct ViewDescriptor {
     #[serde(with = "projection_name")]
     pub projection: Projection,
     /// **This view's own gate** (`views.md` §6): the labels a principal must hold one of to reach
-    /// the view at all, each element one term taken verbatim (decision 0132), or `None` for
+    /// the view at all, each element one term, stored trimmed, or `None` for
     /// `public` — the label every principal holds by construction
     /// ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)),
     /// which is why the ordinary case stores nothing rather than storing the word.
@@ -596,7 +553,7 @@ pub struct ScopedScalar {
     /// after the build, [`Self::views`] naming those that have one — carries no slot at all, which
     /// a reader sees as the column's absence rather than as a row of placeholders.
     pub render: bool,
-    /// The view ids that have a column, in roster order — the joined `group:key`
+    /// The view ids that have a column, in roster order: the joined `group:key`
     /// form, which is what [`crate::view_path_components`] turns into the column's directory.
     ///
     /// **Named rather than derived from the roster**, because the two can differ: a view created
@@ -772,6 +729,22 @@ pub struct Manifest {
     pub files: BTreeMap<String, FileDigest>,
 }
 
+/// Everything a side manifest or the write-ahead log can add to a [`Manifest`] after it was
+/// written, gathered so one call merges it — see [`Manifest::with_declarations`]. A list left
+/// empty adds nothing.
+#[derive(Default)]
+pub struct Declarations<'a> {
+    pub groups: &'a [GroupDescriptor],
+    pub plain_views: &'a [ViewDescriptor],
+    pub vocabularies: &'a [ManifestVocabulary],
+    pub attributes: &'a [DeclaredScalar],
+    pub scoped_attributes: &'a [ScopedScalar],
+    pub created_views: &'a [CreatedView],
+    pub dead_incarnations: &'a [DeadIncarnation],
+    /// `(column, view, incarnation)`, as [`Manifest::with_scoped_columns`] takes them.
+    pub scoped_columns: &'a [(String, String, ViewIncarnation)],
+}
+
 impl Manifest {
     /// The frame a named view's positions are quantised against, or `None` for a view this bundle
     /// does not declare.
@@ -918,9 +891,9 @@ impl Manifest {
     /// **One definition, because a key is not one view.** A create lands on every sharing group at
     /// the same moment and a drop takes it off every one of them, so anything that acts on "the
     /// views of this key" — [`Self::with_roster`]'s death loop, the drop's buffer prune, its
-    /// `delete_dangling` probe, and the WAL replay's own prune — must expand the same way. Three
-    /// copies of the expansion is how one of them comes to prune a single spelling and leave the
-    /// other's rows to be adopted by whatever takes the key next
+    /// probe for the items it leaves in no view, and the WAL replay's own prune — must expand the
+    /// same way. Three copies of the expansion is how one of them comes to prune a single spelling
+    /// and leave the other's rows to be adopted by whatever takes the key next
     /// ([decision 0115](../../../docs/decisions/0115-a-dropped-view-key-is-reusable.md)).
     ///
     /// The caller passes the **owner**: `owner_of_group` is what turns the group a request named
@@ -960,6 +933,17 @@ impl Manifest {
         // the other order would delete the view the caller was just told it had. A death whose key
         // nothing recreated simply leaves the group without it.
         for stone in dead {
+            // A death takes away only the incarnation it names. The list is never pruned and is
+            // applied again at every roster publication and every open, so it goes on naming
+            // earlier incarnations of a key created again; the recreated key keeps its place and
+            // its families' columns.
+            let owner_id = format!("{}{}{}", stone.group, crate::GROUP_SEPARATOR, stone.key);
+            if manifest
+                .incarnation_of(&owner_id)
+                .is_some_and(|live| live != stone.incarnation)
+            {
+                continue;
+            }
             // **The owner's groups and every group sharing its views** — the one expansion
             // `Self::view_ids_for_key` defines, which the drop's own prunes take too.
             let ids = manifest.view_ids_for_key(&stone.group, &stone.key);
@@ -1054,6 +1038,11 @@ impl Manifest {
             .iter()
             .find(|v| v.id == view)
             .map(|v| v.incarnation)
+    }
+
+    /// [`Self::incarnation_of`] for the view `key` of `group`.
+    pub fn incarnation_of_key(&self, group: &str, key: &str) -> Option<ViewIncarnation> {
+        self.incarnation_of(&format!("{group}{}{key}", crate::GROUP_SEPARATOR))
     }
 
     /// Is this artifact's `(view, incarnation)` stamp the live one?
@@ -1182,6 +1171,7 @@ impl Manifest {
 
     pub fn with_scoped_columns(&self, columns: &[(String, String, ViewIncarnation)]) -> Manifest {
         let mut manifest = self.clone();
+        let mut grown: BTreeSet<(usize, usize)> = BTreeSet::new();
         for (column, view, incarnation) in columns {
             if !manifest.is_live_incarnation(view, *incarnation) {
                 continue;
@@ -1189,19 +1179,54 @@ impl Manifest {
             let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
                 continue;
             };
-            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == group_name) else {
+            let Some(g) = manifest.groups.iter().position(|g| g.name == group_name) else {
                 continue;
             };
+            let group = &mut manifest.groups[g];
             if !group.views.iter().any(|v| v.key == key) {
                 continue;
             }
-            if let Some(family) = group.scoped_scalars.iter_mut().find(|f| f.name == *column) {
+            if let Some(f) = group.scoped_scalars.iter().position(|f| f.name == *column) {
+                let family = &mut group.scoped_scalars[f];
                 if !family.views.contains(view) {
                     family.views.push(view.clone());
+                    grown.insert((g, f));
                 }
             }
         }
+        // Roster order, as a build lists them, whichever view a flush reached first.
+        let mut position: Option<(usize, HashMap<String, usize>)> = None;
+        for (g, f) in grown {
+            let group = &mut manifest.groups[g];
+            if position.as_ref().is_none_or(|(held, _)| *held != g) {
+                let ids = group.views.iter().enumerate().map(|(i, v)| {
+                    (format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, v.key), i)
+                });
+                position = Some((g, ids.collect()));
+            }
+            let (_, of) = position.as_ref().expect("set above");
+            group.scoped_scalars[f]
+                .views
+                .sort_by_key(|id| of.get(id).copied());
+        }
         manifest
+    }
+
+    /// This manifest with every list in `declarations` merged, in the one order that keeps them
+    /// all: groups, plain views, vocabularies, attributes, roster, scoped columns.
+    ///
+    /// Each step drops what the manifest cannot place, so a step reached too early loses a
+    /// declaration that arrived in the same value. A roster creation whose group the manifest
+    /// does not yet declare is dropped; a column naming a vocabulary the manifest does not yet
+    /// carry refuses to seed; a scoped column extends a family's list, which the attributes step
+    /// puts there and the roster step decides the live incarnation of.
+    pub fn with_declarations(&self, declarations: &Declarations<'_>) -> Manifest {
+        self.with_groups(declarations.groups)
+            .with_plain_views(declarations.plain_views)
+            .with_vocabularies(declarations.vocabularies)
+            .with_attributes(declarations.attributes, declarations.scoped_attributes)
+            .with_roster(declarations.created_views, declarations.dead_incarnations)
+            .with_scoped_columns(declarations.scoped_columns)
     }
 
     pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
@@ -1262,11 +1287,87 @@ pub struct SegmentDescriptor {
     pub entity_hi: u64,
 }
 
-/// One entry of `deny`: the current suppression set (contracts §2.3's publication rule).
+/// A set of entity ids, as `deny`, `tombstones` and the allocator's freed ids are carried: the
+/// portable Roaring serialisation, base64 in the JSON.
+///
+/// The bytes are decoded once, when the manifest is deserialised, and an id set that does not
+/// decode is held as undecodable rather than as the empty set. [`SegmentsManifest::honourability`]
+/// then refuses the manifest, because a reader that took undecodable bytes for "nothing is
+/// denied" would serve every entity the field names.
+#[derive(Debug, Clone)]
+pub struct EntitySet {
+    encoded: String,
+    entities: Option<croaring::Bitmap>,
+}
+
+impl EntitySet {
+    /// The set `entities` names, encoded for a manifest about to be written.
+    pub fn of(entities: &croaring::Bitmap) -> Self {
+        EntitySet {
+            encoded: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                entities.serialize::<croaring::Portable>(),
+            ),
+            entities: Some(entities.clone()),
+        }
+    }
+
+    /// The ids, or `None` where the field's bytes did not decode.
+    pub fn entities(&self) -> Option<&croaring::Bitmap> {
+        self.entities.as_ref()
+    }
+
+    /// Whether this manifest exists because a deny was accepted. Undecodable counts as carrying:
+    /// the field was written by something, and what it said cannot be read.
+    pub fn carries(&self) -> bool {
+        self.entities
+            .as_ref()
+            .is_none_or(|entities| !entities.is_empty())
+    }
+
+    fn undecodable(&self) -> bool {
+        self.entities.is_none()
+    }
+
+    fn decode(encoded: &str) -> Option<croaring::Bitmap> {
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+        croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+    }
+}
+
+/// One set of freed entity ids held back in [`SegmentsManifest::held_entities`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DenyEntry {
-    pub entity_id: u64,
-    pub cause: String,
+#[serde(deny_unknown_fields)]
+pub struct HeldEntities {
+    /// The WAL position the log must be kept from before these ids are issued.
+    pub position: u64,
+    pub entities: EntitySet,
+}
+
+impl Default for EntitySet {
+    fn default() -> Self {
+        EntitySet::of(&croaring::Bitmap::new())
+    }
+}
+
+impl Serialize for EntitySet {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.encoded)
+    }
+}
+
+impl<'de> Deserialize<'de> for EntitySet {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        let entities = EntitySet::decode(&encoded);
+        Ok(EntitySet { encoded, entities })
+    }
 }
 
 /// One entry of `vocabulary_extensions`: the bindings one named vocabulary has acquired since the
@@ -1310,6 +1411,13 @@ pub struct VocabularyExtension {
 pub struct DictExtent {
     pub path: String,
     pub records: u64,
+}
+
+impl DictExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.path.as_str())
+    }
 }
 
 /// One entry of `attr_extents`: one flush's values for one filterable column
@@ -1385,6 +1493,20 @@ pub struct AttrExtent {
     pub offsets: Option<String>,
 }
 
+impl AttrExtent {
+    /// Every file this extent owns, the optional ones when the extent names them.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [self.values.as_str(), self.presence.as_str()]
+            .into_iter()
+            .chain(
+                [&self.dict, &self.postings, &self.offsets]
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            )
+    }
+}
+
 /// One entry of `text_extents`: one flush's text layer — **dictionary, postings and presence, and
 /// no value column** (`records-and-search.md` §4.4).
 ///
@@ -1433,7 +1555,29 @@ pub struct TextExtent {
     /// and appears in no posting. Without this the layer would report it absent, and a later
     /// extent could claim it.
     pub presence: String,
+    /// The prose itself, one row per entity in [`Self::presence`]: `Some` exactly when
+    /// [`Self::view`] is. An entity-scoped column's prose is in the record blob; a group-scoped
+    /// column's is here, since the postings cannot give back the words they were made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose: Option<RecordExtent>,
 }
+
+impl TextExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.dict.as_str(),
+            self.postings.as_str(),
+            self.presence.as_str(),
+        ]
+        .into_iter()
+        .chain(self.prose.iter().flat_map(RecordExtent::files))
+    }
+}
+
+/// The directory under a group-scoped text column's base that holds its prose, as a record blob
+/// with one field per row.
+pub const SCOPED_PROSE_DIR: &str = "prose";
 
 /// One entry of `record_extents`: one flush's record-blob layer (`records-and-search.md` §3, §7).
 ///
@@ -1463,6 +1607,18 @@ pub struct RecordExtent {
     pub directory: String,
 }
 
+impl RecordExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.blocks.as_str(),
+            self.hasrow.as_str(),
+            self.directory.as_str(),
+        ]
+        .into_iter()
+    }
+}
+
 /// One entry of `entity_terms_extents`: one flush's slice of the entity→term transpose
 /// (`entities/terms/`, contracts §2.4; `crate::entity_terms` for the format).
 ///
@@ -1486,6 +1642,19 @@ pub struct EntityTermsExtent {
     /// Prefix-relative path of the extent's `u64` block bases, one per 65,536 ranks of
     /// `offsets`, which is what keeps a layer's pair count off a `u32` ceiling.
     pub bases: String,
+}
+
+impl EntityTermsExtent {
+    /// Every file this extent owns.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        [
+            self.hasrow.as_str(),
+            self.offsets.as_str(),
+            self.terms.as_str(),
+            self.bases.as_str(),
+        ]
+        .into_iter()
+    }
 }
 
 /// One entry of `membership_extents`: one publication's packed artifact memberships for one level
@@ -1550,170 +1719,60 @@ pub struct LevelVersion {
     pub version: u64,
 }
 
-/// One entry of `containment_extents`: one level's fold-written containment partition
-/// (`tessera_engine::containment`, and `membership.rs` for the format).
+/// One file derived from an artifact level: a containment partition, a tile index, a row-major
+/// column, a segment's shape row form, or a level's held shapes.
 ///
-/// **The coordinate is the whole of the adoption rule.** The partition is a pure function of a
-/// level's records and the prefix's postings, so a file describes the level *at one version*; a
-/// reader adopts it only where the level it seeds is at exactly that version, and recomposes
-/// otherwise. Never a weaker match. Growth shrinks nothing and publication only adds, so a stale
-/// partition answers containment for a generating set that has since grown — and growth makes
-/// containment **harder**, which makes the stale answer the permissive one on the one test
-/// **I3** exists to make conservative.
+/// A reader adopts the file only where the level it seeded is at exactly `level_version`, and
+/// derives the structure again otherwise. A stale file is narrow (a growth added members it does
+/// not cover), so nothing weaker than equality is safe.
 ///
-/// **One file per level, not per publication**, which is the difference from [`MembershipExtent`]:
-/// a membership extent covers the ordinals one publication appended and a reader unions them, where
-/// a partition covers the whole level and is replaced wholesale. That follows from what it is —
-/// interning is over the level's whole population, so an expression identifier means nothing
-/// outside the table it was interned into.
+/// Every form but containment is addressed by row, so it names the view and the incarnation whose
+/// row space it was written over; a containment partition names entities' terms and answers for
+/// every view of the level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ContainmentExtent {
-    /// Prefix-relative path of the packed partition.
+pub struct DerivedExtent {
+    /// Prefix-relative path of the file.
     pub path: String,
     pub layer: String,
     pub level: u32,
-    /// The level's version when this partition was composed. **Also the adoption test**: a reader
-    /// takes the file only where the level it seeded is at exactly this version.
     pub level_version: u64,
+    pub view: Option<String>,
+    pub incarnation: Option<ViewIncarnation>,
+    pub form: DerivedForm,
 }
 
-/// One entry of `tile_index_extents`: one `(view, layer, level)`'s fold-written per-artifact
-/// extents, over which `tessera_engine::tile_index` folds the hierarchical row-range index
-/// (`membership.rs` for the format).
-///
-/// **The coordinate is [`ContainmentExtent`]'s rule with a view on it**, and the view is the whole
-/// of the difference. A containment expression names entities' terms, so no row space is involved
-/// in it and one file answers for every view of a level. An extent is a pair of **rows**, so it
-/// answers for exactly the view whose row space it was projected through — and a level's row form
-/// is per view for the same reason. A file adopted under another view would settle artifacts
-/// against ranges that name other documents.
-///
-/// The version half is the same rule and the same direction of mistake: a growth adds members, so
-/// a stale extent is **narrow**, and a narrow extent settles an artifact whose membership reaches
-/// outside the viewport — which turns the design's collapse (`membership ⊆ viewport`, so one probe
-/// answers both questions) into a claim that is no longer true. Equality, never anything weaker.
+/// Which structure a [`DerivedExtent`] holds, and what else a reader checks before adopting it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TileIndexExtent {
-    /// Prefix-relative path of the packed extent column.
-    pub path: String,
-    /// The view whose row space these extents are in.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when this column was projected. **Also the adoption test.**
-    pub level_version: u64,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DerivedForm {
+    Containment,
+    TileIndex,
+    /// `layout` says which of the two column formats the file is in, and is checked against the
+    /// file's magic at open. Never [`ServingLayout::ArtifactMajor`], which has no column.
+    RowColumn {
+        layout: ServingLayout,
+    },
+    /// The rows of one segment. A `seg_id` is never reused, so the file answers for that segment
+    /// in every generation that carries it; `row_count` catches a file written for another.
+    ShapeRows {
+        seg_id: String,
+        row_count: u32,
+    },
+    ShapeHeld,
 }
 
-/// One entry of `row_column_extents`: one `(view, layer, level)`'s fold-written **row-major**
-/// column — a label per row, or a list per row (`membership.rs` for the two formats).
-///
-/// **[`TileIndexExtent`]'s coordinate, with the layout tag beside it.** A column is addressed by
-/// row, so it answers for exactly the view whose row space it was written over, and the level's
-/// version is what says whether it still describes that level. Equality on both, never anything
-/// weaker: a stale column is **narrow** — a growth added rows it does not label — and an unlabelled
-/// row is one no artifact claims, so the artifact holding it silently stops being a candidate
-/// there.
-///
-/// **The tag is the fail-closed guard the selection memo §5 asks for**, and it is not compatibility
-/// machinery. The manifest states which form each level's file is in and each format carries a
-/// distinct magic, so a reader handed a file the manifest mis-describes refuses at the first bytes
-/// rather than decoding a list's offset table as a label column. A refusal here is a drop and a
-/// recomposition, exactly as an unreadable containment partition is — the level is served
-/// artifact-major, which is what every request did before this structure existed.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RowColumnExtent {
-    /// Prefix-relative path of the packed column.
-    pub path: String,
-    /// The view whose row space this column is addressed in.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when this column was written. **Also the adoption test.**
-    pub level_version: u64,
-    /// Which form the file is in — checked against the file's own magic at open.
-    ///
-    /// Never [`ServingLayout::ArtifactMajor`]: that layout has no column, so an entry claiming it
-    /// names a file no writer produces, and the reader refuses it.
-    pub layout: ServingLayout,
-}
-
-/// One entry of `shape_rows_extents`: one `(view, layer, level)`'s membership of **one segment**,
-/// resolved against the level's shapes and written as the row form (`membership.rs`'s
-/// `pack_shape_rows`) by the build and by every fold, so an open claims it instead of resolving
-/// the segment again (`polygon-membership.md` §6.3).
-///
-/// **[`RowColumnExtent`]'s coordinate with the segment beside it**, and the segment is the whole
-/// of the difference: a piece is rows of one segment, keyed by a `seg_id` that is never reused,
-/// so the same file answers for that segment in every generation that carries it and for no
-/// other. The level version is the other half of the key — a publication into the level moves it
-/// and the piece then describes shapes the level no longer holds — and both are equality tests.
-/// A piece that fails either is resolved again from the geometry, never adapted (I11).
-///
-/// Written for a spatial level whose serving layout is artifact-major; a row-major level's
-/// persisted form is its column, which the open inverts into the same piece.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ShapeRowsExtent {
-    /// Prefix-relative path of the packed row form.
-    pub path: String,
-    /// The view whose segment the rows are of.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when the segment was resolved. **Also the adoption test.**
-    pub level_version: u64,
-    /// The segment the rows are of, and the other adoption test.
-    pub seg_id: String,
-    /// The segment's row count when it was resolved — a segment is immutable, so a mismatch is a
-    /// file written for another segment under a reused name, which contracts §2.1 forbids.
-    pub row_count: u32,
-}
-
-/// One entry of `shape_held_extents`: one `(view, layer, level)`'s **decompositions** — every
-/// artifact's interior tiles, boundary cells and bounds (`polygon-membership.md` §6.3), written
-/// by the build and by every fold so an open assembles the held form from the file instead of
-/// descending every shape again, which on Overture's part 0 was 8.9 of a 9.3 s open.
-///
-/// **[`TileIndexExtent`]'s coordinate**, and the same equality rule: the level version is the
-/// adoption test, and inside the file each entry also carries the length and a digest of the
-/// canonical bytes it was decomposed from, so an entry is used only for the shape that produced
-/// it. A decomposition is a pure function of the canonical shape, so a mismatch is not a
-/// disclosure, but it is refused all the same and the shape decomposed again — a form written by
-/// a different descent would place rows in the wrong cells.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ShapeHeldExtent {
-    /// Prefix-relative path of the packed decompositions.
-    pub path: String,
-    /// The view the shapes were canonicalised for.
-    pub view: String,
-    /// The view's incarnation when this structure was written (decision 0115). Carried for
-    /// [`SegmentDescriptor::incarnation`]'s reason: a derived structure is addressed by *row*, so
-    /// one written over a dropped incarnation's row space would label the rows of a key created
-    /// again with the predecessor's artifacts.
-    pub incarnation: ViewIncarnation,
-    pub layer: String,
-    pub level: u32,
-    /// The level's version when the decompositions were written. **Also the adoption test.**
-    pub level_version: u64,
+impl DerivedForm {
+    /// The directory under a partition that files of this form are written to.
+    pub fn dir(&self) -> &'static str {
+        match self {
+            DerivedForm::Containment => "containment",
+            DerivedForm::TileIndex => "tile-index",
+            DerivedForm::RowColumn { .. } => "row-column",
+            DerivedForm::ShapeRows { .. } => "shape-rows",
+            DerivedForm::ShapeHeld => "shape-held",
+        }
+    }
 }
 
 /// One entry of `term_image_extents`: one `(partition, view)`'s term images — every
@@ -1746,28 +1805,73 @@ pub struct TermImageExtent {
     pub keep_rows_per_container: u32,
 }
 
-/// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
-/// entity range (§3.6).
-///
-/// The build's `entities/ext-locator.u32` is one file whose length is the entity space *at build
-/// time*, so it says nothing about an entity a flush created. Without a durable reverse path for
-/// those, an item visible on the map would answer `/v1/items` with a typed error forever once its
-/// WAL region is reclaimed — contracts §2.4 serves that direction live-map-first,
-/// locator-second, and rotation empties the live map at restart.
-///
-/// The file is a dense `u32` array over `[entity_lo, entity_hi]`, no header, `0xFFFFFFFF` for an
-/// entity with no caller-supplied external id (contracts §3.4 r6 makes it optional). Each slot is
-/// an **ordinal into `external_id_run`**, named here rather than inferred, because a segment's
-/// extent is its own file and the concatenation order that gives the base locator its meaning does
-/// not extend across flushes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocatorExtent {
+/// One unique column's index in [`SegmentsManifest::unique_indexes`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniqueIndexRuns {
+    pub attribute: String,
+    /// The runs the build or the last fold wrote, ascending by key range with disjoint ranges.
+    pub base: Vec<BaseKeyRun>,
+    /// Every run written since, prefix-relative, oldest first. Any key may be in any of them.
+    pub live: Vec<String>,
+}
+
+impl UniqueIndexRuns {
+    /// Every run file this index names.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.base
+            .iter()
+            .map(|run| run.path.as_str())
+            .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// One index's runs in the key run format: the base runs a fold wrote, with their key ranges, and
+/// the live runs written since.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyRuns {
+    /// Ascending by key range with disjoint ranges.
+    pub base: Vec<BaseKeyRun>,
+    /// Prefix-relative, oldest first. Any key may be in any of them.
+    pub live: Vec<String>,
+}
+
+impl KeyRuns {
+    /// Every run file these runs name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.base
+            .iter()
+            .map(|run| run.path.as_str())
+            .chain(self.live.iter().map(String::as_str))
+    }
+}
+
+/// The edited items' two indexes ([`crate::edited`]): number to entity, and entity to number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditedItemsRuns {
+    pub by_number: KeyRuns,
+    pub by_entity: KeyRuns,
+}
+
+impl EditedItemsRuns {
+    /// Every run file both indexes name.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.by_number.files().chain(self.by_entity.files())
+    }
+}
+
+/// One base run of a unique index and its key range, so a lookup opens only the run whose range
+/// holds its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseKeyRun {
     pub path: String,
-    pub entity_lo: u64,
-    /// Inclusive.
-    pub entity_hi: u64,
-    /// Prefix-relative path of the `external_id_runs` entry these ordinals index.
-    pub external_id_run: String,
+    /// The run's smallest key, zero-extended, in lower-case hex.
+    pub first_key: String,
+    /// The run's largest key, the same way.
+    pub last_key: String,
 }
 
 /// `SEGMENTS-<n>.json` (contracts §2.3): complete current state for one partition, written by
@@ -1815,6 +1919,9 @@ pub struct SegmentsManifest {
     /// must not come to mean something else. A tombstone list that forgot would let a recreated
     /// layer silently inherit every stale reference to the old one.
     pub layer_tombstones: Vec<String>,
+    /// The layer registry's version counter: the last version handed to a registration or a drop.
+    /// Open resumes the counter from it.
+    pub layer_registry_version: u64,
     /// Every view **created while the service runs**, complete current state (`views.md` §3.2).
     ///
     /// **This is the roster's durable home, and the WAL is not.** The create and drop records are
@@ -1934,43 +2041,9 @@ pub struct SegmentsManifest {
     /// under the *old* numbering could compare equal to. A manifest omitting it is malformed, not
     /// version-free.
     pub level_versions: Vec<LevelVersion>,
-    /// Every fold-written containment partition this partition holds — see [`ContainmentExtent`].
-    /// Empty in a bundle that has never folded, and in one served by a plugin other than the
-    /// builtin.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument. The consequence of a lost list is
-    /// milder than that field's — a partition that is not adopted is recomposed on first use, and
-    /// the answer is the same — but *indistinguishable from an empty one* is the property the rule
-    /// is about, and a list that silently emptied itself would turn a fold's consolidation into a
-    /// stall on whichever request arrived first, with nothing reporting a fault.
-    pub containment_extents: Vec<ContainmentExtent>,
-    /// Every fold-written tile-index extent column this partition holds — see [`TileIndexExtent`].
-    /// Empty in a bundle that has never folded.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument and with `containment_extents`'
-    /// consequence: an unadopted column is refolded on first use and the answer is the same, but a
-    /// list that silently emptied itself would turn a fold's consolidation into a stall on
-    /// whichever request arrived first, with nothing reporting a fault.
-    pub tile_index_extents: Vec<TileIndexExtent>,
-    /// Every fold-written row-major column this partition holds — see [`RowColumnExtent`]. Empty
-    /// in a bundle that has never folded, and in one whose every level is artifact-major, which is
-    /// most of them.
-    ///
-    /// No `serde(default)`, on `membership_extents`' argument and with `tile_index_extents`'
-    /// consequence: an unadopted column is recomposed on first use and the answer is the same, but
-    /// a list that silently emptied itself would turn a fold's consolidation into a stall on
-    /// whichever request arrived first, with nothing reporting a fault.
-    pub row_column_extents: Vec<RowColumnExtent>,
-    /// Every persisted shape row form this partition holds — see [`ShapeRowsExtent`]. Empty in a
-    /// bundle with no spatial layer, and in one whose spatial levels are all served row-major.
-    ///
-    /// No `serde(default)`, on `row_column_extents`' argument: an unclaimed piece is resolved again
-    /// on open and the answer is the same, but a list that silently emptied itself would put the
-    /// whole re-resolution back into every open with nothing reporting a fault.
-    pub shape_rows_extents: Vec<ShapeRowsExtent>,
-    /// Every persisted decomposition this partition holds — see [`ShapeHeldExtent`]. Empty in a
-    /// bundle with no spatial layer. No `serde(default)`, on `shape_rows_extents`' argument.
-    pub shape_held_extents: Vec<ShapeHeldExtent>,
+    /// Every derived artifact file this partition holds. See [`DerivedExtent`]. No
+    /// `serde(default)`: a lost list must not read as an empty one.
+    pub derived_extents: Vec<DerivedExtent>,
     /// Every view's term images this partition holds. See [`TermImageExtent`]. Empty in a bundle
     /// whose views hold no rows, in one whose dictionary carries no terms, and in one published
     /// before a build or a fold derived them.
@@ -2019,7 +2092,7 @@ pub struct SegmentsManifest {
     /// Every filter-column extent this partition holds — see [`AttrExtent`]. Empty in a bundle
     /// straight out of `tessera build`, whose value columns cover every entity it knows about.
     ///
-    /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` and `locator_extents` are not:**
+    /// **Not in [`HONOURED_STATE`], for the reason `dict_extents` is not:**
     /// that list gates *state a reader might not be able to act on*, and this landed with the code
     /// that reads it. A reader that carried the field and ignored it would answer filters short
     /// over post-build entities, which is the failure the extent exists to remove — so there is no
@@ -2053,17 +2126,33 @@ pub struct SegmentsManifest {
     /// No `serde(default)`, per [`SegmentsManifest::attr_extents`]'s argument: a manifest that
     /// omits it is malformed, not extent-free.
     pub text_extents: Vec<TextExtent>,
+    /// One entry per unique column: the runs of its index ([`crate::unique`]). A column is unique
+    /// exactly where it has an entry, empty lists and all, so this list is also the served
+    /// schema's `unique` flags.
+    ///
+    /// No `serde(default)`: an absent list would read as no column being unique, and the ingest
+    /// refusal and the `eq` route would then stop without anything reporting it.
+    pub unique_indexes: Vec<UniqueIndexRuns>,
+    /// Which entity holds each item an edit moved to a new entity ([`crate::edited`]).
+    ///
+    /// No `serde(default)`: an absent map would name every edited item's first entity, which a
+    /// fold has removed.
+    pub edited_items: EditedItemsRuns,
+    /// The entity ids a fold freed that the allocator issues before its high-water, as of this
+    /// publication (`tessera_lifecycle::alloc`). Ids that do not decode are read as none, which
+    /// issues nothing twice.
+    pub free_entities: EntitySet,
+    /// Freed entity ids the allocator holds back until the log keeps no record older than the
+    /// position beside them.
+    pub held_entities: Vec<HeldEntities>,
+    /// The entities already deleted whose rows a fold has not yet removed — see [`EntitySet`].
     #[serde(default)]
-    pub external_id_runs: Vec<String>,
-    /// The reverse external-id direction for each flush segment — see [`LocatorExtent`]. Empty in
-    /// a bundle straight out of `tessera build`, whose one `ext-locator.u32` covers every entity
-    /// it knows about.
+    pub tombstones: EntitySet,
+    /// The suppression set as it stood when this manifest was written — see [`EntitySet`]. A
+    /// separate field from [`SegmentsManifest::tombstones`] and never its union: publishing the
+    /// union would make every deletion look retirable by an unsuppress.
     #[serde(default)]
-    pub locator_extents: Vec<LocatorExtent>,
-    #[serde(default)]
-    pub tombstones: Vec<u64>,
-    #[serde(default)]
-    pub deny: Vec<DenyEntry>,
+    pub deny: EntitySet,
     /// Category bindings minted since the last build or fold — see [`VocabularyExtension`]. Empty
     /// in a bundle straight out of `tessera build`, and emptied again by every fold.
     #[serde(default)]
@@ -2169,6 +2258,46 @@ pub enum Honourability {
 }
 
 impl SegmentsManifest {
+    /// A side-manifest that names nothing.
+    pub fn empty() -> SegmentsManifest {
+        SegmentsManifest {
+            watermark: 0,
+            entity_id_high_water: 0,
+            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
+            layers: Vec::new(),
+            layer_tombstones: Vec::new(),
+            layer_registry_version: 0,
+            views: Vec::new(),
+            scoped_columns: Vec::new(),
+            attributes: Vec::new(),
+            scoped_attributes: Vec::new(),
+            vocabularies: Vec::new(),
+            groups: Vec::new(),
+            plain_views: Vec::new(),
+            dead_view_incarnations: Vec::new(),
+            membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            derived_extents: Vec::new(),
+            term_image_extents: Vec::new(),
+            artifact_record_extents: Vec::new(),
+            segments: Vec::new(),
+            deltas: Vec::new(),
+            dict_extents: Vec::new(),
+            attr_extents: Vec::new(),
+            record_extents: Vec::new(),
+            entity_terms_extents: Vec::new(),
+            text_extents: Vec::new(),
+            unique_indexes: Vec::new(),
+            edited_items: EditedItemsRuns::default(),
+            free_entities: EntitySet::default(),
+            held_entities: Vec::new(),
+            tombstones: EntitySet::default(),
+            deny: EntitySet::default(),
+            vocabulary_extensions: Vec::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
     /// The state fields this manifest carries that [`HONOURED_STATE`] does not cover, by name.
     ///
     /// **A list of names, never a bool**, because the operator has to be told *which* build
@@ -2189,8 +2318,8 @@ impl SegmentsManifest {
     /// re-exposes every entity denied since the older manifest was written.
     pub fn deny_disposition_state(&self) -> Vec<&'static str> {
         [
-            ("tombstones", !self.tombstones.is_empty()),
-            ("deny", !self.deny.is_empty()),
+            ("tombstones", self.tombstones.carries()),
+            ("deny", self.deny.carries()),
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && DENY_DISPOSITION_STATE.contains(name))
@@ -2201,9 +2330,20 @@ impl SegmentsManifest {
     pub fn unhonourable_state(&self) -> Vec<&'static str> {
         // Deny-disposition fields first, so a truncated message still names the field that
         // decided the posture.
-        [
-            ("tombstones", !self.tombstones.is_empty()),
-            ("deny", !self.deny.is_empty()),
+        //
+        // A deny field is honoured, and honouring it means acting on the ids it carries. Bytes
+        // that do not decode are ids this reader cannot act on, whatever the field name says, so
+        // they are listed here past the honoured-name filter below and the manifest is refused
+        // rather than served as though nothing were denied.
+        let mut fields: Vec<&'static str> = [
+            ("tombstones", self.tombstones.undecodable()),
+            ("deny", self.deny.undecodable()),
+        ]
+        .into_iter()
+        .filter(|(_, undecodable)| *undecodable)
+        .map(|(name, _)| name)
+        .collect();
+        fields.extend([
             ("deltas", !self.deltas.is_empty()),
             (
                 "vocabulary_extensions",
@@ -2224,8 +2364,8 @@ impl SegmentsManifest {
         ]
         .into_iter()
         .filter(|(name, carried)| *carried && !HONOURED_STATE.contains(name))
-        .map(|(name, _)| name)
-        .collect()
+        .map(|(name, _)| name));
+        fields
     }
 
     /// The posture a reader must take towards this manifest — **the only place the two
@@ -2259,7 +2399,6 @@ mod tests {
             rounds: IDENTITY_ROUNDS,
             key: KEY_HEX.to_string(),
             shard_id: 0,
-            idset: 1,
         }
     }
 
@@ -2274,7 +2413,7 @@ mod tests {
     #[test]
     fn an_unknown_arrow_type_refuses_the_declaration() {
         let good: DeclaredScalar = serde_json::from_str(
-            r#"{"name": "score", "arrow_type": "f32", "index": false, "render": true}"#,
+            r#"{"name": "score", "arrow_type": "f32", "index": false, "render": true, "unique": false}"#,
         )
         .expect("f32 parses");
         assert_eq!(good.arrow_type, ScalarType::F32);
@@ -2307,6 +2446,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         };
         assert_eq!(category.wire_type(), ScalarType::Utf8);
         assert_eq!(category.arrow_type, ScalarType::U16);
@@ -2318,6 +2458,7 @@ mod tests {
             analyser: None,
             index: false,
             render: true,
+            unique: false,
         };
         assert_eq!(
             plain.wire_type(),
@@ -2327,9 +2468,9 @@ mod tests {
         );
     }
 
-    /// `IdentityKey`'s `Debug` is redacted, but the key's plaintext hex is deliberately carried
-    /// beside it, and `IdentityDescriptor` is reachable from `Manifest` and `Bundle` — both
-    /// `Debug`. One `tracing::error!("{bundle:?}")` would otherwise print the deployment key.
+    /// The manifest records the key's plaintext hex, and `IdentityDescriptor` is reachable from
+    /// `Manifest` and `Bundle`, both `Debug`. One `tracing::error!("{bundle:?}")` would otherwise
+    /// print the key.
     #[test]
     fn identity_descriptor_debug_does_not_print_the_key() {
         let printed = format!("{:?}", descriptor());
@@ -2354,46 +2495,6 @@ mod tests {
         );
     }
 
-    fn empty_segments_manifest() -> SegmentsManifest {
-        SegmentsManifest {
-            watermark: 0,
-            entity_id_high_water: 0,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
-        }
-    }
-
     /// The term-image list survives a round trip, and a manifest that omits it is refused.
     ///
     /// The refusal is the half worth testing. There is no `serde(default)` on the field, so a
@@ -2401,7 +2502,7 @@ mod tests {
     /// have no images, which is what a list lost in transit would look like.
     #[test]
     fn a_term_image_list_round_trips_and_an_absent_one_is_refused() {
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.term_image_extents.push(TermImageExtent {
             path: "partitions/default/term-images/term-images-000000-000.timg".to_string(),
             view: "s0".to_string(),
@@ -2425,13 +2526,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_derived_form_round_trips_and_an_absent_list_is_refused() {
+        let entry = |form: DerivedForm, view: Option<&str>| DerivedExtent {
+            path: format!("partitions/default/{}/x", form.dir()),
+            layer: "regions".to_string(),
+            level: 0,
+            level_version: 3,
+            view: view.map(str::to_string),
+            incarnation: view.map(|_| DECLARED_INCARNATION),
+            form,
+        };
+        let mut manifest = SegmentsManifest::empty();
+        manifest.derived_extents = vec![
+            entry(DerivedForm::Containment, None),
+            entry(DerivedForm::TileIndex, Some("s0")),
+            entry(
+                DerivedForm::RowColumn {
+                    layout: ServingLayout::RowMajorList,
+                },
+                Some("s0"),
+            ),
+            entry(
+                DerivedForm::ShapeRows {
+                    seg_id: "base".to_string(),
+                    row_count: 7,
+                },
+                Some("s0"),
+            ),
+            entry(DerivedForm::ShapeHeld, Some("s0")),
+        ];
+        let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
+        let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");
+        assert_eq!(parsed.derived_extents, manifest.derived_extents);
+
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("as JSON");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("derived_extents");
+        let without = serde_json::to_vec(&value).expect("re-serialises");
+        assert!(serde_json::from_slice::<SegmentsManifest>(&without).is_err());
+    }
+
     /// The guard must be invisible on the shape `tessera build` writes, or every bundle in the
     /// project stops opening.
     #[test]
     fn a_manifest_with_no_state_carries_nothing_unhonourable() {
-        assert!(empty_segments_manifest().unhonourable_state().is_empty());
+        assert!(SegmentsManifest::empty().unhonourable_state().is_empty());
         assert_eq!(
-            empty_segments_manifest().honourability(),
+            SegmentsManifest::empty().honourability(),
             Honourability::Honourable
         );
     }
@@ -2445,23 +2589,20 @@ mod tests {
     /// deny-carrying. Landing the constant without the second property is the fail-open.
     #[test]
     fn a_honoured_field_no_longer_refuses_a_manifest_but_deny_state_stays_visible() {
-        let mut with_tombstone = empty_segments_manifest();
-        with_tombstone.tombstones.push(17);
+        let mut with_tombstone = SegmentsManifest::empty();
+        with_tombstone.tombstones = deny_set(&[17]);
         assert_eq!(with_tombstone.honourability(), Honourability::Honourable);
         assert_eq!(with_tombstone.deny_disposition_state(), vec!["tombstones"]);
 
-        let mut with_deny = empty_segments_manifest();
-        with_deny.deny.push(DenyEntry {
-            entity_id: 17,
-            cause: "suppress".to_string(),
-        });
+        let mut with_deny = SegmentsManifest::empty();
+        with_deny.deny = deny_set(&[17]);
         assert_eq!(with_deny.honourability(), Honourability::Honourable);
         assert_eq!(with_deny.deny_disposition_state(), vec!["deny"]);
 
         // `deltas` is not deny-disposition state: its absence leaves items *missing*, which is
         // staleness in the fail-safe direction, so a deltas-only candidate whose files do not
         // verify may still be stepped past.
-        let mut with_delta = empty_segments_manifest();
+        let mut with_delta = SegmentsManifest::empty();
         with_delta.deltas.push("d.arrow".to_string());
         assert_eq!(with_delta.honourability(), Honourability::Honourable);
         assert!(with_delta.deny_disposition_state().is_empty());
@@ -2472,14 +2613,50 @@ mod tests {
     /// arrive with the code that acts on it or be refused.
     #[test]
     fn no_known_state_field_is_unhonourable_any_more() {
-        let mut all_three = empty_segments_manifest();
-        all_three.tombstones.push(17);
+        let mut all_three = SegmentsManifest::empty();
+        all_three.tombstones = deny_set(&[17]);
         all_three.deltas.push("d.arrow".to_string());
-        all_three.deny.push(DenyEntry {
-            entity_id: 18,
-            cause: "suppress".to_string(),
-        });
+        all_three.deny = deny_set(&[18]);
         assert!(all_three.unhonourable_state().is_empty());
+    }
+
+    /// A `deny` set for the ids given.
+    fn deny_set(ids: &[u32]) -> EntitySet {
+        EntitySet::of(&ids.iter().copied().collect::<croaring::Bitmap>())
+    }
+
+    /// A deny field whose bytes do not decode is refused, never read as the empty set. Reading it
+    /// as empty would serve every entity it named; stepping past it would serve an older manifest
+    /// that predates the deny.
+    #[test]
+    fn a_deny_field_that_does_not_decode_makes_the_manifest_unready() {
+        for encoded in ["not base64 at all", "", "AAAA"] {
+            let mut manifest = SegmentsManifest::empty();
+            manifest.deny = serde_json::from_value(serde_json::json!(encoded)).unwrap();
+            assert!(manifest.deny.entities().is_none(), "{encoded} decoded");
+            assert_eq!(
+                manifest.honourability(),
+                Honourability::Unready {
+                    fields: vec!["deny"]
+                }
+            );
+            assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
+        }
+    }
+
+    /// A round trip through the JSON encoding keeps every id and keeps an empty set empty.
+    #[test]
+    fn a_deny_set_round_trips_through_its_json_encoding() {
+        for ids in [vec![], vec![0u32], vec![1, 2, 3, 70_000, u32::MAX]] {
+            let written = serde_json::to_value(deny_set(&ids)).unwrap();
+            let read: EntitySet = serde_json::from_value(written).unwrap();
+            assert_eq!(
+                read.entities().unwrap().to_vec(),
+                ids,
+                "the ids a manifest carries must survive its encoding"
+            );
+            assert_eq!(read.carries(), !ids.is_empty());
+        }
     }
 
     /// **The common shape, and the one-identifier fail-open.** Contracts §2.3 makes a
@@ -2493,18 +2670,15 @@ mod tests {
     /// availability loss), and one returning none would step past the suppression.
     #[test]
     fn a_deny_beside_deltas_is_still_deny_disposition_state() {
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
-        manifest.deny.push(DenyEntry {
-            entity_id: 17,
-            cause: "suppress".to_string(),
-        });
+        manifest.deny = deny_set(&[17]);
         assert_eq!(manifest.deny_disposition_state(), vec!["deny"]);
 
         // And the same for a tombstone beside deltas — the other deny-disposition field.
-        let mut manifest = empty_segments_manifest();
+        let mut manifest = SegmentsManifest::empty();
         manifest.deltas.push("d.arrow".to_string());
-        manifest.tombstones.push(17);
+        manifest.tombstones = deny_set(&[17]);
         assert_eq!(manifest.deny_disposition_state(), vec!["tombstones"]);
     }
 
@@ -2562,5 +2736,232 @@ mod tests {
         let b = identity_key_fingerprint("100f0e0d0c0b0a090807060504030201");
         assert_ne!(a, b);
         assert!(a.starts_with("fp:") && a.len() == 3 + 8);
+    }
+
+    fn bare_manifest() -> Manifest {
+        Manifest {
+            bundle_format: tessera_types::BUNDLE_FORMAT,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            data_plugin_hash: "builtin".to_string(),
+            declared_bounds: serde_json::json!({}),
+            declared_scalars: Vec::new(),
+            vocabularies: Vec::new(),
+            small_term_threshold: 32,
+            entity_id_high_water: 0,
+            identity: descriptor(),
+            views: Vec::new(),
+            groups: Vec::new(),
+            partitions: Vec::new(),
+            provenance: serde_json::json!({}),
+            files: BTreeMap::new(),
+        }
+    }
+
+    /// A group, a family over it, a view of it and a column of that view all arriving together
+    /// survive the merge — which they do only in [`Manifest::with_declarations`]' order. Each of
+    /// the three assertions fails under a merge that ran its step before the one it depends on:
+    /// the roster drops a creation whose group is not yet declared, the scoped column drops a
+    /// pair whose family or whose view is not yet there.
+    #[test]
+    fn a_group_its_family_its_view_and_its_column_all_land_from_one_declarations() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let created = CreatedView {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation: 1,
+            visibility: None,
+            metadata: BTreeMap::new(),
+        };
+        let view_id = format!("quarter{}2026-Q1", crate::GROUP_SEPARATOR);
+
+        let merged = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: std::slice::from_ref(&created),
+            scoped_columns: &[("rank".to_string(), view_id.clone(), 1)],
+            ..Declarations::default()
+        });
+
+        let group = merged
+            .groups
+            .iter()
+            .find(|g| g.name == "quarter")
+            .expect("the declared group");
+        assert!(
+            group.views.iter().any(|v| v.key == "2026-Q1"),
+            "the creation lands on the group that arrived with it"
+        );
+        assert!(
+            merged.views.iter().any(|v| v.id == view_id),
+            "and the view it names is declared"
+        );
+        assert_eq!(
+            group
+                .scoped_scalars
+                .iter()
+                .find(|f| f.name == "rank")
+                .expect("the declared family")
+                .views,
+            vec![view_id],
+            "and the column of that view is on the family's list"
+        );
+    }
+
+    /// **A death takes away the incarnation it names and no other.** The list of deaths is never
+    /// pruned, so a key created again meets its predecessor's death at every later merge; a key
+    /// dropped a second time meets its own.
+    #[test]
+    fn a_death_removes_only_the_incarnation_it_names() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let created = |incarnation| CreatedView {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation,
+            visibility: None,
+            metadata: BTreeMap::new(),
+        };
+        let stone = |incarnation| DeadIncarnation {
+            group: "quarter".to_string(),
+            key: "2026-Q1".to_string(),
+            incarnation,
+        };
+        let view_id = format!("quarter{}2026-Q1", crate::GROUP_SEPARATOR);
+        // The key as a fold writes it into `MANIFEST.json` once incarnation 1 has a column.
+        let folded = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: &[created(1)],
+            scoped_columns: &[("rank".to_string(), view_id.clone(), 1)],
+            ..Declarations::default()
+        });
+        let listed = |manifest: &Manifest| {
+            manifest.groups[0]
+                .scoped_scalars
+                .iter()
+                .any(|f| f.views.contains(&view_id))
+        };
+        let rostered = |manifest: &Manifest| manifest.groups[0].views.iter().any(|v| v.key == "2026-Q1");
+
+        // Recreated: the predecessor's death leaves it alone.
+        let recreated = folded.with_roster(&[created(1)], &[stone(0)]);
+        assert_eq!(recreated.incarnation_of(&view_id), Some(1));
+        assert!(rostered(&recreated) && listed(&recreated));
+
+        // Dropped again: both deaths are on the list, and its own takes it away.
+        let dropped_again = folded.with_roster(&[], &[stone(0), stone(1)]);
+        assert_eq!(dropped_again.incarnation_of(&view_id), None);
+        assert!(!rostered(&dropped_again));
+        assert!(!listed(&dropped_again));
+    }
+
+    /// A family lists its views in the group's roster order, whichever view's first column a
+    /// flush wrote first, as a build lists them.
+    #[test]
+    fn a_family_lists_its_views_in_roster_order() {
+        let group = GroupDescriptor {
+            name: "quarter".to_string(),
+            title: None,
+            members_of: None,
+            quantisation: Quantisation {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::None,
+            metadata: Vec::new(),
+            visibility: None,
+            point_default: None,
+            views: Vec::new(),
+            scoped_scalars: Vec::new(),
+        };
+        let family = ScopedScalar {
+            name: "rank".to_string(),
+            group: "quarter".to_string(),
+            arrow_type: ScalarType::I32,
+            vocabulary: None,
+            analyser: None,
+            index: true,
+            render: false,
+            views: Vec::new(),
+        };
+        let keys = ["2026-Q1", "2026-Q2", "2026-Q3"];
+        let created: Vec<CreatedView> = keys
+            .iter()
+            .map(|key| CreatedView {
+                group: "quarter".to_string(),
+                key: key.to_string(),
+                incarnation: 1,
+                visibility: None,
+                metadata: BTreeMap::new(),
+            })
+            .collect();
+        let id = |key: &str| format!("quarter{}{key}", crate::GROUP_SEPARATOR);
+        let column = |key: &str| ("rank".to_string(), id(key), 1);
+
+        let first = bare_manifest().with_declarations(&Declarations {
+            groups: std::slice::from_ref(&group),
+            scoped_attributes: std::slice::from_ref(&family),
+            created_views: &created,
+            scoped_columns: &[column("2026-Q3")],
+            ..Declarations::default()
+        });
+        let later = first.with_scoped_columns(&[column("2026-Q2"), column("2026-Q1")]);
+        assert_eq!(
+            later.groups[0].scoped_scalars[0].views,
+            keys.iter().map(|k| id(k)).collect::<Vec<_>>()
+        );
     }
 }

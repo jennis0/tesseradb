@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -132,20 +133,22 @@ class SourceGeometry:
     hot-row-geometry design §5.2), and until it is, the binding is the harness's discipline.
     """
 
+    #: The unique attribute the file names its items by, which keys `qx` and `qy`.
+    field: str
     qx: dict[int, int]
     qy: dict[int, int]
 
-    def position(self, source_id: int) -> tuple[int, int]:
-        if source_id not in self.qx:
+    def position(self, value: int) -> tuple[int, int]:
+        if value not in self.qx:
             raise KeyError(
-                f"source geometry has no row for source id {source_id}: the points file handed "
-                "to the oracle is not the one this bundle was built from"
+                f"source geometry has no row whose {self.field} is {value}: the points file "
+                "handed to the oracle is not the one this bundle was built from"
             )
-        return self.qx[source_id], self.qy[source_id]
+        return self.qx[value], self.qy[value]
 
 
-def _row_groups_worth_reading(reader, limit: int | None) -> list[int]:
-    """Row groups that may hold a row with `entity_id < limit`, by their own statistics.
+def _row_groups_worth_reading(reader, column: str, limit: int | None) -> list[int]:
+    """Row groups that may hold a row whose `column` is below `limit`, by their own statistics.
 
     Mirrors the importer's own row-group filter (`tessera_build::input`), and for the same
     reason: the fixture corpus is 10⁹ rows and the fixture bundle a 250,000-row prefix, so a
@@ -156,7 +159,7 @@ def _row_groups_worth_reading(reader, limit: int | None) -> list[int]:
     metadata = reader.metadata
     if limit is None:
         return list(range(metadata.num_row_groups))
-    column = reader.schema_arrow.names.index("entity_id")
+    column = reader.schema_arrow.names.index(column)
     keep = []
     for i in range(metadata.num_row_groups):
         stats = metadata.row_group(i).column(column).statistics
@@ -169,25 +172,31 @@ def read_source_geometry(
     path: Path | str,
     extent: tuple[float, float, float, float],
     limit: int | None = None,
+    *,
+    field: str,
+    column: str | None = None,
 ) -> SourceGeometry:
     """Read a points Parquet into [`SourceGeometry`], mirroring the importer's three schemas.
 
     Independently derived from `contracts` §2.5 and the importer's documented branches, not from
     the Rust — which is the whole point of an oracle. The branches, checked in this order:
 
-    1. `entity_id` + `x` + `y` — coordinates quantised against `extent` by `fixed32`, the one
-       place quantisation happens.
-    2. `entity_id` + `morton` + `residual` — already in this form; the two words are reassembled
-       rather than converted. Full 32 bits per axis.
-    3. `entity_id` + `morton` — 16 bits per axis, widened with a zero residual, because that is
-       genuinely all the file says about the point.
+    1. `x` + `y` — coordinates quantised against `extent` by `fixed32`, the one place
+       quantisation happens.
+    2. `morton` + `residual` — already in this form; the two words are reassembled rather than
+       converted. Full 32 bits per axis.
+    3. `morton` — 16 bits per axis, widened with a zero residual, because that is genuinely all
+       the file says about the point.
+
+    Each row is keyed by its value of `field`, the unique attribute its rows name items by, read from
+    `column` (the attribute's `field` in the declaration; its name where that is not set).
 
     Both Morton branches require the identity extent `[0, 65536)`, where `cell(v) = v`; under any
     other extent the cell indices would be re-quantised as though they were coordinates in that
     extent's units. The importer errors there and so does this.
 
-    `limit` mirrors `tessera build --limit`: keep source rows with `entity_id < limit`. **Passing
-    it is not an optimisation** — see [`_row_groups_worth_reading`].
+    `limit` mirrors `tessera build --limit`: keep source rows whose value of `field` is below it.
+    **Passing it is not an optimisation** — see [`_row_groups_worth_reading`].
 
     The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this
     oracle prefers. That is a deliberate exception to "definitions, not algorithms": the quantities
@@ -203,14 +212,15 @@ def read_source_geometry(
     """
     import pyarrow.parquet as pq  # local: keeps the module's import surface to what it always uses
 
+    column = field if column is None else column
     reader = pq.ParquetFile(path)
     names = set(reader.schema_arrow.names)
-    if "entity_id" not in names:
-        raise ValueError(f"{path}: points file has no `entity_id` column")
+    if column not in names:
+        raise ValueError(f"{path}: points file has no `{column}` column")
 
     x_min, x_max, y_min, y_max = extent
     if "x" in names and "y" in names:
-        columns = ["entity_id", "x", "y"]
+        columns = [column, "x", "y"]
         morton_branch = False
     elif "morton" in names:
         if extent != (0.0, 65536.0, 0.0, 65536.0):
@@ -218,30 +228,30 @@ def read_source_geometry(
                 f"{path}: a Morton points file is only meaningful under the identity extent "
                 f"[0, 65536), where cell(v) = v; this bundle declares {extent}"
             )
-        columns = ["entity_id", "morton"] + (["residual"] if "residual" in names else [])
+        columns = [column, "morton"] + (["residual"] if "residual" in names else [])
         morton_branch = True
     else:
         raise ValueError(f"{path}: points file has neither `x`/`y` nor `morton`")
 
     qx: dict[int, int] = {}
     qy: dict[int, int] = {}
-    for group in _row_groups_worth_reading(reader, limit):
+    for group in _row_groups_worth_reading(reader, column, limit):
         table = reader.read_row_group(group, columns=columns)
-        source_ids = table.column("entity_id").to_numpy(zero_copy_only=False).astype(np.uint64)
+        values = table.column(column).to_numpy(zero_copy_only=False).astype(np.uint64)
         if limit is not None:
-            keep = source_ids < np.uint64(limit)
+            keep = values < np.uint64(limit)
             if not keep.any():
                 continue
         else:
             keep = slice(None)
-        source_ids = source_ids[keep]
+        values = values[keep]
 
         if morton_branch:
             hi = table.column("morton").to_numpy(zero_copy_only=False).astype(np.uint64)[keep]
             lo = (
                 table.column("residual").to_numpy(zero_copy_only=False).astype(np.uint64)[keep]
                 if "residual" in columns
-                else np.zeros(len(source_ids), dtype=np.uint64)
+                else np.zeros(len(values), dtype=np.uint64)
             )
             codes = (hi << np.uint64(32)) | lo
             axis_x = _compact64(codes)
@@ -252,10 +262,10 @@ def read_source_geometry(
             axis_x = _fixed32_vec(xs, x_min, x_max)
             axis_y = _fixed32_vec(ys, y_min, y_max)
 
-        qx.update(zip(source_ids.tolist(), axis_x.tolist()))
-        qy.update(zip(source_ids.tolist(), axis_y.tolist()))
+        qx.update(zip(values.tolist(), axis_x.tolist()))
+        qy.update(zip(values.tolist(), axis_y.tolist()))
 
-    return SourceGeometry(qx=qx, qy=qy)
+    return SourceGeometry(field=field, qx=qx, qy=qy)
 
 
 def _fixed32_vec(v: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
@@ -387,9 +397,9 @@ class Bundle:
                 raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
-        # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
+        # §2): the bundle's key and the §13.3 shard prefix `tessera_id` is built
         # under. A bundle that *does* carry `identity` is read strictly, per the memo's
-        # fail-closed rule: bad construction/rounds/key/shard_id/idset all refuse, none
+        # fail-closed rule: bad construction/rounds/key/shard_id all refuse, none
         # default. An absent object takes the PRE_R6_IDENTITY_FALLBACK_REMOVE_AT scaffold
         # path above instead of raising -- see its docstring for why that is still
         # tolerated and when it must go.
@@ -405,13 +415,9 @@ class Bundle:
                 identity_obj["key"]
             )
             self.identity_shard_id: int | None = identity_obj["shard_id"]
-            if "idset" not in identity_obj:
-                raise ValueError("manifest `identity` object is missing `idset`")
-            self.idset: int | None = identity_obj["idset"]
         else:
             self.identity_key = None
             self.identity_shard_id = None
-            self.idset = None
 
         # Phase 1: exactly one partition, "default".
         partition_dir = self.prefix_dir / "partitions" / "default"
@@ -448,6 +454,7 @@ class Bundle:
         # attaches one source and never touches this map.
         self._view_geometry: dict[str, SourceGeometry] = {}
         self._position_cache: dict[str, list[int]] = {}
+        self._unique_cache: dict[str, dict[int, int]] = {}
 
     def _verify_files(self, files: dict) -> None:
         for rel, info in files.items():
@@ -556,21 +563,18 @@ class Bundle:
             )
         return source
 
-    def row_source_ids(self, view_id: str) -> list[int]:
-        """Every row's **source-corpus** id — the join the source geometry is keyed by.
+    def row_join_values(self, view_id: str) -> list[int]:
+        """Every row's value of the unique field the view's source geometry is keyed by.
 
-        Three hops, none of which reads a geometry column: row → `entity_id` (`permutation.bin`,
-        the only key-independent bridge between the two spaces), → `external_id`
-        (`entities/external-ids-<k>.arrow`, 8 bytes little-endian of the source id, which is the
-        build's stated convention), → source id. That makes every geometry differential depend on
-        the external-ID sidecar, which contracts §0.4 does not yet list in the Phase-1 conformance
-        burden and must; a bundle built without `--mint-external-ids` cannot be checked this way
-        at all, which is why the harness's fixture passes the flag.
+        Two hops, neither of which reads a geometry column: row → `entity_id` (`permutation.bin`,
+        the only key-independent bridge between the two spaces), → the value the field's unique
+        index holds for that entity ([`unique_entities`]).
         """
         if view_id not in self._position_cache:
+            field = self._require_source(view_id).field
+            value_of = {entity: value for value, entity in self.unique_entities(field).items()}
             self._position_cache[view_id] = [
-                int.from_bytes(self.external_id_of(entity_id), "little")
-                for entity_id in self.row_entity_ids(view_id)
+                value_of[entity_id] for entity_id in self.row_entity_ids(view_id)
             ]
         return self._position_cache[view_id]
 
@@ -590,8 +594,8 @@ class Bundle:
         if view_id not in self._morton_cache:
             source = self._require_source(view_id)
             codes = []
-            for source_id in self.row_source_ids(view_id):
-                qx, qy = source.position(source_id)
+            for value in self.row_join_values(view_id):
+                qx, qy = source.position(value)
                 cell_code, residual = morton_mod.split32(qx, qy)
                 codes.append((cell_code << 32) | residual)
             self._morton_cache[view_id] = codes
@@ -690,178 +694,44 @@ class Bundle:
         # regardless of view (postings/pairs are entity-space, not view-scoped).
         return self._partition_dir / "terms" / "pairs.parquet"
 
-    def _external_id_runs(self) -> list[str]:
-        """`SEGMENTS-<n>.json`'s external-ID extent paths, under the name the writer actually uses.
+    def unique_entities(self, attribute: str) -> dict[int, int]:
+        """Every value of an integer unique attribute and the entity holding it, read from the
+        field's index runs (`unique_indexes` in `SEGMENTS-<n>.json`) by [`read_key_run`].
 
-        **One accessor because there were four call sites and every one had the name wrong.** They
-        read `external_id_extents`, which is the Phase 1 *plan*'s spelling; contracts §2.4 and
-        `tessera-store` have always written **`external_id_runs`**. Each site defaulted with
-        `.get(key, [])`, so the mismatch produced not an error but an empty list — the sidecar
-        silently absent, `_known_entity_ids` yielding nothing, the locator check raising "bundle
-        names no external-id extents" about a bundle that names several, and `external_id_of`
-        raising `KeyError` on every entity.
-
-        So it refuses rather than defaulting. A bundle genuinely built without `--mint-external-ids`
-        has no runs and that is legitimate — `external_id_of` on such a bundle is a caller error
-        either way — but *silence* is what let a renamed key survive unnoticed, and the empty list
-        is indistinguishable from the absent key that caused this.
+        A value held by two entities raises: a built bundle's index holds one entity per value,
+        and a second is either a defective index or a bundle written to since, whose deletions
+        this reader does not apply.
         """
-        runs = self.segments_manifest.get("external_id_runs")
-        if runs is None:
-            raise KeyError(
-                "SEGMENTS manifest has no 'external_id_runs' key (contracts §2.4). If this "
-                "bundle predates the field, it predates the reader too"
-            )
-        return runs
-
-    def external_id_of(self, entity_id: int) -> bytes:
-        """Invert `entities/external-ids-0.arrow` (sorted by external_id bytes) to find the
-        external id for a given entity id — needed to address `/control/changes` at a specific
-        entity (the tessera-build convention: 8 bytes little-endian of the source corpus id)."""
-        if not hasattr(self, "_entity_to_external"):
-            mapping: dict[int, bytes] = {}
-            for rel in self._external_id_runs():
-                path = self.prefix_dir / rel
-                with ipc.open_file(path) as reader:
-                    table = reader.read_all()
-                ext_col = table.column("external_id").to_pylist()
-                ent_col = table.column("entity_id").to_pylist()
-                for ext, ent in zip(ext_col, ent_col):
-                    mapping[ent] = ext
-            self._entity_to_external = mapping
-        return self._entity_to_external[entity_id]
-
-    def source_of_entity(self, entity_id: int) -> int:
-        """The source-corpus id the build assigned `entity_id` to.
-
-        **The bridge between the fixture's own space and the bundle's**, and the reason it has to
-        exist rather than being an equality. A fixture plants its values by source id — it is what
-        the generation functions take and what the Parquet rows are keyed by — while every answer
-        the engine gives is in entity space. Those two coincided for the mask catalogue until
-        [decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md) made
-        the within-signature tiebreak the Morton code; the corpus's blocks still land on the entity
-        ranges they were designed to, but the order *inside* a block is now geometric and no longer
-        the source order.
-
-        A fixture that assumes the equality is therefore comparing one item's planted value against
-        another item's served one, and every such comparison is silently wrong rather than loudly
-        so. Route the join through here.
-
-        The 8 bytes are little-endian of the source id, which is the build's stated convention for
-        a minted external id (`external_id_of`), so this is one decode rather than a second index.
-        """
-        return int.from_bytes(self.external_id_of(entity_id), "little")
-
-    def entity_of_source(self, source_id: int) -> int:
-        """[`source_of_entity`] the other way, over an inversion built once.
-
-        `KeyError` where the corpus's source id reached no entity — a row the build did not load,
-        which is a fixture fault and not something to paper over with a default.
-        """
-        if not hasattr(self, "_source_to_entity"):
-            self.external_id_of(0)  # populates `_entity_to_external`
-            self._source_to_entity = {
-                int.from_bytes(ext, "little"): ent
-                for ent, ext in self._entity_to_external.items()
-            }
-        return self._source_to_entity[source_id]
-
-    def entities_by_source(self) -> dict[int, int]:
-        """The whole of [`entity_of_source`] as a dict, for a caller keying a planted column by
-        entity id — one pass rather than a lookup per item."""
-        self.entity_of_source(0)
-        return self._source_to_entity
-
-    def _ext_locator_path(self) -> Path:
-        """The locator's real path: memo §7 gives it a fixed name (`ext-locator.u32`, singular,
-        no `<k>` suffix) *alongside the extents*, which the build writes under
-        `partitions/<phash>/entities/`. It is derived from the first extent's own
-        prefix-relative path -- exactly as `tessera-store`'s
-        `ExternalIdSidecar::deferred_from_manifest` derives it -- rather than assumed, because
-        the earlier `prefix_dir / "entities" / ...` guess named a path that never exists, and
-        the caller's `if locator_path.exists()` guard then turned the whole check into a no-op.
-        """
-        extents = self._external_id_runs()
-        if not extents:
-            raise ValueError("bundle names no external-id extents, so it has no locator either")
-        first = extents[0]
-        rel = first.rsplit("/", 1)[0] + "/ext-locator.u32" if "/" in first else "ext-locator.u32"
-        return self.prefix_dir / rel
-
-    def sidecar_round_trips(self, sample: int = 50) -> None:
-        """For a sample of entities: `external_id_of(e)` resolves back to `e` through the
-        sorted extents, **and** that entity's `ext-locator.u32` slot names the same key. Both
-        directions of a mapping stored once sorted by key and once indexed by entity; they must
-        agree or `/control/changes` addresses the wrong item (memo §7).
-
-        The locator is **required**, not probed for: a bundle that names external-id extents
-        names a locator too (contracts §2.4 r6). The former `if locator_path.exists()` guard
-        silently skipped the only part of this method that checked the locator at all -- and,
-        paired with a locator path that never existed, made a green run mean nothing.
-        """
-        entities = list(getattr(self, "_entity_to_external", {}) or {})
-        if not entities:
-            self.external_id_of(next(iter(self._known_entity_ids())))  # populate the cache
-            entities = list(self._entity_to_external)
-        rng = np.random.default_rng(20260730)
-        n = min(sample, len(entities))
-        if n == 0:
-            return
-        chosen = rng.choice(entities, size=n, replace=False)
-
-        # Read once, outside the loop: the locator (raw u32s, no header) and the concatenated
-        # sorted key list the locator's ordinals index into.
-        locator_path = self._ext_locator_path()
-        locator = np.fromfile(locator_path, dtype="<u4")
-        concatenated = self._concatenated_external_keys()
-
-        for entity_id in chosen:
-            entity_id = int(entity_id)
-            ext = self.external_id_of(entity_id)
-            if entity_id >= len(locator):
+        if attribute not in self._unique_cache:
+            declared = {d["name"]: d for d in self.manifest["declared_scalars"]}
+            if attribute not in declared or not declared[attribute].get("unique"):
+                raise KeyError(f"the bundle declares no unique attribute '{attribute}'")
+            arrow_type = declared[attribute]["arrow_type"]
+            if arrow_type.startswith("u"):
+                signed = False
+            elif arrow_type.startswith(("i", "timestamp")):
+                signed = True
+            else:
                 raise ValueError(
-                    f"entity {entity_id} has no ext-locator slot (locator has "
-                    f"{len(locator)} entries)"
+                    f"'{attribute}' is a {arrow_type}, whose index keys are hashes; only an "
+                    "integer attribute's values can be read back from its index"
                 )
-            slot = int(locator[entity_id])
-            if slot == 0xFFFFFFFF:
-                raise ValueError(
-                    f"entity {entity_id} has an external_id ({ext!r}) but its "
-                    "ext-locator slot is the no-external-id sentinel"
-                )
-            if slot >= len(concatenated):
-                raise ValueError(
-                    f"entity {entity_id}'s locator ordinal {slot} is past the "
-                    f"{len(concatenated)} concatenated external-id rows"
-                )
-            # The load-bearing comparison: the key the LOCATOR names against the key the sorted
-            # extents name. Comparing `_entity_to_external[e]` with `external_id_of(e)`, as this
-            # method used to, compares one dict against itself.
-            via_locator = concatenated[slot]
-            if via_locator != ext:
-                raise ValueError(
-                    f"sidecar round-trip failed for entity {entity_id}: the locator's ordinal "
-                    f"{slot} names {via_locator!r}, the sorted extents name {ext!r}"
-                )
-
-    def _concatenated_external_keys(self) -> list[bytes]:
-        """Every extent's `external_id` column, in extent order -- the row space the locator's
-        ordinals index into (contracts §2.4 r6: "that entity's ordinal in the concatenated sorted
-        external-ID extents")."""
-        keys: list[bytes] = []
-        for rel in self._external_id_runs():
-            with ipc.open_file(self.prefix_dir / rel) as reader:
-                table = reader.read_all()
-            keys.extend(table.column("external_id").to_pylist())
-        return keys
-
-    def _known_entity_ids(self):
-        for rel in self._external_id_runs():
-            path = self.prefix_dir / rel
-            with ipc.open_file(path) as reader:
-                table = reader.read_all()
-            for ent in table.column("entity_id").to_pylist():
-                yield ent
+            (index,) = [
+                i for i in self.segments_manifest["unique_indexes"] if i["attribute"] == attribute
+            ]
+            runs = [run["path"] for run in index["base"]] + list(index["live"])
+            entities: dict[int, int] = {}
+            for rel in runs:
+                for key, entity in read_key_run(self.prefix_dir / rel):
+                    value = key - (1 << 63) if signed else key
+                    if value in entities:
+                        raise ValueError(
+                            f"'{attribute}' = {value} is held by entities {entities[value]} and "
+                            f"{entity}"
+                        )
+                    entities[value] = entity
+            self._unique_cache[attribute] = entities
+        return self._unique_cache[attribute]
 
     def postings(self, term_id: int) -> np.ndarray:
         """Term `term_id`'s sorted entity-id array, decoded from `terms/postings.arrow`."""
@@ -876,6 +746,54 @@ class Bundle:
             bm = BitMap.deserialize(payload)
             return np.fromiter(bm, dtype=np.uint32, count=len(bm))
         raise ValueError(f"postings.arrow: term {term_id} has unknown tag {tag}")
+
+
+KEY_RUN_MAGIC = b"TSKEYRUN"
+KEY_RUN_VERSION = 2
+KEY_RUN_PAGE = 4096
+
+
+def _page_checksum_holds(page: bytes) -> bool:
+    return zlib.crc32(page[: KEY_RUN_PAGE - 4]) == struct.unpack_from("<I", page, KEY_RUN_PAGE - 4)[0]
+
+
+def read_key_run(path: Path) -> list[tuple[int, int]]:
+    """One key run file's `(key, entity)` entries, in file order, every checksum checked.
+
+    The layout (`tessera_store::key_index`): a 4096-byte header page — magic, format version,
+    key width, entry count, page count, smallest and largest key, then a CRC-32 of those 64
+    bytes — and one 4096-byte page per group of entries. A page holds its entry count (u16), the
+    bit width of its gaps (u8), its first key, the gap from each key to the next packed least
+    significant bit first, then each entry's entity (u32), and a CRC-32 of its first 4092 bytes
+    in its last four. Every integer is little-endian.
+    """
+    data = path.read_bytes()
+    if data[:8] != KEY_RUN_MAGIC:
+        raise ValueError(f"{path}: not a key run")
+    version, width, count, pages = struct.unpack_from("<IIQQ", data, 8)
+    if version != KEY_RUN_VERSION:
+        raise ValueError(f"{path}: key run format {version}, this reader reads {KEY_RUN_VERSION}")
+    if zlib.crc32(data[:64]) != struct.unpack_from("<I", data, 64)[0]:
+        raise ValueError(f"{path}: the header fails its checksum")
+    entries: list[tuple[int, int]] = []
+    for p in range(pages):
+        page = data[KEY_RUN_PAGE * (1 + p) : KEY_RUN_PAGE * (2 + p)]
+        if not _page_checksum_holds(page):
+            raise ValueError(f"{path}: page {p} fails its checksum")
+        n, bits = struct.unpack_from("<HB", page, 0)
+        key = int.from_bytes(page[3 : 3 + width], "little")
+        gap_end = 3 + width + ((n - 1) * bits + 7) // 8
+        gaps = int.from_bytes(page[3 + width : gap_end], "little")
+        entities = struct.unpack_from(f"<{n}I", page, gap_end)
+        for i, entity in enumerate(entities):
+            if i:
+                key += (gaps >> ((i - 1) * bits)) & ((1 << bits) - 1)
+            entries.append((key, entity))
+    if len(entries) != count:
+        raise ValueError(f"{path}: the header counts {count} entries and the pages hold {len(entries)}")
+    if any(a >= b for a, b in zip(entries, entries[1:])):
+        raise ValueError(f"{path}: entries are not in strictly ascending (key, entity) order")
+    return entries
 
 
 def _read_dictionary(path: Path) -> list[bytes]:

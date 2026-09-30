@@ -4,8 +4,10 @@
 //! assertions can be read directly against entity ids), two granted terms (0, 1) whose postings
 //! cover entities `[0, 510)` — the base fragment — and entity ids `[10_000, 10_005)` reserved,
 //! unpermutted-in-the-bundle-sense but *do* have rows in this synthetic permutation, standing in
-//! for buffered entities. They are exercised against a synthetic permutation even though real
-//! buffered items never have a row, so that the branch that would handle one is covered.
+//! for buffered entities. A real buffered entity has a row wherever a flush of another view has
+//! published one for it — an entity joined to a second view, whose join row flushes before its
+//! own (`tests/deny_mask.rs`) — and the synthetic permutation puts every case here on that
+//! branch rather than only the cases a two-view fixture could reach.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -18,7 +20,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, FrozenFragment, PostingsReader};
-use tessera_engine::compose::{compose, visible_to, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, visible_to, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{ChangeOp, IngestBuffer, Overlay};
 use tessera_store::write::write_permutation;
 use tessera_store::{Permutation, RowSpace};
@@ -67,7 +70,7 @@ fn build_fixture() -> Fixture {
     let cache_dir = temp.path().join("cache");
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&granted, [3u8; 32], 0, &postings, &[], WATERMARK)
+        .get_or_build(&granted, &postings, &[], WATERMARK)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -111,7 +114,7 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
     let cache = FragmentCache::new(&cache_dir, [1u8; 32], [2u8; 32]);
     let granted: Vec<TermId> = vec![TermId::new(0), TermId::new(1)];
     cache
-        .get_or_build(&granted, [3u8; 32], 0, &fx.postings, &[], WATERMARK)
+        .get_or_build(&granted, &fx.postings, &[], WATERMARK)
         .unwrap()
 }
 
@@ -121,6 +124,23 @@ fn fragment_for(fx: &Fixture) -> Arc<FrozenFragment> {
 /// No `FrozenFragment` is built: `fx.base` is already its row-space projection, which is all
 /// `compose` reads. `visible_to` still takes one, and `fragment_for` still exists for it.
 fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> EffectiveMask {
+    let mask = compose_through_the_list(fx, overlay, buffer);
+    let fallback = compose_with_the_fallback_walk(fx, overlay, buffer);
+    let (_, minus, plus, _) = mask.parts();
+    let (_, fallback_minus, fallback_plus, _) = fallback.parts();
+    assert_eq!(
+        (minus, plus),
+        (fallback_minus, fallback_plus),
+        "the list walk and the whole-buffer walk compose different diffs"
+    );
+    mask
+}
+
+fn compose_through_the_list(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
     compose(
         &fx.satisfied,
         overlay,
@@ -130,6 +150,27 @@ fn compose_with(fx: &Fixture, overlay: &Overlay, buffer: &IngestBuffer) -> Effec
         // Derived here exactly as a publication derives it, so every case in this file exercises
         // the deny mask rather than the walk that used to answer for deletions and suppressions.
         &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        // The derived list, on the same rule. Every case here is composed twice, once through it
+        // and once through the whole-buffer fallback, and the two are required to agree: the
+        // fallback is what a view with no list falls back to.
+        Some(&tessera_engine::buffered_rows_of(buffer, &fx.perm)),
+    )
+}
+
+/// [`compose_with`] with no list, so the walk goes over the whole buffer.
+fn compose_with_the_fallback_walk(
+    fx: &Fixture,
+    overlay: &Overlay,
+    buffer: &IngestBuffer,
+) -> EffectiveMask {
+    compose(
+        &fx.satisfied,
+        overlay,
+        buffer,
+        Arc::clone(&fx.base),
+        &fx.perm,
+        &tessera_engine::denied_rows_of(overlay, &fx.perm),
+        None,
     )
 }
 
@@ -137,45 +178,150 @@ fn full_range() -> Range<u32> {
     0..(BOUND as u32)
 }
 
-#[test]
-fn a_no_overlay_or_buffer_matches_raw_projection() {
-    let fx = build_fixture();
-    let overlay = Overlay::new();
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality()
-    );
-    for entity in 0..BOUND as u32 {
-        assert_eq!(
-            mask.contains_row(entity),
-            fx.base.bitmap().contains(entity),
-            "entity {entity}"
-        );
-    }
-    assert!(mask.check_structural_invariants());
+/// **One rule at a time, over one fixture.** Each case names an overlay scenario and the composed
+/// answer it must produce: how far the count over the whole row space falls below the
+/// projection's, which rows `contains_row` must admit and which it must refuse, and whether every
+/// row is compared against the projection one by one — which is what makes "a deny the fragment
+/// never contained changes nothing" a byte-for-byte claim rather than a count.
+struct Case {
+    name: &'static str,
+    ops: &'static [(u64, ChangeOp)],
+    /// Entities the case relies on being inside the base fragment, and outside it.
+    in_fragment: &'static [u64],
+    out_of_fragment: &'static [u64],
+    delta: u64,
+    visible: &'static [u64],
+    hidden: &'static [u64],
+    sweeps: bool,
 }
 
 #[test]
-fn b_suppress_visible_entity_drops_count_and_visibility() {
+fn each_overlay_rule_composes_to_the_answer_it_names() {
+    const CASES: &[Case] = &[
+        Case {
+            name: "no overlay and no buffer",
+            ops: &[],
+            in_fragment: &[],
+            out_of_fragment: &[],
+            delta: 0,
+            visible: &[],
+            hidden: &[],
+            sweeps: true,
+        },
+        Case {
+            name: "a suppression inside the fragment",
+            ops: &[(SUPPRESS_IN, ChangeOp::Suppress)],
+            in_fragment: &[SUPPRESS_IN],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[SUPPRESS_IN],
+            sweeps: false,
+        },
+        Case {
+            name: "that suppression lifted",
+            ops: &[
+                (SUPPRESS_IN, ChangeOp::Suppress),
+                (SUPPRESS_IN, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[SUPPRESS_IN],
+            out_of_fragment: &[],
+            delta: 0,
+            visible: &[SUPPRESS_IN],
+            hidden: &[],
+            sweeps: false,
+        },
+        Case {
+            name: "a deny outside the fragment",
+            ops: &[(SUPPRESS_OUT, ChangeOp::Suppress)],
+            in_fragment: &[],
+            out_of_fragment: &[SUPPRESS_OUT],
+            delta: 0,
+            visible: &[],
+            hidden: &[],
+            sweeps: true,
+        },
+        Case {
+            name: "delete then suppress then unsuppress",
+            ops: &[
+                (CROSS1_DSU, ChangeOp::Delete),
+                (CROSS1_DSU, ChangeOp::Suppress),
+                (CROSS1_DSU, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[CROSS1_DSU],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[CROSS1_DSU],
+            sweeps: false,
+        },
+        Case {
+            name: "suppress then delete then unsuppress",
+            ops: &[
+                (CROSS2_SDU, ChangeOp::Suppress),
+                (CROSS2_SDU, ChangeOp::Delete),
+                (CROSS2_SDU, ChangeOp::Unsuppress),
+            ],
+            in_fragment: &[CROSS2_SDU],
+            out_of_fragment: &[],
+            delta: 1,
+            visible: &[],
+            hidden: &[CROSS2_SDU],
+            sweeps: false,
+        },
+    ];
+
     let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(SUPPRESS_IN as u32)));
+    for case in CASES {
+        let name = case.name;
+        for entity in case.in_fragment {
+            assert!(
+                fx.fragment_entities.contains(&(*entity as u32)),
+                "{name}: entity {entity} is meant to be inside the base fragment"
+            );
+        }
+        for entity in case.out_of_fragment {
+            assert!(
+                !fx.fragment_entities.contains(&(*entity as u32)),
+                "{name}: entity {entity} is meant to be outside the base fragment"
+            );
+            assert!(
+                !fx.base.bitmap().contains(*entity as u32),
+                "{name}: entity {entity} is meant to be outside the projection"
+            );
+        }
 
-    let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
-    let buffer = IngestBuffer::new();
+        let mut overlay = Overlay::new();
+        for (entity, op) in case.ops {
+            overlay.apply(e(*entity), *op);
+        }
+        let mask = compose_with(&fx, &overlay, &IngestBuffer::new());
 
-    let mask = compose_with(&fx, &overlay, &buffer);
-
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality() - 1
-    );
-    assert!(!mask.contains_row(SUPPRESS_IN as u32));
-    assert!(mask.check_structural_invariants());
+        assert_eq!(
+            mask.count_range(full_range()),
+            fx.base.bitmap().cardinality() - case.delta,
+            "{name}: the composed count over the whole row space"
+        );
+        for entity in case.visible {
+            assert!(mask.contains_row(*entity as u32), "{name}: row {entity}");
+        }
+        for entity in case.hidden {
+            assert!(!mask.contains_row(*entity as u32), "{name}: row {entity}");
+        }
+        if case.sweeps {
+            for entity in 0..BOUND as u32 {
+                assert_eq!(
+                    mask.contains_row(entity),
+                    fx.base.bitmap().contains(entity),
+                    "{name}: row {entity}"
+                );
+            }
+        }
+        assert!(
+            mask.check_structural_invariants(),
+            "{name}: the structural invariants"
+        );
+    }
 }
 
 /// **An unsuppress restores the ordinary path, and does not publish anything.**
@@ -225,25 +371,6 @@ fn an_unsuppress_restores_the_buffered_items_own_verdict_rather_than_leaving_a_h
 }
 
 #[test]
-fn c_unsuppress_restores_it() {
-    let fx = build_fixture();
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Unsuppress);
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality()
-    );
-    assert!(mask.contains_row(SUPPRESS_IN as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
 fn e_buffered_entity_included_iff_terms_intersect() {
     let fx = build_fixture();
 
@@ -264,62 +391,6 @@ fn e_buffered_entity_included_iff_terms_intersect() {
 
     assert!(mask.contains_row(BUFFERED_PASS as u32));
     assert!(!mask.contains_row(BUFFERED_FAIL as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn f2_out_of_fragment_deny_is_a_byte_for_byte_no_op() {
-    let fx = build_fixture();
-    assert!(!fx.fragment_entities.contains(&(SUPPRESS_OUT as u32)));
-    assert!(!fx.base.bitmap().contains(SUPPRESS_OUT as u32));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-
-    // Every count identical to case (a): the `minus ⊆ base` clamp means denying an entity the
-    // fragment never contained changes nothing.
-    assert_eq!(
-        mask.count_range(full_range()),
-        fx.base.bitmap().cardinality()
-    );
-    for entity in 0..BOUND as u32 {
-        assert_eq!(mask.contains_row(entity), fx.base.bitmap().contains(entity));
-    }
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn f3_cross_cause_delete_suppress_unsuppress_stays_excluded() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(CROSS1_DSU as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Delete);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Suppress);
-    overlay.apply(e(CROSS1_DSU), ChangeOp::Unsuppress);
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(!mask.contains_row(CROSS1_DSU as u32));
-    assert!(mask.check_structural_invariants());
-}
-
-#[test]
-fn f3_cross_cause_suppress_delete_unsuppress_stays_excluded() {
-    let fx = build_fixture();
-    assert!(fx.fragment_entities.contains(&(CROSS2_SDU as u32)));
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress);
-    let buffer = IngestBuffer::new();
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(!mask.contains_row(CROSS2_SDU as u32));
     assert!(mask.check_structural_invariants());
 }
 
@@ -425,35 +496,12 @@ fn g2_visible_runs_flatten_to_rows_in_range_on_both_routes() {
     );
 }
 
-#[test]
-fn h_structural_invariants_hold_pervasively() {
-    let fx = build_fixture();
-
-    let mut overlay = Overlay::new();
-    overlay.apply(e(SUPPRESS_IN), ChangeOp::Suppress);
-    overlay.apply(e(SUPPRESS_OUT), ChangeOp::Suppress);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Suppress);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Delete);
-    overlay.apply(e(CROSS2_SDU), ChangeOp::Unsuppress);
-
-    let mut buffer = IngestBuffer::new();
-    insert_buffered(
-        &mut buffer,
-        BUFFERED_PASS,
-        vec![TermId::new(SATISFIED_TERM_A)],
-    );
-
-    let mask = compose_with(&fx, &overlay, &buffer);
-    assert!(mask.check_structural_invariants());
-}
-
 /// Insert a buffered item directly with already-resolved `terms`, bypassing descriptor
 /// resolution (irrelevant to these tests — see [`tessera_lifecycle::IngestBuffer::insert_row_with_terms`]).
 fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     use tessera_lifecycle::WalRow;
 
     let row = WalRow {
-        external_id: Some(entity.to_le_bytes().to_vec()),
         entity_id: e(entity),
         view: "s0".to_string(),
         join: false,
@@ -476,24 +524,23 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
 #[test]
 fn step3_restart_replay_survives_cross_cause_sequences() {
     use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
-    use tessera_lifecycle::{replay, ChangeOp};
+    use tessera_lifecycle::{ChangeOp, Replay};
 
     const ENTITY_X: u64 = 10_002;
     const ENTITY_Y: u64 = 10_003;
-    let ext_x = b"external-x".to_vec();
-    let ext_y = b"external-y".to_vec();
 
     let wal_dir = TempDir::new().unwrap();
     let wal_path = wal_dir.path().join("wal.log");
 
     {
-        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
+        let mut wal = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b0".to_string(),
             body_hash: [0u8; 32],
             rows: vec![
                 WalRow {
-                    external_id: Some(ext_x.clone()),
                     entity_id: e(ENTITY_X),
                     view: "s0".to_string(),
                     join: false,
@@ -504,7 +551,6 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     scoped: Vec::new(),
                 },
                 WalRow {
-                    external_id: Some(ext_y.clone()),
                     entity_id: e(ENTITY_Y),
                     view: "s0".to_string(),
                     join: false,
@@ -519,32 +565,27 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
         .unwrap();
 
         // delete X -> suppress X -> unsuppress X (must stay excluded: delete is terminal).
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Delete,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Delete)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Suppress)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_X),
-            op: ChangeOp::Unsuppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_X), ChangeOp::Unsuppress)],
         })
         .unwrap();
 
         // suppress Y -> delete Y: the other order, and the deletion must outlive an unsuppress
         // that never comes.
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_Y),
-            op: ChangeOp::Suppress,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Suppress)],
         })
         .unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: e(ENTITY_Y),
-            op: ChangeOp::Delete,
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(e(ENTITY_Y), ChangeOp::Delete)],
         })
         .unwrap();
 
@@ -561,13 +602,13 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
     let dict = tessera_authz::Dict::load(&dict_paths).unwrap();
 
     // Reopen: fresh replay from disk, not the in-memory `Overlay`/`IngestBuffer` above.
-    let (_wal, records) = Wal::open(&wal_path).unwrap();
-    let (overlay, buffer, _established, _resolver) = replay(
-        &records,
-        &dict,
-        Overlay::new(),
-        &tessera_lifecycle::owner_id_only,
-    );
+    let wal = Wal::open(&wal_path).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, buffer, _resolver) = replay.finish();
 
     assert!(
         overlay.is_deleted(e(ENTITY_X)),
@@ -643,6 +684,7 @@ fn visible_to_agrees_with_compose_over_every_precedence_case() {
         Arc::clone(&fx.base),
         &fx.perm,
         &tessera_engine::denied_rows_of(&overlay, &fx.perm),
+        Some(&tessera_engine::buffered_rows_of(&buffer, &fx.perm)),
     );
     assert!(mask.check_structural_invariants());
 

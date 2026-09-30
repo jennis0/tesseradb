@@ -6,6 +6,10 @@
     <!-- No icon to fetch: a headed browser asks for one and the dev server's 404 reads as an error. -->
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/style.css" />
+    <!-- The elements fetch no font; this page loads Instrument Sans, their default face. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
   <body>
     <!-- The explorer is the map with its status strip, toolbar (the layer picker and the legend),

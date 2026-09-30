@@ -1,5 +1,5 @@
-//! Round-trip test for CSR postings: tagged records in a single Arrow IPC file,
-//! `posting.arrow` — record ordinal = term_id (contracts §2.4).
+//! Round-trip test for CSR postings: tagged records in a single Arrow IPC file, `posting.arrow`,
+//! record ordinal = term_id.
 
 use tessera_authz::{write_postings, PostingRef, PostingsReader};
 use tessera_types::TermId;
@@ -9,9 +9,6 @@ fn round_trip_three_terms() {
     let temp = tempfile::TempDir::new().unwrap();
     let path = temp.path().join("postings.arrow");
 
-    // Term 0: singleton -> tag 0 (small array)
-    // Term 1: 1..=1000 -> tag 1 (roaring, exceeds default threshold of 32)
-    // Term 2: empty -> tag 0, zero entries
     let singleton: Vec<u32> = vec![5];
     let large: Vec<u32> = (1..=1000u32).collect();
     let empty: Vec<u32> = vec![];
@@ -59,9 +56,7 @@ fn round_trip_three_terms() {
         PostingRef::Roaring(_) => panic!("term 2 should be tag 0 (array)"),
     };
 
-    // Byte-level cross-check via an independent Arrow reader (not `PostingsReader`): the
-    // singleton (tag 0) record must be exactly tag ‖ u32 LE 5, and record 1's first byte must
-    // be the tag-1 marker.
+    // Byte-level cross-check via an independent Arrow reader, not `PostingsReader`.
     let file = std::fs::File::open(&path).unwrap();
     let mut arrow_reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
     let batch = arrow_reader.next().unwrap().unwrap();

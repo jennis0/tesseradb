@@ -1,4 +1,4 @@
-"""**`GET /v1/categories/{column}/suggest`** — the typeahead differential.
+"""**`/v1/categories/{column}/suggest`** — the typeahead differential.
 
 `docs/design/value-suggestion.md` §3/§4/§7 (Normative r2, ruled 2026-09-02): engine against
 `suggest_fixture`'s Python fold oracle, over a small dedicated corpus built backwards from the
@@ -24,8 +24,13 @@ What this module covers:
 - **`more`**, both of its causes — the page filling, and the walk budget being spent first — kept
   apart by a `limit`/`walk_budget` pair chosen to interact.
 - **I12's direction for this surface**: the suggestion set is unmoved by an active viewport filter
-  on the same session, since the verb takes no filter operand at all and is gated on `M_auth`
-  alone (§3).
+  on the same session, and by the `POST` form's own `filters`, which changes the counts and
+  nothing else; what is offered is gated on `M_auth` alone (§3).
+- **Counts under a filter** — the `POST` form's `count` for each value equals the oracle's
+  `|members(v) ∩ evaluate(filter, M_auth)|`, `oracle.filters` evaluating the filter over the
+  fixture's planted values and stored positions, for both principals, over category, `region`,
+  combined and negated filters and a filter on the counted column itself. A value the filter
+  excludes is offered with `0`.
 - **`title: null`** where no author wrote one (`multi_word`, `omega`), and the unresolvable-column
   refusal, byte-identical to `/v1/categories`' own (§5.1: "the enumeration's").
 
@@ -52,7 +57,9 @@ a disagreement in this module is the first place a reader would look for it.
 
 from __future__ import annotations
 
+import shutil
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -67,8 +74,22 @@ def suggest_bundle(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def suggest_server(tmp_path_factory, suggest_bundle):
-    server, proc = spawn_server(suggest_bundle, tmp_path_factory.mktemp("suggest-server"))
+def private_suggest_bundle(tmp_path_factory, suggest_bundle):
+    """A factory for private copies of the suggestion bundle, one per server, since a server
+    writes into its bundle root and locks it while it runs."""
+    def make(label: str) -> Path:
+        dest = tmp_path_factory.mktemp(f"bundle-{label}") / "bundle-suggest"
+        shutil.copytree(suggest_bundle, dest)
+        return dest
+
+    return make
+
+
+@pytest.fixture(scope="session")
+def suggest_server(tmp_path_factory, private_suggest_bundle):
+    server, proc = spawn_server(
+        private_suggest_bundle("suggest"), tmp_path_factory.mktemp("suggest-server")
+    )
     yield server
     stop_server(proc)
 
@@ -265,12 +286,14 @@ def test_counts_equal_the_oracles_masked_cardinality(suggest_server, principal_n
             f"{expected_counts[value['key']]}"
         )
         assert value["count"] > 0, "a served value's count must be its visible members, never 0"
+    assert resp.json()["total"] == len(candidate), f"{principal_name}: total is the counted set"
 
     # Without the flag, no count at all — never `0`, never `null` standing in for absent.
     plain = suggest(suggest_server, token, "topic", q="", limit=100)
     assert plain.status_code == 200
     for value in plain.json()["values"]:
         assert "count" not in value
+    assert "total" not in plain.json()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -378,10 +401,10 @@ def test_title_is_served_as_null_where_none_was_authored(suggest_server):
 
 
 def test_a_viewport_filter_on_the_same_session_does_not_narrow_suggestions(suggest_server):
-    """The verb takes no filter operand at all — gated on `M_auth`, never on a filtered mask (§3).
-    So the same session's suggestion page must be unmoved by having just issued a narrowly
-    filtered viewport request, which is the shape a naive implementation threading request state
-    through the session could get wrong even with no `filters=` parameter on this route to send."""
+    """What is offered is gated on `M_auth`, never on a filtered mask (§3). So the same session's
+    suggestion page must be unmoved by having just issued a narrowly filtered viewport request,
+    which is the shape a naive implementation threading request state through the session could
+    get wrong."""
     token = suggest_server.authorise(sf.WIDE_GRANTS)["token"]
 
     before = suggest(suggest_server, token, "topic", q="", limit=100)
@@ -407,6 +430,109 @@ def test_a_viewport_filter_on_the_same_session_does_not_narrow_suggestions(sugge
         "a viewport filter on the same session moved what suggest served"
     )
     assert after.json()["more"] == before.json()["more"]
+
+
+# ---------------------------------------------------------------------------------------------
+# The `POST` form: counts under a filter
+# ---------------------------------------------------------------------------------------------
+
+
+def suggest_filtered(server, token, column, body):
+    return requests.post(
+        f"{server.viewer_base}/v1/categories/{column}/suggest",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=10,
+    )
+
+
+#: Filters the counts are taken under: an entity-space category leaf, a region answered by the
+#: view's rows, the two combined, a negation, and a filter on `topic` itself.
+FILTERS = [
+    ("archive", {"archive": {"in": ["red"]}}),
+    ("region", {"region": {"bbox": [8000.5, 4000.5, 50000.5, 40000.5]}}),
+    (
+        "combined",
+        {"all_of": [
+            {"archive": {"eq": "blue"}},
+            {"region": {"bbox": [0.5, 0.5, 40000.5, 60000.5]}},
+        ]},
+    ),
+    ("negated", {"none_of": [{"archive": {"eq": "red"}}]}),
+    ("same-column", {"topic": {"in": ["ml", "omega"]}}),
+]
+
+
+@pytest.mark.parametrize("filter_name,expr", FILTERS, ids=[f[0] for f in FILTERS])
+@pytest.mark.parametrize("principal_name,grants", PRINCIPALS, ids=[p[0] for p in PRINCIPALS])
+@pytest.mark.parametrize("column,values", [("topic", sf.TOPIC_VALUES), ("archive", sf.ARCHIVE_VALUES)])
+def test_filtered_counts_equal_the_oracles(
+    suggest_server, principal_name, grants, filter_name, expr, column, values
+):
+    """Each value's `count` is the oracle's count of the principal's visible items that pass the
+    filter and carry it, and the page less its counts is the `GET` form's, so the filter moved no
+    value and no position."""
+    from oracle.filters import evaluate
+
+    token = suggest_server.authorise(grants)["token"]
+    candidate = sf.visible_sources(grants)
+    passing = evaluate(expr, sf.filter_columns(), candidate)
+    planted = sf.planted_topic() if column == "topic" else sf.planted_archive()
+
+    resp = suggest_filtered(
+        suggest_server,
+        token,
+        column,
+        {"q": "", "limit": 100, "counts": True, "view": sf.VIEW_ID, "filters": expr},
+    )
+    assert resp.status_code == 200, resp.text
+    if "region" in str(expr):
+        assert resp.headers["x-tessera-region"] == "exact"
+    values_served = resp.json()["values"]
+    assert values_served, "no values served — the counts assertion below would be vacuous"
+
+    plain = suggest(suggest_server, token, column, q="", limit=100)
+    assert _strip_count(values_served) == plain.json()["values"], (
+        f"{principal_name} / {filter_name}: the filter moved what was offered"
+    )
+    expected = sf.counts_for(values, planted, passing)
+    for value in values_served:
+        assert value["count"] == expected[value["key"]], (
+            f"{principal_name} / {filter_name} / {column}: {value['key']} count "
+            f"{value['count']} != oracle {expected[value['key']]}"
+        )
+    assert resp.json()["total"] == len(passing), (
+        f"{principal_name} / {filter_name}: total is the visible items passing the filter"
+    )
+
+
+def test_a_value_the_filter_excludes_is_offered_with_zero(suggest_server):
+    """A filter on the counted column: `ml` counts its visible members and every other value
+    offered counts `0`, still offered and in its place."""
+    token = suggest_server.authorise(sf.WIDE_GRANTS)["token"]
+    resp = suggest_filtered(
+        suggest_server,
+        token,
+        "topic",
+        {"q": "", "limit": 100, "counts": True, "view": sf.VIEW_ID, "filters": {"topic": {"eq": "ml"}}},
+    )
+    assert resp.status_code == 200, resp.text
+    counts = {v["key"]: v["count"] for v in resp.json()["values"]}
+    ml = len(sf.members_of(sf.planted_topic(), "ml") & sf.visible_sources(sf.WIDE_GRANTS))
+    assert counts.pop("ml") == ml > 0
+    assert counts and all(count == 0 for count in counts.values()), counts
+
+
+def test_filters_without_a_view_are_refused(suggest_server):
+    token = suggest_server.authorise(sf.WIDE_GRANTS)["token"]
+    resp = suggest_filtered(
+        suggest_server,
+        token,
+        "topic",
+        {"q": "", "counts": True, "filters": {"archive": {"eq": "red"}}},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"] == "contract"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -514,7 +640,7 @@ def test_the_page_is_identical_once_the_visible_value_set_is_warm(suggest_server
 
 
 @pytest.fixture(scope="session")
-def probe_route_server(tmp_path_factory, suggest_bundle):
+def probe_route_server(tmp_path_factory, private_suggest_bundle):
     """A second server that can never build a visible-value set.
 
     `max_suggest_set_entities = 1` is the schema's floor (`/v1/meta` publishes the constant with
@@ -524,7 +650,7 @@ def probe_route_server(tmp_path_factory, suggest_bundle):
     who has not raised the constant is running.
     """
     server, proc = spawn_server(
-        suggest_bundle,
+        private_suggest_bundle("suggest-probe-route"),
         tmp_path_factory.mktemp("suggest-probe-route"),
         serve_extra="max_suggest_set_entities = 1\n",
     )

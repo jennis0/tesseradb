@@ -1,9 +1,12 @@
-"""The declaration the verbs build, and what the TOML always says: python-sdk.md §4.
+"""The declaration the verbs build, and what an insert writes onto it.
 
-The TOML is asserted as text rather than parsed back: Python 3.10 carries no TOML reader, and the
-declaration is proved to parse by `tessera check` reading it in `test_sdk_corpus.py`.
+A `declare_*` verb takes no data, so every source and every column name below was written by an
+`insert`. What each declaration means is asserted through the check the build runs over it, and
+what an insert wrote is asserted where it was written: the table under `sources/`, and the two
+lists the insert prints.
 """
 
+import pyarrow.parquet as pq
 import pytest
 
 from tesseradb._database import create
@@ -24,11 +27,22 @@ def points(n=4):
     )
 
 
+def members():
+    return pd.DataFrame({"key": ["a"], "entity": ["p0"]})
+
+
+def artifacts():
+    return pd.DataFrame({"level": [0], "key": ["a"]})
+
+
 @pytest.fixture
 def db(tmp_path):
-    database = create(tmp_path / "db")
-    database.stage("points", points(), id="id", default=True)
-    return database
+    return create(tmp_path / "db")
+
+
+def joined(db) -> None:
+    """The frames' `id` column, declared unique."""
+    db.declare_attribute("id", type="keyword", unique=True)
 
 
 def test_the_toml_writer_spells_each_shape_once():
@@ -52,180 +66,232 @@ def test_the_toml_writer_spells_each_shape_once():
     assert "[[view.levels]]\nlevel = 0" in text
 
 
-def test_every_block_names_its_source_and_the_defaults_name_the_allocation_view(db):
-    db.declare_view("s0", access=None)
+def test_every_block_names_the_source_and_the_columns_its_inserts_gave_it(db, checked):
+    """The file an object reads is on the object, and the column names are the call's."""
+    db.declare_view("s0", default_label="public")
+    joined(db)
     db.declare_attribute("cluster", type="keyword", index=True)
+    db.insert("s0", points(), x="x", y="y")
+    assert checked(db).ok
     text = db.declaration
-    assert '[defaults]\nallocation_view = "s0"' in text
-    # `default=True` is the SDK's own convenience and `[defaults].source` is never written: the
-    # source it names is filled onto every block that named none, so the file each object reads is
-    # on the object. Here that is the view and the attribute.
     assert "\nsource = " not in text.split("[[view]]")[0]
-    assert text.count('source = "points"') == 2
-    # And where identity is, since 'id' is not what configuration.md reads it under by default.
-    assert 'entity_id = "id"' in text and 'entity_id_field = "id"' in text
+    # The view and the two attributes its frame fills, the unique one among them.
+    assert text.count('source = "s0"') == 3
 
 
-def test_the_id_column_is_the_identity_rather_than_an_attribute(db):
-    """§3: the build takes the column's bytes as the external id, so it is no column of values."""
-    db.declare_view("s0", access=None)
-    text = db.declaration
-    assert 'name = "id"' not in text
-    assert 'fields = { x = "x", y = "y", entity_id = "id" }' in text
-
-
-def test_an_explicit_declaration_overrides_the_inferred_block(db):
+def test_a_declared_thing_with_no_insert_is_declared_and_empty(db, checked):
     db.declare_view("s0")
-    db.declare_attribute("id", type="text", index=True)
-    assert db.declaration.count('name = "id"') == 1
-    assert 'type = "keyword"' not in db.declaration
+    db.declare_attribute("cluster", type="keyword", index=True)
+    assert checked(db).ok
+    assert "[sources]" not in db.declaration
 
 
-def test_a_view_with_no_source_and_no_default_is_refused_naming_the_block(tmp_path):
-    database = create(tmp_path / "db")
-    database.stage("points", points(), id="id")
-    database.declare_view("s0")
-    with pytest.raises(Refusal, match="view 's0' names no source"):
-        database.declaration
-
-
-def test_the_anchor_view_is_the_allocation_view(db):
-    db.stage("second", points(), id="id")
+def test_the_anchor_view_is_the_allocation_view(db, checked):
     db.declare_view("s0")
-    db.declare_view("s1", source="second", anchor=True)
+    joined(db)
+    db.declare_view("s1", anchor=True)
+    db.insert("s1", points(), x="x", y="y")
+    assert checked(db).ok
     assert 'allocation_view = "s1"' in db.declaration
-    assert "__anchor__" not in db.declaration
 
 
-def test_a_view_names_a_label_for_every_point(db):
-    with pytest.raises(Refusal, match="names no label"):
-        db.declare_view("s0", default_label=None)
-    db.declare_view("s0", access="cluster", default_label=None)
+def test_a_view_names_a_label_for_every_point(db, checked):
+    """A view declaring no default reads every point's labels from the column the insert named."""
+    db.declare_view("s0", default_label=None)
+    joined(db)
+    db.insert("s0", points(), x="x", y="y", access="cluster")
+    assert checked(db).ok
     assert 'point_visibility = { field = "cluster" }' in db.declaration
 
 
-def test_a_layer_always_writes_its_value_set_and_its_three_disclosure_controls(db):
+def test_a_layer_with_an_artifacts_table_is_closed_and_one_with_a_key_column_is_open(db, checked):
+    """Which it is decides whether a key the layer does not declare is minted or refused."""
     db.declare_view("s0")
-    db.declare_layer("clusters", kind="flat", from_column="cluster")
-    text = db.declaration
-    # A from-column layer is written `open`, without which a key its artifacts do not declare is
-    # refused, and it compiles to `[layer.members]` over the points source.
-    assert 'value_set = "open"' in text
-    assert 'visibility = "public"' in text
-    assert 'artifact_visibility = { default = "inherited" }' in text
-    assert 'require_member_visibility = "none"' in text
-    assert '[layer.members]\nsource = "points"' in text
-    assert 'fields = { key = "cluster", entity = "id" }' in text
-    assert 'views = ["s0"]' in text
-
-
-def test_a_layer_from_tables_is_closed_and_a_members_only_layer_is_open(db):
-    db.stage("artifacts", pd.DataFrame({"level": [0], "key": ["a"]}))
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
-    db.declare_view("s0")
-    db.declare_layer("from_tables", kind="flat", source="artifacts", members="members")
-    db.declare_layer("members_only", kind="flat", members="members")
+    joined(db)
+    db.declare_layer("from_tables", kind="flat")
+    db.declare_layer("from_a_column", kind="flat")
+    db.insert("s0", points(), x="x", y="y")
+    db.insert("from_tables", artifacts=artifacts(), key="key", level="level")
+    db.insert("from_tables", members=members(), columns={"id": "entity"}, key="key")
+    db.insert("from_a_column", points(), key="cluster")
+    assert checked(db).ok
     text = db.declaration
     assert 'value_set = "closed"' in text and 'value_set = "open"' in text
+    # The key column's table carries `id` under its own name, and the members table as `entity`.
+    assert 'fields = { key = "cluster" }' in text and 'fields = { id = "entity" }' in text
 
 
-def test_a_levelled_layer_declares_its_levels_and_a_treed_one_is_refused_them(db):
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
+def test_supplied_content_and_prune_and_depends_on_reach_the_declaration(db, checked):
     db.declare_view("s0")
-    with pytest.raises(Refusal, match="declares its levels"):
-        db.declare_layer("t", kind="tiered", members="members")
-    with pytest.raises(Refusal, match="its edges"):
-        db.declare_layer("n", kind="nested", members="members", levels=[(0, "a")])
-    db.declare_layer("t", kind="tiered", members="members", levels=[(0, "archive"), (1, "class")])
-    assert "[[layer.levels]]\nlevel = 0\ntitle = \"archive\"" in db.declaration
-
-
-def test_a_layer_with_no_membership_route_is_refused(db):
-    db.declare_view("s0")
-    with pytest.raises(Refusal, match="from_column"):
-        db.declare_layer("nothing", kind="flat")
-
-
-def test_supplied_content_and_prune_and_depends_on_reach_the_toml(db):
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
-    db.declare_view("s0")
-    db.declare_layer("clusters", kind="flat", members="members")
+    joined(db)
+    db.declare_layer("clusters", kind="flat")
     db.declare_layer(
         "regions",
         kind="flat",
-        members="members",
         prune_children=True,
         depends_on=["clusters"],
         supplied=[("name", "text", "inherited")],
         computed=("centroid",),
     )
-    text = db.declaration
-    assert "prune_children = true" in text
-    assert 'depends_on = ["clusters"]' in text
-    assert "[layer.content]\ncomputed = [\"centroid\"]" in text
-    assert '[[layer.content.supplied]]\nname = "name"' in text
-    assert 'require_member_visibility = "inherited"' in text
+    db.insert("s0", points(), x="x", y="y")
+    db.insert("clusters", members=members(), columns={"id": "entity"}, key="key")
+    db.insert("regions", members=members(), columns={"id": "entity"}, key="key")
+    assert checked(db).ok
 
 
-def test_a_label_sets_two_gates_are_the_pairings_the_design_allows(db):
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
-    db.stage("topics", pd.DataFrame({"level": [0], "key": ["a"]}))
+def test_a_label_sets_gate_is_one_of_two_words_and_its_tables_come_from_its_inserts(db):
     db.declare_view("s0")
-    db.declare_layer("clusters", kind="flat", members="members")
-    with pytest.raises(Refusal, match="names the generating set"):
-        db.declare_labels("t", of="clusters", source="topics", content_requires="all")
-    with pytest.raises(Refusal, match="declares no generating set"):
-        db.declare_labels(
-            "t", of="clusters", source="topics", members="members", content_requires="inherited"
-        )
-    with pytest.raises(Refusal, match="'all' or 'inherited'"):
-        db.declare_labels("t", of="clusters", source="topics", content_requires="none")
-    # The default follows `members`: `all` when given, `inherited` when not.
-    db.declare_labels("topics/a", of="clusters", source="topics", members="members")
+    joined(db)
+    db.declare_layer("clusters", kind="flat")
+    with pytest.raises(Refusal):
+        db.declare_labels("t", of="clusters", content_requires="none")
+    db.declare_labels("topics/a", of="clusters", content_requires="all")
+    db.insert("s0", points(), x="x", y="y")
+    db.insert("clusters", members=members(), columns={"id": "entity"}, key="key")
+    db.insert("topics/a", {"a": "Diffusion models"})
+    db.insert(
+        "topics/a",
+        members=pd.DataFrame({"key": ["a"], "entity": ["p0"], "rank": [0]}),
+        columns={"id": "entity"},
+        key="key",
+        rank="rank",
+    )
     text = db.declaration
     assert "[layer.labels]" in text
     assert '[layer.labels.content]\nrequire_member_visibility = "all"' in text
-    assert '[layer.labels.members]\nsource = "members"' in text
+    assert '[layer.labels.members]\nsource = "topics_a_members"' in text
 
 
 def test_a_label_set_from_a_mapping_is_written_as_a_key_contents_table(db):
-    db.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
     db.declare_view("s0")
-    db.declare_layer("clusters", kind="flat", members="members")
-    db.declare_labels("topics", of="clusters", source={"a": "Diffusion models"})
-    assert db.sources["topics"].rows == 1
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    insert = db.insert("topics", {"a": "Diffusion models"})
+    assert insert.rows == 1
+    assert insert.read == ["level", "key", "contents", "attached_layer", "attached_key"]
     assert 'source = "topics"' in db.declaration
+    # The SDK wrote the table, so it wrote the attachment: the label hangs from the cluster its
+    # key names, in the layer the set was declared `of`.
+    written = pq.read_table(insert.path)
+    assert written["attached_layer"].to_pylist() == ["clusters"]
+    assert written["attached_key"].to_pylist() == ["a"]
 
 
-def test_form_bs_roster_table_goes_through_the_generic_form(db):
-    """Form A, the one-source form and `members` are `declare_view_group`'s three rosters; the
-    roster as a table has no parameter and is written as the block it is."""
+def test_a_label_table_the_sdk_reads_as_it_stands_carries_its_own_attachment(db):
+    """`contents=` is a table in the publication's shape, so the attachment is in it."""
     db.declare_view("s0")
-    db.declare("view_group", {
-        "name": "quarter",
-        "source": "points",
-        "fields": Inline({"view": "quarter"}),
-        "extent": Inline({"x": [0.0, 1.0], "y": [0.0, 1.0]}),
-        "point_visibility": Inline({"default": "public"}),
-        "views": {"source": "roster", "fields": Inline({"key": "quarter"})},
-    })
-    text = db.declaration
-    assert "[[view_group]]" in text
-    assert '[view_group.views]\nsource = "roster"' in text
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    table = pd.DataFrame(
+        {
+            "key": ["t0"],
+            "contents": [[["Diffusion models"]]],
+            "attached_layer": ["clusters"],
+            "attached_key": ["a"],
+        }
+    )
+    with pytest.raises(Refusal):
+        db.insert("topics", table.drop(columns=["attached_layer", "attached_key"]),
+                  key="key", contents="contents")
+    insert = db.insert(
+        "topics", table, key="key", contents="contents",
+        attached_layer="attached_layer", attached_key="attached_key",
+    )
+    assert insert.ignored == []
 
 
-def test_a_category_names_its_vocabulary_and_a_closed_one_names_its_values(db):
-    with pytest.raises(Refusal, match="names its vocabulary"):
-        db.declare_attribute("archive", type="category")
-    with pytest.raises(Refusal, match="closed value set"):
-        db.declare_vocabulary("archive", closed=True)
-    db.declare_vocabulary("archive", closed=True, values=["cs", "math"], width="u8")
+def test_a_label_table_carries_the_level_and_the_attachment_the_call_named(db):
+    """A `text=` table is written by the SDK, and every column the call named travels with it."""
+    db.declare_view("s0")
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    insert = db.insert(
+        "topics",
+        pd.DataFrame({"k": ["t0"], "text": ["Diffusion models"], "lvl": [0], "cluster": ["a"]}),
+        key="k",
+        text="text",
+        level="lvl",
+        attached_key="cluster",
+    )
+    written = pq.read_table(insert.path)
+    assert written["key"].to_pylist() == ["t0"]
+    assert written["attached_key"].to_pylist() == ["a"]
+    assert written["contents"].to_pylist() == [[["Diffusion models"]]]
+
+
+def test_a_group_takes_its_roster_and_its_rows_from_two_inserts(db, checked):
+    db.declare_view_group(
+        "quarter",
+        metadata={"label": "text"},
+        extent={"x": [0.0, 1.0], "y": [0.0, 1.0]},
+    )
+    joined(db)
+    db.insert(
+        "quarter",
+        roster=pd.DataFrame({"quarter": ["q1"], "label": ["Q1"]}),
+        key="quarter",
+        label="label",
+    )
+    rows = points()
+    rows["quarter"] = ["q1"] * len(rows)
+    db.insert("quarter", rows, x="x", y="y", view="quarter")
+    assert checked(db).ok
     text = db.declaration
-    assert 'value_set = "closed"' in text and 'visibility = "public"' in text
-    assert 'values = ["cs", "math"]' in text
+    assert '[view_group.views]\nsource = "quarter_roster"' in text
+    # One `fields` entry per column the call renamed, and none for a column already carrying the
+    # name the build reads it under.
+    assert 'fields = { key = "quarter", label = "label" }' in text
+    assert 'fields = { view = "quarter" }' in text
 
 
 def test_declaring_one_name_twice_is_refused(db):
     db.declare_view("s0")
-    with pytest.raises(Refusal, match="already declared"):
+    with pytest.raises(Refusal):
         db.declare_view("s0")
+
+
+def test_a_text_table_refuses_a_column_the_written_one_would_not_carry(db):
+    """The SDK writes that table, so a column it does not carry is refused, not dropped."""
+    db.declare_view("s0")
+    db.declare_layer("clusters", kind="flat")
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    with pytest.raises(Refusal):
+        db.insert(
+            "topics",
+            pd.DataFrame({"k": ["t0"], "text": ["A"], "parent": ["p"]}),
+            key="k",
+            text="text",
+            parent="parent",
+        )
+
+
+def test_a_table_names_its_items_by_every_unique_column_it_carries(db, checked):
+    """No column is chosen for the user: a table names its items by the columns it carries of the
+    attributes declared unique, and `columns=` names only those on a table that is no view's."""
+    db.declare_view("s0", default_label="public")
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_attribute("paper", type="keyword", unique=True)
+    db.declare_attribute("cluster", type="keyword")
+    db.declare_layer("clusters", kind="flat")
+    rows = points()
+    rows["paper"] = [f"q{i}" for i in range(len(rows))]
+    insert = db.insert("s0", rows, x="x", y="y")
+    assert insert.items == {"id": "id", "paper": "paper"}
+    with pytest.raises(Refusal):
+        db.insert("clusters", members=members(), key="key", columns={"cluster": "entity"})
+    db.insert("clusters", members=members(), key="key", columns={"id": "entity"})
+    assert checked(db).ok
+    text = db.declaration
+    assert 'fields = { id = "entity" }' in text
+
+
+def test_a_file_carrying_a_unique_attribute_under_another_name_says_so_in_fields(db, checked):
+    db.declare_view("s0", default_label="public")
+    db.declare_view("s1", default_label="public")
+    joined(db)
+    db.insert("s0", points(), x="x", y="y")
+    db.insert(
+        "s1", points().rename(columns={"id": "paper"}), x="x", y="y", columns={"id": "paper"}
+    )
+    assert checked(db).ok
+    assert 'fields = { id = "paper" }' in db.declaration

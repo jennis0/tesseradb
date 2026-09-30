@@ -13,20 +13,14 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{AcceptError, Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord, WalRow};
 use tessera_lifecycle::UnallocatedRow;
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(10);
 
 /// Write a `SEGMENTS-1.json` cloned from the build's `SEGMENTS-0.json`, carrying a delta-tier
 /// declaration and a file that does not verify — honourable, unverifiable, steppable.
@@ -63,12 +57,13 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
     // flush would have something to publish — the plan gate is what must stop it.
     let wal_path = tmp.path().join("wal.log");
     {
-        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
+        let mut wal = Wal::open(&wal_path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "pre-existing".to_string(),
             body_hash: [1u8; 32],
             rows: vec![WalRow {
-                external_id: Some(b"pre-existing-row".to_vec()),
                 entity_id: tessera_types::EntityId::new(N_ITEMS),
                 view: "s0".to_string(),
                 join: false,
@@ -110,7 +105,6 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
 
     // Ingest is refused at the engine boundary, before anything is acked or WAL-durable.
     let row = UnallocatedRow {
-        external_id: Some(b"refused-on-stepdown".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -121,7 +115,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
         scoped: Vec::new(),
     };
     let err = engine
-        .accept_ingest(vec![row], "refused-batch".to_string(), [2u8; 32])
+        .ingest_rows(vec![row], "refused-batch".to_string(), [2u8; 32])
         .expect_err("a stepped-down node must not accept ingest");
     assert!(
         matches!(err, AcceptError::SteppedDown),
@@ -130,7 +124,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
 
     // The buffered pre-existing row is not flushed: ticks pass, nothing publishes. And the
     // suppression lane stays open — a deny is accepted, because denies threaten no segment.
-    wait_until("two ticks fire on the stepped-down node", || {
+    wait_until("two ticks fire on the stepped-down node", WAIT, || {
         engine.write_executor_stats().ticks >= 2
     });
     assert_eq!(

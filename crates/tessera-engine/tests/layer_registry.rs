@@ -60,32 +60,8 @@ fn reachable(engine: &Engine, credential: &[u8]) -> Vec<String> {
 /// identifier this deployment has ever issued. The symptom would not have looked like a range
 /// check: suppressing a layer would simply have answered *no such thing*.
 fn layer_entity(engine: &Engine, id: tessera_types::TesseraId) -> tessera_types::EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0]
+    engine.resolve_tessera_ids(&[id]).unwrap()[0]
         .expect("a layer identifier names the entity this deployment issued for it")
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
 }
 
 impl Fixture {
@@ -292,4 +268,71 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
         "a refusal spends no ids: every check runs before the first allocation"
     );
     assert!(reachable(&engine, &full_coverage_credential()).is_empty());
+}
+
+/// **A layer labelled with a term no point carries** is reached by a principal whose credential
+/// names it and by no other: the layer's label is compared with the credential's descriptors, not
+/// with the terms the dictionary happens to hold.
+#[test]
+fn a_layer_labelled_with_a_term_no_point_carries_is_reached_by_its_holder_alone() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration("clusters/team", Some("team-x")))
+        .expect("a layer labelled with a term no point carries registers");
+    assert!(reachable(&engine, br#"{"terms": ["0", "team-x"]}"#)
+        .contains(&"clusters/team".to_string()));
+    assert!(!reachable(&engine, &full_coverage_credential()).contains(&"clusters/team".to_string()));
+}
+
+/// `builtin:passthrough` except that it refuses the label `refused`.
+struct Refusing;
+
+impl tessera_plugin::Plugin for Refusing {
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        if labels.iter().any(|l| l.as_slice() == b"refused") {
+            return Err(tessera_plugin::PluginError::Malformed("refused".into()));
+        }
+        tessera_plugin::Passthrough::new().terms_of_labels(labels)
+    }
+    fn terms_of_auth(
+        &self,
+        auth_data: &[u8],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        tessera_plugin::Passthrough::new().terms_of_auth(auth_data)
+    }
+    fn present_terms(
+        &self,
+        descriptors: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
+        tessera_plugin::Passthrough::new().present_terms(descriptors)
+    }
+    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        tessera_plugin::Passthrough::new().declared_bounds()
+    }
+    fn data_plugin_hash(&self) -> String {
+        tessera_plugin::Passthrough::new().data_plugin_hash()
+    }
+    fn auth_plugin_hash(&self) -> String {
+        tessera_plugin::Passthrough::new().auth_plugin_hash()
+    }
+}
+
+/// A layer whose label the plugin refuses is reached by nobody, whatever the credential names.
+#[test]
+fn a_layer_whose_label_the_plugin_refuses_is_reached_by_nobody() {
+    let fx = fixture();
+    let mut engine = Engine::open(&fx.root, &fx.cache, &fx.wal, Refusing, config()).unwrap();
+    engine.start_write_executor(8).unwrap();
+    engine
+        .register_layer(declaration("clusters/refused", Some("refused")))
+        .expect("the layer registers");
+    engine
+        .register_layer(declaration("clusters/open", None))
+        .expect("the layer registers");
+    let names = reachable(&engine, br#"{"terms": ["0", "refused"]}"#);
+    assert_eq!(names, vec!["clusters/open".to_string()]);
 }

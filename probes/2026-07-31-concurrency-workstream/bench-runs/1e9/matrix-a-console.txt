@@ -1,5 +1,5 @@
     Finished `release` profile [optimized] target(s) in 0.12s
-bundle /home/joe/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
+bundle /home/user/code/tessera/data/bench-fixtures/1e9 -- 47968 descriptors
 booting server (matrix/cpu)...
   up in 27.6s (pid 3190178)
 

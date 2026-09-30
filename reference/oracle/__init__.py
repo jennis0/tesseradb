@@ -14,8 +14,9 @@ change to it can break.
 
 **Definitional — pure, no I/O beyond reading a bundle, no server.** ``viewport`` (§7.2 written as
 a definition), ``mask`` (I1's composition), ``filters`` (decision 0062's tree as a per-entity
-walk), ``text`` (records §10's predicates as set-and-sequence arithmetic), ``morton``,
-``identity``, ``bundle``, ``wire``, ``record_blob`` (the blob's addressing walk — structure only,
+walk), ``aggregate`` (the counting route's tables as set arithmetic), ``text`` (records §10's predicates as set-and-sequence arithmetic), ``morton``,
+``identity``, ``naming`` (the identity rule: which item each row of a write names), ``bundle``,
+``wire``, ``record_blob`` (the blob's addressing walk — structure only,
 never values; its module doc states the records §3/B7 licence it holds to). These are the second
 implementation of record. They are held to being *obviously the spec*: literal constructions, no
 cleverness, and a documented pin to the design revision they were checked against. A differential

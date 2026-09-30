@@ -31,3 +31,26 @@ clients/ts/viewer/public/clusters.json
 *.env.local
 clients/ts/.vite.out
 **/target/
+
+# A local notebook and its virtualenv: a scratchpad, never the repository.
+notebooks/
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
+
+#Ignore codacy configuration files
+.codacy/
+
+# The documentation site: its virtualenv and its build output.
+.venv-docs/
+/site/
+
+# The TypeScript and components reference, generated from the client sources by
+# clients/ts/scripts/reference.mjs, and the custom-elements manifest it reads.
+/docs/reference/typescript/
+/docs/reference/components/
+clients/ts/components/custom-elements.json
+
+#Ignore env variables
+.env

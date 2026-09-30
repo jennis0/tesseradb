@@ -2,68 +2,76 @@ import type {ClauseVerb} from './filters.js';
 import type {FilterExpr, MemberOfOperand} from './types.js';
 
 /**
- * The `member_of` leaf and the clauses a client holds of it (`highlight-and-hierarchy.md` §3, §5).
+ * The `member_of` leaf and the clauses a client holds of it.
  *
- * A `member_of` clause names one artifact of one layer and asks for its membership. It composes
- * exactly like every other leaf, and it sits in `filters` or in `highlight` identically — which is
- * the whole of why *narrow to this cluster* and *light this descriptor* are one mechanism: the
- * clause is the same object in two positions, and moving it costs a field.
- *
- * **This replaces the `region`-by-published-artifact spelling** for *filter to this artifact* and
- * *outside this artifact* on the card (§5.5). The drawn-region spelling stays, for a region drawn
- * by hand: `region` asks about a shape and this asks about a membership, and on a layer whose
- * artifacts are spread across the map the two are not the same question — which is the whole
- * reason the leaf exists, a spread artifact's shape being the map's own outline.
+ * A `member_of` clause names one artifact of one layer and asks for its members. It composes like
+ * any other leaf and sits in `filters` or in `highlight` alike, so narrowing the map to a cluster
+ * and lighting that cluster's members are one clause in two positions, and an artifact can hold a
+ * clause in each at once. A drawn `region` asks about a shape and this asks about membership; for
+ * an artifact whose members are spread across the map, its shape is the map's outline and the two
+ * differ.
  */
 
-/** The leaf's operand for an artifact a client holds as a `bigint`. */
+/**
+ * The `member_of` operand for an artifact held as a `bigint`: the layer name, and the artifact's
+ * `tessera_id` as a decimal string.
+ *
+ * @category Filters
+ */
 export function memberOf(layer: string, artifact: bigint): MemberOfOperand {
   return {layer, artifact: artifact.toString()};
 }
 
 /**
- * One clause the interface holds: an artifact, whether it is *this* or *outside this*, and which
- * of the request's two expressions it joins.
+ * One `member_of` clause as the interface holds it: an artifact, whether the clause selects its
+ * members or everything outside them, and which expression it joins. {@link withMember} keeps one
+ * clause per artifact in each position, so an artifact can be filtered to and highlighted at once.
  *
- * Keyed by `(layer, artifact)`: an artifact is in a clause once, in one position, with one sense.
- * Asking to filter to an artifact already highlighted moves it rather than adding a second clause,
- * which is §5.2's *without being re-entered* for a panel node and a card alike.
+ * @category Filters
  */
 export type MemberClause = {
+  /** The artifact's layer. */
   layer: string;
+  /** The artifact's `tessera_id`. */
   artifact: bigint;
-  /** `none_of` over the leaf — *outside this artifact*. */
+  /** Whether the clause selects everything outside the artifact (`none_of` over the leaf) in place of its members. */
   outside: boolean;
+  /** The expression the clause joins. */
   verb: ClauseVerb;
   /**
-   * What the interface called the artifact when the clause was made — **presentation only, and
-   * never sent**.
-   *
-   * A clause on a filter layer names an artifact the viewport never serves (§5.4), so nothing on
-   * the map can resolve its identifier to a name; the panel or the card that made the clause is
-   * the only thing that knew one, and a chip reading `mesh/descriptors 546790` says nothing about
-   * what was asked. Absent where the caller had no name to give.
+   * What the interface called the artifact when the clause was made. It is for display and is not
+   * sent. A clause on a filter layer names an artifact the viewport does not serve, so only the
+   * panel or card that made the clause knew a name. Absent where the caller had none.
    */
   label?: string;
 };
 
+/**
+ * A string naming one artifact of one layer, `<layer> <artifact>`, for keying a `Map` or `Set`.
+ * Two clauses on one artifact have the same key, whatever their positions.
+ *
+ * @category Filters
+ */
 export function memberKey(layer: string, artifact: bigint): string {
   return `${layer} ${artifact}`;
 }
 
-/** One clause as its leaf. */
+/**
+ * One clause as a filter leaf: `member_of`, inside `none_of` where the clause is `outside`.
+ *
+ * @category Filters
+ */
 export function memberLeaf(clause: MemberClause): FilterExpr {
   const leaf: FilterExpr = {member_of: memberOf(clause.layer, clause.artifact)};
   return clause.outside ? {none_of: [leaf]} : leaf;
 }
 
 /**
- * The clauses in one position, conjoined with `expr`.
+ * Joins the clauses in position `verb` to `expr` with `all_of`. Two artifacts named together narrow
+ * to their intersection; to show the members of either, name their parent. Returns `expr` where no
+ * clause is in that position, and the bare leaf where `expr` is `null` and one clause is.
  *
- * `all_of`, because several member clauses mean *all of these* the way several filled-in controls
- * do — two descriptors named together narrow to their intersection, which is what a viewer walking
- * a hierarchy and adding a second node means. A viewer who wants either sends one clause naming
- * the parent.
+ * @category Filters
  */
 export function withMembers(expr: FilterExpr | null, clauses: readonly MemberClause[], verb: ClauseVerb): FilterExpr | null {
   const leaves = clauses.filter((c) => c.verb === verb).map(memberLeaf);
@@ -72,14 +80,22 @@ export function withMembers(expr: FilterExpr | null, clauses: readonly MemberCla
   return all.length === 1 ? all[0]! : {all_of: all};
 }
 
-/** Add a clause, or move the one already naming this artifact. */
+/**
+ * Returns `clauses` with `clause` added last, in place of any clause that names the same artifact
+ * in the same position. A clause on the artifact in the other position is kept.
+ *
+ * @category Filters
+ */
 export function withMember(clauses: readonly MemberClause[], clause: MemberClause): MemberClause[] {
-  const key = memberKey(clause.layer, clause.artifact);
-  return [...clauses.filter((c) => memberKey(c.layer, c.artifact) !== key), clause];
+  return [...withoutMember(clauses, clause.layer, clause.artifact, clause.verb), clause];
 }
 
-/** Drop the clause naming this artifact, if there is one. */
-export function withoutMember(clauses: readonly MemberClause[], layer: string, artifact: bigint): MemberClause[] {
+/**
+ * Returns `clauses` without the clause naming this artifact in position `verb`, if there is one.
+ *
+ * @category Filters
+ */
+export function withoutMember(clauses: readonly MemberClause[], layer: string, artifact: bigint, verb: ClauseVerb): MemberClause[] {
   const key = memberKey(layer, artifact);
-  return clauses.filter((c) => memberKey(c.layer, c.artifact) !== key);
+  return clauses.filter((c) => c.verb !== verb || memberKey(c.layer, c.artifact) !== key);
 }

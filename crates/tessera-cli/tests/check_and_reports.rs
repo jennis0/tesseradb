@@ -10,14 +10,13 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float64Array, ListArray, StringArray, StringBuilder, UInt32Array, UInt64Array,
+    Array, ArrayRef, Float64Array, ListArray, StringArray, StringBuilder, StructArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 32;
 
 fn tessera() -> Command {
@@ -148,22 +147,24 @@ control = "127.0.0.1:45731"
 }
 
 /// One layer's artifacts, with the membership column under `column` — so a test can misspell it.
+/// Each member is a struct naming its item by the unique `id`'s column, `entity_id`.
 fn write_clusters(path: &Path, column: &str) {
-    let members = ListArray::new(
-        Arc::new(Field::new("item", DataType::UInt64, true)),
-        OffsetBuffer::from_lengths([2usize, 2]),
+    let entries = StructArray::from(vec![(
+        Arc::new(Field::new("entity_id", DataType::UInt64, false)),
         Arc::new(UInt64Array::from(vec![0u64, 1, 2, 3])) as ArrayRef,
+    )]);
+    let item = Arc::new(Field::new("item", entries.data_type().clone(), true));
+    let members = ListArray::new(
+        item.clone(),
+        OffsetBuffer::from_lengths([2usize, 2]),
+        Arc::new(entries) as ArrayRef,
         None,
     );
     write(
         path,
         Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
-            Field::new(
-                column,
-                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-                true,
-            ),
+            Field::new(column, DataType::List(item), true),
         ])),
         vec![
             Arc::new(StringArray::from(vec!["c0", "c1"])),
@@ -229,13 +230,20 @@ content                   = { computed = ["centroid", "box"] }
 
     [layer.labels.members]
     source = "topic_members"
+    fields = { id = "entity" }
+
+# The points file's `entity_id`, which every file names its item by.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 "#;
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
     tessera()
         .args(args)
         .current_dir(cwd)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera")
 }
@@ -276,11 +284,11 @@ fn check_prints_every_disclosure_decision() {
     project(tmp.path());
     let output = run(tmp.path(), &["check"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    let text = stdout(&output);
+    let text = stderr(&output);
     for expected in [
         "labels from field, default 'public'",
         "public, closed, 3 declared value(s), reserved [7]",
-        "u8 over vocabulary 'severity', hot",
+        "u8 over vocabulary 'severity', render",
         "gate 'public' | artifacts 'inherited' | members {\"fraction\":0.05}",
         "written by `[layer.labels]` on 'clusters/a'",
         "gate 'ir:analyst'",
@@ -289,6 +297,8 @@ fn check_prints_every_disclosure_decision() {
     ] {
         assert!(text.contains(expected), "{expected}\nmissing from:\n{text}");
     }
+    // The whole page is one stream, so stdout carries the payloads and nothing else.
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
 }
 
 /// **Every finding, not the first.** A build stops at the first thing wrong because everything
@@ -546,7 +556,7 @@ fn the_disclosure_report_carries_every_decision() {
     assert_eq!(json["vocabularies"][0]["visibility"], "public");
     assert_eq!(json["vocabularies"][0]["value_set"], "closed");
     assert_eq!(json["vocabularies"][0]["reserved"][0], 7);
-    assert_eq!(json["attributes"][0]["placement"], "hot");
+    assert_eq!(json["attributes"][0]["placement"], "render");
     assert_eq!(json["attributes"][0]["vocabulary"], "severity");
 
     let clusters = &json["layers"][0];
@@ -619,11 +629,11 @@ fn a_declaration_that_decides_nothing_writes_no_report() {
 }
 
 // -------------------------------------------------------------------------------------------
-// A points file with no identity column
+// A declaration with no unique attribute
 // -------------------------------------------------------------------------------------------
 
-/// The project's points, minus the identity column: geometry, access terms and one attribute.
-fn write_points_without_identity(dir: &Path) {
+/// The project's points, minus `entity_id`: geometry, access terms and one attribute.
+fn write_points_without_ids(dir: &Path) {
     let rows = N as usize;
     let ids: Vec<u64> = (0..N).collect();
     write(
@@ -661,8 +671,8 @@ fn write_keys(dir: &Path) {
 }
 
 /// The whole declaration over that file. The attribute is read from the points file itself, which
-/// is the one place a positional build can read one from.
-const NO_IDENTITY: &str = r#"
+/// is the one place a build with no unique attribute can read one from.
+const NO_UNIQUE: &str = r#"
 [sources]
 points = "points.parquet"
 
@@ -689,21 +699,20 @@ vocabulary = "severity"
 render     = true
 "#;
 
-/// **A points file may carry no identity column** (`configuration.md` §8), and the check accepts
-/// exactly what the build does: the rows are named by their position, the note says how they are
-/// addressed instead, and the check stays clean.
+/// **A declaration may declare no unique attribute**, and the check accepts exactly what the build
+/// does: each points row is an item of its own, the check says so, and it stays clean.
 #[test]
-fn a_points_file_with_no_identity_column_checks_clean_and_builds() {
+fn a_declaration_with_no_unique_attribute_checks_clean_and_builds() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_identity(tmp.path());
-    std::fs::write(tmp.path().join("schema.toml"), NO_IDENTITY).unwrap();
+    write_points_without_ids(tmp.path());
+    std::fs::write(tmp.path().join("schema.toml"), NO_UNIQUE).unwrap();
 
     let output = run(tmp.path(), &["check"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let said = stderr(&output);
     assert!(
-        said.contains("no identity column: rows addressable by tessera_id only"),
+        said.contains("view 's0': names items by nothing"),
         "{said}"
     );
     assert!(said.contains("check OK"), "{said}");
@@ -711,14 +720,14 @@ fn a_points_file_with_no_identity_column_checks_clean_and_builds() {
     build(tmp.path());
 }
 
-/// A `[layer.members]` table names one entity per row, and a position is not an entity. The
-/// finding names the table, so the author reads what needs the column rather than that one is
-/// missing.
+/// A `[layer.members]` table names one item per row by a unique value, and a declaration with no
+/// unique attribute gives items none. The finding names the table, so the author reads which file
+/// needs a column to name items by.
 #[test]
-fn a_members_table_over_a_file_with_no_identity_column_is_a_finding_naming_it() {
+fn a_members_table_with_no_unique_attribute_is_a_finding_naming_it() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
-    write_points_without_identity(tmp.path());
+    write_points_without_ids(tmp.path());
     write_keys(tmp.path());
     std::fs::write(
         tmp.path().join("schema.toml"),
@@ -754,7 +763,7 @@ require_member_visibility = "all"
     let output = run(tmp.path(), &["check"]);
     assert!(!output.status.success(), "{}", stderr(&output));
     let said = stderr(&output);
-    assert!(said.contains("view 's0'"), "{said}");
+    assert!(said.contains("layer 'topics/a' `[layer.members]`: "), "{said}");
     assert!(said.contains("topic_members.parquet"), "{said}");
-    assert!(said.contains("Declare an identity column"), "{said}");
+    assert!(said.contains("1 finding(s)"), "{said}");
 }

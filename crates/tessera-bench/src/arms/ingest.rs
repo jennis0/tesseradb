@@ -30,7 +30,7 @@
 //!   `apply_window` copies the whole buffer per close, so a flush interval pays `B²/2W` item
 //!   copies and per-row cost is proportional to `B/W`. A sweep that holds the buffer shallow
 //!   cannot see the term that dominates a deployment.
-//! * **Concurrency.** `accept_ingest` blocks on its receipt, so a *serial* caller gives the window
+//! * **Concurrency.** `Engine::ingest` blocks on its receipt, so a *serial* caller gives the window
 //!   a queue of one: one close and one fsync per call, and `commit_window_max_items` does nothing
 //!   at all (a window also closes when the work queue is observed empty — decision 0034, no
 //!   linger). Only under concurrent load does the window gather, and gathering changes `W`, which
@@ -104,9 +104,8 @@
 //!   grows linearly, one per ~4M rows ingested** (measured: 2 → 17 segments over 200 flushes at a
 //!   250M base, while merges kept firing throughout). Design §16's "how many live segments before
 //!   per-tile fan-out is noticeable" is **still open**, and now has a rate attached to it rather
-//!   than only a question. The cap is raisable — write-path §7 only requires it strictly below the
-//!   base segment's size — but merge peak memory is a measured 4.4–4.9× the inputs' file bytes, so
-//!   raising it buys segment count with pool transient.
+//!   than only a question. The cap is raisable, but merge peak memory is a measured 4.4–4.9× the
+//!   inputs' file bytes, so raising it buys segment count with pool transient.
 //! * **`accept_change` — the *other* write path, and not this module's.** It lives in
 //!   `arms::changes`: `changes` measures ack, tail and the visibility arithmetic against *overlay*
 //!   depth, and `arms::changes::run_deny_ack` measures the deny-ack floor's own drivers — buffered
@@ -115,6 +114,7 @@
 //!   queue-front + fsync, and `/control/changes` is never refused for capacity because refusing a
 //!   security operation for load is fail-open).
 
+use crate::ingest_rows::IngestRows;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -168,7 +168,6 @@ impl BuildObserver for StageCollector {
 /// | **`signature_sort`** | 0.1 | 2.8 (15%) | **53.4 (45%)** |
 /// | `assignment` | 2.4 (14%) | 2.7 (15%) | 3.6 (3%) |
 /// | `postings_write` | 0.0 | 0.4 (2%) | 4.9 (4%) |
-/// | **`external_ids`** | 0.2 (1%) | 2.3 (12%) | **24.0 (20%)** |
 /// | `geometry_scan` | 2.5 (14%) | 3.8 (21%) | 15.1 (13%) |
 /// | `tiler_sort` | 0.0 | 0.1 | 2.9 (2%) |
 /// | `segment_write` | 0.0 | 0.2 (1%) | 2.0 (2%) |
@@ -177,18 +176,12 @@ impl BuildObserver for StageCollector {
 ///
 /// † The 250k row ran first, against a cold page cache, so its `source_ids` includes a cold read
 /// of the 6.6 GB `geometry.parquet`. Later builds hit the cache. Compare 2.42M against 25M; treat
-/// the 250k column as contaminated.
+/// the 250k column as contaminated. The totals include 0.2, 2.3 and 24.0 s for a stage writing
+/// external ids, which the build no longer has.
 ///
 /// **`signature_sort` is the stage that bends.** 2.8 s → 53.4 s for 10x the items — 19x, clearly
 /// superlinear — and 45% of the 25M build. It is also the one stage that cannot be skipped or
 /// deferred: assignment is permanent under I9.
-///
-/// **`external_ids` is the second cost, and it is avoidable.** 2.3 s → 24.0 s, near-perfectly
-/// linear, 20% of the build. The same sidecar is 42% of bundle *bytes*, and is synthesised for
-/// every row from the source entity id even though the corpus supplies no external ids
-/// (`pipeline.rs`, stage 7). A build flag to skip it would take ~20% off build time and ~42% off
-/// disk — but it backs `/v1/items` drill-down and the C-5 constant-time property, so it is a
-/// deliberate trade, not free.
 ///
 /// **Bundle size is 47.0 B/item, dead flat across 100x of scale** (47.1 / 47.0 / 47.0).
 ///
@@ -251,14 +244,12 @@ pub fn run_build(
                 attribute_sources: Vec::new(),
                 out: out.clone(),
                 limit: Some(scale),
+                strict: false,
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
-                identity_key_hex: TEST_KEY_HEX.to_string(),
-                idset: 1,
                 shard_id: 0,
                 layers: Vec::new(),
                 layer_inputs: Vec::new(),
                 scoped_layers: Default::default(),
-                mint_external_ids: true,
                 emit_oracle_pairs: true,
                 batch_items: None,
                 memory_budget: None,
@@ -374,7 +365,6 @@ pub(crate) fn synth_rows(
         .map(|i| {
             let n = start + i as u64;
             UnallocatedRow {
-                external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: descriptors.to_vec(),
@@ -536,7 +526,7 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                 let batch_id = format!("bench-{batch}-{rep}");
                 depths.push(rep as u64 * batch as u64);
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, batch_id, [rep as u8; 32])?;
+                engine.ingest_rows(rows, batch_id, [rep as u8; 32])?;
                 samples.push(start.elapsed().as_nanos() as u64);
             }
 
@@ -691,7 +681,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 let rows = synth_rows(1, next_id, &terms, &descriptors);
                 next_id += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, format!("c-{next_id}"), [0u8; 32])?;
+                engine.ingest_rows(rows, format!("c-{next_id}"), [0u8; 32])?;
                 let ack_ns = start.elapsed().as_nanos() as u64;
                 buffered += 1;
                 std::hint::black_box(ack_ns);
@@ -723,7 +713,7 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
                 next_id += 1;
                 buffered += 1;
                 let start = std::time::Instant::now();
-                engine.accept_ingest(rows, format!("c-probe-{next_id}"), [0u8; 32])?;
+                engine.ingest_rows(rows, format!("c-probe-{next_id}"), [0u8; 32])?;
                 start.elapsed().as_nanos() as u64
             };
 
@@ -820,7 +810,7 @@ fn varied_signature_rows(
 /// result dressed as a measurement. That is a property of the harness, not of the server — a real
 /// `/control/ingest` caller is one of `ingest_admission` concurrent handlers.
 ///
-/// So this arm spawns N threads each calling `Engine::accept_ingest`, which is exactly what N
+/// So this arm spawns N threads each calling `Engine::ingest`, which is exactly what N
 /// concurrent handlers do one layer up (`control.rs` runs `run_ingest` inside `spawn_blocking`).
 ///
 /// # What is reported, and what is exact
@@ -925,7 +915,7 @@ pub fn run_concurrent(
                             let rows = varied_signature_rows(batch, base, &terms, &descriptors);
                             let batch_id = format!("conc-{t}-{rep}");
                             engine
-                                .accept_ingest(rows, batch_id, [t as u8; 32])
+                                .ingest_rows(rows, batch_id, [t as u8; 32])
                                 .expect("the batch is accepted");
                         }
                     });
@@ -997,7 +987,7 @@ pub struct RateSweep<'a> {
     pub ratio: &'a [usize],
     /// Concurrent `/control/ingest` callers.
     pub submitters: &'a [usize],
-    /// Rows per `accept_ingest` call. `W` for a serial caller; a lower bound on it otherwise.
+    /// Rows per ingest batch. `W` for a serial caller; a lower bound on it otherwise.
     pub batch: usize,
     /// `ingest.commit_window_max_items`, the ceiling a gathering window closes at.
     pub window: usize,
@@ -1059,7 +1049,7 @@ const POOL_TERMS: usize = 1_024;
 ///
 /// Spread rather than taken from the head: a dictionary is written in term order and the head is
 /// systematically the shortest and widest descriptors, so a prefix would make descriptor *length*
-/// — which is what the WAL record and the external-id compare pay for — unrepresentative.
+/// — which is what the WAL record pays for — unrepresentative.
 fn dictionary_pool(dict: &Dictionary, limit: usize) -> (Vec<TermId>, Vec<Vec<u8>>) {
     let n = dict.len();
     let take = limit.min(n);
@@ -1084,8 +1074,7 @@ fn dictionary_pool(dict: &Dictionary, limit: usize) -> (Vec<TermId>, Vec<Vec<u8>
 /// and the number of distinct signatures is `P` at every density. Taking a contiguous run instead
 /// would make the signature count `P/gcd(density, P)` — so `density` would move two things at once
 /// and neither column of the table would mean anything. `assign_sorted` sorts a window by
-/// `(signature, external_id)`, and `crates/tessera-engine/tests/ingest_shape.rs` measures that the
-/// tie-break's cost is real, so this is not a hypothetical confound.
+/// signature, so this is not a hypothetical confound.
 fn rate_rows(
     pool_terms: &[TermId],
     pool_descriptors: &[Vec<u8>],
@@ -1101,7 +1090,6 @@ fn rate_rows(
                 .map(|j| ((n as usize).wrapping_mul(7).wrapping_add(j * 137)) % p)
                 .collect();
             UnallocatedRow {
-                external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),
@@ -1138,7 +1126,7 @@ fn drive_cycle(
                 let hash = [(seq % 251) as u8; 32];
                 let t = std::time::Instant::now();
                 engine
-                    .accept_ingest(rows, batch_id, hash)
+                    .ingest_rows(rows, batch_id, hash)
                     .expect("the batch is accepted");
                 acks.lock()
                     .unwrap()

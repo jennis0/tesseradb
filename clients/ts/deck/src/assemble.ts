@@ -1,27 +1,21 @@
 import {
-  assertCompositionMatchesServed,
-  compose,
-  fold,
   type Band,
   type ComposedTile,
   type Composition,
-  type ReplicaFrame,
   type ScalarColumn,
-  type StandInPiece,
-  type TileRect
+  type ScalarValues,
+  type StandInPiece
 } from '@tesseradb/client';
+import {assertCompositionMatchesServed, compose, fold, type ReplicaFrame, type TileRect} from '@tesseradb/client/internal';
 
 /**
- * Materialising a composition into the buffers one `ScatterplotLayer` draws.
+ * Materialising a core composition into the buffers one `ScatterplotLayer` draws. Core's
+ * `compose` decides which bands contribute; this module concatenates the stand-in pieces into
+ * typed arrays, for the columns a renderer colours by. Exact bands are not copied: the slab
+ * writes each once.
  *
- * **The rules live in `tessera-client` now** (`compose.ts`; client-architecture §5): which bands
- * contribute, at what prefix length, on what authority — density matching, exact-supersession,
- * provenance. What remains here is the genuinely presentational half: turning the stand-in piece
- * list into concatenated typed arrays, and only for the columns a renderer is actually colouring
- * by. Exact bands are never copied here — they go to `slab.ts`, which writes each band once.
- *
- * `Assembled` carries its `composition` so a fold can run in core against it, and so every
- * account of what is drawn — the audit, the fidelity checks — reads one structure.
+ * `Assembled` carries its `composition` so core can fold new bands into it and every check of
+ * what is drawn reads one structure.
  */
 
 export type AssembledTile = ComposedTile;
@@ -31,30 +25,20 @@ export type Assembled = {
   want: TileRect;
   version: number;
   standInStale: boolean;
-  /** The exact bands this frame draws — handed to the slab, never copied. */
+  /** The exact bands this frame draws, handed to the slab uncopied. */
   bands: Band[];
-  /** Stand-in marks, concatenated for the provisional layer — every one of them stale-marked. */
+  /** Stand-in marks, concatenated for the provisional layer. */
   standIn: {
     ids: BigUint64Array;
     positions: Float32Array;
     scalars: Record<string, ScalarColumn>;
     /**
-     * The membership ordinal per stand-in mark for the layer it was materialised for, `0` where
-     * the band carried no column — the same attribute the slab writes for an exact band, so a
-     * stand-in draws through the lookup texture rather than neutral (§5.10).
-     *
-     * A stand-in is a *set* that oversamples the ground it covers, but each mark in it is a real
-     * point of a real band, carrying the ordinal the response that served it named. Colouring it
-     * by the artifact it is a member of is therefore exact — the density is the superset, not the
-     * membership — and drawing it neutral said *not known here yet* about a point whose cluster
-     * the client was holding.
+     * The membership ordinal per stand-in mark for the layer materialised, `0` where the band
+     * carried no column. A stand-in set oversamples its ground, but each mark is a real served
+     * point with its served ordinal, so colouring it by artifact is exact.
      */
     ordinals: Float32Array;
-    /**
-     * The highlight bit per stand-in mark, `1` where the band carried none — the same attribute
-     * the slab writes for an exact band, so a stand-in dulls with the rest of the map rather
-     * than sitting over it as a patch of undimmed ground.
-     */
+    /** The highlight bit per stand-in mark, `1` where the band carried none, so stand-ins dull with the map. */
     highlights: Float32Array;
   };
   tiles: AssembledTile[];
@@ -62,7 +46,7 @@ export type Assembled = {
   exactServed: number;
   provisional: number;
   visibleInView: number;
-  /** The core composition this frame materialises — the authority every reader shares. */
+  /** The core composition this frame materialises. */
   composition: Composition;
 };
 
@@ -76,13 +60,33 @@ function pieceLength(piece: StandInPiece): number {
   return Math.min(whole, piece.limit);
 }
 
-/**
- * Concatenate one column across pieces, preserving its declared Arrow type. Only the columns a
- * caller asks for: a redraw needs exactly the one being coloured by.
- */
+/** Concatenate one column across pieces, keeping its declared Arrow type. */
 function assembleScalar(name: string, pieces: readonly StandInPiece[], total: number): ScalarColumn | null {
   const first = pieces.find((p) => p.band.scalars[name])?.band.scalars[name];
   if (!first) return null;
+  const column: ScalarColumn = assembleValues(name, pieces, total, first);
+  // A piece whose band lacks the column has no value there, as a null does.
+  if (pieces.some((p) => p.band.scalars[name]?.present || !p.band.scalars[name])) {
+    const present = new Uint8Array(total);
+    let o = 0;
+    for (const piece of pieces) {
+      const source = piece.band.scalars[name];
+      const len = pieceLength(piece);
+      const at = (i: number) => (!source ? 0 : !source.present ? 1 : source.present[i]!);
+      if (piece.indices) for (const i of piece.indices) present[o++] = at(i);
+      else for (let i = 0; i < len; i++) present[o++] = at(i);
+    }
+    column.present = present;
+  }
+  return column;
+}
+
+function assembleValues(
+  name: string,
+  pieces: readonly StandInPiece[],
+  total: number,
+  first: ScalarColumn
+): ScalarValues {
 
   if (first.arrowType === 'bool' || first.arrowType === 'utf8') {
     const values: unknown[] = [];
@@ -97,7 +101,7 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
       if (piece.indices) for (const i of piece.indices) values.push(source[i]);
       else for (let i = 0; i < len; i++) values.push(source[i]);
     }
-    return {arrowType: first.arrowType, values} as ScalarColumn;
+    return {arrowType: first.arrowType, values} as ScalarValues;
   }
 
   const Ctor = (first.values as unknown as {constructor: new (n: number) => ArrayLike<unknown>})
@@ -122,16 +126,16 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
       o += len;
     }
   }
-  return {arrowType: first.arrowType, values: out} as unknown as ScalarColumn;
+  return {arrowType: first.arrowType, values: out} as unknown as ScalarValues;
 }
 
 /** The stand-in buffers a `ScatterplotLayer` draws, and how many marks they hold. */
 export type StandInBuffers = Assembled['standIn'] & {count: number};
 
 /**
- * The stand-in piece list as concatenated buffers — the one copy this file still pays — for the
- * columns a renderer is colouring by. `TesseraLayer` memoises this on the piece list's identity,
- * which `fold` preserves whenever nothing was filtered.
+ * The stand-in piece list as concatenated buffers, for the columns a renderer colours by.
+ * `TesseraLayer` memoises this on the piece list's identity, which `fold` keeps when it filters
+ * nothing.
  */
 export function materialiseStandIn(pieces: readonly StandInPiece[], columns: Iterable<string>, layer = ''): StandInBuffers {
   const total = pieces.reduce((n, piece) => n + pieceLength(piece), 0);
@@ -146,10 +150,9 @@ function concatenatePieces(
 ): Assembled['standIn'] {
   const ids = new BigUint64Array(total);
   const positions = new Float32Array(total * 2);
-  // Zeros where the layer names none: ordinal 0 is *no artifact*, which the texture draws neutral.
+  // Ordinal 0 is no artifact, which the texture draws neutral.
   const ordinals = new Float32Array(total);
-  // Ones where the band carried no highlight column — *matched*, which is what every mark is when
-  // no highlight was asked (`marks-layer.ts`).
+  // 1 is matched, which every mark is when no highlight is set.
   const highlights = new Float32Array(total).fill(1);
   let o = 0;
   for (const piece of pieces) {
@@ -165,7 +168,7 @@ function concatenatePieces(
         o++;
       }
     } else {
-      // A whole band is a memcpy; `subarray` honours the density-matching limit — a view, no copy.
+      // A whole band is a block copy up to the piece's density-matching limit.
       const len = pieceLength(piece);
       ids.set(piece.band.ids.subarray(0, len), o);
       positions.set(piece.band.positions.subarray(0, len * 2), o * 2);
@@ -200,12 +203,9 @@ function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembl
 }
 
 /**
- * Materialise a presented composition into buffers, reusing what a held frame already built.
- *
- * The stand-in piece list comes back from core's `fold` **by reference** when nothing was
- * filtered, and that identity is the signal here: the held buffers — and with them the colour memo
- * and deck's upload skip — survive untouched. A derive, or a fold that filtered a piece, pays the
- * copy for the columns named (the one being coloured by, in practice).
+ * Materialise a composition into buffers, reusing a held frame's stand-in buffers when core's
+ * `fold` returned the same piece list. That keeps the colour memo and deck's upload skip valid.
+ * Otherwise the named columns are copied.
  */
 export function materialise(
   c: Composition,
@@ -217,19 +217,17 @@ export function materialise(
   return fromComposition(c, concatenatePieces(c.standIn, c.provisional, columns, layer));
 }
 
-/** Compose and materialise a replica frame in one step — the shape the tests drive. */
+/** Compose and materialise a replica frame in one step. */
 export function assemble(frame: ReplicaFrame, columns?: Iterable<string>, layer = ''): Assembled {
   return materialise(compose(frame), null, columns ?? [], layer);
 }
 
-/** Fold fresh exact bands into a frame already on screen — see {@link materialise}. */
+/** Fold fresh exact bands into a frame already on screen. */
 export function refreshExact(held: Assembled, bands: Band[], version: number): Assembled {
   return materialise(fold(held.composition, bands, version), held, Object.keys(held.standIn.scalars));
 }
 
-/**
- * Fold one column's values across the exact bands, for a reader that needs the whole frame.
- */
+/** Fold one column's values across the exact bands and the stand-in marks. */
 export function foldBandColumn<T>(
   assembled: Assembled,
   column: string | null,
@@ -248,12 +246,9 @@ export function foldBandColumn<T>(
 }
 
 /**
- * That the picture matches what was served — a fidelity check, **not an invariant check**.
- *
- * Dropping a mark fails in the safe direction (`client-interaction.md`; `caching.md` §11): a
- * thinner picture discloses nothing. It is thrown over because a lost mark has been the signature
- * of every assembly bug so far. Exact tiles only; and no non-exact tile may carry a count —
- * a superset read as density overstates (`delta-serving.md` §7).
+ * Throws when the drawn marks on exact tiles differ from what was served, or a non-exact tile
+ * carries a count. A dropped mark discloses nothing, so this is a fidelity check, and a lost mark
+ * is the usual sign of an assembly bug.
  */
 export function assertAssemblyMatchesServed(assembled: Assembled): void {
   assertCompositionMatchesServed(assembled.composition);

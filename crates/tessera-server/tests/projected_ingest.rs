@@ -25,16 +25,15 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, UInt64Array};
+use arrow::array::{Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
+use tessera_build::build;
 use tessera_build::config::Fields;
 use tessera_build::input::deinterleave;
-use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord};
@@ -42,18 +41,6 @@ use tessera_plugin::Passthrough;
 use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
-
-/// The whole-world `web_mercator` frame, which **is** the unit square (`projections.md` §4): every
-/// projection's output is normalised to `[0, 1]` on both axes, x east and y south, so a 16-bit
-/// cell here is exactly an XYZ tile at zoom 16.
-fn world_frame() -> Bounds {
-    Bounds {
-        x_min: 0.0,
-        x_max: 1.0,
-        y_min: 0.0,
-        y_max: 1.0,
-    }
-}
 
 /// Places, in longitude and latitude — the order GeoJSON and WKT use, which is the whole reason
 /// this view's columns are named for what they hold.
@@ -82,81 +69,39 @@ fn places() -> Vec<(f64, f64)> {
 /// The one row `places()` clips.
 const POLAR: usize = 11;
 
-/// A points file under the names a projected view reads (`projections.md` §2).
-fn write_lon_lat_points(path: &Path, points: &[(f64, f64)]) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![
-            Arc::new(UInt64Array::from(
-                (0..points.len() as u64).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                points.iter().map(|p| p.1).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .expect("the fixture batch is well-formed");
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-/// A bundle whose one view is projected `web_mercator` against the whole world.
+/// A bundle whose one view is projected `web_mercator` against the whole world, declaring the
+/// unique `id` ([`id_schema`]) so a built place is named by its index in `points`.
 ///
 /// `Fields::moved` is what a projected `[[view]]` compiles to — the geographic names carried on the
 /// canonical axes — so the build reads `lon`/`lat` here exactly as it would from a declaration.
 fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
-    let points_path = tmp.join("points.parquet");
-    let pairs_path = tmp.join("pairs.parquet");
-    write_lon_lat_points(&points_path, points);
-    write_pairs_n(&pairs_path, points.len() as u64);
-    build(&BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: Projection::WebMercator,
-            extent: world_frame(),
-            points: points_path,
-            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs_path),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    })
-    .expect("the projected fixture builds");
+    build_projected_in(out, tmp, points, world_frame());
 }
 
-/// An ingest batch under caller-chosen column names, so the refusal tests can spell them wrong.
-fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Vec<u8> {
+/// [`build_projected`] against `frame`.
+fn build_projected_in(out: &Path, tmp: &Path, points: &[(f64, f64)], frame: Bounds) {
+    let points_path = tmp.join("points.parquet");
+    let pairs_path = tmp.join("pairs.parquet");
+    write_lon_lat(&points_path, points);
+    write_pairs_n(&pairs_path, points.len() as u64);
+    let args = build_args(
+        out,
+        vec![tessera_build::ViewArgs {
+            projection: Projection::WebMercator,
+            extent: frame,
+            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+            ..view_args("s0", &points_path, AccessInput::relation(pairs_path))
+        }],
+    );
+    build(&with_id(args, &points_path)).expect("the projected fixture builds");
+}
+
+/// An ingest batch of `(id, x, y, access label)` rows under caller-chosen coordinate column
+/// names, so the refusal tests can spell them wrong.
+fn ingest_batch(columns: (&str, &str), rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     let access = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new(columns.0, DataType::Float64, false),
         Field::new(columns.1, DataType::Float64, false),
         access_field(&access),
@@ -164,8 +109,8 @@ fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Ve
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                rows.iter().map(|(id, _, _, _)| id.as_slice()),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|(id, _, _, _)| *id),
             )),
             Arc::new(Float64Array::from(
                 rows.iter().map(|(_, x, _, _)| *x).collect::<Vec<_>>(),
@@ -182,10 +127,10 @@ fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Ve
     w.into_inner().unwrap()
 }
 
-/// The ingested-row external id for source `i`, distinct from the build's own 8-byte spelling so
-/// both copies of a place are addressable.
-fn ingested_id(i: usize) -> Vec<u8> {
-    format!("ingested-{i}").into_bytes()
+/// The `id` an ingested copy of place `i` takes, distinct from the built copy's `i` so both copies
+/// of a place are addressable.
+fn ingested_id(i: usize) -> u64 {
+    1_000_000 + i as u64
 }
 
 /// `POST /control/ingest`, returning the status and the decoded body.
@@ -209,41 +154,20 @@ async fn post_ingest(
     (status, json)
 }
 
-/// `POST /control/flush`, waited out — a buffered row has no geometry until it is flushed, so
-/// nothing below can read a position without this.
-async fn flush(server: &TestServer) {
-    let before = server.state.engine.write_executor_stats().flushes;
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    wait_for_flush(&server.state.engine, before);
-}
-
-fn wait_for_flush(engine: &Engine, before: u64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Every served point's 64-bit position, by `tessera_id`.
 fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
+    served_positions_in(engine, k, [0.0, 0.0, 1.0, 1.0])
+}
+
+/// [`served_positions`] over `bbox`.
+fn served_positions_in(engine: &Engine, k: usize, bbox: [f64; 4]) -> BTreeMap<u64, u64> {
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
         .expect("the fixture's pairs grant term 0 to every row");
     let out = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, [0.0, 0.0, 1.0, 1.0], k),
+            ViewportRequest::new("s0", 0, bbox, k),
         )
         .expect("the viewport answers over the whole frame");
     out.points
@@ -252,21 +176,17 @@ fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
         .collect()
 }
 
-/// The position an external id's row was placed at, or a panic naming the id.
-fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, external_id: &[u8]) -> u64 {
-    let entity = engine
-        .resolve_external_ids(std::slice::from_ref(&external_id.to_vec()))
-        .expect("the sidecar and the live map both answer")[0]
-        .expect("this external id was established by a build or an accepted batch");
-    let id = engine
+/// The position the item holding `id` was placed at, or a panic naming the id.
+fn position_of(engine: &Engine, positions: &BTreeMap<u64, u64>, id: u64) -> u64 {
+    let entity = unique_holders(engine, "id", &[id.to_string()])
+        .expect("`id` is a declared unique attribute")[0]
+        .unwrap_or_else(|| panic!("no item holds id {id}"));
+    let tessera_id = engine
         .tessera_id_of(entity)
         .expect("a live entity has an identifier");
-    *positions.get(&id.raw()).unwrap_or_else(|| {
-        panic!(
-            "the row for external id {} was not served",
-            String::from_utf8_lossy(external_id)
-        )
-    })
+    *positions
+        .get(&tessera_id.raw())
+        .unwrap_or_else(|| panic!("the item holding id {id} was not served"))
 }
 
 /// An engine config that flushes only when asked, so every position below is read after a flush
@@ -308,15 +228,15 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
     )
     .await;
 
-    let rows: Vec<(Vec<u8>, f64, f64, &str)> = points
+    let rows: Vec<(u64, f64, f64, &str)> = points
         .iter()
         .enumerate()
         .map(|(i, (lon, lat))| (ingested_id(i), *lon, *lat, "0"))
         .collect();
     let (status, body) = post_ingest(&server, "batch-1", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 200, "the projected batch is accepted: {body}");
-    assert_eq!(body["accepted"], points.len());
-    flush(&server).await;
+    assert_eq!(body["created"], points.len());
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
     assert_eq!(
@@ -325,8 +245,8 @@ async fn a_build_and_an_ingest_place_a_projected_coordinate_in_one_cell() {
         "both copies of every place must be served, or the comparison below is vacuous"
     );
     for (i, (lon, lat)) in points.iter().enumerate() {
-        let from_build = position_of(&server.state.engine, &positions, &external_id_of(i as u64));
-        let from_ingest = position_of(&server.state.engine, &positions, &ingested_id(i));
+        let from_build = position_of(&server.state.engine, &positions, i as u64);
+        let from_ingest = position_of(&server.state.engine, &positions, ingested_id(i));
         assert_eq!(
             from_build, from_ingest,
             "lon {lon}, lat {lat} was placed differently by the build and the ingest"
@@ -387,20 +307,16 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         status, 200,
         "a clipped row is accepted, never refused: {body}"
     );
-    assert_eq!(body["accepted"], 1);
+    assert_eq!(body["created"], 1);
     assert_eq!(
         body["clipped"], 1,
         "the response carries the clip count beside the out-of-bound count it already returns"
     );
-    flush(&server).await;
+    tick(&server).await;
 
     let positions = served_positions(&server.state.engine, 400);
-    let ingested = position_of(&server.state.engine, &positions, &ingested_id(POLAR));
-    let built = position_of(
-        &server.state.engine,
-        &positions,
-        &external_id_of(POLAR as u64),
-    );
+    let ingested = position_of(&server.state.engine, &positions, ingested_id(POLAR));
+    let built = position_of(&server.state.engine, &positions, POLAR as u64);
     assert_eq!(
         ingested, built,
         "the same polar row through the two doors must land in the same cell"
@@ -413,6 +329,53 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
         cell_y, 0,
         "a clipped northern row is stored on the frame's northern edge"
     );
+}
+
+/// A projected row outside the view's frame is clamped onto the frame's edge and counted, and
+/// lands where a build clamps the same row.
+#[tokio::test]
+async fn a_projected_row_outside_the_frame_is_clamped_where_a_build_clamps_it() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    // The north-western quarter of the world, which Tokyo lies east of.
+    let quarter = Bounds {
+        x_min: 0.0,
+        x_max: 0.5,
+        y_min: 0.0,
+        y_max: 0.5,
+    };
+    let points = vec![
+        (-0.1276, 51.5072),
+        (-74.0060, 40.7128),
+        (-155.5828, 19.8968),
+        (-100.0, 40.0),
+        (-60.0, 10.0),
+        (139.6917, 35.6895),
+    ];
+    const TOKYO: usize = 5;
+    build_projected_in(&root, tmp.path(), &points, quarter);
+    let server = spawn_server_with_config(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        config(),
+    )
+    .await;
+
+    let (lon, lat) = points[TOKYO];
+    let rows = vec![(ingested_id(TOKYO), lon, lat, "0")];
+    let (status, body) = post_ingest(&server, "tokyo", ingest_batch(("lon", "lat"), &rows)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["clamped"], 1, "{body}");
+    assert_eq!(body["clipped"], 0, "{body}");
+    tick(&server).await;
+
+    let positions = served_positions_in(&server.state.engine, 400, [0.0, 0.0, 0.5, 0.5]);
+    let ingested = position_of(&server.state.engine, &positions, ingested_id(TOKYO));
+    let built = position_of(&server.state.engine, &positions, TOKYO as u64);
+    assert_eq!(ingested, built, "the build and the ingest clamp Tokyo into one cell");
+    let (cell_x, _) = deinterleave((ingested >> 32) as u32);
+    assert_eq!(cell_x, 65_535, "Tokyo is stored on the frame's eastern edge");
 }
 
 /// A batch spelling its coordinate columns `x`/`y` against a **projected** view is refused, naming
@@ -438,6 +401,7 @@ async fn a_projected_view_refuses_the_cartesian_spelling() {
     let rows = vec![(ingested_id(0), 0.0, 0.0, "0")];
     let (status, body) = post_ingest(&server, "wrong", ingest_batch(("x", "y"), &rows)).await;
     assert_eq!(status, 422, "the wrong spelling is a contract refusal");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("'lon'") && detail.contains("'lat'"),
@@ -453,12 +417,7 @@ async fn a_projected_view_refuses_the_cartesian_spelling() {
 #[tokio::test]
 async fn a_view_with_no_projection_refuses_the_geographic_spelling() {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server_with_config(
         &root,
         &tmp.path().join("cache"),
@@ -470,6 +429,7 @@ async fn a_view_with_no_projection_refuses_the_geographic_spelling() {
     let rows = vec![(ingested_id(0), 10.0, 10.0, "0")];
     let (status, body) = post_ingest(&server, "wrong", ingest_batch(("lon", "lat"), &rows)).await;
     assert_eq!(status, 422, "the wrong spelling is a contract refusal");
+    assert_eq!(body["error"], "contract", "{body}");
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("'x'") && detail.contains("'y'"),
@@ -506,7 +466,7 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
     )
     .await;
 
-    let rows: Vec<(Vec<u8>, f64, f64, &str)> = points
+    let rows: Vec<(u64, f64, f64, &str)> = points
         .iter()
         .enumerate()
         .map(|(i, (lon, lat))| (ingested_id(i), *lon, *lat, "0"))
@@ -521,7 +481,8 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
     copy_dir(&wal_dir, &replay_dir);
 
     // ---- half one: what the log actually holds.
-    let (_wal, records) = Wal::open(replay_dir.join("wal.log")).expect("the copied log opens");
+    let wal = Wal::open(replay_dir.join("wal.log")).expect("the copied log opens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let logged: Vec<(f64, f64)> = records
         .iter()
         .filter_map(|r| match r {
@@ -562,32 +523,22 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
         .expect("the executor starts once");
     let before = replayed.write_executor_stats().flushes;
     replayed.request_flush();
-    wait_for_flush(&replayed, before);
+    wait_until(
+        "the flush published",
+        std::time::Duration::from_secs(60),
+        async || replayed.write_executor_stats().flushes > before,
+    )
+    .await;
 
-    flush(&server).await;
+    tick(&server).await;
     let live = served_positions(&server.state.engine, 400);
     let after_restart = served_positions(&replayed, 400);
     for (i, (lon, lat)) in points.iter().enumerate() {
         let id = ingested_id(i);
         assert_eq!(
-            position_of(&replayed, &after_restart, &id),
-            position_of(&server.state.engine, &live, &id),
+            position_of(&replayed, &after_restart, id),
+            position_of(&server.state.engine, &live, id),
             "replay moved lon {lon}, lat {lat}"
         );
-    }
-}
-
-/// A shallow recursive copy — enough for a bundle directory and a WAL sequence, and small enough
-/// that reaching for a dependency would cost more than it saved.
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
     }
 }

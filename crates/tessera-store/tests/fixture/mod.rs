@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_store::manifest::{
-    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
@@ -108,26 +108,6 @@ pub fn build_bundle(root: &Path, n: u64) {
     let segments_manifest = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
-        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-        layers: Vec::new(),
-        layer_tombstones: Vec::new(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
-        membership_extents: Vec::new(),
-        level_versions: Vec::new(),
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
-        shape_rows_extents: Vec::new(),
-        shape_held_extents: Vec::new(),
-        term_image_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,
             view: VIEW.to_string(),
@@ -138,16 +118,11 @@ pub fn build_bundle(root: &Path, n: u64) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
-        external_id_runs: vec![],
-        locator_extents: vec![],
-        tombstones: vec![],
-        deny: vec![],
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         vocabulary_extensions: vec![],
         files,
+        ..SegmentsManifest::empty()
     };
     fs::write(
         partition_dir.join("SEGMENTS-0.json"),
@@ -169,7 +144,6 @@ pub fn build_bundle(root: &Path, n: u64) {
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
             shard_id: 0,
-            idset: 1,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {
@@ -236,7 +210,7 @@ pub fn flush_segment(
             rows: (entity_lo..entity_lo + count)
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
-                    external_id: Some(format!("ext-{e}").into_bytes()),
+                    number: EntityId::new(e),
                     x: ((e * 37) % 100) as f64 / 100.0,
                     y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],
@@ -252,6 +226,7 @@ pub fn flush_segment(
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         },
     )
     .expect("write_flush_segment");
@@ -264,6 +239,7 @@ pub fn flush_segment(
         .join("segments")
         .join(&seg_id);
     let segment = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id,
         row_count: out.segment.row_count,
         morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),

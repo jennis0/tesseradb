@@ -1,0 +1,243 @@
+"""What each call returns: a report that shows as a short summary, and no call prints.
+
+Each report kind is checked for the numbers that matter in its summary, and for every finding
+and refusal it holds. The wording is not asserted.
+"""
+
+import pyarrow as pa
+import pytest
+
+from tesseradb._database import create
+from tesseradb._refusal import Refusal
+
+
+def papers(ids, x=None, labels="public"):
+    n = len(ids)
+    return pa.table(
+        {
+            "id": pa.array(ids, pa.string()),
+            "x": pa.array(x if x is not None else [float(i) for i in range(n)], pa.float64()),
+            "y": pa.array([0.0] * n, pa.float64()),
+            "labels": pa.array([[labels]] * n, pa.list_(pa.string())),
+            "note": pa.array(["n"] * n, pa.string()),
+        }
+    )
+
+
+def declare_the_id(db) -> None:
+    db.declare_attribute("id", type="keyword", unique=True)
+
+
+def unscored(ids, x):
+    """Rows inserted after the first commit, carrying the declared `score` with no value."""
+    rows = papers(ids, x=x)
+    return rows.append_column("score", pa.nulls(rows.num_rows, pa.float64()))
+
+
+def small(db) -> None:
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
+    db.declare_attribute("score", type="f64", index=True, render=False)
+    db.insert("map", papers([f"p{i}" for i in range(20)]), x="x", y="y",
+              access="labels")
+    # The build reads `score` from this table, which holds a row for every item: a value on `p0`
+    # and nulls on the rest.
+    db.insert(
+        "score",
+        pa.table(
+            {
+                "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                "score": pa.array([0.5] + [None] * 19, pa.float64()),
+            }
+        ),
+        value="score",
+    )
+
+
+def test_declare_columns_reports_every_column_and_prints_nothing(tmp_path, capsys):
+    db = create(tmp_path / "db")
+    db.declare_view("map")
+    frame = pa.table({"id": ["p"], "x": [0.0], "y": [0.0], "title": ["t"], "year": [2001]})
+    report = db.declare_columns(frame, skip=["id", "x", "y"], index=["title"])
+    summary = str(report)
+    assert str(len(report.columns)) in summary
+    assert all(column.name in summary for column in report.columns)
+    assert repr(report) == summary
+    assert capsys.readouterr().out == ""
+
+
+def test_an_insert_reports_its_rows_and_columns_and_prints_nothing(tmp_path, capsys):
+    db = create(tmp_path / "db")
+    db.declare_view("map")
+    declare_the_id(db)
+    insert = db.insert("map", papers([f"p{i}" for i in range(1500)]), x="x", y="y")
+    summary = str(insert)
+    assert insert.rows == 1500 and f"{insert.rows:,}" in summary
+    assert all(column in summary for column in insert.read)
+    assert insert.ignored == ["labels", "note"]
+    assert all(column in summary for column in insert.ignored)
+    assert repr(insert) == summary
+    assert capsys.readouterr().out == ""
+
+
+def test_a_check_before_the_first_commit_reports_its_rows_and_every_finding(tmp_path, capsys):
+    db = create(tmp_path / "db")
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
+    db.declare_layer("clusters", kind="flat", supplied=[("topic", "text", "all")])
+    rows = papers(["p", "q"])
+    db.insert("map", rows, x="x", y="y", access="labels")
+    # A layer declaring supplied content takes an artifacts table, and a key column is a finding.
+    db.insert("clusters", rows.append_column("cluster", pa.array(["a", "a"])), key="cluster")
+    report = db.check()
+    summary = str(report)
+    assert not report.ok and report.findings
+    assert all(str(finding) in summary for finding in report.findings)
+    assert report.rows == {"map": 2} and "2 rows" in summary
+    assert capsys.readouterr().out == ""
+
+
+def test_a_check_names_a_declared_column_nothing_fills_and_the_commit_shows_its_failure(
+    tmp_path, capsys
+):
+    db = create(tmp_path / "db")
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    declare_the_id(db)
+    db.declare_attribute("score", type="f64", index=True)
+    db.insert("map", papers(["p0", "p1"]), x="x", y="y", access="labels")
+    report = db.check()
+    empty = [note for note in report.notes if "score" in note and "empty" in note]
+    assert empty and all(note in str(report) for note in empty)
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    failed = raised.value.report
+    assert not failed.ok
+    refused = [line for line in failed.log.splitlines() if "refused" in line]
+    assert refused and all(line in str(failed) for line in refused)
+    assert capsys.readouterr().out == ""
+
+
+def test_the_first_commit_reports_each_row_the_build_left_out(tmp_path, corpus):
+    """A member naming no item is left out and the build goes on; the report counts it by file
+    and reason, with the value it carried."""
+    db = create(tmp_path / "db")
+    try:
+        small(db)
+        db.declare_layer("clusters", kind="flat")
+        db.insert(
+            "clusters", members=pa.table({"key": ["a", "a"], "id": ["p0", "nobody"]}), key="key"
+        )
+        report = db.commit()
+        assert report.ok, report.log
+        assert [(one["reason"], one["rows"]) for one in report.refused] == [("names_no_item", 1)]
+        assert any("nobody" in value for value in report.refused[0]["values"])
+        assert report.refused[0]["source"] in str(report)
+    finally:
+        db.close()
+
+
+def test_a_strict_first_commit_refuses_the_build_at_a_row_it_would_leave_out(tmp_path, corpus):
+    """The same member naming no item, with `strict=True`: the build is refused and nothing is
+    served."""
+    db = create(tmp_path / "db")
+    try:
+        small(db)
+        db.declare_layer("clusters", kind="flat")
+        db.insert(
+            "clusters", members=pa.table({"key": ["a", "a"], "id": ["p0", "nobody"]}), key="key"
+        )
+        with pytest.raises(Refusal):
+            db.commit(strict=True)
+        assert not db.built
+    finally:
+        db.close()
+
+
+def test_the_first_commit_reports_what_it_built_and_prints_nothing(tmp_path, corpus, capsys):
+    db = create(tmp_path / "db")
+    try:
+        small(db)
+        report = db.commit()
+        summary = str(report)
+        assert report.ok, report.log
+        assert report.rows == {"map": 20} and "20 rows" in summary
+        assert report.items == 20 and "20 items" in summary
+        assert report.views == {"map": 1} and "map" in summary
+        assert report.layers == []
+        assert report.seconds is not None and f"{report.seconds:.1f}" in summary
+        assert report.viewer in summary
+        # The build's log stays on the report.
+        assert "built" in report.log
+        assert capsys.readouterr().out == ""
+    finally:
+        db.close()
+
+
+def test_a_later_check_and_commit_report_their_plan_findings_and_refusals(served, corpus, capsys):
+    db = served(small)
+    capsys.readouterr()
+    # A row outside the view's frame commits on the frame's edge, and the summary counts it.
+    db.insert("map", unscored(["far"], x=[9_000.0]), x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok and report.clamped == 1
+    assert "clamped" in str(report)
+
+    # A members table naming its members by no unique attribute names items by nothing, which is
+    # a finding, as the build refuses such a file.
+    db = served(small)
+    capsys.readouterr()
+    db.declare_layer("clusters", kind="flat")
+    db.insert("clusters", members=pa.table({"key": ["a"], "paper": ["p0"]}), key="key")
+    assert db.check().findings
+    with pytest.raises(Refusal):
+        db.commit()
+
+    # A member written as a plain value names no column, which is a finding, and the check and the
+    # commit both carry it.
+    db = served(small)
+    capsys.readouterr()
+    db.declare_layer("clusters", kind="flat")
+    db.insert(
+        "clusters",
+        artifacts=pa.table({"key": ["a"], "members": pa.array([["p0"]])}),
+        key="key",
+        members="members",
+    )
+    plan = db.check()
+    assert plan.findings and all(str(finding) in str(plan) for finding in plan.findings)
+    assert str(len(plan.plan)) in str(plan)
+    with pytest.raises(Refusal) as raised:
+        db.commit()
+    refused = raised.value.report
+    assert all(str(finding) in str(refused) for finding in refused.findings)
+
+    # No item is named `nobody`, and a row without coordinates creates none, so a strict commit
+    # refuses its page, and the two new rows land. The refused commit left its rows pending, so
+    # this is a second database.
+    db = served(small)
+    capsys.readouterr()
+    db.insert(
+        "score",
+        pa.table({"id": pa.array(["nobody"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        value="score",
+    )
+    db.insert("map", unscored(["q0", "q1"], x=[1.5, 2.5]), x="x", y="y", access="labels")
+    report = db.commit(strict=True)
+    summary = str(report)
+    assert report.rows_accepted == {"map": 2} and "2 rows to map" in summary
+    assert report.refusals and all(
+        str(refusal["status"]) in summary and refusal["detail"] in summary
+        for refusal in report.refusals
+    )
+    assert f"{report.flush_wait:.2f}" in summary
+    assert capsys.readouterr().out == ""
+
+
+def test_a_change_reports_how_many_rows_it_was_given_and_applied(served, corpus, capsys):
+    db = served(small)
+    capsys.readouterr()
+    for report in (db.suppress({"id": ["p1", "p2", "p3"]}),
+                   db.unsuppress({"id": ["p1", "p2", "p3"]})):
+        assert report.ok and report.requested == 3 and report.accepted == 3
+        assert "3 rows" in str(report)
+    assert capsys.readouterr().out == ""

@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it} from 'vitest';
-import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection} from '@tesseradb/client';
+import {type Artifact, type ArtifactsProjection} from '@tesseradb/client';
+import {GRID32_PER_WORLD_UNIT, SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import '../src/map.js';
 import {fakeStore, mount, settle, status} from './fake-store.js';
 
@@ -16,7 +17,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-/** A box in world units, as the wire carries it: 32-bit grid units per axis (contracts §3.2). */
+/** A box in world units, as the server sends it: 32-bit grid units per axis. */
 const boxOf = (x0: number, y0: number, x1: number, y1: number): [number, number, number, number] =>
   [x0, y0, x1, y1].map((v) => Math.round(v * GRID32_PER_WORLD_UNIT)) as [number, number, number, number];
 
@@ -32,7 +33,8 @@ const artifact = (id: bigint, parent: bigint | null, rung: number, box: [number,
   parentIds: parent === null ? [] : [parent],
   rung,
   matched: null,
-  highlighted: null
+  highlighted: null,
+  target: null
 });
 
 function artifactsProjection(served: Artifact[]): ArtifactsProjection {
@@ -42,6 +44,8 @@ function artifactsProjection(served: Artifact[]): ArtifactsProjection {
     layer: 'clusters',
     layers: ['clusters'],
     served,
+    colourServed: [],
+    attached: new Map(),
     lineage: servedLineage(served),
     status: 'shown',
     refusal: null,
@@ -102,9 +106,12 @@ describe('a click on a contour', () => {
     const {el, store} = await map();
     // Inside the root's box and outside every frontier shape: the root is served, it is nobody's
     // answer, and clicking where only it reaches opens nothing.
+    let missed = 0;
+    (el as unknown as HTMLElement).addEventListener('tessera-miss', () => (missed += 1));
     el.onClick({index: -1, x: 2, y: 2});
     expect(opened(store)).toEqual([]);
     expect((el as unknown as {lastPick: {kind: string} | null}).lastPick).toEqual({kind: 'miss'});
+    expect(missed).toBe(1);
   });
 
   it('leaves deck’s own answers alone: a mark under the pointer is picked, not the contour', async () => {

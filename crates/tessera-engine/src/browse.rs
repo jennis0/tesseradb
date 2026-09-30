@@ -31,25 +31,34 @@
 //! # What it costs
 //!
 //! One pass over the layer's artifacts — the gate, and one masked `and_cardinality` each — plus,
-//! under `filters`, one more `and_cardinality` per row against a whole-view verdict. **A filter
+//! under `filters`, one more `and_cardinality` per row against a whole-view verdict. On a linked
+//! layer a second pass over the served artifacts counts the children of the rows returned,
+//! reading each artifact's parent list against the page's handful of rows. **A filter
 //! whose leaves route row space is the one whole-view scan this design adds** (§9 (d), owner
 //! ruling): a leaf over a render-only column is answered by the viewport only inside its tiles,
 //! and browse has none, so the row route's own predicate is run over every row of the view rather
 //! than over a request's ranges. Served naively its `matched_count` would be silently zero, which
 //! is the failure decision 0104 exists to prevent.
+//!
+//! A row without text of its own takes its name from an attached label. The label layers are read
+//! on the first row that needs one, and a label is looked up only for the rows of a page, or for
+//! the candidates of a search whose key does not match, through an index from target to label
+//! kept with the label level's row form, so a page does not walk the label layer.
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use croaring::Bitmap;
-
-use tessera_types::layer::HierarchyKind;
+use tessera_types::layer::{HierarchyKind, RegisteredLayer};
 use tessera_types::{EntityId, TesseraId};
 
-use crate::compose::{compose, MaskedSet, WholeMask};
-use crate::filter::{FilterExpr, RoutedFilter};
-use crate::viewport::{response_rungs, segments_with_row_bases};
-use crate::session::Result;
+use crate::artifacts::{ArtifactVerdict, ArtifactView};
+use crate::compose::compose;
+use crate::compose::EffectiveMask;
+use crate::error::Result;
+use crate::filter::FilterExpr;
+use crate::layer_read::{check_level, LayerRefusal, ReadLevel};
+use crate::viewport::{response_rungs, segments_with_row_bases, DependencyContext};
 use crate::EngineError;
 
 /// Which of §4's three forms a request takes. One verb, three forms (§9 (a), owner ruling).
@@ -60,8 +69,7 @@ pub enum BrowseForm {
     /// `parent` given: the artifacts naming it among their parents, with the requested artifact's
     /// own served parents beside them.
     Children(TesseraId),
-    /// `q` given: the artifacts whose key, or whose first supplied text content, contains `q`
-    /// case-insensitively.
+    /// `q` given: the artifacts whose key or [`BrowseRow::name`] contains `q` case-insensitively.
     Search(String),
 }
 
@@ -123,9 +131,12 @@ pub struct BrowseRow {
     pub tessera_id: TesseraId,
     /// The publisher's own key, where they supplied one.
     pub key: Option<String>,
-    /// The artifact's **first supplied text content**, where this principal may read it — the
-    /// containment rule's own answer, so a viewer who holds no content's generating set entire is
-    /// served no artifact at all rather than this field empty.
+    /// The artifact's first supplied text content where it has one, and otherwise the first text
+    /// of an artifact attached to it that `POST /v1/artifacts` would serve this principal. Label
+    /// layers are taken in the order `/v1/meta` lists layers; within one, by level, then keyed
+    /// artifacts by key, then keyless ones by publication, which is the order the viewport's
+    /// frame serves a level in and the same for a built level and a published one. `None` where
+    /// neither gives text.
     pub name: Option<String>,
     /// `|membership ∩ M_auth|`, computed per request and never precomputed (C8). **It never moves
     /// with the filter.**
@@ -140,6 +151,9 @@ pub struct BrowseRow {
     /// This artifact's parents **that this principal is also served**, ascending — C29 per entry,
     /// exactly as the artifacts frame's list is.
     pub parent_ids: Vec<TesseraId>,
+    /// How many artifacts this principal is served that name this one among their parents: the
+    /// size of this artifact's children form, on the same rule as `parent_ids`.
+    pub child_count: u64,
 }
 
 /// One browse page.
@@ -241,80 +255,76 @@ impl crate::Engine {
         // **The layer, resolved through the principal's own reachable set** — one probe for a
         // gate-failed name and a never-registered one alike, so a `422` here confirms nothing this
         // principal was not already told by `/v1/meta`.
-        let refuse_layer = || EngineError::BrowseRefused(BrowseRefused::UnknownLayer(req.layer.to_string()));
-        let reachable = self.write.resolve_layers(
-            |term| session.satisfied.contains(&term),
-            |label| generation.dict.lookup(label.as_bytes()),
-        );
-        if !reachable.contains(req.layer) {
-            return Err(refuse_layer());
-        }
-        let layer = self.write.registered_layer(req.layer).ok_or_else(refuse_layer)?;
-        if !layer.declaration.views.iter().any(|s| s == view)
-            || generation.overlay.is_deleted(layer.entity)
-            || generation.overlay.is_suppressed(layer.entity)
-        {
-            return Err(refuse_layer());
-        }
+        let refused = |refusal| {
+            EngineError::BrowseRefused(match refusal {
+                LayerRefusal::Unknown => BrowseRefused::UnknownLayer(req.layer.to_string()),
+                LayerRefusal::OneLevel(kind) => BrowseRefused::Level {
+                    layer: req.layer.to_string(),
+                    detail: format!(
+                        "its kind is '{}', which has one level, so `level` names nothing. \
+                         Omit it",
+                        kind_name(kind)
+                    ),
+                },
+                LayerRefusal::NoSuchLevel { held } => BrowseRefused::Level {
+                    layer: req.layer.to_string(),
+                    detail: format!(
+                        "it holds {held} level(s), so level {} names nothing — /v1/meta \
+                         publishes the level set",
+                        req.level.unwrap_or(0)
+                    ),
+                },
+            })
+        };
+        let layer = self
+            .readable_layer(session, &generation, req.layer, view)
+            .map_err(refused)?;
         if !layer.declaration.depends_on.is_empty() {
             return Err(EngineError::BrowseRefused(BrowseRefused::AttachedLayer(
                 req.layer.to_string(),
             )));
         }
-
-        // **`level` is refused on a one-level kind and clamped by nothing.** `flat`, `nested` and
-        // `dag` sit entirely at level 0 (decision 0082), so a level parameter there names a
-        // resolution the layer does not have.
+        check_level(&layer, req.level).map_err(refused)?;
         let levelled = matches!(
             layer.declaration.hierarchy.kind,
             HierarchyKind::Stacked | HierarchyKind::Tiered
         );
-        if let Some(level) = req.level {
-            if !levelled {
-                return Err(EngineError::BrowseRefused(BrowseRefused::Level {
-                    layer: req.layer.to_string(),
-                    detail: format!(
-                        "its kind is '{}', which has one level, so `level` names nothing. \
-                         Omit it",
-                        kind_name(layer.declaration.hierarchy.kind)
-                    ),
-                }));
-            }
-            if level as usize >= layer.runs.len() {
-                return Err(EngineError::BrowseRefused(BrowseRefused::Level {
-                    layer: req.layer.to_string(),
-                    detail: format!(
-                        "it holds {} level(s), so level {level} names nothing — /v1/meta \
-                         publishes the level set",
-                        layer.runs.len()
-                    ),
-                }));
-            }
-        }
         let level = req.level.unwrap_or(0);
+        let linked = !matches!(
+            layer.declaration.hierarchy.kind,
+            HierarchyKind::Flat | HierarchyKind::Stacked
+        );
 
         // `session_geometry` laps into a probe; this verb publishes no per-stage timings, so it
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let geometry =
+        let (geometry, _) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
         let denied = generation
-            .denied
+            .denied()
             .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
                 view: view.to_string(),
             })?;
         let mask = compose(
-            &session.satisfied,
+            session.satisfied(),
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
             &view_data.row_space,
             denied,
+            generation.buffered_rows(view),
         );
-        let segments = segments_with_row_bases(view, view_data)?;
-        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        let served_view = crate::viewport::ServedView {
+            session,
+            generation: &generation,
+            name: view,
+            data: view_data,
+            segments: segments_with_row_bases(view, view_data)?,
+            denied,
+            mask_identity: self.mask_identity(session, &generation, &geometry),
+        };
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it
         // may take is asked for its whole-view answer: an entity-space verdict is projected whole,
@@ -323,17 +333,10 @@ impl crate::Engine {
         // this design adds.
         let filter_rows = match &req.filter {
             None => None,
-            Some(expr) => Some(self.browse_filter_rows(
-                session,
-                &generation,
-                view,
-                view_data,
-                &segments,
-                &mask,
-                denied,
-                mask_identity,
-                expr,
-            )?),
+            Some(expr) => Some(
+                self.whole_view_filter_rows(&served_view, &mask, expr, &None)?
+                    .0,
+            ),
         };
 
         // **The gate, over every artifact of every level of the layer, before any page.** Every
@@ -346,109 +349,20 @@ impl crate::Engine {
         let mut keys: HashMap<(u32, u32), Option<String>> = HashMap::new();
         let mut filtered: HashMap<(u32, u32), u64> = HashMap::new();
         let shard = generation.bundle.manifest.identity.shard_id;
-        let source = generation.partition_source();
-        let vocabulary = crate::viewport::predicate_vocabulary(&generation, &layer.declaration);
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let wants_name = !layer.declaration.content.supplied.is_empty();
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
-            let recorded = layer.layout_of(walked);
-            let (rows, level_version) = self.write.with_artifacts(|store| {
-                let predicate = crate::viewport::predicate_source(
-                    &layer.declaration,
-                    &generation,
-                    view,
-                    view_data,
-                    &segments,
-                    &code_of_key,
-                    &self.shapes,
-                    store,
-                    walked,
-                );
-                // The version the form is of, not the store's — see
-                // `ArtifactProjections::get_or_build`. The histogram below is filed under it and
-                // is the same entry a viewport reads.
-                self.artifact_projections.get_or_build(
-                    &generation.prefix,
-                    view,
-                    req.layer,
-                    walked,
-                    store,
-                    &view_data.row_space,
-                    Some(&source),
-                    recorded,
-                    predicate.as_ref(),
-                    generation.segments_version,
-                    self.serves_column_only(req.layer),
-                )
-            });
-            let counts = self.masked_counts(
-                &mask_identity,
-                view,
-                req.layer,
-                walked,
-                level_version,
-                &rows,
-                &mask,
-                // A browse page carries a name and a count, never a derived geometry.
-                None,
-            );
-            let containment = rows.partition().map(|p| p.answers(&session.satisfied));
-            let view_of = crate::artifacts::ArtifactView {
-                declaration: &layer.declaration,
-                overlay: &generation.overlay,
-                satisfied: &session.satisfied,
-                layer_reachable: true,
-                rows: &rows,
-                mask: &mask,
-                dependency_served: &|_| false,
-                containment,
-                denied,
-                counts,
-            };
-            // The row-major route's filtered counts, taken in one walk of `M_auth ∩ filter` — the
-            // same shape the masked histogram takes, over a narrower set. A label column has no
-            // per-artifact membership to intersect, so this is the only route to the number.
-            let filtered_histogram = match (rows.column(), filter_rows.as_ref()) {
-                (Some(column), Some(rows_of_filter)) => {
-                    // Narrowed into a copy, because the composed set is the mask's and is borrowed.
-                    // The count beside an artifact is filter-blind (I12) and the whole-map
-                    // candidacy route reads the same set, so narrowing it in place would make both
-                    // a function of this request's filter.
-                    let visible = mask.visible_all().and(rows_of_filter);
-                    // The engine's pool, for `Engine::masked_counts`' reason: the walk splits.
-                    Some(self.pool.install(|| column.histogram_over(&visible)))
-                }
-                _ => None,
-            };
-            let contents = if wants_name {
-                Some(self.level_contents.get_or_build(
-                    req.layer,
-                    walked,
-                    level_version,
-                    generation.segments_version,
-                    || {
-                        crate::artifact_content::LevelContent::build(
-                            generation.filter_columns.records(),
-                            runs,
-                        )
-                    },
-                ))
-            } else {
-                None
-            };
+            let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false);
+            if let Some(filter_rows) = &filter_rows {
+                level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
+            }
+            let rows = &level_read.rows;
+            let view_of = level_read.view(self, &served_view, &mask, &layer, &|_| false);
             for ordinal in 0..rows.len() as u32 {
                 let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                     continue;
                 };
-                // ⊘ **No artifact carries its own terms yet**, so a layer whose
-                // `artifact_visibility` names a field serves nothing here — the same fail-closed
-                // answer the viewport gives, reached by the same call.
                 let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-                    view_of.verdict(entity, ordinal, None)
+                    view_of.verdict(entity, ordinal)
                 else {
                     continue;
                 };
@@ -459,35 +373,28 @@ impl crate::Engine {
                 // generating set receives no artifact at all rather than one with its description
                 // missing (decision 0076), which is why this runs inside the gate and not beside
                 // the row build.
-                let Some(content) = self.supplied_content(
-                    &generation,
-                    req.layer,
-                    walked,
-                    ordinal,
-                    entity,
-                    layer.declaration.content.supplied.len(),
-                    rank,
-                    true,
-                    contents.as_deref(),
-                ) else {
+                let Some(content) =
+                    level_read.content(self, &generation, &layer, ordinal, entity, rank)
+                else {
                     continue;
                 };
                 if let Some(filter_rows) = filter_rows.as_ref() {
-                    let count = match (&filtered_histogram, rows.get(ordinal)) {
-                        (Some(histogram), _) => {
-                            histogram.get(ordinal as usize).copied().unwrap_or(0) as u64
-                        }
-                        (None, Some(members)) => {
-                            mask.visible_rows(members).and_cardinality(filter_rows)
-                        }
-                        (None, None) => 0,
-                    };
-                    filtered.insert((walked, ordinal), count);
+                    filtered.insert(
+                        (walked, ordinal),
+                        level_read.matched_count(ordinal, &mask, filter_rows),
+                    );
                 }
-                names.insert((walked, ordinal), content.into_iter().next());
+                names.insert(
+                    (walked, ordinal),
+                    content
+                        .first_text()
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string),
+                );
                 keys.insert(
                     (walked, ordinal),
                     self.write
+                        .live()
                         .with_artifacts(|store| store.get(req.layer, walked, ordinal)?.key.clone()),
                 );
                 gated.push(Gated {
@@ -532,10 +439,119 @@ impl crate::Engine {
             response_rungs(&parents_of)
         };
 
-        let row_of = |g: &Gated| BrowseRow {
+        // **The layers attached to this one that this principal reads**, each level under this
+        // request's mask, and each artifact of them judged by the viewport's own verdict with the
+        // viewport's dependency hook. They are read on the first row that has no text of its own,
+        // and a name is looked up only for a row that needs one: the rows of a page, and the
+        // candidates of a search whose key does not match.
+        let reachable = self.reachable_layers(session);
+        let ctx = DependencyContext::new(&served_view, &mask, &reachable);
+        let dependency_served = self.dependency_gate(&ctx);
+        let label_layers: OnceCell<Vec<(RegisteredLayer, Vec<ReadLevel>)>> = OnceCell::new();
+        let label_views: OnceCell<Vec<Vec<ArtifactView<'_, EffectiveMask>>>> = OnceCell::new();
+        let attached_name = |level: u32, ordinal: u32| -> Option<String> {
+            let target = layer.runs[level as usize]
+                .entity_of(u64::from(ordinal))
+                .map(EntityId::new)?;
+            let layers = label_layers.get_or_init(|| {
+                reachable
+                    .names()
+                    .filter_map(|name| self.readable_layer(session, &generation, name, view).ok())
+                    .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
+                    .map(|label| {
+                        let levels = (0..label.runs.len() as u32)
+                            .map(|level| self.read_level(&served_view, &mask, &label, level, false))
+                            .collect();
+                        (label, levels)
+                    })
+                    .collect()
+            });
+            let views = label_views.get_or_init(|| {
+                layers
+                    .iter()
+                    .map(|(label, levels)| {
+                        levels
+                            .iter()
+                            .map(|read| {
+                                read.view(self, &served_view, &mask, label, &dependency_served)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            });
+            layers
+                .iter()
+                .zip(views)
+                .find_map(|((label, levels), views)| {
+                    levels.iter().zip(views).find_map(|(read, view)| {
+                        // An edge naming an entity the target slot no longer holds is into an
+                        // artifact since republished over.
+                        let mut attached: Vec<u32> = read
+                            .rows
+                            .records()
+                            .attached_to(req.layer, level, ordinal)
+                            .filter(|&at| {
+                                read.rows.attachment(at).is_some_and(|a| a.entity == target)
+                            })
+                            .collect();
+                        // The viewport's order within a level: by key, then the keyless by ordinal.
+                        if attached.len() > 1 {
+                            let name = label.declaration.name.as_str();
+                            let keyed: Vec<(Option<String>, u32)> =
+                                self.write.live().with_artifacts(|store| {
+                                    attached
+                                        .iter()
+                                        .map(|&at| {
+                                            (
+                                                store
+                                                    .get(name, read.level, at)
+                                                    .and_then(|r| r.key.clone()),
+                                                at,
+                                            )
+                                        })
+                                        .collect()
+                                });
+                            let mut keyed = keyed;
+                            keyed.sort_unstable_by(|(a, at), (b, bt)| {
+                                (a.is_none(), a, at).cmp(&(b.is_none(), b, bt))
+                            });
+                            attached = keyed.into_iter().map(|(_, at)| at).collect();
+                        }
+                        attached.into_iter().find_map(|at| {
+                            let entity = label.runs[read.level as usize]
+                                .entity_of(u64::from(at))
+                                .map(EntityId::new)?;
+                            let ArtifactVerdict::Serve { rank, .. } = view.verdict(entity, at)
+                            else {
+                                return None;
+                            };
+                            read.content(self, &generation, label, at, entity, rank)?
+                                .first_text()
+                                .filter(|text| !text.is_empty())
+                                .map(str::to_string)
+                        })
+                    })
+                })
+        };
+        let resolved: RefCell<HashMap<(u32, u32), Option<String>>> = RefCell::default();
+        let name_of = |g: &Gated| -> Option<String> {
+            let at = (g.level, g.ordinal);
+            if let Some(name) = resolved.borrow().get(&at) {
+                return name.clone();
+            }
+            let name = names
+                .get(&at)
+                .cloned()
+                .flatten()
+                .or_else(|| attached_name(g.level, g.ordinal));
+            resolved.borrow_mut().insert(at, name.clone());
+            name
+        };
+
+        let row_of = |g: &Gated, children: &HashMap<(u32, u32), u64>| BrowseRow {
             tessera_id: g.tessera_id,
             key: keys.get(&(g.level, g.ordinal)).cloned().flatten(),
-            name: names.get(&(g.level, g.ordinal)).cloned().flatten(),
+            name: name_of(g),
             masked_count: g.masked_count,
             matched_count: filtered.get(&(g.level, g.ordinal)).copied(),
             rung: if levelled {
@@ -553,6 +569,10 @@ impl crate::Engine {
                 ids.dedup();
                 ids
             },
+            child_count: children
+                .get(&(g.level, g.ordinal))
+                .copied()
+                .unwrap_or(0),
         };
 
         // The form's own candidate set, taken over the gated artifacts and never over the level's
@@ -607,14 +627,12 @@ impl crate::Engine {
                         .iter()
                         .enumerate()
                         .filter(|(_, g)| {
+                            let found = |text: Option<String>| {
+                                text.is_some_and(|text| text.to_lowercase().contains(&needle))
+                            };
                             g.level == level
-                                && [
-                                    keys.get(&(g.level, g.ordinal)).cloned().flatten(),
-                                    names.get(&(g.level, g.ordinal)).cloned().flatten(),
-                                ]
-                                .iter()
-                                .flatten()
-                                .any(|text| text.to_lowercase().contains(&needle))
+                                && (found(keys.get(&(g.level, g.ordinal)).cloned().flatten())
+                                    || found(name_of(g)))
                         })
                         .map(|(at, _)| at)
                         .collect(),
@@ -663,114 +681,48 @@ impl crate::Engine {
             })
             .flatten();
 
-        let mut parent_rows: Vec<BrowseRow> =
-            parents.iter().map(|&at| row_of(&gated[at])).collect();
+        // The children of each row returned, counted over the gated artifacts, so both ends are
+        // served. A child counts once however many times its parent list repeats the parent, as
+        // the children form lists it once. A `flat` or `stacked` layer has no links to count.
+        let mut returned: Vec<Vec<bool>> = vec![Vec::new(); layer.runs.len()];
+        for &at in page.iter().chain(&parents) {
+            let marks = &mut returned[gated[at].level as usize];
+            let ordinal = gated[at].ordinal as usize;
+            if marks.len() <= ordinal {
+                marks.resize(ordinal + 1, false);
+            }
+            marks[ordinal] = true;
+        }
+        let is_returned = |&(level, ordinal): &(u32, u32)| {
+            returned
+                .get(level as usize)
+                .and_then(|marks| marks.get(ordinal as usize))
+                .copied()
+                .unwrap_or(false)
+        };
+        let mut children: HashMap<(u32, u32), u64> = HashMap::new();
+        if linked && !(page.is_empty() && parents.is_empty()) {
+            for g in &gated {
+                for (i, at) in g.parents.iter().enumerate() {
+                    if is_returned(at) && !g.parents[..i].contains(at) {
+                        *children.entry(*at).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut parent_rows: Vec<BrowseRow> = parents
+            .iter()
+            .map(|&at| row_of(&gated[at], &children))
+            .collect();
         parent_rows.sort_by_key(|row| row.tessera_id.raw());
         parent_rows.dedup_by_key(|row| row.tessera_id.raw());
         Ok(BrowseOut {
-            artifacts: page.iter().map(|&at| row_of(&gated[at])).collect(),
+            artifacts: page
+                .iter()
+                .map(|&at| row_of(&gated[at], &children))
+                .collect(),
             parents: parent_rows,
             next,
-        })
-    }
-
-    /// The request's filter as a **whole-view** row set — see this module's doc on §9 (d).
-    #[allow(clippy::too_many_arguments)]
-    fn browse_filter_rows(
-        &self,
-        session: &crate::Session,
-        generation: &crate::Generation,
-        view: &str,
-        view_data: &tessera_store::read::ViewData,
-        segments: &[(&tessera_store::read::SegmentData, u32)],
-        mask: &crate::compose::EffectiveMask,
-        denied: &Bitmap,
-        mask_identity: crate::histogram::MaskIdentity,
-        expr: &FilterExpr,
-    ) -> Result<Bitmap> {
-        let fragment = self.fragment_for(session, generation)?;
-        let candidate = crate::filter::candidate(
-            &fragment,
-            &session.satisfied,
-            &generation.overlay,
-            &generation.buffer,
-        );
-        // **`Engine::browse` takes no cancellation token, and could not usefully hold one**: the
-        // row route's `scan_rows` carries no checkpoint on any path — the viewport's own
-        // coarse-zoom whole-view scan is equally uninterruptible — and this is a unary JSON verb
-        // with no consumer-gone signal of the kind the streamed viewport reads off its sink. So
-        // the scan is **admission-gated and not cancellable**, and the permit is held for its
-        // duration (`highlight-and-hierarchy.md` §7, which prices that). Making it interruptible
-        // is a change to the shared row route rather than to this verb.
-        let cancel = None;
-        let regions = |leaf: &crate::filter::RegionLeaf| {
-            self.resolve_region(
-                leaf,
-                session,
-                generation,
-                view,
-                view_data,
-                segments,
-                mask,
-                denied,
-                mask_identity,
-                &cancel,
-            )
-        };
-        let members = |leaf: &crate::filter::MemberOfLeaf| {
-            self.resolve_member_of(
-                leaf,
-                session,
-                generation,
-                view,
-                view_data,
-                segments,
-                mask,
-                denied,
-                mask_identity,
-            )
-        };
-        let resolvers = crate::filter::RowLeafResolvers {
-            regions: &regions,
-            members: &members,
-        };
-        let total_rows = view_data.row_space.total_rows();
-        // `prefer_row = false`: browse has no tile ranges to make the row route cheaper, so a
-        // both-routes column takes the entity route and only a render-only column reaches the scan.
-        let routed = generation
-            .filter_columns
-            .evaluate_routed(expr, &candidate, false, &resolvers)
-            .map_err(|e| {
-                let detail = e.to_string();
-                if e.is_callers_fault() {
-                    EngineError::FilterMalformed(detail)
-                } else {
-                    EngineError::FilterRefused(detail)
-                }
-            })?;
-        Ok(match routed {
-            RoutedFilter::Entity(entities) => view_data.row_space.project(&entities),
-            RoutedFilter::Row(tree) => {
-                // The whole view as the one domain: the row route's predicate runs over every row
-                // rather than over a request's ranges, which is what makes the count exact off the
-                // viewport and is the cost §7 prices.
-                let whole = std::slice::from_ref(&std::ops::Range {
-                    start: 0u32,
-                    end: u32::try_from(total_rows).unwrap_or(u32::MAX),
-                })
-                .to_vec();
-                self.evaluate_row_route(
-                    &tree,
-                    &view_data.row_space,
-                    segments,
-                    &whole,
-                    total_rows,
-                    total_rows,
-                    false,
-                )?
-                .rows()
-                .clone()
-            }
         })
     }
 }

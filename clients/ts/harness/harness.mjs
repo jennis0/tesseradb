@@ -1,44 +1,40 @@
 #!/usr/bin/env node
-// The acceptance harness (design client-components §9; client-interaction §10's conformance
-// harness, given its first subject): DOM-level assertions against the demo page, through the
-// components' parts and never through an id the shadow DOM hides — and the measurements the
-// delivery record owes.
+// The acceptance harness: DOM-level assertions against the viewer page through the components'
+// parts, and the viewer's measurements.
 //
 //   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/tessera-harness.png] [--headed]
 //
-// The same assertions run against the demo page and against the C1 example page
-// (`examples/plain-html`, `--url http://localhost:5180`), which is the explorer with none of the
-// demo's layout: the claims read the components' parts, the probe is the explorer's own map's
-// where the page publishes none, and the demo's instruments panel is optional. Both pages carry a
-// `#principal` select, which is how a page says who is signed in.
+// The same assertions run against the plain HTML example (`examples/plain-html`,
+// `--url http://localhost:5180`), which is the explorer without the viewer's layout. There the
+// probe is the explorer's map's, and the instruments panel is optional. Both pages carry a
+// `#principal` select for who is signed in.
 //
-// Requires a running `tessera serve` with a published layer and a running `vite dev`. A target
-// beside the gate, not a step in it: it needs a served bundle, ports and Chromium — headless
-// under swiftshader by default; `--headed` runs the real browser on a display (WSLg's, or
-// `xvfb-run`), which is where the GPU and the frame cadence are measured rather than emulated.
+// Requires a running `tessera serve` with a published layer and a running `vite dev`. It is not
+// part of `check-clients.sh`. Headless under swiftshader by default; `--headed` runs the browser
+// on a display (WSLg, or `xvfb-run`) so GPU and frame timings are real.
 //
-// The claims, each checked rather than eyeballed:
-//   1. only `shown` renders a count — sampled from the first paint, through loading;
-//   2. both figures render or neither — the strip's shown cell renders its figure only with its
-//      total carried beside it (`data-total`, the visible cell's number), or renders nothing;
-//   3. a refusal renders as one — the viewport route is refused under the page, and the strip
-//      shows the refusal with no count;
-//   4. no count renders against a stale view, and a refresh control is present — the artifact
-//      channel's response is given a moved content key, and the strip goes stale;
-//   5. a region's count renders as inexact when its cell exceeds a pixel — a box at the
-//      overview, counted in the `tiles` form at a bounded depth, reads `≈`;
-//   6. a switch of principal empties every card;
+// The claims:
+//   1. no count renders before the first answer, sampled from the first paint through loading;
+//      after it, a state other than `shown` greys out the last counts answered under the same
+//      token, and a new token starts with none (claim 6 checks the switch of principal);
+//   2. both figures render or neither: the strip's shown cell renders its figure only with its
+//      total beside it (`data-total`), or nothing;
+//   3. a refusal renders as one: the viewport route is refused under the page, and the strip
+//      names the refusal, with the server's code on the refusal part's `data-code`;
+//   4. no count renders against a stale view, and a refresh control is present: a revalidation
+//      response is given a new content key, and the strip goes stale;
+//   5. a region's count renders as inexact when its cell exceeds a pixel: a box at the overview,
+//      counted in the `tiles` form at a bounded depth, reads `≈`;
+//   6. a switch of principal empties every card, and the strip shows no count until the new
+//      principal's first answer;
 //   7. a different principal reports a different picture;
-//   8. an artifact's count does not move across a pan — the list's row for one artifact reads
-//      the same number before and after the map is dragged, though the served set may change;
-//   9. a coloured point's ordinal resolves to a served artifact — colour by cluster is chosen
-//      through the legend, and every ordinal the marks on screen carry resolves, through the
-//      session table, to an id in the served set (read off the probe, never eyeballed).
+//   8. an artifact's count does not change across a pan, though the served set may;
+//   9. every ordinal the marks on screen carry, under colour by cluster, resolves through the
+//      session table to an id in the served set, read off the probe.
 //
-// Hover and click on marks are not driven here: deck.gl's `onClick` does not fire under headless
-// chromium (the same reason the smoke scripts never drove the drill-down), so the pick path is
-// covered by the component and deck unit tests and `core/test/client.live.test.ts`. The item
-// card is filled here through the selection panel's list, which is DOM.
+// Hover and click on marks are not driven: deck.gl's `onClick` does not fire under headless
+// Chromium. The component and deck unit tests and `core/test/client.live.test.ts` cover the pick
+// path. The item card is filled through the selection panel's list.
 import {chromium} from 'playwright';
 
 const args = Object.fromEntries(
@@ -49,14 +45,12 @@ const args = Object.fromEntries(
 const url = args.url ?? 'http://localhost:5173';
 const shot = args.shot ?? '/tmp/tessera-harness.png';
 const headed = 'headed' in args;
-/** A Chromium other than the one this Playwright bundles — `--executable /path/to/chrome`. */
+/** A Chromium other than Playwright's own, from `--executable /path/to/chrome`. */
 const executablePath = args.executable;
 
-// **A page served from another port.** The demo enumerates one browser origin in
-// `serve.dev_cors_origins` — `http://localhost:5173` — so a viewer run on another port cannot
-// reach the server at all, and every claim below reads as a detached store rather than as a
-// configuration. Where the URL is not that origin the *browser's* origin check is switched off
-// rather than the server's: this is a measuring browser, and a running demo is not touched.
+// The demo's `serve.dev_cors_origins` allows only `http://localhost:5173`. For a page on another
+// port the browser's origin check is switched off, leaving the running server's configuration
+// alone.
 const sameOrigin = new URL(url).port === '5173';
 const originFlags = sameOrigin ? [] : ['--disable-web-security'];
 const browser = await chromium.launch(
@@ -65,11 +59,16 @@ const browser = await chromium.launch(
     : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
 );
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
-// The probe: the demo publishes its first map's on `window` (with the lanes it keeps itself);
-// any page with an explorer has the map's own, and that is what the C1 example page offers.
+// The probe: the viewer publishes its first map's on `window` with measuring on. On another page
+// with an explorer the map's own probe is read, and the first read turns measuring on.
 await page.addInitScript(() => {
-  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
-  window.__tesseraProbeOf = () => window.__tesseraProbe ?? explorer()?.map?.probe ?? null;
+  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']; measure: boolean} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+  window.__tesseraProbeOf = () => {
+    if (window.__tesseraProbe) return window.__tesseraProbe;
+    const map = explorer()?.map ?? null;
+    if (map) map.measure = true;
+    return map?.probe ?? null;
+  };
 });
 
 const consoleErrors = [];
@@ -78,18 +77,18 @@ page.on('console', (m) => {
 });
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
-/** Every viewport request's body, so a claim about the request's shape is checked on the wire. */
+/** Every viewport request's body. */
 const viewportRequests = [];
 page.on('request', (r) => {
   if (!r.url().includes('/v1/viewport')) return;
   try {
     viewportRequests.push(JSON.parse(r.postData() ?? '{}'));
   } catch {
-    // Not JSON; not a viewport request this harness understands.
+    // Not JSON.
   }
 });
 
-/** Every response that was not a 2xx, with the request that earned it — a 422 is the client's bug. */
+/** Every non-2xx response with its request; a 422 is a client bug. */
 const refusals = [];
 page.on('response', async (r) => {
   if (!/\/v1\/|\/session\//.test(r.url()) || r.ok()) return;
@@ -151,18 +150,17 @@ const settled = async (limitMs = 45_000) => {
   return false;
 };
 
-// ---- 1 and 2: only shown renders a count; both figures or neither -------------------------------
+// ---- 1 and 2: no count before the first answer; both figures or neither -------------------------
 
 console.log('--- claims ---');
 await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
 
-// Sample from the first paint: every (state, counts) pair observed while the session comes up.
+// Every (state, counts) pair observed from the first paint while the session comes up.
 const samples = [];
 {
   const started = Date.now();
   while (Date.now() - started < 90_000) {
-    // One evaluate for the pair: read in two round-trips, a transition landing between them
-    // (`loading` read, then counts read after the frame arrived) reads as a count outside shown.
+    // One evaluate for the pair, so a transition cannot land between the two reads.
     const sample = await strip
       .evaluate((root) => {
         const scope = root.shadowRoot ?? root;
@@ -181,16 +179,17 @@ const samples = [];
 const leaked = samples.filter((s) => s.state !== 'shown' && s.state !== 'stale' && s.counts.length > 0);
 const nonShown = samples.filter((s) => s.state !== 'shown');
 check(
-  'only `shown` renders a count',
+  'no count renders before the first answer',
   leaked.length === 0 && samples.some((s) => s.state === 'shown'),
   `${samples.length} samples, ${nonShown.length} in ${[...new Set(nonShown.map((s) => s.state))].join('/') || 'no other state'}, ${leaked.length} with a count outside shown`
 );
 await settled();
 {
   const counts = await stripCounts();
-  const shown = counts[0]?.text ?? '';
-  const total = counts[0]?.total ?? null;
-  const both = (/^\d[\d,]*$/.test(shown) && total !== null && total === counts[2]?.text) || (shown === '' && total === null);
+  // The strip reads matched, then visible, then shown, whose total is the visible count.
+  const shown = counts[2]?.text ?? '';
+  const total = counts[2]?.total ?? null;
+  const both = (/^\d[\d,]*$/.test(shown) && total !== null && total === counts[1]?.text) || (shown === '' && total === null);
   check('both figures render or neither', both && counts.length === 3, `strip reads "${counts.map((c) => c.text).join(' · ')}", shown of ${total}`);
 }
 const baseline = await stripCounts();
@@ -198,8 +197,8 @@ const baseline = await stripCounts();
 // ---- 3: a refusal renders as one ---------------------------------------------------------------
 
 /**
- * Whether a viewport request is the artifact channel's — `k = 0` with a named layer — rather
- * than the point path's, which names the layers too now (§5.10) but always asks for points.
+ * Whether a viewport request is the artifact channel's (`k = 0` with a named layer). The point
+ * path names layers too, but always asks for points.
  */
 const isChannel = (route) => {
   try {
@@ -209,9 +208,8 @@ const isChannel = (route) => {
     return false;
   }
 };
-// The point path is refused; the channel is left alone, so the refusal the strip shows is the
-// view's own and not the artifacts'. Zooming several notches into a corner reaches ground the
-// replica does not hold, so a request goes out.
+// Refuse the point path and leave the artifact channel alone. Zooming into a corner reaches
+// ground the replica does not hold, so a request goes out.
 await page.route('**/v1/viewport', (route) =>
   isChannel(route)
     ? route.continue()
@@ -225,11 +223,11 @@ for (let i = 0; i < 4; i++) {
 const refusedState = await untilState(['refused', 'expired'], 30_000);
 {
   const counts = await nonEmptyCounts();
-  const refusal = await strip.locator('[part="refusal"]').first().textContent().catch(() => '');
+  const refusal = await strip.locator('[part="refusal"]').first().getAttribute('data-code').catch(() => '');
   check(
     'a refusal renders as one',
-    (refusedState === 'refused' || refusedState === 'expired') && counts.length === 0 && /harness-refusal/.test(refusal ?? ''),
-    `state=${refusedState}, refusal="${(refusal ?? '').trim().slice(0, 60)}", ${counts.length} counts rendered`
+    (refusedState === 'refused' || refusedState === 'expired') && refusal === 'harness-refusal',
+    `state=${refusedState}, refusal code "${refusal ?? ''}", ${counts.length} counts greyed out`
   );
 }
 await page.unroute('**/v1/viewport');
@@ -239,11 +237,10 @@ await settled();
 
 // ---- 4: no count against a stale view, and a refresh control ------------------------------------
 
-// The replica's revalidation — a counts-only `k = 0` bbox request it issues for a still, covered
-// view once its interval (60 s) has lapsed and the view is scheduled again — is given a content
-// key the presented frame did not see. The store keys staleness on the key its replica observes
-// (never on `x-tessera-stale`), and the strip goes stale without a redraw. A point request is
-// left alone: it would redraw under the new key and never be stale.
+// The replica's revalidation (a counts-only `k = 0` bbox request for a still, covered view once
+// its 60 s interval lapses) is given a content key the presented frame did not see. The store
+// keys staleness on that key, so the strip goes stale. A point request is left alone, since it
+// would redraw under the new key.
 const isRevalidation = (route) => {
   try {
     const body = JSON.parse(route.request().postData() ?? '{}');
@@ -252,7 +249,10 @@ const isRevalidation = (route) => {
     return false;
   }
 };
-/** Revalidations the harness moved the key under — nought of them is a different failure from one. */
+/**
+ * Revalidations whose key the harness changed. Zero means no revalidation was sent, which is a
+ * different failure from the strip not going stale.
+ */
 let movedKeys = 0;
 await page.route('**/v1/viewport', async (route) => {
   if (!isRevalidation(route)) return route.continue();
@@ -261,8 +261,8 @@ await page.route('**/v1/viewport', async (route) => {
   await route.fulfill({response, headers: {...response.headers(), etag: '"harness-moved-content-key"'}});
 });
 await page.waitForTimeout(61_000);
-// A nudge the ring already covers: the view is scheduled again, nothing novel is fetched, and
-// the lapsed interval sends the revalidation.
+// A nudge within held ground: the view is scheduled again and the lapsed interval sends the
+// revalidation.
 await page.mouse.move(900, 450);
 await page.mouse.down();
 await page.mouse.move(912, 456, {steps: 2});
@@ -278,12 +278,9 @@ const staleState = await untilState(['stale'], 30_000);
   );
 }
 await page.unroute('**/v1/viewport');
-// **Clicked in a retry loop, not once.** While the moved key is in play the strip alternates
-// between the stale row and the counts row on each arriving response — the replica observes the
-// server's real key, the next derive stamps the moved one — and each flip replaces the button, so
-// a single click races the re-render and times out with *element was detached from the DOM*. That
-// flake is not a claim: claim 4 has already been checked, and this click only puts the page back
-// to `shown` for the claims after it. Seen on `main` as well as on the branch.
+// Clicked in a retry loop: while the changed key is in play the strip alternates between stale
+// and shown on each response, replacing the button, so one click can miss. Claim 4 is already
+// checked; this only returns the page to `shown`.
 for (let tries = 0; tries < 10 && (await stripState().catch(() => null)) === 'stale'; tries++) {
   await strip.locator('[part="refresh"]').first().click({timeout: 5_000}).catch(() => {});
   await page.waitForTimeout(500);
@@ -293,15 +290,14 @@ await settled();
 
 // ---- 5: a region's count is inexact when its cell exceeds a pixel -------------------------------
 
-// The overview: the world is 512 px at zoom 0, so any cover under the 4,096-tile bound is coarser
-// than a pixel. The box is shift-dragged in pan mode, which is the shortcut §5.3 names.
+// At the overview the world is 512 px, so any cover under the 4,096-tile bound is coarser than a
+// pixel. The box is shift-dragged in pan mode.
 await page.locator('tessera-map').first().focus();
 await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 await settled();
 const requestsBefore = viewportRequests.length;
 const selectStarted = Date.now();
-// Clear of the floating panels — the left card ends at x = 632 in the demo's overlay and the
-// right one starts at 1108 — so the box is on the canvas.
+// Between the floating panels (x 632 to 1108 in the overlay layout), so the box is on the canvas.
 await page.keyboard.down('Shift');
 await page.mouse.move(700, 250);
 await page.mouse.down();
@@ -328,7 +324,7 @@ const regionMs = Date.now() - selectStarted;
 
 // ---- 6: a switch of principal empties every card -----------------------------------------------
 
-// Fill the item card through the selection's list — a click that is DOM, not a canvas pick.
+// Fill the item card through the selection's list.
 const item = selection.locator('[part="item"]').first();
 if ((await item.count()) > 0) await item.click();
 const card = page.locator('tessera-item-card').first();
@@ -356,12 +352,11 @@ await settled();
   const after = await stripCounts();
   check(
     'a different principal reports a different picture',
-    after[0]?.text !== baseline[0]?.text,
+    after.map((c) => c.text).join(' · ') !== baseline.map((c) => c.text).join(' · '),
     `"${baseline.map((c) => c.text).join(' · ')}" → "${after.map((c) => c.text).join(' · ')}"`
   );
 }
-// Back to the principal the page opened on — the broadest — so the artifact claims and the
-// measurements below run at the largest picture the demo serves.
+// Back to the broadest principal, which the page opened on, for the claims and measurements below.
 await page.selectOption('#principal', current);
 await untilState(['shown'], 60_000);
 await settled();
@@ -388,11 +383,10 @@ const listCounts = async () =>
     .catch(() => ({}));
 
 await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
-// The demo opens with a layer on; the example page leaves that to the layer picker, so a page
-// with none on has its first layer turned on here — a precondition of the two claims below.
+// The viewer opens with a layer on; on a page with none on, turn the first on for the claims below.
 if ((await page.evaluate(() => window.__tesseraProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
-  // A minute, because under headless swiftshader the main thread is gone for 10–14 s at a time
-  // drawing a million marks, and a click that cannot land is reported rather than swallowed.
+  // A minute, since headless swiftshader can block the main thread for 10 to 14 s drawing a
+  // million marks. A click that cannot land is reported.
   const on = await page.locator('tessera-layer-picker [part="entry"] input').first().click({timeout: 60_000}).then(() => true, () => false);
   console.log(`  ·    no layer was on; the first layer ${on ? 'turned on through the picker' : 'could not be turned on — the picker did not take a click'}`);
 }
@@ -422,10 +416,12 @@ const countsAfter = await listCounts();
 
 // ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
 
-const legendSelect = page.locator('tessera-legend select').first();
-const clusterOption = await legendSelect.locator('option[part="cluster-option"]').first().getAttribute('value').catch(() => null);
+await page.locator('tessera-legend [part="colour-by"]').first().click().catch(() => null);
+const clusterEntry = page.locator('tessera-legend [part="option"][data-kind="layer"]').first();
+const clusterOption = await clusterEntry.getAttribute('data-value', {timeout: 5_000}).catch(() => null);
 const refillStarted = Date.now();
-if (clusterOption) await legendSelect.selectOption(clusterOption);
+if (clusterOption) await clusterEntry.click();
+await page.keyboard.press('Escape');
 await settled();
 await page.waitForTimeout(800);
 {
@@ -440,7 +436,7 @@ await page.waitForTimeout(800);
   check(
     'a coloured point’s ordinal resolves to a served artifact',
     clusterOption !== null && probe?.encoding === `cluster|${probe.cluster.layer}` && sample.length > 0 && foreign.length === 0,
-    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${foreign.length} to an artifact not served, ${probe?.cluster.coloured ?? 0} drawn in a colour; ${probe?.lutWrites} lookup-texture writes so far`
+    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${foreign.length} to an artifact not served, ${probe?.cluster.coloured ?? 0} drawn in a colour; ${probe?.lutWrites} writes to the lookup texture since the layer made it`
   );
 }
 const clusterShot = shot.replace(/\.png$/, '-cluster.png');
@@ -448,7 +444,7 @@ await page.screenshot({path: clusterShot, timeout: 60_000});
 
 // ---- measurements --------------------------------------------------------------------------------
 
-// The largest bundle the demo is serving — the harness measures what is there and says which.
+// Report which dataset is measured.
 const dataset = await page
   .locator('#instruments')
   .innerText({timeout: 2_000})
@@ -460,13 +456,13 @@ for (const notch of [-400, -400, 400, 400]) {
   await page.mouse.wheel(0, notch);
   await settled();
 }
-// The layer-switch refill under the colour-stale refetch: the layer off, then on again, and the
-// time until every band in view is colour-current again (the strip's hover reads *colours exact*).
+// The layer-switch refill: the layer off, then on, and the time until every band in view is
+// colour-current again.
 const pickerBox = page.locator('tessera-layer-picker [part="entry"] input').first();
 let refillMs = null;
 let refillStale = null;
-// Under headless swiftshader the main thread can be gone for tens of seconds drawing a million
-// marks, and a click that cannot land in time is a measurement not taken, not a failed claim.
+// Under headless swiftshader a click may not land in time; that is a measurement not taken, not
+// a failed claim.
 const clickable = (await pickerBox.count()) > 0 && (await pickerBox.click({timeout: 15_000}).then(() => true, () => false));
 if (clickable) {
   await page.waitForTimeout(600);
@@ -482,8 +478,7 @@ if (clickable) {
         refillStale = firstStale;
         break;
       }
-      // Never stale at all: the bands kept their column through the switch, which is the
-      // free case §5.10 describes for a layer switched back on.
+      // Never stale: the bands kept their column through the switch.
       if (firstStale === null && c.coverage.current > 0 && Date.now() - switchedAt > 4000) {
         refillMs = 0;
         refillStale = 0;
@@ -521,8 +516,8 @@ if (probe) {
   } else {
     console.log('  per response — the decode, absorb and region lanes are the demo\'s instruments; this page keeps none (the store\'s `instruments` option), so they are not measured here');
   }
-  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
-  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} texture writes in the session`);
+  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, density ${probe.timings.densityMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
+  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} writes to the lookup texture since the layer made it`);
   const region = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
   console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes?.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
   if (lanes) console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
@@ -539,9 +534,8 @@ console.log(refusals.length ? refusals.map((e) => `  ${e}`).join('\n') : '  none
 console.log('--- console errors (the harness’s own 403s excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 console.log(`--- screenshots: ${shot}, ${clusterShot}`);
-// The 403s are the harness's own, refused under the page above, and an incomplete chunked body
-// is a streamed response the client abandoned mid-flight (a superseded request's abort, which
-// Chromium logs against the resource); anything else counts.
+// The 403s are the harness's own refusals, and an incomplete chunked body is an aborted
+// superseded request; anything else counts.
 const unexpected = consoleErrors.filter((e) => !/403 \(Forbidden\)|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(e));
 if (unexpected.length) failures.push(`${unexpected.length} console error(s)`);
 if (failures.length) {

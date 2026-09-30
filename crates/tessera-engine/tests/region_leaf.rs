@@ -15,6 +15,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::filter::{FilterExpr, RegionLeaf};
@@ -29,7 +30,7 @@ use tessera_types::layer::{
 };
 use tessera_types::{EntityId, TesseraId};
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+const WAIT: Duration = Duration::from_secs(30);
 
 /// The fixture's positions — `write_points_n`'s own arithmetic, restated so the oracle reads
 /// the generator and not the bundle.
@@ -57,10 +58,6 @@ fn canonical(shape: ShapeF64) -> Arc<Shape> {
 
 fn region(shape: &Arc<Shape>) -> FilterExpr {
     FilterExpr::Region(RegionLeaf::Shape(Arc::clone(shape)))
-}
-
-fn subset_sees(e: u64) -> bool {
-    terms_of(e).contains(&SUBSET_TERM)
 }
 
 /// The oracle: how many of the principal's visible items lie inside the shape.
@@ -389,8 +386,7 @@ fn the_leaf_by_artifact_is_its_masked_count_and_an_empty_operand_wherever_the_ar
     assert_eq!(matched(&outside_withheld), visible(&outside_withheld));
 
     // Suppressed: the broad principal, who was served it, now gets the empty operand too.
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    let entity = engine.resolve_tessera_ids(&[id], idset).unwrap()[0].unwrap();
+    let entity = engine.resolve_tessera_ids(&[id]).unwrap()[0].unwrap();
     engine.accept_change(entity, ChangeOp::Suppress).unwrap();
     let suppressed = viewport(&engine, &full_coverage_credential(), Some(by_artifact(id)));
     let unknown_full = viewport(
@@ -525,7 +521,6 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
                     vec![b"0".to_vec()]
                 };
                 tessera_lifecycle::UnallocatedRow {
-                    external_id: Some(format!("ext-{s}-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     x: flushed_x(s, t),
@@ -539,12 +534,12 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
             .collect();
         entities.extend(
             engine
-                .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+                .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
                 .expect("ingest is accepted"),
         );
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -556,7 +551,6 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
 fn flush_filler_segment(engine: &Engine, n: usize) {
     let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..4)
         .map(|i| tessera_lifecycle::UnallocatedRow {
-            external_id: Some(format!("filler-{n}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
             x: (700 + i * 20) as f64,
@@ -568,24 +562,13 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
         })
         .collect();
     engine
-        .accept_ingest(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
+        .ingest_rows(rows, format!("filler-{n}"), [(200 + n) as u8; 32])
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the filler flush to publish", || {
+    wait_until("the filler flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
-}
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !cond() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting: {what}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
 }
 
 fn segment_count(engine: &Engine) -> usize {
@@ -714,7 +697,7 @@ fn a_region_answer_is_re_taken_at_the_generation_a_merge_renumbered_its_rows_in(
     let rows_before = rows_of(&engine, &flushed);
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     engine.set_merge_for_test(false);

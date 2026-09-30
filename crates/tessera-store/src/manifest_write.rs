@@ -2,8 +2,8 @@
 //! publication (compaction §4 step 4) needs a writer for.
 //!
 //! **A bundle artefact, so its writer lives with the others** (owner ruling, 2026-08-06;
-//! compaction §10's rule paragraph): `SegmentWriter`, `PermutationWriter`, `RunWriter`,
-//! `LocatorWriter` and `PairsParquetWriter` (see [`crate::pairs`]) all sit in this crate because
+//! compaction §10's rule paragraph): `SegmentWriter`, `PermutationWriter` and
+//! `PairsParquetWriter` (see [`crate::pairs`]) all sit in this crate because
 //! they write files contracts §2 defines, and `MANIFEST.json` wrote from `tessera-build` alone
 //! for as long as a build was the only thing that produced it. Compaction's pass 5 is the second
 //! producer, and it cannot reach `tessera-build`: the fold's driver lives in `tessera-engine`,
@@ -130,7 +130,7 @@ pub fn write_and_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
 ///
 /// # Why a caller needs this at all
 ///
-/// The segment, postings and external-id writers do not sync: `write_single_batch` says so at the
+/// The segment and postings writers do not sync: `write_single_batch` says so at the
 /// site, and the reasoning has always been that a partially-written file is *detectable* — the
 /// manifest digests catch it, and the producer re-runs. That holds for a build (nothing else has
 /// been deleted yet) and for a flush (the WAL still holds the rows, and the side-manifest it was
@@ -261,4 +261,46 @@ pub fn write_segments_manifest(
         .and_then(|d| d.sync_all())
         .map_err(|e| io("dir fsync", e))?;
     Ok(())
+}
+
+/// How many `SEGMENTS-<n>.json` one partition directory keeps: the newest and the two before it.
+pub const SIDE_MANIFESTS_KEPT: usize = 3;
+
+/// Delete every `SEGMENTS-<n>.json` under one partition directory below the
+/// [`SIDE_MANIFESTS_KEPT`] highest, and return how many were removed.
+///
+/// **Deleting a superseded candidate removes it from the step-down walk rather than letting the
+/// walk skip it, and that is what keeps the walk safe.** The walk's safety rests on never stepping
+/// *past* a deny-carrying manifest unexamined, and a side-manifest is complete current state for
+/// its partition rather than a diff: the newest one restates the whole deny state, serialised
+/// fresh from the live overlay, so nothing a pruned manifest carried is absent from the ones kept.
+/// What a reader loses is depth to step down into — below the kept three it errors with no
+/// verifying manifest, which is a refusal, never an older state served.
+///
+/// **The highest `n` is never deleted**, whoever wrote it: the next number a writer may take is
+/// derived from the names present ([`crate::highest_side_manifest_n`]), and
+/// [`write_segments_manifest`]'s refusal to replace an existing `n` is the only thing standing
+/// between two writers at one number.
+///
+/// The directory entry is left unsynced: a deletion lost to a crash leaves a superseded manifest
+/// that the next publication prunes again.
+pub fn prune_superseded_segments_manifests(prefix_dir: &Path, partition: &str) -> Result<usize> {
+    let dir = prefix_dir.join("partitions").join(partition);
+    let mut present = crate::read::list_segments_manifests(&dir, partition)?;
+    if present.len() <= SIDE_MANIFESTS_KEPT {
+        return Ok(0);
+    }
+    // Highest first, so the skip below keeps the newest and the two before it.
+    present.sort_unstable_by(|a, b| b.cmp(a));
+    let mut removed = 0;
+    for n in present.into_iter().skip(SIDE_MANIFESTS_KEPT) {
+        let path = dir.join(format!("SEGMENTS-{n}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            // Another pass removed it, which is not a failure to remove it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(StoreError::Io { path, source }),
+        }
+    }
+    Ok(removed)
 }

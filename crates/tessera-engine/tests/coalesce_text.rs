@@ -26,7 +26,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -104,42 +104,18 @@ fn write_points(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path, n: u64) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("term_id", DataType::UInt32, false),
-    ]));
-    let mut entities: Vec<u64> = Vec::new();
-    let mut terms: Vec<u32> = Vec::new();
-    for e in 0..n {
-        for t in terms_of(e) {
-            entities.push(e);
-            terms.push(t as u32);
-        }
-    }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(entities)),
-            Arc::new(UInt32Array::from(terms)),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 fn build_text_fixture(out: &Path, tmp: &Path) {
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
     write_points(&points, N);
-    write_pairs(&pairs, N);
+    write_pairs_n(&pairs, N);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = Config::parse(&schema_path, &HashMap::new())
-        .expect("the text schema parses")
-        .schema;
+    let schema = with_id(
+        Config::parse(&schema_path, &HashMap::new())
+            .expect("the text schema parses")
+            .schema,
+    );
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -157,14 +133,12 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -172,13 +146,6 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         schema,
     })
     .expect("a bundle with an indexed text column builds");
-}
-
-fn current_prefix(root: &Path) -> String {
-    let current: tessera_store::manifest::CurrentPointer =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT is readable"))
-            .expect("CURRENT parses");
-    current.prefix
 }
 
 fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
@@ -191,7 +158,6 @@ fn text_extents(root: &Path) -> Vec<tessera_store::manifest::TextExtent> {
 /// Ingest one item carrying `prose` and flush it, returning the entity it was allocated.
 fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u32 {
     let row = UnallocatedRow {
-        external_id: Some(tag.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -202,7 +168,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u
         scoped: Vec::new(),
     };
     let entity = engine
-        .accept_ingest(vec![row], tag.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], tag.to_string(), [0u8; 32])
         .expect("an ingest carrying prose is accepted")[0];
     // **Waited on the flush count, not on the extent count.** A coalesce fires between these
     // flushes and *reduces* the number of live text extents, which is the whole point of this
@@ -231,21 +197,14 @@ fn text_extents_for_column(root: &Path) -> usize {
 
 /// Flush `COALESCE_WIDTH` items and wait for the pass that collapses their layers.
 fn flush_a_window(engine: &Engine, root: &Path, from: usize) -> Vec<u32> {
-    let coalesces = engine.write_executor_stats().coalesces;
     let entities: Vec<u32> = (from..from + COALESCE_WIDTH)
         .map(|i| ingest_and_flush(engine, root, &format!("fresh-{i}"), flushed_prose(i)))
         .collect();
-    // The pass is selected on a tick, and a flush is what drives one.
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().coalesces <= coalesces {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the coalesce never published: {} text extents live",
-            text_extents_for_column(root)
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    tick_until(engine, "the text layers to coalesce", std::time::Duration::from_secs(60), || {
+        let generation = engine.generation();
+        let live = &generation.bundle.partitions["default"].manifest.text_extents;
+        live.iter().filter(|e| e.column == "prose").count() < COALESCE_WIDTH
+    });
     entities
 }
 
@@ -467,6 +426,7 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
         dict: prefix.join(&extent.dict),
         postings: prefix.join(&extent.postings),
         presence: presence.to_path_buf(),
+        prose: None,
     };
 
     // A layer this generation does not hold.
@@ -494,5 +454,16 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     let err = columns
         .with_coalesced(&[], &[window], None, None)
         .expect_err("a replacement short of its window is refused");
-    assert!(format!("{err}").contains("present for"), "{err}");
+    assert!(
+        matches!(
+            &err,
+            tessera_engine::filter::ComposeError::CoverageMismatch {
+                column,
+                replacement,
+                consumed: 1,
+                covered,
+            } if column == "prose" && *replacement + 1 == *covered
+        ),
+        "{err:?}"
+    );
 }

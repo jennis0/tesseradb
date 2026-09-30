@@ -183,8 +183,10 @@ fn container_count(posting: &PostingRef<'_>) -> usize {
     match posting {
         PostingRef::Roaring(view) => view.iter().for_each(&mut note),
         PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .for_each(|c| note(u32::from_le_bytes(c.try_into().unwrap()))),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .for_each(|c| note(u32::from_le_bytes(*c))),
     }
     n
 }
@@ -336,10 +338,8 @@ fn main() {
                         WalkBudget {
                             limit: 20,
                             walk_budget: budget,
-                            counts: false,
                         },
                         &|code| postings.intersects(AttrLocalId::new(code), &cand),
-                        &|_| Ok(0u64),
                         &|e: io::Error| e,
                         None,
                     )
@@ -432,14 +432,20 @@ fn main() {
                     WalkBudget {
                         limit: 20,
                         walk_budget: 100_000,
-                        counts: true,
                     },
                     &|code| postings.intersects(AttrLocalId::new(code), &cand),
-                    &|code| postings.intersection_cardinality(AttrLocalId::new(code), &cand),
                     &|e: io::Error| e,
                     None,
                 )
                 .expect("the walk");
+                // The counts `Engine::suggest` takes after the walk, for the codes it found.
+                for found in &found {
+                    std::hint::black_box(
+                        postings
+                            .intersection_cardinality(AttrLocalId::new(found.code), &cand)
+                            .expect("the count"),
+                    );
+                }
                 samples.push(started.elapsed().as_secs_f64() * 1e3);
                 std::hint::black_box(found.len());
             }
@@ -524,13 +530,11 @@ fn decomposition(
                 WalkBudget {
                     limit: 20,
                     walk_budget: 100_000,
-                    counts: false,
                 },
                 &|code| {
                     probed.borrow_mut().push(code);
                     postings.intersects(AttrLocalId::new(code), &cand)
                 },
-                &|_| Ok(0u64),
                 &|e: io::Error| e,
                 None,
             )
@@ -561,13 +565,11 @@ fn decomposition(
                 WalkBudget {
                     limit: 20,
                     walk_budget: 100_000,
-                    counts: false,
                 },
                 &|_| {
                     seen.set(seen.get() + 1);
                     Ok(false)
                 },
-                &|_| Ok(0u64),
                 &|e: io::Error| e,
                 None,
             )
@@ -583,10 +585,8 @@ fn decomposition(
                 WalkBudget {
                     limit: 20,
                     walk_budget: 100_000,
-                    counts: false,
                 },
                 &|code| postings.intersects(AttrLocalId::new(code), &cand),
-                &|_| Ok(0u64),
                 &|e: io::Error| e,
                 None,
             )
@@ -795,10 +795,8 @@ fn set_route(
                     WalkBudget {
                         limit: 20,
                         walk_budget: 100_000,
-                        counts: false,
                     },
                     &|code| postings.intersects(AttrLocalId::new(code), &cand),
-                    &|_| Ok(0u64),
                     &|e: io::Error| e,
                     None,
                 )
@@ -814,12 +812,10 @@ fn set_route(
                     WalkBudget {
                         limit: 20,
                         walk_budget: 100_000,
-                        counts: false,
                     },
                     // Unreachable on this arm — every value under a prefix has a dense position, so
                     // the set answers every gate test and the probe closure is never called.
                     &|_| Ok(false),
-                    &|_| Ok(0u64),
                     &|e: io::Error| e,
                     Some(&set),
                 )

@@ -108,6 +108,14 @@ quarter = "quarter.parquet"
 [defaults]
 allocation_view = "world"
 
+# The points file's `entity_id`, which every file names its item by.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+source = "world"
+
 [[view]]
 name             = "world"
 source           = "world"
@@ -134,12 +142,8 @@ schema = "corpus.toml"
 [plugin]
 module = "builtin:passthrough"
 
-[identity]
-env = "TESSERA_TEST_IDENTITY_KEY"
-
 [disclosure]
-min_visible_members = 1
-token_max_lifetime  = 3600
+token_max_lifetime = 3600
 
 [serve]
 viewer  = "127.0.0.1:18091"
@@ -161,8 +165,7 @@ fn fixture(corpus: &str) -> tempfile::TempDir {
 fn build_in(dir: &Path) -> std::process::Output {
     tessera()
         .current_dir(dir)
-        .args(["build", "--mint-id-key"])
-        .env("TESSERA_TEST_IDENTITY_KEY", "")
+        .arg("build")
         .output()
         .expect("the build runs")
 }

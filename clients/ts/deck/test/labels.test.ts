@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
+import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, MAX_DISPLACEMENT, MAX_LABEL_CHARS, labelSize, placeLabels, labelLine, type LabelCandidate} from '../src/labels.js';
 
 const at = (id: number, x: number, y: number, priority: number, width = 60, height = 24): LabelCandidate => ({id: BigInt(id), x, y, width, height, priority});
 
@@ -34,6 +34,9 @@ describe('label placement (§5.10)', () => {
         const a = placed[i]!;
         const b = placed[j]!;
         expect(a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1, `${a.id} over ${b.id}`).toBe(false);
+        // Neighbours keep clear space of about half a line between them.
+        const clear = Math.max(b.x0 - a.x1, a.x0 - b.x1, b.y0 - a.y1, a.y0 - b.y1);
+        expect(clear, `${a.id} beside ${b.id}`).toBeGreaterThanOrEqual(8);
       }
     }
     // The first to be left out is a low priority, never the highest.
@@ -47,9 +50,9 @@ describe('label placement (§5.10)', () => {
   });
 
   it('never leads a label across the map: a move beyond 40 px drops the label instead', () => {
-    // Two wide labels on one spot: the lower would have to move its own width (206 px) sideways
-    // or its height (30 px) up or down. Up and down are taken by two more; nothing else is within
-    // reach, so it is left out rather than drawn 206 px away on a leader.
+    // Two wide labels on one spot: the lower would have to move its own width (208 px) sideways
+    // or its height (32 px) up or down. Up and down are taken by two more; nothing else is within
+    // reach, so it is left out rather than drawn 208 px away on a leader.
     const wide = (id: number, priority: number) => at(id, 500, 500, priority, 200, 24);
     const placed = placeLabels([wide(1, 100), wide(2, 90), wide(3, 80), wide(4, 70)]);
     expect(placed.map((p) => p.id)).toEqual([1n, 2n, 3n]);
@@ -57,10 +60,10 @@ describe('label placement (§5.10)', () => {
     // The moved ones carry a leader; the one at its centroid does not.
     expect(placed.find((p) => p.id === 1n)!.leader).toBe(false);
     expect(placed.filter((p) => p.leader).map((p) => p.id)).toEqual([2n, 3n]);
-    // A wider bound admits the sideways try — the rule is the bound, not the ring.
+    // A wider bound admits the sideways try: the rule is the bound, not the ring.
     const loose = placeLabels([wide(1, 100), wide(2, 90), wide(3, 80), wide(4, 70)], 300);
     expect(loose.length).toBe(4);
-    expect(Math.abs(loose.find((p) => p.id === 4n)!.dx)).toBe(206);
+    expect(Math.abs(loose.find((p) => p.id === 4n)!.dx)).toBe(208);
     expect(MAX_DISPLACEMENT).toBe(40);
   });
 
@@ -77,12 +80,12 @@ describe('label placement (§5.10)', () => {
       expect(size).toBeLessThanOrEqual(LABEL_SIZE_MAX);
       previous = size;
     }
-    // **Logarithmic, not linear**: the owner's pair. 29,369 against 380,069 is 7.7% of the range
-    // linearly — a name on the floor — and half of it on the band, which is what the eye reads.
+    // Logarithmic: 29,369 against 380,069 is 7.7% of the range linearly and over half of it on
+    // the band.
     const midway = (labelSize(29_369, 176, 380_069) - LABEL_SIZE_MIN) / (LABEL_SIZE_MAX - LABEL_SIZE_MIN);
     expect(midway).toBeGreaterThan(0.55);
     expect(midway).toBeLessThan(0.75);
-    // A count ten times another is a fixed step whatever the decade — the point of the band.
+    // A count ten times another is a fixed step, whatever the decade.
     const step = (n: number) => labelSize(n * 10, 1, 1e6) - labelSize(n, 1, 1e6);
     expect(step(10)).toBeCloseTo(step(10_000), 6);
     // Out-of-range and absurd inputs land inside the band rather than off it: a count of zero is
@@ -103,26 +106,31 @@ describe('label placement (§5.10)', () => {
   });
 });
 
-describe('wrapping a name (§5.10)', () => {
-  it('breaks on words, keeps every line short, and never hyphenates', () => {
-    expect(wrapLabel('quantum error correction')).toEqual(['quantum error', 'correction']);
-    expect(wrapLabel('graph')).toEqual(['graph']);
-    // A word longer than the line takes a line of its own rather than being cut.
-    expect(wrapLabel('electroencephalography signals')).toEqual(['electroencephalography', 'signals']);
-    for (const line of wrapLabel('dark matter haloes in cosmological simulations')) {
-      expect(line.length).toBeLessThanOrEqual(MAX_LABEL_LINE_CHARS + 2);
-    }
+describe('a name on one line', () => {
+  it('keeps a name that fits whole, on one line', () => {
+    expect(labelLine('quantum error correction')).toBe('quantum error correction');
+    expect(labelLine('graph  neural\nnetworks')).toBe('graph neural networks');
   });
 
-  it('elides rather than silently truncating what will not fit in three lines', () => {
-    const lines = wrapLabel('one two three four five six seven eight nine ten eleven twelve');
-    expect(lines.length).toBe(3);
-    expect(lines[2]!.endsWith('…')).toBe(true);
+  it('cuts a longer name at a word and marks the cut', () => {
+    const line = labelLine('Large language models: alignment, evaluation and the long tail of instruction following');
+    expect(line.length).toBeLessThanOrEqual(MAX_LABEL_CHARS + 1);
+    expect(line).toBe('Large language models: alignment…');
+    // A first word longer than the line is cut inside the word.
+    expect(labelLine('x'.repeat(MAX_LABEL_CHARS + 10))).toBe(`${'x'.repeat(MAX_LABEL_CHARS)}…`);
   });
 
-  it('places a wrapped label by the box it actually draws', () => {
-    // Two labels a line apart on the same anchor: the taller wrapped box refuses the overlap the
-    // one-line box would have allowed.
+  it('moves a label that would sit closer than half a line to a neighbour', () => {
+    // Two one-line names 20 px apart on 16 px boxes leave 4 px between them: too close.
+    const line = (id: number, y: number, priority: number) => at(id, 0, y, priority, 100, 16);
+    const placed = placeLabels([line(1, 0, 2), line(2, 20, 1)]);
+    expect(placed.find((p) => p.id === 1n)).toEqual({id: 1n, dx: 0, dy: 0, leader: false});
+    expect(placed.find((p) => p.id === 2n)?.leader).toBe(true);
+  });
+
+  it('places a label by the box it actually draws', () => {
+    // Two labels a line apart on the same anchor: a taller box, such as one with a topic beneath,
+    // refuses the overlap a one-line box allows.
     const box = (id: bigint, y: number, height: number): LabelCandidate => ({id, x: 0, y, width: 100, height, priority: Number(id)});
     const tall = placeLabels([box(2n, 0, 40), box(1n, 30, 40)]);
     expect(tall.length).toBe(1);

@@ -28,7 +28,7 @@ paths = [
   "crates/tessera-engine/src/coalesce.rs",
   "crates/tessera-engine/src/compose.rs",
   "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/write/*",
   "crates/tessera-engine/src/lib.rs",
   "crates/tessera-engine/tests/*",
   "crates/tessera-store/src/manifest.rs",
@@ -45,7 +45,7 @@ paths = [
 paths = [
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
-  "crates/tessera-engine/src/write.rs",
+  "crates/tessera-engine/src/write/*",
   "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/tests/*",
   "conformance/tests/test_restart_replay.py",
@@ -88,4 +88,83 @@ paths = [
   "crates/tessera-engine/tests/*",
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
+]
+
+# Owner rulings 2026-09-18 on the SDK campaign's findings. `fix-wire` is four small fixes (#151 a
+# runtime view on /v1/meta, #152 the build's per-(layer, view) key, #155 the restated values page's
+# no-op record) and the publish route letting an attached record omit `members`/`excluding`; the
+# contracts sentence is the controller's. `fix-group-cycle` is #153: a group view created in a
+# commit window publishes its buffered rows in the same cycle.
+[track.fix-wire]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "conformance/tests/*",
+  "clients/py/*",
+]
+
+[track.fix-group-cycle]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
+]
+
+# Issue #150, owner ruling (a), 2026-09-18: a generating set is projected over the whole row space and
+# maintained at flush, merge and growth as a membership is; the containment partition declines an
+# ordinal whose set reaches above the base rows. The write-cycle document's §4.1 is the controller's.
+[track.fix-generating]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
+]
+
+# Owner rulings 2026-09-18. `fix-batch-id`: the SDK's batch id is a fresh id per request (never derived
+# from the body); the server indexes every batch-carrying record by one exhaustive rule and trims the
+# index at WAL rotation (#154). `fix-label-target`: a dependent's row names its target by tessera id;
+# the copied masked count and the client's join by count go. Contracts and decisions are the controller's.
+[track.fix-batch-id]
+paths = [
+  "clients/py/*",
+  "crates/tessera-engine/src/write/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+]
+
+[track.fix-label-target]
+paths = [
+  "crates/tessera-engine/src/viewport.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-wire/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "conformance/*",
+  "clients/ts/*",
+  "clients/py/tesseradb/static/*",
+  "clients/py/tests/*",
+]
+
+# Found by the fix-wire round, 2026-09-18: on a group-scoped layer a view's browse returns another
+# view's artifact (key and tessera_id, count zero). A view of a scoped layer serves its own artifacts only.
+[track.fix-scoped-roster]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-server/tests/*",
+  "conformance/tests/*",
+  "clients/py/tests/*",
 ]

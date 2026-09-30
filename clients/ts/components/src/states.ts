@@ -1,11 +1,10 @@
 import {html, nothing, type TemplateResult} from 'lit';
 import type {StatusProjection} from '@tesseradb/client';
-import {icon} from './icons.js';
 
 /**
- * The eight states, uniformly (design client-components §5.4). Every panel renders them through
- * one `part="state"` region so a host that restyles one has restyled them all. The mapping from
- * the store's `status` is the table's third column, exactly:
+ * The eight panel states. Every panel shows its state in one `part="state"` region, with
+ * `data-state` set to it, so one rule restyles every panel. Each follows from the store's `status`
+ * projection:
  *
  * | state | from `status` |
  * |---|---|
@@ -15,15 +14,11 @@ import {icon} from './icons.js';
  * | shown | `shown` |
  * | empty | `empty` |
  * | refused | `refused` |
- * | expired | the `expired` flag — `expired-token`, a `bad-credential` on a token this store used, or `expiresAt` passed |
+ * | expired | the `expired` flag: `expired-token`, a `bad-credential` on a token this store used, or `expiresAt` passed |
  * | stale | `shown` with `stale` |
  *
- * `expired` wins over `refused` because it is a refusal with a name; `stale` is `shown` with the
- * picture marked older than the numbers, and the only state besides `shown` a number appears in
- * — through the formatter, which renders nothing against it.
- *
- * What a state *says* is one line — an answer, never an explanation of how Tessera works
- * (owner, 2026-08-25): the words are the boards' (`StatusStates.png`).
+ * `expired` is a named refusal and wins over `refused`. `stale` is `shown` with the picture older
+ * than the numbers.
  */
 export type PanelState = 'detached' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused' | 'expired' | 'stale';
 
@@ -45,43 +40,53 @@ export function stateOf(status: StatusProjection | null | undefined): PanelState
   }
 }
 
-/** Whether a panel in this state shows its content — the numbers, the list, the card. */
+/** Whether a panel in this state shows its content: the numbers, the list, the card. */
 export function showsContent(state: PanelState): boolean {
   return state === 'shown' || state === 'stale';
 }
 
 export type StateActions = {
-  /** The refresh control, present when stale. */
+  /** The Refresh button, present when stale. */
   onRefresh?: (() => void) | null;
-  /** Renewal, when the host gave the map an `authorise` property — shown on expiry. */
+  /** The Retry button, present when refused. */
+  onRetry?: (() => void) | null;
+  /** The Sign in button, shown on expiry when the host gave the element a renewal. */
   onReauthorise?: (() => void) | null;
 };
 
-/** The word for a state, as the strip's badge says it. */
+/**
+ * The words for a state as the status strip says it: two or three plain words. What went wrong in
+ * detail stays in `status.refusal`, which a host reads, and is not put on screen.
+ */
 export function stateWord(state: PanelState, status: StatusProjection | null | undefined): string {
   switch (state) {
     case 'detached':
-      return 'No data';
+      return 'Not connected';
     case 'loading':
-      return status && !status.sessionWarm ? 'Starting session…' : 'Loading';
+      return status && !status.sessionWarm ? 'Connecting' : 'Updating';
     case 'retrying':
-      return 'Retrying';
+      return 'Reconnecting';
     case 'shown':
+      return 'Up to date';
     case 'empty':
-      return 'Current';
+      return 'Nothing in view';
     case 'refused':
-      return 'Refused';
+      return 'View refused';
     case 'expired':
       return 'Session expired';
     case 'stale':
-      return 'Corpus updated';
+      return 'Data updated';
   }
 }
 
+/** The refusal's words, with its code on `data-code` for a host's rules and tests. */
+export function refusalText(words: string, code: string | null | undefined): TemplateResult {
+  return html`<span part="refusal" data-code=${code ?? nothing}>${words}</span>`;
+}
+
 /**
- * The state region. Rendered by every panel in the same markup: a `part="state"` carrying
- * `data-state`, and the one line the state needs — a skeleton while loading, an answer when
- * empty, the refusal's code, the refresh control when stale, the way back in when expired.
+ * The state region every panel renders: a `part="state"` carrying `data-state`, and the line the
+ * state needs, such as a skeleton while loading or the refresh control when stale.
  */
 export function renderState(
   state: PanelState,
@@ -91,23 +96,25 @@ export function renderState(
   const refusal = status?.refusal ?? null;
   switch (state) {
     case 'detached':
-      // Nothing — neither "empty" nor "refused", both of which are answers.
+      // Empty: "empty" and "refused" are answers, and a detached panel has none.
       return html`<span part="state" data-state="detached"></span>`;
     case 'loading':
       return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${stateWord(state, status)}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;
     case 'retrying':
-      return html`<span part="state" data-state="retrying"><span class="dot warn"></span>Retrying<span class="skel" aria-hidden="true"></span></span>`;
+      return html`<span part="state" data-state="retrying"><span class="dot warn"></span>${stateWord(state, status)}</span>`;
     case 'shown':
       return html`<span part="state" data-state="shown"></span>`;
     case 'empty':
-      return html`<span part="state" data-state="empty">Nothing here</span>`;
+      return html`<span part="state" data-state="empty">${stateWord(state, status)}</span>`;
     case 'refused':
-      return html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${refusal ? `${refusal.code}${refusal.detail ? ' · ' + refusal.detail : ''}` : ''}</span></span>`;
+      return html`<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText(stateWord(state, status), refusal?.code)}${actions.onRetry
+          ? html`<button part="retry" class="btn small" type="button" @click=${actions.onRetry}>Retry</button>`
+          : nothing}</span>`;
     case 'expired':
-      return html`<span part="state" data-state="expired">${icon('lock', 14)}Session expired${actions.onReauthorise
-          ? html`<button part="reauthorise" class="btn primary" type="button" @click=${actions.onReauthorise}>Sign in again</button>`
+      return html`<span part="state" data-state="expired"><span class="dot refuse"></span>${stateWord(state, status)}${actions.onReauthorise
+          ? html`<button part="reauthorise" class="btn small" type="button" @click=${actions.onReauthorise}>Sign in</button>`
           : nothing}</span>`;
     case 'stale':
-      return html`<span part="state" data-state="stale">${icon('clock', 14)}Corpus updated<button part="refresh" class="btn primary" type="button" @click=${actions.onRefresh ?? undefined}>${icon('refresh', 13)}Refresh</button></span>`;
+      return html`<span part="state" data-state="stale"><span class="dot warn"></span>${stateWord(state, status)}<button part="refresh" class="btn small" type="button" @click=${actions.onRefresh ?? undefined}>Refresh</button></span>`;
   }
 }

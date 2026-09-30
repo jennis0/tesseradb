@@ -23,7 +23,7 @@ had to be answered before anything was built. It does not
    positionless entity could be drawn nowhere and would still spend an entity id.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 
 # a fraction that finishes, into $TESSERA_LADDER/gbif-64p
 python3 -m test_corpora.gbif.prepare --parts 64 --spread
@@ -93,11 +93,15 @@ for the same reason: the campaign's principal ladder starts at 1% of the corpus 
 composed under a floor every principal holds for free.
 
 The country term is the compartment, 251 values on the whole corpus. The year and species terms put
-about 1.4×10⁶ terms in the dictionary (modelled from the census's distinct counts) so that
+1,399,206 terms in the rung 6 dictionary and 10,124,084,726 pairs in its postings, so that
 principals shaped like a user's term set — a few hundred years, a thousand or a hundred thousand
 species — can be measured on a real dictionary rather than on stand-ins (owner ruling, 2026-09-17).
 `countrycode`, `specieskey` and `year` stay as columns and as attributes; the access list is derived
 from them and does not replace them.
+
+`prepare.py --from-points <rung>` adds the list to a rung prepared without it, from the columns its
+`points.parquet`, `holdout.parquet` and `duplicates.parquet` already carry, without reading the
+share again.
 
 `UNRECORDED` is 0.18% of the placed rows (47,565 of 25,846,007, spread sample) against 1.57% of all
 rows in the census. Records with no country largely have no coordinate either, so dropping the
@@ -119,11 +123,32 @@ Owner ruling, 2026-09-09. Distinct and null figures are the census's, over its 2
 | keyword | `specieskey` | ~10⁶ | 11% (as `species`) | `index = true` — a genuine lookup |
 | numeric | `year` | 377 | 3.7% | `index = true` — "since 2020" is what a map of this is asked |
 | utf8 | `scientificname` | — | 0.0% | neither flag: blob-resident, returned on drill-down |
+| u64 | `gbifid` | one a row | 0.0% | `unique = true`, neither flag: its unique index answers `eq` and `in` |
 
-⊘ **`gbifid` and `occurrenceid` are not taken.** Both are unique per row at 3.65×10⁹, which is a
-~100 GB keyword dictionary and exactly the pathology
-[`probes/2026-09-08-keyword-spill/`](../../probes/2026-09-08-keyword-spill/README.md) was written
-about.
+`gbifid` is GBIF's key for a record, a string of digits on the share, declared a unique `u64`, and
+every file names a record by it: the points file in its `gbifid` column, the member file in its
+`entity` column, which `[layer.members]` maps with `fields = { gbifid = "entity" }`. Its
+index is 42.1 GB over the placed rows
+([`probes/2026-09-26-identity-gbif-scale/`](../../probes/2026-09-26-identity-gbif-scale/README.md)).
+
+⊘ **`occurrenceid` is taken only under `prepare.py --occurrenceid`.** It is the publisher's
+identifier, about 42 bytes a row and not required by GBIF to be unique, and stored as a keyword it
+would add on the order of 140 GB to the bundle.
+
+**Held rows for an ingest.** `--holdout N` writes N rows that have no coordinate to
+`holdout.parquet`, so each `gbifid` is one the build never saw. A held-out row keeps its own
+country and attributes and takes its coordinate from a placed row of the same part. It joins no
+taxonomy artifact: `holdout.parquet` carries no rank columns. `--duplicates N` copies N placed rows
+to `duplicates.parquet`, each setting a `gbifid` an item holds.
+
+**Reusing the taxonomy.** `--reuse-taxonomy` keeps the member file and the kingdom vocabulary
+already in the output directory, and saves reading the three rank columns and writing 23 GB. The
+member file names each row by its `gbifid`, so the run refuses before it starts unless the
+manifest beside the files names the same dataset, the same number of parts, the same selection and
+a member file keyed by `gbifid`; one written before the member file was keyed that way named rows
+by their position in the part sequence. It refuses at the end unless it placed as many rows as that manifest and the
+member file hold, and the kept vocabulary names every kingdom it saw. The new manifest carries the
+old one's `taxonomy` block.
 
 ⊘ **`locality` is not taken, and this is the hook for it.** It is 48.45 GiB compressed, the
 corpus's largest column at 14.2 B/row, and a text index over it is deferred past the first build.

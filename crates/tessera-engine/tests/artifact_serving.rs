@@ -9,17 +9,13 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
+use tessera_engine::{Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::{EntityId, TesseraId};
-
-/// The whole extent at zoom 0 — one tile, every row a candidate. Candidacy is tested separately
-/// (`a_cluster_outside_the_viewport_is_not_a_candidate`); these assertions are about counts.
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
@@ -47,29 +43,6 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         open_engine_publishing(&self.root, &self.cache, &self.wal)
@@ -90,22 +63,6 @@ fn visible_to_subset(source_ids: impl Iterator<Item = u64>) -> u64 {
     source_ids
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
         .count() as u64
-}
-
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **The stage's headline.** One cluster, two principals, two counts — and the narrow one is the
@@ -299,7 +256,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     let id = served[0].tessera_id;
     let drilled = engine
-        .artifact(&broad_session, id, None, "s0", None)
+        .artifact(&broad_session, id, "s0", None)
         .unwrap()
         .expect("the identifier this session was just served");
     assert_eq!(drilled, served[0], "one predicate, one answer");
@@ -308,7 +265,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     // not a way round the criterion.
     let narrow_session = engine.authorise(&subset_credential()).unwrap();
     assert!(engine
-        .artifact(&narrow_session, id, None, "s0", None)
+        .artifact(&narrow_session, id, "s0", None)
         .unwrap()
         .is_none());
 
@@ -326,7 +283,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
             .tessera_ids[0],
     );
     assert!(engine
-        .artifact(&broad_session, point_id, None, "s0", None)
+        .artifact(&broad_session, point_id, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -362,7 +319,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
     assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
-        .artifact(&session, served[0].tessera_id, None, "s0", None)
+        .artifact(&session, served[0].tessera_id, "s0", None)
         .unwrap()
         .is_none());
 

@@ -1,10 +1,10 @@
 //! `tessera verify --deep` — the structural verifier's deep mode (correctness-suite §11, §12.4).
 //!
 //! [`verify_deep`] runs the whole of [`crate::verify`] — the read protocol, bijectivity over the
-//! full row space, the identity column — and then one linear pass over the structures identity
-//! says nothing about: postings, the external-id sidecar, the dictionary extents and the oracle's
-//! `pairs.parquet`. It needs no fixture, no generator and no oracle, which is what lets it run
-//! against a bundle whose data came from somewhere real.
+//! full row space, the identity column — and then one linear pass over the structures identity says
+//! nothing about: postings, the dictionary extents and the oracle's `pairs.parquet`. It needs no
+//! fixture, no generator and no oracle, which is what lets it run against a bundle whose data came
+//! from somewhere real.
 //!
 //! ## What the open already refuses, and why this module does not re-check it
 //!
@@ -18,22 +18,6 @@
 //! instead of a comment is the deliberate-damage pair in `tests/verify_deep.rs` (§18 obligation
 //! 9): if the loader's refusals are ever relaxed, those tests fail, and the checks move here.
 //!
-//! ## The external-id agreement is newest-binding-first, NOT a bijection
-//!
-//! Delete plus re-ingest re-binds an external id (decision 0047): the newest run holding a key
-//! carries the live binding, and the superseded row — a forgotten, deleted holder — is retained
-//! until the compaction fold executes the deletion. A bijection check (each key exactly one row)
-//! would therefore refuse every bundle that has taken a re-ingest. What *is* invariant, in every
-//! state every producer leaves (build, flush, coalesce, fold), is row↔slot exactness in both
-//! directions: a locator slot addresses a run row bound to exactly that entity, and every run
-//! row is addressed back by its own entity's one covering slot. A key appearing in several runs
-//! is the accepted 0047 state, not a defect.
-//!
-//! The sidecar family is also the one exemption from the open-time digest sweep (contracts §0.3
-//! deviation 9 — verified lazily, at first touch), so this pass digests each run and locator
-//! against the manifest before reading it: a deep verify of a bundle at rest must not leave the
-//! only undigested family undigested.
-//!
 //! ## The pairs check is scoped to the base, deliberately
 //!
 //! `terms/pairs.parquet` is written by the build and rewritten by the fold, and by nothing else —
@@ -43,13 +27,8 @@
 //!
 //! ## Cost model, and what this pass must not be pointed at
 //!
-//! One linear pass, and it re-hashes the sidecar family, streaming each file rather than reading
-//! it whole. Every structure the two agreement directions cross is read through a mapping: the
-//! locators from the bundle, the runs' entity columns from one scratch file this pass writes and
-//! unlinks. What it holds is a row count and a name per run, and one span per flush extent. The
-//! base locator is four bytes for every entity in the corpus and a run carries the corpus's own
-//! ids, neither of which a verifier can put in the heap. Cadence is the suite's concern (§11:
-//! per-stage at the small tiers, per-run above).
+//! One linear pass. Cadence is the suite's concern (§11: per-stage at the small tiers, per-run
+//! above).
 //!
 //! ⊘ **At rest only, for now.** This resolves `CURRENT` through `open_bundle`, so a fold flipping
 //! `CURRENT` mid-pass could swap the prefix under it. §12.4's answer — name the prefix once and
@@ -59,16 +38,15 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, BinaryArray, UInt32Array, UInt64Array};
-use arrow::ipc::reader::FileReader as ArrowFileReader;
+use arrow::array::{Array, UInt32Array, UInt64Array};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use sha2::{Digest, Sha256};
 
 use tessera_authz::{DeltaTier, PostingRef, PostingsReader};
-use tessera_store::manifest::{FileDigest, Manifest, SegmentsManifest};
+use tessera_store::manifest::{Manifest, SegmentsManifest};
+
+use tessera_types::{IdentityKey, TesseraId};
 
 use crate::error::{BuildError, Result};
 use crate::VerifyReport;
@@ -112,9 +90,6 @@ pub struct VerifyDeepReport {
     pub pairs_rows: u64,
     /// Dictionary records parsed across the extent lists, none repeated (decision 0042).
     pub dict_records: u64,
-    /// External-id run rows confirmed to agree with the locator side in both directions; 0 where
-    /// the deployment minted no external ids — the ordinary case, not a degraded one.
-    pub external_id_bindings: u64,
     /// Record-blob rows walked across the base blob and every extent of every partition, each
     /// one's identity checked against the block that holds it and against the has-row bitmap's
     /// member at its rank ([`check_record_blobs`]); 0 where no column is blob-resident.
@@ -126,11 +101,19 @@ pub struct VerifyDeepReport {
     /// Leaf Morton cells confirmed to begin where `cuts.u32` says and to hold ascending
     /// identities ([`check_cut_index`]), across every segment of every view.
     pub cells: u64,
+    /// Unique index entries confirmed to agree with their column's values in both directions,
+    /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
+    pub unique_entries: u64,
+    /// Edited-item pairs confirmed to be held by both directions of the map
+    /// ([`check_edited_items`]); 0 where no item has been edited.
+    pub edited_pairs: u64,
+    /// Segment rows whose entity is not their number, each confirmed to be a pair of the map.
+    pub edited_rows: u64,
 }
 
 /// Deep-verify the bundle at `root`: the shallow [`crate::verify`] pass, then §11's structural
-/// checks over postings, dictionary extents, the external-id sidecar and `pairs.parquet`. See the
-/// module doc for what each check accepts on purpose.
+/// checks over postings, dictionary extents and `pairs.parquet`. See the module doc for what each
+/// check accepts on purpose.
 pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
     if opts.source.is_some() {
         return Err(BuildError::Invalid(
@@ -151,10 +134,12 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         delta_tiers: 0,
         pairs_rows: 0,
         dict_records: 0,
-        external_id_bindings: 0,
         record_rows: 0,
         scoped_render_lanes: 0,
         cells: 0,
+        unique_entries: 0,
+        edited_pairs: 0,
+        edited_rows: 0,
     };
 
     // Sorted so two runs over the same defective bundle refuse with the same message.
@@ -169,13 +154,6 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
             &mut report,
         )?;
         check_dict_extents(&prefix_dir, &partition.manifest, &mut report)?;
-        check_external_ids(
-            root,
-            &prefix_dir,
-            &bundle.manifest,
-            &partition.manifest,
-            &mut report,
-        )?;
         check_record_blobs(
             &prefix_dir,
             phash,
@@ -185,9 +163,404 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
         check_cut_index(phash, partition, &mut report)?;
+        check_unique_indexes(
+            root,
+            &prefix_dir,
+            phash,
+            &bundle.manifest,
+            partition,
+            &mut report,
+        )?;
+        check_edited_items(&prefix_dir, phash, &bundle.manifest, partition, &mut report)?;
     }
 
     Ok(report)
+}
+
+/// **The edited-items map agrees with itself and with the rows.** Its two directions hold the same
+/// pairs, an entity holds one number, a number has at most one live entity, and every row an edit
+/// moved is a pair of the map, its number being what its `tessera_id` inverts to.
+fn check_edited_items(
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &tessera_store::manifest::Manifest,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let runs = &partition.manifest.edited_items;
+    let unreadable = |e: tessera_store::StoreError| {
+        BuildError::Invalid(format!("partition {phash}: the edited items' runs: {e}"))
+    };
+    let forward: BTreeSet<(u32, u32)> = tessera_store::edited::entries(&runs.by_number, prefix_dir)
+        .map_err(unreadable)?
+        .into_iter()
+        .collect();
+    let mut number_of: BTreeMap<u32, u32> = BTreeMap::new();
+    for (entity, number) in
+        tessera_store::edited::entries(&runs.by_entity, prefix_dir).map_err(unreadable)?
+    {
+        if let Some(held) = number_of.insert(entity, number) {
+            if held != number {
+                return Err(BuildError::Invalid(format!(
+                    "partition {phash}: the edited items give entity {entity} two numbers, \
+                     {held} and {number}"
+                )));
+            }
+        }
+    }
+    let backward: BTreeSet<(u32, u32)> = number_of.iter().map(|(e, n)| (*n, *e)).collect();
+    if let Some((number, entity)) = forward.symmetric_difference(&backward).next() {
+        let (held, missing) = match forward.contains(&(*number, *entity)) {
+            true => ("by number", "by entity"),
+            false => ("by entity", "by number"),
+        };
+        return Err(BuildError::Invalid(format!(
+            "partition {phash}: the edited items hold number {number} and entity {entity} {held} \
+             and not {missing}"
+        )));
+    }
+    report.edited_pairs += forward.len() as u64;
+
+    // A number's live entity is one no deletion names that has a row: an edit deletes the entity
+    // it moves an item away from.
+    let deleted = partition
+        .manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .unwrap_or_default();
+    let live = |entity: u32| {
+        !deleted.contains(entity)
+            && partition.views.values().any(|data| {
+                data.row_space
+                    .row_of(tessera_types::EntityId::new(u64::from(entity)))
+                    .is_some()
+            })
+    };
+    let mut entities_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &(number, entity) in &forward {
+        entities_of.entry(number).or_default().push(entity);
+    }
+    for (number, entities) in &entities_of {
+        let alive: Vec<u32> = std::iter::once(*number)
+            .chain(entities.iter().copied())
+            .filter(|entity| live(*entity))
+            .collect();
+        if alive.len() > 1 {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: number {number} has {} live entities, {alive:?}; an item is \
+                 held by one",
+                alive.len()
+            )));
+        }
+    }
+
+    let key = IdentityKey::from_hex(&manifest.identity.key)
+        .map_err(|e| BuildError::Invalid(format!("the manifest's identity key: {e}")))?;
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let ids = segment.columns.tessera_id();
+            for (row, entity) in segment.entities.moved(ids, &key) {
+                let tessera_id = ids.get(row as usize).copied().ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "view {view}, segment {}: moved row {row} is past its {} rows",
+                        segment.seg_id,
+                        ids.len()
+                    ))
+                })?;
+                let (_, number) = key.invert(TesseraId::new(tessera_id));
+                if !u32::try_from(number.raw()).is_ok_and(|n| forward.contains(&(n, entity))) {
+                    return Err(BuildError::Invalid(format!(
+                        "view {view}, segment {}: row {row} holds entity {entity}, which the \
+                         edited items do not give number {}",
+                        segment.seg_id,
+                        number.raw()
+                    )));
+                }
+                report.edited_rows += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **Every unique index agrees with its column, and no key names two live entities.**
+///
+/// Each run is digested against the manifest, since the open-time sweep defers key runs to their
+/// pages' own checksums, and checked page by page ([`tessera_store::key_index::verify_run`]).
+/// The runs are then merged, the manifest's tombstoned entities dropped, into one sorted stream,
+/// and the column's values for every entity not tombstoned are sorted into another through the
+/// same spill; the two must be equal entry for entry, and no key may carry two entities. The
+/// values are read from the column's own home: its value column, the record blob, or, for a
+/// column rendered alone, each view's row tail.
+fn check_unique_indexes(
+    root: &Path,
+    prefix_dir: &Path,
+    phash: &str,
+    manifest: &Manifest,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use tessera_store::unique::{key_of, KeyKind, UniqueSpill};
+    let partition_manifest = &partition.manifest;
+    if partition_manifest.unique_indexes.is_empty() {
+        return Ok(());
+    }
+    let store = |e: tessera_store::StoreError| BuildError::Invalid(e.to_string());
+    // The schema as served: the build's columns and those declared at a running service.
+    let served = manifest.with_attributes(&partition_manifest.attributes, &[]);
+    let tombstones = partition_manifest
+        .tombstones
+        .entities()
+        .cloned()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!("partition {phash}: the tombstones do not decode"))
+        })?;
+    let bound = u32::try_from(partition_manifest.entity_id_high_water.max(manifest.entity_id_high_water))
+        .unwrap_or(u32::MAX);
+    for index in &partition_manifest.unique_indexes {
+        let attribute = &index.attribute;
+        let Some((at, declared)) = served
+            .declared_scalars
+            .iter()
+            .enumerate()
+            .find(|(_, d)| &d.name == attribute)
+        else {
+            return Err(BuildError::Invalid(format!(
+                "partition {phash}: a unique index names attribute '{attribute}', which the \
+                 manifests do not declare"
+            )));
+        };
+        let kind = KeyKind::of(declared.arrow_type).ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "partition {phash}: attribute '{attribute}' has a unique index and a type that \
+                 cannot be unique"
+            ))
+        })?;
+        let mut inputs: Vec<PathBuf> = Vec::new();
+        for rel in index.files() {
+            let digest = partition_manifest
+                .files
+                .get(rel)
+                .or_else(|| manifest.files.get(rel))
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!("{rel}: a unique index run no files map digests"))
+                })?;
+            let path = join_rel(prefix_dir, rel)?;
+            let actual = crate::digest_file(&path)?;
+            if actual.size != digest.size || actual.sha256 != digest.sha256 {
+                return Err(BuildError::Invalid(format!(
+                    "{rel}: bytes do not match the manifest digest"
+                )));
+            }
+            let checked = tessera_store::key_index::verify_run(&path)
+                .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))?;
+            let width = if kind == KeyKind::Keyword { 16 } else { 8 };
+            if checked.key_width != width {
+                return Err(BuildError::Invalid(format!(
+                    "{rel}: holds {}-byte keys and '{attribute}' takes {width}-byte keys",
+                    checked.key_width
+                )));
+            }
+            inputs.push(path);
+        }
+        let scratch = crate::VerifyTmp::create(root)?;
+        let homes_value = declared.index;
+        let blob = !declared.render && !declared.index;
+        // The spill a build under the machine's own budget would sort the column in.
+        let budget = crate::pipeline::detect_memory_budget();
+        let spill_bytes = crate::unique_index::spill_budget(budget, budget);
+        let mut spill = UniqueSpill::create(kind, scratch.path(), spill_bytes).map_err(store)?;
+        let mut push = |entity: u32, value: &tessera_spatial::ScalarValue| -> Result<()> {
+            if entity >= bound || tombstones.contains(entity) {
+                return Ok(());
+            }
+            if let Some(key) = key_of(declared.arrow_type, value) {
+                spill.push(key, entity).map_err(store)?;
+            }
+            Ok(())
+        };
+        if homes_value {
+            let dir = prefix_dir.join("partitions").join(phash).join("attrs").join(attribute);
+            let access = tessera_filter::Access::MappedSequential;
+            let mut layers: Vec<(tessera_filter::ValueColumn, Option<tessera_filter::SortedDict>)> =
+                Vec::new();
+            let base_rel = format!("partitions/{phash}/attrs/{attribute}/{}", tessera_filter::VALUES_FILE);
+            if manifest.files.contains_key(&base_rel) {
+                let values = tessera_filter::ValueColumn::open_dir(&dir, access)
+                    .map_err(|e| BuildError::io(&dir, e))?;
+                let dict = (declared.arrow_type == tessera_spatial::ScalarType::Keyword)
+                    .then(|| tessera_filter::SortedDict::open_dir(&dir, access))
+                    .transpose()
+                    .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))?;
+                layers.push((values, dict));
+            }
+            for extent in partition_manifest
+                .attr_extents
+                .iter()
+                .filter(|e| &e.column == attribute && e.view.is_none())
+            {
+                let values = tessera_filter::open_extent(
+                    &join_rel(prefix_dir, &extent.values)?,
+                    &join_rel(prefix_dir, &extent.presence)?,
+                    access,
+                )
+                .map_err(|e| BuildError::Invalid(format!("{}: {e}", extent.values)))?;
+                let dict = extent
+                    .dict
+                    .as_ref()
+                    .map(|rel| {
+                        join_rel(prefix_dir, rel).and_then(|path| {
+                            tessera_filter::SortedDict::open(&path, access)
+                                .map_err(|e| BuildError::Invalid(format!("{rel}: {e}")))
+                        })
+                    })
+                    .transpose()?;
+                layers.push((values, dict));
+            }
+            let mut scratch_bytes = Vec::new();
+            let mut keyed = |dict: &tessera_filter::SortedDict, ordinal: u32| {
+                dict.key_of(ordinal, &mut scratch_bytes)
+                    .map(|key| tessera_spatial::ScalarValue::Utf8(key.to_string()))
+                    .map_err(|e| BuildError::Invalid(format!("{attribute}: {e}")))
+            };
+            for (values, dict) in &layers {
+                let present = values.present();
+                values.for_each_record_value_in(&present, |entity, value| {
+                    use tessera_filter::RecordValue as RV;
+                    let value = match (dict, value) {
+                        (None, value) => record_as_scalar(value),
+                        (Some(dict), RV::U8(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U16(o)) => keyed(dict, u32::from(o))?,
+                        (Some(dict), RV::U32(o)) => keyed(dict, o)?,
+                        (Some(_), other) => {
+                            return Err(BuildError::Invalid(format!(
+                                "{attribute}: a keyword column holds {other:?} where it stores \
+                                 ordinals"
+                            )))
+                        }
+                    };
+                    push(entity, &value)
+                })?;
+            }
+        } else if !blob {
+            // Rendered alone: every view's rows carry the value, so each entity is read from the
+            // first view that holds it.
+            let mut wanted = croaring::Bitmap::new();
+            wanted.add_range(0..bound);
+            let mut views: Vec<_> = partition.views.iter().collect();
+            views.sort_by(|a, b| a.0.cmp(b.0));
+            let mut failed: Option<BuildError> = None;
+            for (view, data) in views {
+                let mut read = croaring::Bitmap::new();
+                data.for_each_rendered(attribute, &wanted, &mut |entity, value| {
+                    read.add(entity);
+                    if failed.is_none() {
+                        if let Err(e) = push(entity, &value) {
+                            failed = Some(e);
+                        }
+                    }
+                })
+                .map_err(|e| BuildError::Invalid(format!("view '{view}': {e}")))?;
+                wanted.andnot_inplace(&read);
+            }
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        } else {
+            let record_dir = prefix_dir.join("partitions").join(phash).join("attrs").join("record");
+            let base_rel = format!("partitions/{phash}/attrs/record/{}", tessera_filter::RECORD_BLOCKS_FILE);
+            let base = manifest.files.contains_key(&base_rel).then_some(record_dir.as_path());
+            let extents: Vec<tessera_filter::RecordExtentPaths> = partition_manifest
+                .record_extents
+                .iter()
+                .map(|e| {
+                    Ok(tessera_filter::RecordExtentPaths {
+                        blocks: join_rel(prefix_dir, &e.blocks)?,
+                        hasrow: join_rel(prefix_dir, &e.hasrow)?,
+                        directory: join_rel(prefix_dir, &e.directory)?,
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let stack = tessera_filter::RecordStack::open(
+                base,
+                &extents,
+                tessera_filter::Access::MappedSequential,
+            )
+            .map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+            let mut wanted = croaring::Bitmap::new();
+            wanted.add_range(0..bound);
+            let mut failed: Option<BuildError> = None;
+            let walked = stack.for_each_row_in(&wanted, &mut |entity, fields| {
+                if let Some(field) = fields.into_iter().find(|f| f.tag as usize == at) {
+                    if let Err(e) = push(entity, &record_as_scalar(field.value)) {
+                        failed = Some(e);
+                        // Ends the walk; the error returned is `failed`.
+                        return Err(tessera_filter::RecordError::Malformed(String::new()));
+                    }
+                }
+                Ok(())
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            walked.map_err(|e| BuildError::Invalid(format!("the record blob: {e}")))?;
+        }
+        let mut twice = 0u64;
+        let column_dir = scratch.path().join("column");
+        fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+        let column_side: Vec<PathBuf> = spill
+            .finish(&column_dir, "column", |_| twice += 1)
+            .map_err(store)?
+            .into_iter()
+            .map(|run| run.path)
+            .collect();
+        if twice > 0 {
+            return Err(BuildError::Invalid(format!(
+                "unique column '{attribute}' holds {twice} value(s) for more than one live item"
+            )));
+        }
+        let compared =
+            tessera_store::unique::compare_unique_runs(kind, &inputs, &tombstones, &column_side)
+                .map_err(store)?;
+        if let Some((key, one, other)) = compared.shared_key {
+            return Err(BuildError::Invalid(format!(
+                "unique index '{attribute}': key {:x} names entities {one} and {other}, both live",
+                key.widen()
+            )));
+        }
+        if let Some(first) = compared.first_difference {
+            return Err(BuildError::Invalid(format!(
+                "unique index '{attribute}' holds {} live entries and its column {} values; they \
+                 first differ at entry {first}",
+                compared.index_entries, compared.column_entries
+            )));
+        }
+        report.unique_entries += compared.index_entries;
+    }
+    Ok(())
+}
+
+/// A stored value at the shape the unique key derivation takes.
+fn record_as_scalar(value: tessera_filter::RecordValue) -> tessera_spatial::ScalarValue {
+    use tessera_filter::RecordValue as RV;
+    use tessera_spatial::ScalarValue as SV;
+    match value {
+        RV::U8(x) => SV::U8(x),
+        RV::U16(x) => SV::U16(x),
+        RV::U32(x) => SV::U32(x),
+        RV::U64(x) => SV::U64(x),
+        RV::I8(x) => SV::I8(x),
+        RV::I16(x) => SV::I16(x),
+        RV::I32(x) => SV::I32(x),
+        RV::I64(x) => SV::I64(x),
+        RV::TimestampUs(x) => SV::TimestampUs(x),
+        RV::Utf8(s) => SV::Utf8(s),
+        _ => SV::Null,
+    }
 }
 
 /// **`cuts.u32` names exactly the rows at which a leaf Morton cell begins, and each cell's
@@ -517,8 +890,8 @@ fn walk_posting(
     match posting {
         PostingRef::Array(bytes) => {
             // A payload length that is not a multiple of 4 was refused at the reader's open.
-            for chunk in bytes.chunks_exact(4) {
-                visit(u32::from_le_bytes(chunk.try_into().expect("chunks_exact(4)")))?;
+            for chunk in bytes.as_chunks::<4>().0 {
+                visit(u32::from_le_bytes(*chunk))?;
             }
         }
         PostingRef::Roaring(view) => {
@@ -576,9 +949,8 @@ impl PairsCursor {
                 path: self.path.clone(),
                 detail: e.to_string(),
             })?;
-            let malformed = |detail: &str| {
-                BuildError::Invalid(format!("{}: {detail}", self.path.display()))
-            };
+            let malformed =
+                |detail: &str| BuildError::Invalid(format!("{}: {detail}", self.path.display()));
             let entities = batch
                 .column_by_name("entity_id")
                 .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
@@ -696,12 +1068,11 @@ fn check_record_blobs(
 /// (`Dict::load`) tolerates a repeat by skipping it, deliberately; this is the artefact-side
 /// statement that no correct writer produces one.
 ///
-/// **This is the pass's remaining unbounded arm.** It reads each extent whole and holds a
-/// `HashSet` of every descriptor it has seen, so its memory is the term vocabulary's — not the
-/// corpus's, which is why it survived the bounding of the row space, the record blob and the
-/// external-id sidecar, but a deployment whose vocabulary is itself corpus-scale would find it
-/// here. Bounding it needs the descriptors sorted rather than hashed, which is a partition pass
-/// like the identity check's.
+/// **This is the pass's remaining unbounded arm.** It reads each extent whole and holds a `HashSet`
+/// of every descriptor it has seen, so its memory is the term vocabulary's — not the corpus's,
+/// which is why it survived the bounding of the row space and the record blob, but a deployment
+/// whose vocabulary is itself corpus-scale would find it here. Bounding it needs the descriptors
+/// sorted rather than hashed, which is a partition pass like the identity check's.
 fn check_dict_extents(
     prefix_dir: &Path,
     partition_manifest: &SegmentsManifest,
@@ -752,365 +1123,4 @@ fn check_dict_extents(
         report.dict_records += records;
     }
     Ok(())
-}
-
-/// The locator sentinel for "this entity has no caller-supplied external id" (contracts §2.4
-/// r6) — the ordinary case, never a missing value.
-const LOCATOR_NONE: u32 = 0xFFFF_FFFF;
-
-/// One external-id run: its name, how many rows it holds, and where those rows begin in the
-/// concatenation a base-locator ordinal addresses.
-struct RunRows {
-    rel: String,
-    rows: u64,
-    offset: u64,
-}
-
-/// One locator, mapped: the base file over `[0, len)`, or a flush extent over its own span, with
-/// the run its ordinals index.
-struct ExtentSlots {
-    rel: String,
-    entity_lo: u64,
-    entity_hi: u64,
-    run: usize,
-    slots: Slots,
-}
-
-/// One file of the sidecar family, mapped.
-///
-/// **The bytes are checked through the mapping the pass then reads from.** This family is the one
-/// exemption from the open-time digest sweep (contracts §0.3 deviation 9), so a deep verify is the
-/// only place its bytes are checked at all; hashing a file, closing it and opening it again would
-/// leave a same-length rewrite between the two used unverified. There is one mapping, the digest is
-/// taken over it, and every read below comes out of it.
-struct Mapped {
-    map: Option<memmap2::Mmap>,
-    len: u64,
-}
-
-impl Mapped {
-    /// Map `path`. A zero-length file maps to nothing, which `memmap2` refuses and which has no
-    /// bytes to read anyway.
-    fn open(path: &Path) -> Result<Mapped> {
-        let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
-        let len = file.metadata().map_err(|e| BuildError::io(path, e))?.len();
-        if len == 0 {
-            return Ok(Mapped { map: None, len: 0 });
-        }
-        // SAFETY: the mapping is read-only and no reference into it outlives it. A bundle file
-        // rewritten under a running verify is the race §12.4 records for the whole pass; this
-        // mapping neither adds to it nor is shared with another process.
-        let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BuildError::io(path, e))?;
-        Ok(Mapped {
-            map: Some(map),
-            len,
-        })
-    }
-
-    fn bytes(&self) -> &[u8] {
-        self.map.as_ref().map(|map| &map[..]).unwrap_or(&[])
-    }
-}
-
-/// A little-endian `u32` array over a mapping: a locator from the bundle, or the concatenated run
-/// entity columns this pass writes beside it.
-///
-/// Both are addressed at an index the *other* side hands over — a locator at an entity a run row
-/// names, a run row at an ordinal a locator slot names — so neither can be streamed, and both are
-/// four bytes for every entity or every binding in the corpus. A mapping gives the random access
-/// without the heap.
-struct Slots {
-    bytes: Mapped,
-    len: usize,
-}
-
-impl Slots {
-    /// Read `bytes` as exactly `declared_len` slots.
-    fn over(rel: &str, bytes: Mapped, declared_len: u64) -> Result<Slots> {
-        let expected = declared_len.saturating_mul(4);
-        if bytes.len != expected {
-            return Err(BuildError::Invalid(format!(
-                "{rel}: {} bytes where the manifest-implied length is {declared_len} u32 slots \
-                 ({expected} bytes)",
-                bytes.len
-            )));
-        }
-        Ok(Slots {
-            bytes,
-            len: declared_len as usize,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Slot `i`. Four bytes read and assembled rather than a cast: the mapping's alignment is the
-    /// page's, but a file's contents are not this code's to make claims about.
-    fn get(&self, i: usize) -> u32 {
-        let at = i * 4;
-        u32::from_le_bytes(
-            self.bytes.bytes()[at..at + 4]
-                .try_into()
-                .expect("four bytes"),
-        )
-    }
-}
-
-/// The external-id locator and its sidecar agreeing in both directions, newest binding first —
-/// see the module doc for the exact invariant and for why a repeated key across runs is the
-/// accepted state rather than a defect.
-fn check_external_ids(
-    root: &Path,
-    prefix_dir: &Path,
-    bundle_manifest: &Manifest,
-    partition_manifest: &SegmentsManifest,
-    report: &mut VerifyDeepReport,
-) -> Result<()> {
-    let runs_rel = &partition_manifest.external_id_runs;
-    if runs_rel.is_empty() {
-        // No sidecar at all: the ordinary state for a deployment whose callers supplied no
-        // external ids (contracts §2.4 r6), not a degraded one.
-        return Ok(());
-    }
-    let high_water = partition_manifest.entity_id_high_water;
-
-    // Map each file and digest it against the manifest through that mapping, which is what the
-    // reads below then come out of ([`Mapped`]). Nothing is read into the heap: the base locator
-    // is four bytes an entity.
-    let verified_map = |rel: &str| -> Result<Mapped> {
-        let digest: &FileDigest = partition_manifest
-            .files
-            .get(rel)
-            .or_else(|| bundle_manifest.files.get(rel))
-            .ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{rel}: named by the sidecar lists but digested by neither files map"
-                ))
-            })?;
-        let path = join_rel(prefix_dir, rel)?;
-        let mapped = Mapped::open(&path)?;
-        if mapped.len != digest.size
-            || crate::hex_digest(Sha256::digest(mapped.bytes()).as_slice()) != digest.sha256
-        {
-            return Err(BuildError::Invalid(format!(
-                "{rel}: bytes do not match the manifest digest — this family is exempt from the \
-                 open-time sweep (contracts §0.3 deviation 9), so the deep pass is where a \
-                 corrupt sidecar file is caught at rest"
-            )));
-        }
-        Ok(mapped)
-    };
-
-    // One pass over the runs: each one's keys ascend, each one's entities are below the high
-    // water, and the entity column is copied out to a single scratch file in listed order. That
-    // file is what a base-locator ordinal addresses, and what direction two reads back in run
-    // order.
-    let scratch = crate::VerifyTmp::create(root)?;
-    let bound_path = scratch.path().join("ext-run-entities.u32");
-    let mut runs: Vec<RunRows> = Vec::with_capacity(runs_rel.len());
-    let mut total = 0u64;
-    {
-        let file = File::create(&bound_path).map_err(|e| BuildError::io(&bound_path, e))?;
-        let mut out = BufWriter::with_capacity(1 << 20, file);
-        for rel in runs_rel {
-            let rows = scan_run(
-                rel,
-                verified_map(rel)?.bytes(),
-                high_water,
-                &mut out,
-                &bound_path,
-            )?;
-            runs.push(RunRows {
-                rel: rel.clone(),
-                rows,
-                offset: total,
-            });
-            total += rows;
-        }
-        out.flush().map_err(|e| BuildError::io(&bound_path, e))?;
-    }
-    let bound = Slots::over("the run entity columns", Mapped::open(&bound_path)?, total)?;
-
-    // The base locator lives beside the first run under the same derivation the sidecar uses.
-    let locator_rel = match runs_rel[0].rsplit_once('/') {
-        Some((dir, _)) => format!("{dir}/ext-locator.u32"),
-        None => "ext-locator.u32".to_string(),
-    };
-    let base_len = bundle_manifest.entity_id_high_water;
-    let base = Slots::over(&locator_rel, verified_map(&locator_rel)?, base_len)?;
-
-    let mut extents: Vec<ExtentSlots> =
-        Vec::with_capacity(partition_manifest.locator_extents.len());
-    for extent in &partition_manifest.locator_extents {
-        if extent.entity_hi < extent.entity_lo {
-            return Err(BuildError::Invalid(format!(
-                "{}: entity span {}..={} is inverted",
-                extent.path, extent.entity_lo, extent.entity_hi
-            )));
-        }
-        let run = runs_rel
-            .iter()
-            .position(|rel| rel == &extent.external_id_run)
-            .ok_or_else(|| {
-                BuildError::Invalid(format!(
-                    "{}: indexes run '{}', which the manifest does not list — its ordinals \
-                     cannot be resolved",
-                    extent.path, extent.external_id_run
-                ))
-            })?;
-        let span = extent.entity_hi - extent.entity_lo + 1;
-        let slots = Slots::over(&extent.path, verified_map(&extent.path)?, span)?;
-        extents.push(ExtentSlots {
-            rel: extent.path.clone(),
-            entity_lo: extent.entity_lo,
-            entity_hi: extent.entity_hi,
-            run,
-            slots,
-        });
-    }
-
-    // Direction one: every locator slot addresses a row bound to exactly its entity.
-    for entity in 0..base.len() {
-        let slot = base.get(entity);
-        if slot == LOCATOR_NONE {
-            continue;
-        }
-        let global = slot as u64;
-        if global >= total {
-            return Err(BuildError::Invalid(format!(
-                "{locator_rel}: entity {entity}'s ordinal {global} is past the {total} \
-                 concatenated run rows"
-            )));
-        }
-        let run = runs.partition_point(|run| run.offset <= global) - 1;
-        let claims = bound.get(global as usize) as u64;
-        if claims != entity as u64 {
-            return Err(BuildError::Invalid(format!(
-                "{locator_rel}: entity {entity}'s slot addresses a row of '{}' bound to entity \
-                 {claims} — the locator and the runs disagree",
-                runs[run].rel
-            )));
-        }
-    }
-    for extent in &extents {
-        for i in 0..extent.slots.len() {
-            let slot = extent.slots.get(i);
-            if slot == LOCATOR_NONE {
-                continue;
-            }
-            let entity = extent.entity_lo + i as u64;
-            let run = &runs[extent.run];
-            if slot as u64 >= run.rows {
-                return Err(BuildError::Invalid(format!(
-                    "{}: entity {entity}'s ordinal {slot} is past the end of run '{}' ({} rows)",
-                    extent.rel, run.rel, run.rows
-                )));
-            }
-            let claims = bound.get((run.offset + slot as u64) as usize) as u64;
-            if claims != entity {
-                return Err(BuildError::Invalid(format!(
-                    "{}: entity {entity}'s slot addresses a row of '{}' bound to entity {claims} \
-                     — the locator and the runs disagree",
-                    extent.rel, run.rel
-                )));
-            }
-        }
-    }
-
-    // Direction two: every run row is addressed back by its own entity's covering slot. This is
-    // what refuses a dangling binding (a row no locator can reach) and, with direction one, two
-    // slots claiming one row. A key bound in several runs passes both directions: each of its
-    // rows has its own entity, and each entity its own slot.
-    for (r, run) in runs.iter().enumerate() {
-        for i in 0..run.rows {
-            let entity = bound.get((run.offset + i) as usize) as u64;
-            let agrees = if entity < base_len {
-                let slot = base.get(entity as usize);
-                slot != LOCATOR_NONE && slot as u64 == run.offset + i
-            } else if let Some(extent) = extents
-                .iter()
-                .find(|x| entity >= x.entity_lo && entity <= x.entity_hi)
-            {
-                extent.run == r
-                    && extent.slots.get((entity - extent.entity_lo) as usize) as u64 == i
-            } else {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {i} binds entity {entity}, which no locator covers — the reverse \
-                     direction could never answer for it",
-                    run.rel
-                )));
-            };
-            if !agrees {
-                return Err(BuildError::Invalid(format!(
-                    "{}: row {i} binds entity {entity}, but the locator side does not point \
-                     back at it — the two directions must agree",
-                    run.rel
-                )));
-            }
-        }
-    }
-
-    report.external_id_bindings += total;
-    Ok(())
-}
-
-/// Scan one external-id run: `(external_id: Binary, entity_id: UInt32)`, keys strictly ascending
-/// within the run (a duplicate inside one run would make a binding unreachable to the sidecar's
-/// binary search — across runs is the accepted 0047 state), entities below `high_water`. Each
-/// row's entity is appended to `out` as four little-endian bytes; the row count is returned.
-///
-/// **Only the previous key is held.** The ascent is a comparison between neighbours, and a run's
-/// keys are the caller's own ids: holding them all is what made this pass's memory the corpus's.
-/// The high-water fault is carried to the end of the run rather than raised where it is found, so
-/// a run with both faults still reports the ordering one, which is the first a reader can act on.
-fn scan_run(
-    rel: &str,
-    bytes: &[u8],
-    high_water: u64,
-    out: &mut BufWriter<File>,
-    out_path: &Path,
-) -> Result<u64> {
-    let arrow_err = |detail: String| BuildError::Invalid(format!("{rel}: {detail}"));
-    let reader = ArrowFileReader::try_new(std::io::Cursor::new(bytes), None)
-        .map_err(|e| arrow_err(e.to_string()))?;
-    let mut rows = 0u64;
-    let mut previous: Vec<u8> = Vec::new();
-    let mut first_over_water: Option<(u64, u32)> = None;
-    for batch in reader {
-        let batch = batch.map_err(|e| arrow_err(e.to_string()))?;
-        let key_col = batch
-            .column_by_name("external_id")
-            .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
-            .ok_or_else(|| arrow_err("no binary 'external_id' column".to_string()))?;
-        let entity_col = batch
-            .column_by_name("entity_id")
-            .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
-            .ok_or_else(|| arrow_err("no uint32 'entity_id' column".to_string()))?;
-        for i in 0..batch.num_rows() {
-            let key = key_col.value(i);
-            if rows > 0 && previous.as_slice() >= key {
-                return Err(BuildError::Invalid(format!(
-                    "{rel}: external ids are not strictly ascending at row {rows} — the sidecar \
-                     binary-searches each run, and an unsorted or duplicated key makes a binding \
-                     unreachable"
-                )));
-            }
-            previous.clear();
-            previous.extend_from_slice(key);
-            let entity = entity_col.value(i);
-            if entity as u64 >= high_water && first_over_water.is_none() {
-                first_over_water = Some((rows, entity));
-            }
-            out.write_all(&entity.to_le_bytes())
-                .map_err(|e| BuildError::io(out_path, e))?;
-            rows += 1;
-        }
-    }
-    if let Some((i, entity)) = first_over_water {
-        return Err(BuildError::Invalid(format!(
-            "{rel}: row {i} binds entity {entity}, at or past entity_id_high_water {high_water}"
-        )));
-    }
-    Ok(rows)
 }

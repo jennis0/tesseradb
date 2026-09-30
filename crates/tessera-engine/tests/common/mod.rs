@@ -12,22 +12,109 @@
 // carrying their own copy — which is the drift this module exists to prevent.
 #![allow(dead_code)]
 
+mod lifecycle;
+mod wait;
+
+#[allow(unused_imports)]
+pub use lifecycle::*;
+#[allow(unused_imports)]
+pub use wait::*;
+pub use ingest_rows::IngestRows;
+
+mod ingest_rows {
+    use tessera_engine::{AcceptError, Engine, IngestRequest};
+    use tessera_lifecycle::{BatchArtifacts, IngestRow, UnallocatedRow};
+    use tessera_types::EntityId;
+
+    /// Ingest through [`Engine::ingest`] from rows shaped as the executor writes them: each row
+    /// names the item its `join` holds by `tessera_id`, or none, carries its label and position,
+    /// and carries every value it holds, a null clearing one. Every row names the same view.
+    pub trait IngestRows {
+        /// Send `rows` as one batch, and answer the entity each row created or named.
+        fn ingest_rows(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+        ) -> Result<Vec<EntityId>, AcceptError> {
+            self.ingest_rows_joining(rows, batch_id, body_hash, BatchArtifacts::default())
+                .map(|(entities, _)| entities)
+        }
+
+        /// [`Self::ingest_rows`], with the artifacts the rows name in a layer's column, answering
+        /// how many artifacts the batch minted beside the entities.
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError>;
+    }
+
+    impl IngestRows for Engine {
+        fn ingest_rows_joining(
+            &self,
+            rows: Vec<UnallocatedRow>,
+            batch_id: String,
+            body_hash: [u8; 32],
+            artifacts: BatchArtifacts,
+        ) -> Result<(Vec<EntityId>, u64), AcceptError> {
+            let view = rows.first().map(|row| row.view.clone());
+            assert!(
+                rows.iter().all(|row| Some(&row.view) == view.as_ref()),
+                "a batch names one view"
+            );
+            let rows = rows
+                .into_iter()
+                .map(|row| IngestRow {
+                    tessera_id: row
+                        .join
+                        .map(|entity| self.tessera_id_of(entity).expect("a joined item has an id")),
+                    labels: Some(row.descriptors),
+                    position: Some((row.x, row.y)),
+                    scalars: row.scalars,
+                    scoped: row.scoped,
+                    omitted: Vec::new(),
+                })
+                .collect();
+            let receipt = self.ingest(IngestRequest {
+                batch_id,
+                body_hash,
+                view,
+                rows,
+                artifacts,
+                strict: true,
+                tessera_id_column: false,
+            })?;
+            let entities = self
+                .resolve_tessera_ids(&receipt.tessera_ids.iter().flatten().copied().collect::<Vec<_>>())
+                .unwrap()
+                .into_iter()
+                .map(|entity| entity.expect("an accepted row names an item"))
+                .collect();
+            Ok((entities, receipt.minted))
+        }
+    }
+}
+
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{default_compute_threads, Engine, EngineConfig};
+use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig, ViewportRequest};
+use tessera_lifecycle::UnallocatedRow;
 use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
-use tessera_types::IdentityKey;
+use tessera_types::{EntityId, IdentityKey, TesseraId};
 
 pub const N_ITEMS: u64 = 10_000;
 pub const ALL_TERM: u64 = 0;
@@ -171,6 +258,7 @@ pub fn write_pairs_n(path: &Path, n: u64) {
 pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64) {
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
+    let schema = id_schema();
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -185,22 +273,23 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &schema,
+        ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("fixture build should succeed");
 }
@@ -208,6 +297,44 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
 /// Build the fixture bundle at `out` through `tessera_build::build`.
 pub fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path) {
     build_fixture_n(out, points_path, pairs_path, N_ITEMS)
+}
+
+/// A built fixture bundle and the paths an engine opens it with, holding the temporary directory
+/// that owns all three.
+pub struct Fixture {
+    pub _tmp: tempfile::TempDir,
+    pub root: PathBuf,
+    pub cache: PathBuf,
+    pub wal: PathBuf,
+}
+
+/// The `N_ITEMS` fixture, built into a temporary directory of its own.
+pub fn fixture() -> Fixture {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    Fixture {
+        root,
+        cache: tmp.path().join("cache"),
+        wal: tmp.path().join("wal.log"),
+        _tmp: tmp,
+    }
+}
+
+/// The same bundle, built into a caller's directory — for a case that opens the bundle more than
+/// once, or beside paths of its own.
+pub fn fixture_in(tmp: &Path) -> PathBuf {
+    let root = tmp.join("bundle");
+    build_fixture(
+        &root,
+        &tmp.join("points.parquet"),
+        &tmp.join("pairs.parquet"),
+    );
+    root
 }
 
 /// Build a bundle over inputs the **corpus generator** wrote, with the generator's own schema.
@@ -250,14 +377,12 @@ pub fn build_corpus_fixture(
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
@@ -309,14 +434,12 @@ pub fn build_corpus_fixture_with_layers(
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
@@ -339,6 +462,7 @@ pub fn build_with_layers(
     corpus: &tessera_corpus::Corpus,
     config: tessera_build::config::Config,
 ) {
+    let schema = with_id(config.schema);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -355,64 +479,107 @@ pub fn build_with_layers(
         scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             points_path.to_path_buf(),
-            &config.schema,
+            &schema,
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: config.schema,
+        schema,
     };
     build(&args).expect("the fixture's own declaration builds");
 }
 
-/// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
-/// ground truth `tessera-build`'s own smoke test cross-checks against.
+/// The fixture's one declared column: `id`, the points file's `entity_id` declared unique, which
+/// is how a test finds, or names in a row, the item a source row became.
+pub fn id_schema() -> tessera_build::config::Schema {
+    tessera_build::config::Schema {
+        attributes: vec![tessera_build::config::Attribute {
+            field: Some("entity_id".to_string()),
+            name: "id".to_string(),
+            title: None,
+            ty: tessera_spatial::tiler::ScalarType::U64,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: false,
+            unique: true,
+        }],
+        vocabularies: Default::default(),
+    }
+}
+
+/// `schema` with [`id_schema`]'s `id` declared after its own columns, unless it declares one.
+pub fn with_id(mut schema: tessera_build::config::Schema) -> tessera_build::config::Schema {
+    if !schema.attributes.iter().any(|a| a.name == "id") {
+        schema.attributes.extend(id_schema().attributes);
+    }
+    schema
+}
+
+/// Every `source_id -> entity_id` pair the bundle's unique `id` column holds in its runs.
 pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
     let bundle = open_bundle(bundle_root).unwrap();
     let part = &bundle.partitions["default"];
-    let ext_path = bundle_root
-        .join(prefix)
-        .join(&part.manifest.external_id_runs[0]);
-    let file = File::open(&ext_path).unwrap();
-    let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+    let runs = part
+        .manifest
+        .unique_indexes
+        .iter()
+        .find(|runs| runs.attribute == "id")
+        .expect("the fixture declares a unique `id`");
     let mut map = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.unwrap();
-        let ext = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
-        // Contracts r6: the external-id extent's entity column is `UInt32` (entities are capped
-        // at `u32::MAX` by the I9 allocator), not the pre-r6 `UInt64`.
-        let ent = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        for i in 0..batch.num_rows() {
-            let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-            map.insert(source, ent.value(i) as u64);
-        }
+    let paths = runs.base.iter().map(|run| run.path.as_str()).chain(runs.live.iter().map(String::as_str));
+    for rel in paths {
+        tessera_store::unique::for_each_entry(
+            tessera_store::unique::KeyKind::Unsigned,
+            &bundle_root.join(prefix).join(rel),
+            |key, entity| {
+                if let tessera_store::unique::UniqueKey::Int(source) = key {
+                    map.insert(source, u64::from(entity));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
     }
     map
 }
 
-/// The external id `tessera-build` writes for a source row: the source corpus id, 8 bytes
-/// little-endian (see `source_to_new_map`'s decode of the same convention).
-pub fn source_id_key(source_id: u64) -> Vec<u8> {
-    source_id.to_le_bytes().to_vec()
+/// The item the unique `id` value `source` names, deleted items left out.
+pub fn item_of_id(
+    engine: &Engine,
+    source: u64,
+) -> Result<Option<EntityId>, tessera_engine::EngineError> {
+    Ok(unique_holders(engine, "id", &[source.to_string()])?[0])
+}
+
+/// The `id` a test gives the item it calls `key`: a stable hash with the top bit set, so it names
+/// none of the fixture's built items.
+pub fn key_id(key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    hash | 1 << 63
+}
+
+/// The row values that give an item the `id` of `key`.
+pub fn keyed(key: &str) -> Vec<tessera_lifecycle::wal::WalScalar> {
+    vec![tessera_lifecycle::wal::WalScalar::U64(key_id(key))]
+}
+
+/// The live item holding the `id` of `key`, if any.
+pub fn item_of_key(engine: &Engine, key: &str) -> Option<EntityId> {
+    unique_holders(engine, "id", &[key_id(key).to_string()]).unwrap()[0]
 }
 
 /// An engine with its write executor running.
@@ -481,23 +648,77 @@ pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Pat
     .expect("engine should open against a freshly built bundle")
 }
 
-/// **Force a tick and wait for it** — the moment a level's row forms are published from the
-/// deltas accumulated since the last one (`ingest.md` §1.3, §10 ruling 6).
-///
-/// A write is durable at its acknowledgement and visible at the next publication, so a test that
-/// writes and then reads what a viewer sees puts this between the two. The tick is requested
-/// rather than waited for so that a test does not sit out `flush_max_age_secs`.
-pub fn tick(engine: &Engine) {
-    let before = engine.write_executor_stats().ticks;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().ticks == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the tick that publishes the row forms never ran"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+/// The fixture's whole extent, as a viewport request carries it.
+pub const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+
+/// The artifacts a principal is served over the whole map at depth 0.
+pub fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+/// The entity an artifact's served identifier names.
+pub fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
+    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
+}
+
+/// A one-row ingest at the fixture's centre, carrying `ALL_TERM`, under the caller's batch id.
+pub fn ingest(engine: &Engine, batch: &str) -> EntityId {
+    let row = UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+    engine
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
+        .expect("ingest is accepted")[0]
+}
+
+/// An engine over `root`, with its cache and log beside it under `tmp`, ticking every
+/// `tick_secs` and its write executor running.
+pub fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
+    let mut engine = Engine::open(
+        root,
+        &tmp.join("cache"),
+        &tmp.join("wal.log"),
+        Passthrough::new(),
+        EngineConfig {
+            flush_max_age_secs: tick_secs,
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts once");
+    engine
+}
+
+/// Whether the subset principal can see the item behind a source id.
+pub fn subset_sees(e: u64) -> bool {
+    terms_of(e).contains(&SUBSET_TERM)
+}
+
+/// A credential over the terms a generator grant names.
+pub fn grant_credential(grant: &str) -> Vec<u8> {
+    let terms: Vec<String> = tessera_corpus::Grant::parse(grant)
+        .expect("the grant is inside the generator's term space")
+        .terms()
+        .iter()
+        .map(|t| format!("\"{}\"", t.raw()))
+        .collect();
+    format!("{{\"terms\": [{}]}}", terms.join(", ")).into_bytes()
 }
 
 pub fn full_coverage_credential() -> Vec<u8> {
@@ -510,4 +731,33 @@ pub fn subset_credential() -> Vec<u8> {
 
 pub fn zero_credential() -> Vec<u8> {
     br#"{"terms": []}"#.to_vec()
+}
+
+/// The item each of `values` names in the unique field `field`, `None` for a value naming none,
+/// asked of [`tessera_engine::Engine::name_items`].
+pub fn unique_holders(
+    engine: &tessera_engine::Engine,
+    field: &str,
+    values: &[String],
+) -> Result<Vec<Option<tessera_types::EntityId>>, tessera_engine::EngineError> {
+    let table = tessera_engine::AddressTable {
+        rows: values.len(),
+        tessera_id: None,
+        columns: vec![(
+            field.to_string(),
+            values
+                .iter()
+                .map(|v| Some(tessera_engine::AddressValue::Text(v.clone())))
+                .collect(),
+        )],
+    };
+    Ok(engine
+        .name_items(&table)?
+        .verdicts
+        .into_iter()
+        .map(|verdict| match verdict {
+            tessera_lifecycle::resolve::Verdict::Names(entity) => Some(entity),
+            _ => None,
+        })
+        .collect())
 }

@@ -19,14 +19,16 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::{AuthTerms, DeclaredBounds, Descriptor, Passthrough, Plugin, PluginError};
+use tessera_plugin::{DeclaredBounds, Descriptor, Passthrough, Plugin, PluginError};
 use tessera_types::EntityId;
+
+const WAIT: Duration = Duration::from_secs(20);
 
 /// [`Passthrough`] with a lower declared term ceiling, for the one bound promotion enforces.
 ///
@@ -40,7 +42,7 @@ impl Plugin for CappedTerms {
     fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_labels(labels)
     }
-    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
+    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }
     fn present_terms(&self, descriptors: &[Vec<u8>]) -> Result<Vec<String>, PluginError> {
@@ -63,14 +65,6 @@ impl Plugin for CappedTerms {
 /// Descriptors no fixture dictionary carries.
 const NOVEL: &[u8] = b"dept:secret";
 const OTHER: &[u8] = b"dept:legal";
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 /// An engine on `root`, keeping its cache and WAL under `tmp`.
 ///
@@ -121,21 +115,10 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
     .expect("engine opens")
 }
 
-fn fixture(tmp: &Path) -> PathBuf {
-    let root = tmp.join("bundle");
-    build_fixture(
-        &root,
-        &tmp.join("points.parquet"),
-        &tmp.join("pairs.parquet"),
-    );
-    root
-}
-
 /// Ingest one item at (5, 5) carrying exactly `descriptors`.
-fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> EntityId {
+fn ingest_with(engine: &Engine, batch: &str, descriptors: &[&[u8]]) -> EntityId {
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -146,12 +129,12 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("ingest is accepted")[0]
 }
 
 fn flushes_reach(engine: &Engine, n: u64) {
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes >= n
     });
 }
@@ -204,13 +187,13 @@ fn extent_records(root: &Path, prefix: &str) -> Vec<Vec<Vec<u8>>> {
 #[test]
 fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     let credential = br#"{"terms": ["dept:secret"]}"#.to_vec();
     let before = engine.authorise(&credential).expect("authorises");
     assert_eq!(
-        before.satisfied,
+        *before.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "the descriptor does not exist yet, so this session satisfies nothing but the reserved \
          `public` term every session holds"
@@ -243,16 +226,20 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     // And it means something: the item is visible through the promoted term.
     let after = reopened.authorise(&credential).expect("authorises");
     // Two: the promoted descriptor, and the reserved `public` term every session holds.
-    assert_eq!(after.satisfied.len(), 2, "the descriptor now resolves");
+    assert_eq!(
+        after.satisfied_for_test().len(),
+        2,
+        "the descriptor now resolves"
+    );
     let tessera_id = reopened.tessera_id_of(id).expect("identity is computable");
     assert!(
-        reopened.item(&after, tessera_id, None).unwrap().is_some(),
+        reopened.item(&after, tessera_id).unwrap().is_some(),
         "the flushed item is visible through the descriptor it was ingested under"
     );
 
     // §3.2's first consequence, preserved: the older session never gains it.
     assert_eq!(
-        before.satisfied,
+        *before.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "`satisfied` is fixed at authorise; a promotion never reaches back into a live session"
     );
@@ -270,7 +257,7 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 #[test]
 fn a_second_flush_reuses_the_first_flushs_ordinal_and_writes_no_duplicate_record() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let engine = engine_at(tmp.path(), &root, 1);
 
     ingest_with(&engine, "ext-1", &[NOVEL]);
@@ -312,14 +299,18 @@ fn a_second_flush_reuses_the_first_flushs_ordinal_and_writes_no_duplicate_record
 #[test]
 fn an_ingest_and_a_tick_flip_the_staleness_hint() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let engine = engine_at(tmp.path(), &fixture(tmp.path()), 1);
+    let engine = engine_at(tmp.path(), &fixture_in(tmp.path()), 1);
 
     let session = engine
         .authorise(br#"{"terms": ["0", "dept:secret"]}"#)
         .expect("authorises");
     // Two: the credential's own `0`, and the reserved `public` term the engine adds. `dept:secret`
     // is the one that did not resolve.
-    assert_eq!(session.satisfied.len(), 2, "one resolved, one did not");
+    assert_eq!(
+        session.satisfied_for_test().len(),
+        2,
+        "one resolved, one did not"
+    );
     assert!(!session.is_stale(&engine.generation()));
 
     ingest_with(&engine, "ext-1", &[NOVEL]);
@@ -343,7 +334,7 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
 #[test]
 fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture(tmp.path());
+    let root = fixture_in(tmp.path());
     let mut engine = Engine::open(
         &root,
         &tmp.path().join("cache"),
@@ -365,7 +356,7 @@ fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
         .expect("the executor starts");
 
     let id = ingest_with(&engine, "ext-1", &[NOVEL]);
-    wait_until("the flush to fail", || {
+    wait_until("the flush to fail", WAIT, || {
         engine.write_executor_stats().flush_failures >= 1
     });
 

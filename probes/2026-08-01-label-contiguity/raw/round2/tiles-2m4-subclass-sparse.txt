@@ -1,4 +1,4 @@
-bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+bundle: /home/user/code/tessera/data/bench-fixtures/2m4
 grant mode: spread (deterministic, --sparse) (w=10), dictionary=176, reps=25, max_tiles=131072
 
 grant contiguity (universe 2422486 rows): entity-space card=599200 cov=24.7349% containers=36 run_ratio=136.086 | row-space card=599200 cov=24.7349% containers=37 run_ratio=1.666

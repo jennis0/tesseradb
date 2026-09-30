@@ -5,7 +5,7 @@
 # that passes: both are silence. Three mechanisms in this repository make a test stop running
 # without anyone deleting it, and none of them is visible in a diff.
 #
-#   1. `#[ignore]`. CI's `cargo test --workspace` skips them, by design — several take minutes.
+#   1. `#[ignore]`. The gate's test run skips them, by design — several take minutes.
 #      An ignore WITHOUT a reason string is the defect this script refuses: nobody reading it can
 #      tell "slow, run it before a release" from "broken, someone silenced it".
 #   2. `#[cfg(feature = "...")]` on a test, where the feature is off in the crate's own build and
@@ -67,7 +67,7 @@ ignored=$(wc -l < "$work/ws-ignored")
 echo "  test entries the workspace harnesses list: $(cat "$work/raw")"
 echo "  distinct test names among them:            $exist"
 echo "  of those, #[ignore]d (CI skips):           $ignored"
-echo "  executed by \`cargo test --workspace\`:     $((exist - ignored))"
+echo "  executed by the gate's test run:          $((exist - ignored))"
 
 echo
 echo "== 2. #[ignore] without a reason string"
@@ -117,9 +117,9 @@ for m in $members; do
   # module path it has. A crate whose own listing already contains that final segment did not lose
   # anything — the missing spelling belongs to the other member. Without this the source grep alone
   # reports a false positive for every duplicated test name, which it did:
-  # `an_undersized_bound_does_not_livelock` exists in `tessera-authz/src`, `tessera-engine/src` and
-  # `tessera-engine/tests/cache.rs`, and the bare spelling from the last was attributed to authz,
-  # whose own listing carries it under `single_flight::tests::`.
+  # `an_undersized_bound_does_not_livelock` exists in both `tessera-cache/src` and
+  # `tessera-engine/tests/cache.rs`, and the bare spelling from the second was attributed to the
+  # first, whose own listing carries it under `tests::`.
   #
   # The trade is deliberate: a crate that genuinely lost a test *and* still lists another test of
   # the same final segment is filtered out too. That is the rarer error, and this is a diagnostic —

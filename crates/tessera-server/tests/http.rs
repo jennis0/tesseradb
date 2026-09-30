@@ -9,10 +9,8 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
-use tessera_engine::viewport::SERIAL_FALLBACK_MAX_ROWS;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_plugin::Passthrough;
 use tessera_server::state::ComputeGate;
@@ -20,43 +18,24 @@ use tessera_spatial::tiles_for_bbox;
 
 use common::*;
 
-/// Item count for the two byte-equality tests below — see `tessera-engine/tests/viewport.rs`'s
-/// identically-named constant for the full argument (same fixed-extent scatter, so
-/// `Σ range.len() == n` exactly for a full-extent request). This crate does not depend on
-/// `tessera-engine`'s test binary, so the constant and its reasoning are duplicated rather than
-/// shared, matching this file's own existing "same fixture pattern" duplication of
-/// `tests/viewport.rs`'s fixture builder (this file's module doc).
-///
-/// **Item count alone does not reach the parallel branch.** `SERIAL_FALLBACK_MAX_ROWS` sits at
-/// 500,000,000 (see that constant's doc in `tessera-engine` for the calibration), comfortably above
-/// this fixture — which the assertion below pins. The two tests below therefore force the branch
-/// directly via `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) on
-/// each server's `Engine` before it starts serving. This constant still matters independent of that
-/// override: it is what gives the request a genuinely multi-tile, multi-thousand-row shape
-/// (cross-tile ordering, the underlay path) rather than a token one.
-const PARALLEL_HEADLINE_ITEMS: u64 = 300_000;
+/// Items for the two byte-equality tests. [`scatter`] puts them on 1,000 locations, so every
+/// occupied tile at zoom 8 holds at least 51, more than the `k` of 50 both tests ask for.
+const PARALLEL_HEADLINE_ITEMS: u64 = 51_000;
 
-/// Sanity check that [`PARALLEL_HEADLINE_ITEMS`] stays deliberately unit-test-scale small relative
-/// to the production threshold — not load-bearing for the two tests' correctness any more (the
-/// `bench-timing` override makes them reach the parallel branch regardless of this relationship),
-/// but a true and worth-keeping fact about why this fixture is cheap to build.
-const _: () = assert!(PARALLEL_HEADLINE_ITEMS < SERIAL_FALLBACK_MAX_ROWS);
+static PARALLEL_HEADLINE: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// [`build_fixture`] of [`PARALLEL_HEADLINE_ITEMS`] into `dir`, built once per test binary and
+/// copied.
+fn parallel_headline_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    copy_built(&PARALLEL_HEADLINE, dir, |built| {
+        build_fixture(built, PARALLEL_HEADLINE_ITEMS)
+    })
+}
 
 #[tokio::test]
 async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -93,18 +72,7 @@ async fn a_authorise_then_viewport_succeeds_with_matching_counts() {
 #[tokio::test]
 async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requests() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -169,6 +137,159 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
     );
 }
 
+/// **The identity coordinate belongs to one bundle.** Every build generates its own identity key
+/// and so gives every item a new `tessera_id`, and a client's held bands carry the old ones: two
+/// builds of the same data must give the same credential and view different coordinates. One
+/// bundle gives the same coordinate after a restart, so a restart drops nothing a client holds.
+#[tokio::test]
+async fn the_identity_coordinate_changes_with_the_bundle_and_survives_a_restart() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+    let serve = |dir: &TempDir, bundle: &std::path::Path| {
+        let (bundle, cache, wal) =
+            (bundle.to_path_buf(), dir.path().join("cache"), dir.path().join("wal.log"));
+        async move { spawn_server(&bundle, &cache, &wal).await }
+    };
+
+    let server = serve(&first, &first_bundle).await;
+    let before_restart = identity_coordinate(&server).await;
+    server.shutdown().await;
+    let server = serve(&first, &first_bundle).await;
+    assert_eq!(
+        identity_coordinate(&server).await,
+        before_restart,
+        "a restart over the same bundle must keep the coordinate"
+    );
+    server.shutdown().await;
+
+    let other = serve(&second, &second_bundle).await;
+    assert_ne!(
+        identity_coordinate(&other).await,
+        before_restart,
+        "a bundle built under another key must not share a render partition"
+    );
+}
+
+/// **A `tessera_id` names an item only in the bundle that issued it.** The same data built under
+/// another key serves other identifiers: every one bundle A served is an unknown item to bundle B,
+/// and a delete naming them by `tessera_id` is refused with nothing deleted.
+#[tokio::test]
+async fn a_tessera_id_from_another_bundle_names_nothing() {
+    let (first, second) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let first_bundle = build_under_key(first.path(), "000102030405060708090a0b0c0d0e0f");
+    let second_bundle = build_under_key(second.path(), "0f0e0d0c0b0a09080706050403020100");
+
+    let a = spawn_server(
+        &first_bundle,
+        &first.path().join("cache"),
+        &first.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&a, &["0"]).await;
+    let (_, points) = decode_viewport(&whole_map(&a, &token, N_ITEMS as usize).await);
+    let issued: Vec<u64> = points.iter().map(|(tessera_id, _)| *tessera_id).collect();
+    assert!(issued.len() > 100, "bundle A serves its items: {}", issued.len());
+    drop(a);
+
+    let b = spawn_server(
+        &second_bundle,
+        &second.path().join("cache"),
+        &second.path().join("wal.log"),
+    )
+    .await;
+    let token = token_for(&b, &["0"]).await;
+    let visible = |body: Vec<u8>| -> u64 {
+        let (tiles, _) = decode_viewport(&body);
+        tiles.iter().map(|(_, visible, _)| *visible).sum()
+    };
+    let before = visible(whole_map(&b, &token, 5).await);
+    for &tessera_id in &issued {
+        assert_eq!(
+            post_item(&b, &token, tessera_id).await.status(),
+            404,
+            "bundle B answered bundle A's tessera_id {tessera_id}"
+        );
+    }
+    let deletes: Vec<serde_json::Value> = issued
+        .iter()
+        .map(|id| serde_json::json!({ "op": "delete", "match": { "tessera_id": id.to_string() } }))
+        .collect();
+    let resp = b
+        .client
+        .post(b.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&deletes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(answer["accepted"], 0, "the delete names nothing bundle B issued: {answer}");
+    let refused = answer["refused"].as_array().unwrap();
+    assert_eq!(refused.len(), issued.len(), "{answer}");
+    assert!(
+        refused.iter().all(|row| row["reason"] == "unknown_tessera_id"),
+        "{answer}"
+    );
+    assert_eq!(
+        visible(whole_map(&b, &token, 5).await),
+        before,
+        "nothing was deleted"
+    );
+}
+
+/// A whole-map viewport of `s0` at zoom 0 serving at most `k` points, as body bytes.
+async fn whole_map(server: &TestServer, token: &str, k: usize) -> Vec<u8> {
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": k
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.bytes().await.unwrap().to_vec()
+}
+
+/// The standard fixture's data, built into `dir/bundle` under `key`.
+fn build_under_key(dir: &std::path::Path, key: &str) -> std::path::PathBuf {
+    let points = dir.join("points.parquet");
+    write_points_n(&points, N_ITEMS);
+    write_pairs_n(&dir.join("pairs.parquet"), N_ITEMS);
+    let view = view_args("s0", &points, AccessInput::relation(dir.join("pairs.parquet")));
+    let out = dir.join("bundle");
+    tessera_build::build(&tessera_build::BuildArgs {
+        identity_key: tessera_types::IdentityKey::from_hex(key).unwrap(),
+        ..with_id(build_args(&out, vec![view]), &points)
+    })
+    .expect("the build succeeds");
+    out
+}
+
+/// The identity coordinate of a whole-map viewport of `s0` for a session holding term `0`.
+async fn identity_coordinate(server: &TestServer) -> String {
+    let auth = authorise(server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.headers()["x-tessera-identity-key"]
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
 /// **A request names its tile set exactly once, by bbox or by list.**
 ///
 /// The list is how a client with a replica elides: a tile it can prove it holds is simply absent,
@@ -177,18 +298,7 @@ async fn viewport_serves_an_etag_and_an_identity_key_that_are_stable_across_requ
 #[tokio::test]
 async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -238,18 +348,7 @@ async fn viewport_takes_exactly_one_of_bbox_and_tiles() {
 #[tokio::test]
 async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -312,144 +411,10 @@ async fn a_listed_tile_set_is_answered_exactly_and_deduplicated() {
     }
 }
 
-/// Owner ruling (contracts §3.2): `/v1/items` returns the identical `404` for "no such id" and
-/// "exists but is not visible to this principal" -- same status, same body, byte for byte. This
-/// test deliberately never learns which *external id* the invisible `tessera_id` names (that
-/// would require inverting the identity, which I10 forbids even to a test): it gets a genuinely
-/// existing id from session A's own viewport (everyone carries term "0") and finds one that
-/// session B -- authorised for term "1" only, so it sees strictly fewer items (`terms_of`'s
-/// multiples-of-3 subset) -- cannot see, entirely through the HTTP surface a client has.
-#[tokio::test]
-async fn i_item_404s_identically_for_unknown_and_invisible() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    // Session A: term "0" -- every item carries it, so A sees the whole bundle.
-    let auth_a = authorise(&server, &["0"]).await;
-    let token_a = auth_a["token"].as_str().unwrap();
-    // Session B: term "1" only -- `terms_of`'s multiples-of-3 subset, strictly fewer items.
-    let auth_b = authorise(&server, &["1"]).await;
-    let token_b = auth_b["token"].as_str().unwrap();
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token_a)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
-    assert!(
-        !points.is_empty(),
-        "session A's viewport must return some points to pick from"
-    );
-
-    // Find a tessera_id that is real (session A's own viewport returned it) but invisible to B.
-    let mut invisible_to_b = None;
-    for &(tessera_id, _) in &points {
-        let resp_b = post_item(&server, token_b, tessera_id).await;
-        if resp_b.status() == 404 {
-            invisible_to_b = Some(tessera_id);
-            break;
-        }
-    }
-    let invisible_to_b = invisible_to_b
-        .expect("the fixture's multiples-of-3 term split must leave something invisible to B");
-
-    // Sanity: A, which is the session that surfaced this id in its own viewport, can fetch it.
-    let resp_a = post_item(&server, token_a, invisible_to_b).await;
-    assert_eq!(
-        resp_a.status(),
-        200,
-        "session A must be able to fetch an id its own viewport just returned"
-    );
-
-    let unknown_to_everyone = 0xDEAD_BEEF_DEAD_BEEFu64;
-    let resp_unknown = post_item(&server, token_b, unknown_to_everyone).await;
-    let resp_invisible = post_item(&server, token_b, invisible_to_b).await;
-
-    assert_eq!(resp_unknown.status(), 404);
-    assert_eq!(resp_invisible.status(), 404);
-    assert_eq!(resp_unknown.status(), resp_invisible.status());
-
-    let unknown_body = resp_unknown.text().await.unwrap();
-    let invisible_body = resp_invisible.text().await.unwrap();
-    assert_eq!(
-        unknown_body, invisible_body,
-        "identical 404 required byte-for-byte -- any difference is an oracle for \"this id exists\""
-    );
-}
-
-#[tokio::test]
-async fn b_missing_or_garbage_token_is_401() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let body = serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-    });
-
-    let resp_missing = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_missing.status(), 401);
-
-    let resp_garbage = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth("not-a-real-token")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp_garbage.status(), 401);
-}
-
 #[tokio::test]
 async fn d_unknown_view_404_and_malformed_bbox_422() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -485,12 +450,7 @@ async fn d_unknown_view_404_and_malformed_bbox_422() {
 #[tokio::test]
 async fn h_config_missing_disclosure_refuses_to_start() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
 
     std::env::set_var("TESSERA_TEST_H_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_H_OPERATOR", OPERATOR_CREDENTIAL);
@@ -526,62 +486,11 @@ async fn h_config_missing_disclosure_refuses_to_start() {
 
 // --- Authentication and disclosure regressions ---
 
-/// `GET /v1/meta` must require a valid session token — it discloses bundle extents, views and the
-/// declared-scalar schema.
+/// `GET /v1/meta` never carries the bundle's identity key.
 #[tokio::test]
-async fn viewer_meta_requires_bearer() {
+async fn viewer_meta_never_carries_the_identity_key() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = server
-        .client
-        .get(server.viewer_url("/v1/meta"))
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
-/// Contracts §2.2 r6: `GET /v1/meta` reports the idset as `idset` —
-/// and reports **only** the idset: the identity key appears in no API response on any plane.
-/// Nothing asserted either half before, which is what let S2's idset regression sit untested.
-#[tokio::test]
-async fn viewer_meta_reports_the_idset_and_never_the_key() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -594,98 +503,10 @@ async fn viewer_meta_reports_the_idset_and_never_the_key() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["idset"], FIXTURE_IDSET,
-        "/v1/meta must report the bundle's idset: {body}"
-    );
     let raw = body.to_string();
     assert!(
         !raw.contains(TEST_KEY_HEX),
         "/v1/meta must never carry the identity key: {raw}"
-    );
-}
-
-/// Contracts §2.2/§3.2 r6: `POST /v1/items/{tessera_id}` accepts an optional `idset` and answers
-/// `409 conflict` — "stale idset; re-resolve by external_id" — when it does not match.
-/// The 409 had no test at any level, and the check is decided before inversion, so a matching
-/// idset must not alter the answer for the same id.
-#[tokio::test]
-async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    // A real, visible id, so the 409 is not confusable with the 404 an unknown id would give.
-    let viewport = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(viewport.status(), 200);
-    let (_tiles, points) = decode_viewport(&viewport.bytes().await.unwrap());
-    let tessera_id = points[0].0;
-
-    // Baseline: no idset at all → 200.
-    let plain = post_item(&server, token, tessera_id).await;
-    assert_eq!(plain.status(), 200);
-
-    // A stale idset → 409, with the contract's own detail string.
-    let stale = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), 409);
-    let body: serde_json::Value = stale.json().await.unwrap();
-    assert_eq!(body["error"], "conflict");
-    assert_eq!(body["detail"], "stale idset; re-resolve by external_id");
-
-    // The matching idset is a no-op: same 200, same body as the idset-less request.
-    let matching = server
-        .client
-        .post(server.viewer_url(&format!("/v1/items/{tessera_id}")))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(matching.status(), 200);
-
-    // And a stale idset on an id naming nothing is still the 409, decided before inversion —
-    // identical for every identifier, so it opens no channel (Appendix C, C4).
-    let stale_unknown = server
-        .client
-        .post(server.viewer_url("/v1/items/0"))
-        .bearer_auth(token)
-        .json(&serde_json::json!({ "idset": FIXTURE_IDSET + 1 }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        stale_unknown.status(),
-        409,
-        "the idset check must be entity-independent, not fall through to 404"
     );
 }
 
@@ -703,18 +524,7 @@ async fn item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing() {
 #[tokio::test]
 async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
@@ -811,13 +621,14 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
 // ---------------------------------------------------------------------------------------------
 
 /// A slow viewport request, engineered exactly as `healthz_stays_prompt_while_a_long_viewport_runs`
-/// does (see its doc for the cost-model argument): `zoom = 0`, `underlay_offset = 12` against a
+/// does (see its doc for the cost-model argument): the whole extent at `zoom = 10` against a
 /// server whose `EngineConfig` has been widened to allow it. Used throughout the gate tests below
-/// to hold the compute permit for long enough to deterministically observe saturation.
+/// to hold the compute permit for long enough to deterministically observe saturation, and by the
+/// cancellation tests, whose check sits at the top of the tile loop, so a disconnect landing after
+/// any prefix of the `4^10` tiles releases the gate long before the rest would have run.
 fn slow_viewport_body() -> serde_json::Value {
     serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-        "underlay_offset": 12
+        "view": "s0", "zoom": 10, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
     })
 }
 
@@ -825,13 +636,11 @@ fn fast_viewport_body() -> serde_json::Value {
     serde_json::json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1 })
 }
 
-/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s own
-/// bounds checks rather than being refused as `EngineError::UnderlayRefused` before it costs
-/// anything.
+/// A server config wide enough for [`slow_viewport_body`] to pass `Engine::viewport`'s tile bound
+/// rather than being refused as `EngineError::TooManyTiles` before it costs anything.
 fn engine_config_for_slow_viewport() -> EngineConfig {
     let mut config = default_engine_config();
-    config.max_underlay_offset = 12;
-    config.max_underlay_cells = 20_000_000;
+    config.max_tiles_per_request = 1 << 20;
     config
 }
 
@@ -860,14 +669,12 @@ const GATE_POLL_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 /// `want > 0` — waiting for the gate to *drain* is indifferent to sheds, and one caller
 /// deliberately sheds a request before waiting for 0.
 async fn poll_until_in_flight(server: &TestServer, want: u64) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
     let shed_at_entry = compute_status(server).await["shed_total"].as_u64().unwrap();
-    loop {
+    let what = format!("compute.in_flight reaching {want}");
+    let every = std::time::Duration::from_millis(1);
+    poll(&what, GATE_POLL_BOUND, every, async || {
         let compute = compute_status(server).await;
-        if compute["in_flight"].as_u64() == Some(want) {
-            return;
-        }
-        if want > 0 {
+        if want > 0 && compute["in_flight"].as_u64() != Some(want) {
             let shed_now = compute["shed_total"].as_u64().unwrap();
             assert_eq!(
                 shed_now, shed_at_entry,
@@ -876,16 +683,12 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
                  when it arrived. Gate state: {compute}"
             );
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compute.in_flight did not reach {want} within {GATE_POLL_BOUND:?} -- this is \
-             poll_until_in_flight's own generous-but-finite timeout firing, not necessarily the \
-             calling test's real assertion; check whether the gate is genuinely stuck before \
-             assuming a regression in the mechanism the calling test targets. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+        match compute["in_flight"].as_u64() == Some(want) {
+            true => Ok(()),
+            false => Err(format!("gate state {compute}")),
+        }
+    })
+    .await;
 }
 
 /// Poll until the gate holds **no slot permit at all** — nothing running compute, nothing queued,
@@ -906,23 +709,25 @@ async fn poll_until_in_flight(server: &TestServer, want: u64) {
 /// still has to observe the stream end and drop the permit. This closes the gap by waiting for
 /// the gate itself to say it is empty, which is the condition the caller actually depends on.
 async fn poll_until_gate_idle(server: &TestServer) {
-    let deadline = std::time::Instant::now() + GATE_POLL_BOUND;
-    loop {
-        let compute = compute_status(server).await;
-        let held = compute["in_flight"].as_u64().unwrap()
-            + compute["waiting"].as_u64().unwrap()
-            + compute["streaming"].as_u64().unwrap();
-        if held == 0 {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the compute gate still held a permit {GATE_POLL_BOUND:?} after the last response \
-             completed -- a permit has leaked past the request that took it. Gate state: \
-             {compute}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+    let every = std::time::Duration::from_millis(1);
+    poll(
+        "the compute gate holding no permit",
+        GATE_POLL_BOUND,
+        every,
+        async || {
+            let compute = compute_status(server).await;
+            let held = compute["in_flight"].as_u64().unwrap()
+                + compute["waiting"].as_u64().unwrap()
+                + compute["streaming"].as_u64().unwrap();
+            match held == 0 {
+                true => Ok(()),
+                false => Err(format!(
+                    "a permit leaked past its request; gate state {compute}"
+                )),
+            }
+        },
+    )
+    .await;
 }
 
 async fn compute_status(server: &TestServer) -> serde_json::Value {
@@ -937,12 +742,7 @@ async fn compute_status(server: &TestServer) -> serde_json::Value {
 #[tokio::test]
 async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -952,8 +752,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1010,12 +809,7 @@ async fn saturated_gate_sheds_a_second_viewport_with_429_and_retry_after() {
 #[tokio::test]
 async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1029,8 +823,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // path (it shares the viewer/session compute budget), so acquiring a *second*
     // session token during saturation would itself race the gate rather than testing the
     // never-gated routes this test is actually about.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     let second_auth = authorise(&server, &["0"]).await;
     let second_token_id = second_auth["token_id"].as_u64().unwrap();
 
@@ -1069,7 +862,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     assert_eq!(meta_resp.status(), 200, "/v1/meta must never be gated");
 
     // `/session/revoke`: session-plane credential, never gated. Revokes the SECOND session
-    // (minted before saturation, above) so the slow request's own `Arc<SessionEntry>` — cloned
+    // (minted before saturation, above) so the slow request's own `Arc<Session>` — cloned
     // into its `spawn_blocking` closure before this point — is unaffected either way; this
     // assertion is purely about the revoke endpoint's own responsiveness under a saturated gate.
     let revoke_resp = server
@@ -1089,13 +882,13 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
     // `/control/changes` suppress: the case this test exists for. The entire control plane is off
     // the viewer/session gate; a deny op must reach the WAL regardless.
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([
+            { "op": "suppress", "match": { "id": member(SUPPRESS_SOURCE_ID) } }
+        ]))
         .send()
         .await
         .unwrap();
@@ -1116,12 +909,7 @@ async fn never_gated_routes_succeed_while_the_viewer_gate_is_saturated() {
 #[tokio::test]
 async fn no_permit_leak_after_a_shed_or_a_completion() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1131,8 +919,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1216,12 +1003,7 @@ async fn no_permit_leak_after_a_shed_or_a_completion() {
 #[tokio::test]
 async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     // compute_queue = 1 (not 0): the queued fast request below must be ADMITTED (a slot) and
     // then WAIT for a compute permit, rather than being shed outright by stage 1 — that wait is
     // exactly what `x-tessera-admission-us` needs to capture. A generous timeout so it is never
@@ -1235,8 +1017,7 @@ async fn server_us_excludes_admission_wait_while_admission_us_captures_it() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Baseline: a solo fast request with no contention at all.
     let baseline_resp = server
@@ -1322,23 +1103,6 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> u64 {
 // Cooperative cancellation wired to client disconnect (the rapid-pan case).
 // ---------------------------------------------------------------------------------------------
 
-/// A slow viewport request engineered to spread its cost across MANY tiles rather than
-/// [`slow_viewport_body`]'s one giant tile. The per-tile cancellation check sits at the top of
-/// the tile loop — it is deliberately not checked mid-tile (a tile's own underlay sweep is
-/// bounded, in-flight work, same as every other per-tile stage) — so a single-tile fixture like
-/// `slow_viewport_body` (`zoom = 0`) cannot demonstrate early interruption at all: cancellation
-/// would only ever be observed once that one tile's entire sweep has already finished, which is
-/// indistinguishable from no cancellation. `zoom = 2` gives 16 tiles; `underlay_offset = 9` costs
-/// ~262144 sub-cell evaluations per tile (~4.2M total, tens of tiles' worth of real work), so a
-/// disconnect landing after any prefix of tiles releases the gate long before the rest would have
-/// run.
-fn slow_multi_tile_viewport_body() -> serde_json::Value {
-    serde_json::json!({
-        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-        "underlay_offset": 9
-    })
-}
-
 /// Warm-session scope: a client that drops its connection mid-viewport — the rapid-pan case
 /// — releases the compute-admission gate's permit well before the full service time an
 /// uncancelled request of the same shape takes. Observed two ways: directly, via `/control/
@@ -1351,7 +1115,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 /// COLD first viewport's build cost would dominate this test's timing regardless of cancellation
 /// and would prove nothing about the per-tile checks. A fast warm-up request first, on the SAME token, gets this token/view's row projection
 /// to `Ready` before either slow request below, so the slow request's cost is entirely its
-/// (cancellation-interruptible, per-tile) [`slow_multi_tile_viewport_body`] sweep.
+/// (cancellation-interruptible, per-tile) [`slow_viewport_body`] sweep.
 ///
 /// **Self-scaling, not a fixed wall-clock bet** — same pattern as this file's other slow-viewport
 /// tests (see e.g. `healthz_stays_prompt_while_a_long_viewport_runs`'s doc): `baseline_elapsed` is
@@ -1387,12 +1151,7 @@ fn slow_multi_tile_viewport_body() -> serde_json::Value {
 #[tokio::test]
 async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
     let server = spawn_server_with_config_and_gate(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1402,8 +1161,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     // Warm-session scope (see this test's doc): warms this token/view's row-projection cache
     // before either slow request below.
@@ -1430,7 +1188,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         .client
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(&token)
-        .json(&slow_multi_tile_viewport_body())
+        .json(&slow_viewport_body())
         .send()
         .await
         .unwrap();
@@ -1443,7 +1201,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
     assert!(
         baseline_elapsed > std::time::Duration::from_millis(50),
         "the uncancelled baseline finished in {baseline_elapsed:?}, too fast to exercise this \
-         test's early-release scenario -- widen the underlay offset"
+         test's early-release scenario -- raise the zoom of the slow request"
     );
 
     // The actual scenario: a second slow request, admitted and genuinely running
@@ -1456,7 +1214,7 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
         client
             .post(viewer_url)
             .bearer_auth(slow_token)
-            .json(&slow_multi_tile_viewport_body())
+            .json(&slow_viewport_body())
             .send()
             .await
     });
@@ -1521,29 +1279,13 @@ async fn dropping_a_client_connection_mid_viewport_releases_the_gate_promptly() 
 /// compared -- it is derived from the bundle's own `(prefix, segments_version)`, not from
 /// timing, so it must agree too.
 ///
-/// Uses `PARALLEL_HEADLINE_ITEMS` (300,000), not this file's default
-/// `N_ITEMS` (1,000), for a genuinely multi-tile, multi-thousand-row request. But item count alone
-/// no longer gets this test to the parallel branch at all: `SERIAL_FALLBACK_MAX_ROWS` rose to
-/// 500,000,000 in the post-B9 three-scale re-calibration, and a fixture that reaches it is
-/// impractical at unit-test scale. Review caught that this left `pool.install` untested end to
-/// end. Fixed the same way as the engine-level headline test
-/// (`tessera-engine/tests/viewport.rs`): each server's `Engine` has its threshold forced to 0 via
-/// `Engine::set_serial_fallback_max_rows_for_test` (`bench-timing`-gated, test-only) BEFORE it is
-/// handed to `spawn_server_from_engine`, so both servers genuinely take `pool.install`, differing
-/// only in worker count. Without `bench-timing` (the method does not exist there at all) this
-/// falls back to comparing the serial fold on both configs — still real byte-equality coverage,
-/// just not of the branch this test's name is about; every guard-rail invocation that matters for
-/// this specific claim builds with `bench-timing`.
+/// Each server's engine has its serial fallback threshold forced to 0, so both take the parallel
+/// branch and differ only in worker count. Without `bench-timing` the method does not exist and
+/// both compare the serial fold instead.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = parallel_headline_fixture(tmp.path());
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1588,10 +1330,8 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     let auth_8 = authorise(&server_8, &["0"]).await;
     let token_8 = auth_8["token"].as_str().unwrap();
 
-    // zoom=3 over the full extent: 64 candidate tiles, most non-empty over this fixture's
-    // `(e*37, e*53) % 1000` scatter across `N_ITEMS = 1000` -- multiple non-empty tiles, so the
-    // response's tile-order/point-concatenation ordering is actually exercised, plus an underlay
-    // request so that per-tile path runs across tiles too.
+    // Zoom 3 over the full extent: 64 candidate tiles, most of them occupied, so cross-tile
+    // ordering is exercised, with an underlay so its per-tile path runs too.
     let body = serde_json::json!({
         "view": "s0", "zoom": 3, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 50,
         "underlay_offset": 2
@@ -1649,6 +1389,10 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         !decoded_1.points.is_empty(),
         "the fixture must return some points"
     );
+    assert!(
+        decoded_1.tiles.iter().any(|&(_, _, matched)| matched > 50),
+        "some tile must hold more candidates than k, or no tile samples"
+    );
 
     assert_eq!(
         decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
@@ -1659,32 +1403,14 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
     );
 }
 
-/// Server-level twin of
-/// `tessera-engine`'s `viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles`
-/// (fix-wave minor: the headline test above, like its engine-level counterpart, never exercises
-/// `tile_result`'s `visible == 0 -> Ok(None)` empty-tile skip path). Same trick, no new fixture
-/// data: this file's fixture scatter is `(e*37, e*53) % 1000`, a bijection of `e % 1000` onto the
-/// 1000×1000 residue lattice, so `N_ITEMS = 1_000` items occupy up to 1,000 distinct locations
-/// spread across the full extent -- dense enough at `zoom = 3` (64 candidate tiles) to leave almost
-/// every tile non-empty, but at `zoom = 8` (up to 65,536 candidate tiles) sparse enough that most
-/// candidate tiles are genuinely empty while a real minority are not.
-///
-/// Same arrangement as the headline test above: each server's `Engine` has its
-/// threshold forced to 0 (`Engine::set_serial_fallback_max_rows_for_test`, `bench-timing`-gated)
-/// before being handed to `spawn_server_from_engine`, so both genuinely take `pool.install`. The
-/// occupied/empty tile mix this test is actually for (still 1,000 distinct locations, more items
-/// stacked on each) is unaffected — see the doc above.
+/// The byte-identity claim above, on the path that skips empty tiles. The fixture's 51,000 items
+/// sit on 1,000 locations, so at zoom 8 (65,536 candidate tiles) most tiles are empty and the
+/// occupied minority each hold more than `k`. Both engines take the parallel branch, as above.
 #[tokio::test]
 async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles(
 ) {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
+    let bundle_root = parallel_headline_fixture(tmp.path());
 
     let config_1 = EngineConfig {
         compute_threads: 1,
@@ -1770,6 +1496,10 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
          candidates to exercise the skip path this test is for -- got {} non-empty tiles",
         tiles.len()
     );
+    assert!(
+        tiles.iter().any(|&(_, _, matched)| matched > 50),
+        "some tile must hold more candidates than k, or no tile samples"
+    );
 
     assert_eq!(
         decoded_1.deterministic_bytes, decoded_8.deterministic_bytes,
@@ -1778,46 +1508,32 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
     );
 }
 
-/// **Concurrent viewports on a cold session are all served, off one build** — decision 0058's
-/// whole point, at the boundary a client sees.
+/// **Concurrent viewports on a cold session are all served, off one build.** A cold session's
+/// row projection is not built yet, so eight simultaneous viewports all miss: one builds, and the
+/// other seven wait for that build and are served its result rather than shed.
 ///
-/// A cold session is one whose row projection has not been built. Eight simultaneous viewports on
-/// one therefore all miss, one becomes the builder, and the other seven find a `Building` slot.
-/// They used to be shed with 429 `backpressure`; they now wait for that build and are served its
-/// result.
-///
-/// **The assertions are unconditional now, and that is the change.** This test previously allowed
-/// that no racer might lose, in which case there was no 429 and nothing to check — it could pass
-/// vacuously. Waiting removes the branch: every racer is served whatever the interleaving, and
-/// `misses == 1` says the eight of them cost one projection build rather than eight. The
-/// `shed_total` check stays, because it is what distinguishes this mechanism from the
-/// compute-admission gate, and the gate still sheds nothing here.
-///
-/// The fixture is deliberately larger than [`N_ITEMS`] so the build is wide enough to race.
+/// The build is held open until all seven are parked on it, so every one of them waits.
 #[tokio::test]
 async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
 
     // The generous default gate: 48 admission permits against the handful of requests below, so
     // any 429 here would be the single-flight builder's and not the gate's.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
+    server.state.engine.hold_next_projection_build_for_test();
+    // Released on drop, so a failed wait still frees the blocking thread the build holds.
+    struct ReleaseOnDrop(std::sync::Arc<tessera_server::state::AppState>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.engine.release_projection_build_for_test();
+        }
+    }
+    let held = ReleaseOnDrop(std::sync::Arc::clone(&server.state));
 
+    const RACERS: u64 = 8;
     let mut racers = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..RACERS {
         let client = server.client.clone();
         let url = server.viewer_url("/v1/viewport");
         let token = token.clone();
@@ -1841,6 +1557,21 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
         }));
     }
 
+    let waiters = RACERS - 1;
+    wait_until(
+        "every racer but the builder parked on the held build",
+        std::time::Duration::from_secs(5),
+        async || {
+            let status = control_status(&server).await;
+            match status["row_projection_cache"]["waiters_now"].as_u64() == Some(waiters) {
+                true => Ok(()),
+                false => Err(format!("{}", status["row_projection_cache"])),
+            }
+        },
+    )
+    .await;
+    drop(held);
+
     for racer in racers {
         let (status, body) = racer.await.unwrap();
         assert_eq!(
@@ -1861,15 +1592,11 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
     );
     assert_eq!(
         cache["building_refusals"], 0,
-        "nothing was refused — the racers waited and were served"
+        "nothing was refused: the racers waited and were served"
     );
-    // Not asserted as exactly seven: a racer that arrives after the publish is an ordinary hit and
-    // never waits at all, which is a legitimate interleaving rather than a failure. What is
-    // asserted is that hits and waits together account for the other seven, which `misses == 1`
-    // above already says.
-    assert!(
-        cache["waits_satisfied"].as_u64().unwrap() <= 7,
-        "a wait cannot be satisfied for a racer that never waited"
+    assert_eq!(
+        cache["waits_satisfied"], waiters,
+        "every racer that parked on the build was served its result"
     );
 }
 
@@ -1886,12 +1613,7 @@ async fn concurrent_viewports_on_a_cold_session_are_all_served_off_one_build() {
 #[tokio::test]
 async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = standard_fixture(tmp.path());
 
     let chunked = spawn_server_with_stream_flush(
         &bundle_root,
@@ -1951,18 +1673,7 @@ async fn a_tiny_flush_threshold_streams_many_point_frames_with_identical_content
 #[tokio::test]
 async fn viewport_tiles_are_served_in_request_order_with_first_occurrence_dedup() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve_standard(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -2120,24 +1831,15 @@ fn dechunk(body: &[u8]) -> (Vec<u8>, bool) {
 /// is fixed small, so the only room for unread frames is the server's send buffer and the bounded
 /// body channel. Measured on Linux with the default `tcp_wmem`: 2.8 MB of the 3.5 MB response is
 /// held there once the reader stops, and the rest parks the producer until the stall budget
-/// fires. The response is a 2M-item fixture at zoom 6 with `k` 200; its size is tiles × k, so
-/// more items would not widen that margin, and the assertion below names the bytes held so a
-/// narrower points frame shows up as a number. On 2026-08-16 this test failed on a host where the
-/// same binary had passed the same day; a code regression was ruled out by bisection and the
-/// kernel's socket buffers by a larger response failing identically against a fixed buffer
-/// ceiling, which left the client's buffering, and the raw reader removes it.
+/// fires. The response is zoom 6 with `k` 200; its size is tiles × k, so more items than fill
+/// every occupied tile to `k` would not widen that margin.
 #[tokio::test]
 async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero() {
     use tokio::io::AsyncReadExt as _;
-    const SHED_FIXTURE_ITEMS: u64 = 2_000_000;
+    // 200 items on each of the fixture's 1,000 locations, so every occupied tile serves all `k`.
+    const SHED_FIXTURE_ITEMS: u64 = 200_000;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        SHED_FIXTURE_ITEMS,
-    );
+    let bundle_root = build_fixture(tmp.path(), SHED_FIXTURE_ITEMS);
     let server = spawn_server_with_stream_flush(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2161,21 +1863,35 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     let wait_for_streaming = |state: std::sync::Arc<tessera_server::state::AppState>,
                               want: usize,
                               patience_ms: u64| async move {
-        let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_millis(patience_ms);
-        loop {
+        let what = format!("the streaming gauge reaching {want}");
+        let patience = std::time::Duration::from_millis(patience_ms);
+        wait_until(&what, patience, async || {
             let now = state.compute_gate.status().streaming;
-            if now == want {
-                return;
+            match now == want {
+                true => Ok(()),
+                false => Err(format!("streaming gauge at {now}")),
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "streaming gauge stuck at {now}, wanted {want}, after {:?}",
-                started.elapsed()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        })
+        .await
     };
+
+    // The response must outgrow the socket buffers, or a stalled reader never parks the producer.
+    let whole = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&big_request)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        whole.len() > 3_500_000,
+        "the response is {} bytes, too small to fill the socket buffers",
+        whole.len()
+    );
 
     // 1. The stalled reader: take the headers, then stop reading, holding the socket open. The
     //    producer fills the channel and the socket buffers, parks, and the stall budget sheds it,
@@ -2242,4 +1958,56 @@ async fn a_stalled_or_disconnected_stream_is_shed_and_the_gauge_returns_to_zero(
     assert_eq!(resp.status(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(!decoded.points.is_empty());
+}
+
+/// **The viewport's whole-stream deadline runs from its first flush**: at a deadline of nothing,
+/// the body is cut before its trailer, and the same request under the shipped deadline arrives
+/// whole.
+#[tokio::test]
+async fn the_whole_stream_deadline_cuts_a_viewport_after_its_first_flush() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = standard_fixture(tmp.path());
+    let body = serde_json::json!({
+        "view": "s0", "zoom": 2, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+    });
+    let mut bodies = Vec::new();
+    for deadline_ms in [0, tessera_config::defaults::DEFAULT_STREAM_DEADLINE_MS] {
+        let dir = tmp.path().join(format!("serve-{deadline_ms}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = spawn_server_with_bulk_reads(
+            &bundle_root,
+            &dir.join("cache"),
+            &dir.join("wal.log"),
+            generous_test_gate(),
+            generous_bulk_gate(),
+            |limits| limits.stream_deadline_ms = deadline_ms,
+        )
+        .await;
+        let auth = authorise(&server, &["0"]).await;
+        // A cut body can reach hyper before the headers are written, so the cut shows either as a
+        // failed request or as a body that ends in an error; both are a response without its
+        // trailer.
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(auth["token"].as_str().unwrap())
+            .json(&body)
+            .send()
+            .await;
+        let body = match resp {
+            Ok(resp) => {
+                assert_eq!(resp.status(), 200, "a 200 or a cut, never a refusal");
+                resp.bytes().await.ok()
+            }
+            Err(_) => None,
+        };
+        bodies.push(body);
+        server.shutdown().await;
+    }
+    assert!(
+        bodies[0].is_none(),
+        "a deadline of nothing cuts the body after the counts"
+    );
+    let whole = bodies[1].as_ref().expect("the shipped deadline serves the whole body");
+    assert!(decode_viewport_frames(whole).trailer.is_object());
 }

@@ -1,4 +1,4 @@
-"""The local instance: the deployment file, its secrets, and the `tessera serve` child (§7).
+"""The local server: the deployment file, its secrets, and the `tessera serve` child process.
 
 `commit()` starts `tessera serve` as a child of the kernel over the directory's `tessera.toml`.
 The three planes are on loopback at port 0, so the kernel picks no ports and the child says which
@@ -10,22 +10,29 @@ one's, and the notebook would then hold a URL answering for somebody else's serv
 announces nothing is a refusal carrying what the child wrote.
 
 The child is killed by its pid, at `close()` and at interpreter exit, never by process name: a
-kill by name reaches every other server on the machine.
+kill by name reaches every other server on the machine. A temporary database's directory is
+removed at the same two points, after its child has stopped.
 """
 
 from __future__ import annotations
 
 import atexit
+import importlib
 import json
 import os
 import queue
 import secrets
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
+from importlib.machinery import ExtensionFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from types import ModuleType
 
 from ._refusal import Refusal
 from ._toml import dumps
@@ -45,9 +52,10 @@ def serve_timeout() -> float:
 #: The deployment's token lifetime, which `[disclosure]` requires and has no backstop default.
 TOKEN_MAX_LIFETIME = 3600
 
-IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
-
 _running: dict[int, subprocess.Popen] = {}
+
+#: The directories of the temporary databases this process made and has not closed.
+temporary: set[Path] = set()
 
 
 class ServeRefused(Refusal):
@@ -56,7 +64,12 @@ class ServeRefused(Refusal):
 
 @dataclass
 class Listening:
-    """The three planes' bound addresses, as the child announced them."""
+    """The addresses a database's server listens on, each as `host:port`.
+
+    - `viewer`: the viewer plane, where readers read.
+    - `session`: the session plane, where tokens are made and revoked.
+    - `control`: the control plane, where the operator writes.
+    """
 
     viewer: str
     session: str
@@ -64,15 +77,14 @@ class Listening:
 
 
 def write_deployment(directory: Path) -> Path:
-    """`tessera.toml`, as `tessera build` and `tessera serve` both read it (SA §7).
+    """Write `tessera.toml`, which `tessera build` and `tessera serve` both read.
 
     Every path in it resolves against this file's own directory, so the database directory serves
     from wherever it is copied to.
 
-    `serve.cors_loopback` admits a page served from a loopback address on the viewer plane (§7).
-    A notebook page's origin is the front end's, unknown at start and not enumerable for a
-    webview, so it is what a widget in a notebook needs; the three planes bind loopback, so the
-    pages it admits are pages on this machine.
+    `serve.cors_loopback` lets a page served from this machine read from the server, which is
+    what a notebook's map needs, since its page's address is not known in advance. The server
+    listens on this machine only.
     """
     serve = {
         "viewer": "127.0.0.1:0",
@@ -89,7 +101,6 @@ def write_deployment(directory: Path) -> Path:
             "wal": ".tessera/wal.log",
         },
         "build": {"schema": "schema.toml"},
-        "identity": {"env": IDENTITY_ENV},
         "plugin": {"module": "builtin:passthrough"},
         "disclosure": {"token_max_lifetime": TOKEN_MAX_LIFETIME},
         "serve": serve,
@@ -102,52 +113,42 @@ def write_deployment(directory: Path) -> Path:
     return path
 
 
-def secrets_for(directory: Path) -> tuple[str, str]:
-    """The session credential, the operator credential and the identity key, once per database.
+def secrets_for(directory: Path) -> None:
+    """Write the session credential and the operator credential, once per database.
 
-    All three are written under `.tessera/`, which is owner-only, and each file is created
-    owner-only rather than created and then narrowed: between a write and a `chmod` the secret is
-    readable by anyone on the machine. The identity key is named by `[identity].env` rather than
-    by a path, so it is passed to the child in its environment; the file is where this database
-    keeps it between processes. The operator credential is generated beside the session one
-    because the deployment file requires both.
+    Both are written under `.tessera/`, which is owner-only, and each file is created owner-only
+    rather than created and then narrowed: between a write and a `chmod` the secret is readable by
+    anyone on the machine. The operator credential is generated beside the session one because the
+    deployment file requires both.
     """
     private = directory / ".tessera"
     private.mkdir(parents=True, exist_ok=True)
     private.chmod(0o700)
-    session = _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
+    _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
-    identity = _secret(private / "identity.key", lambda: secrets.token_hex(16))
-    _secret(private / "identity.toml", lambda: f'[identity]\nkey = "{identity}"\n')
-    return session, identity
 
 
-def _secret(path: Path, mint) -> str:
+def _secret(path: Path, mint) -> None:
     if path.exists():
-        return path.read_text(encoding="utf-8").strip()
+        return
     value = mint()
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as file:
         file.write(value if value.endswith("\n") else value + "\n")
-    return value.strip()
 
 
 def start(
     binary: str,
     deployment: Path,
-    identity_key: str,
     timeout: float | None = None,
 ) -> tuple[subprocess.Popen, Listening]:
     """Start `tessera serve` and read the addresses it bound."""
-    environment = dict(os.environ)
-    environment[IDENTITY_ENV] = identity_key
     child = subprocess.Popen(
         [binary, "serve", "--deployment", str(deployment)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
-        env=environment,
         cwd=str(Path(deployment).parent),
     )
     _running[child.pid] = child
@@ -162,7 +163,7 @@ def start(
 
 
 def read_announce(stdout, timeout: float, stderr_text) -> Listening:
-    """Read the child's stdout until one line is the announce line (§11.2 A).
+    """Read the child's output until the line announcing its addresses.
 
     The line is JSON carrying `event: "listening"` and the three planes' bound addresses. Lines
     that are not that are skipped, the child's own logging having shared the stream before now.
@@ -276,13 +277,17 @@ def stop(child: subprocess.Popen, timeout: float = 5.0) -> None:
 def _stop_everything() -> None:
     for child in list(_running.values()):
         stop(child)
+    for directory in list(temporary):
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def find_binary() -> tuple[str, str]:
-    """The `tessera` binary and where it came from (§7).
+    """The `tessera` binary and where it was found.
 
-    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
-    directory, release before debug. At release a platform wheel carries it (§11.2 E).
+    `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else the `tesseradb-native`
+    platform wheel, else a checkout's target directory, release before debug. An explicit
+    override and a developer's own build both win over the wheel; the wheel is what makes a
+    fresh `pip install tesseradb` work.
     """
     named = os.environ.get("TESSERA_BIN")
     if named:
@@ -294,12 +299,46 @@ def find_binary() -> tuple[str, str]:
     found = which("tessera")
     if found:
         return found, "PATH"
+    try:
+        from tesseradb_native import binary_path
+    except ImportError:
+        pass
+    else:
+        return binary_path(), "the tesseradb-native wheel"
     for parent in Path(__file__).resolve().parents:
         for profile in ("release", "debug"):
             candidate = parent / "target" / profile / "tessera"
             if candidate.exists():
                 return str(candidate), f"this checkout's target/{profile}"
     raise Refusal(
-        "no `tessera` binary at TESSERA_BIN, on PATH, or in a checkout's target directory. "
-        "Build it with `cargo build --release -p tessera-cli`"
+        "no `tessera` binary at TESSERA_BIN, on PATH, in the tesseradb-native wheel, or in a "
+        "checkout's target directory. Install it with `pip install tesseradb-native`, or build "
+        "it with `cargo build --release -p tessera-cli`"
     )
+
+
+def find_extension() -> ModuleType | None:
+    """The `_tessera` extension module, or `None` where nothing carries it.
+
+    The same order as `find_binary`: whatever is already importable as `_tessera`, then the
+    `tesseradb-native` wheel, then a checkout's target directory, where cargo names it
+    `lib_tessera.so`, which Python will not import by name, so it is loaded by path.
+    """
+    for name in ("_tessera", "tesseradb_native._tessera"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            pass
+    for parent in Path(__file__).resolve().parents:
+        for profile in ("release", "debug"):
+            for built in ("lib_tessera.so", "lib_tessera.dylib", "_tessera.dll"):
+                candidate = parent / "target" / profile / built
+                if not candidate.exists():
+                    continue
+                loader = ExtensionFileLoader("_tessera", str(candidate))
+                spec = spec_from_loader("_tessera", loader)
+                module = module_from_spec(spec)
+                sys.modules["_tessera"] = module
+                loader.exec_module(module)
+                return module
+    return None

@@ -24,8 +24,7 @@ topics          = "topics-openalex.parquet"
 topics_members  = "topics-openalex-members.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "entity_id"
+source     = "points"
 
 # ---------------------------------------------------------------------------------------------
 # **One view.** Stella V5 embeds a title and an abstract as one general text encoding, so the map
@@ -94,6 +93,14 @@ source     = "type"
 # prose uncompressed across 10^8 works, indexed as text, which is what puts the bundle past this
 # box's memory. Nothing here is trimmed to make it fit (owner ruling, 2026-09-02).
 # ---------------------------------------------------------------------------------------------
+
+# The row number `prepare.py` gives each work. Every file names a work by it: the points file
+# as `entity_id`, the member files as `entity`.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 # `i32` rather than `u16`: OpenAlex writes a null year and, rarely, one outside a plausible range,
 # and a signed 32-bit column carries both without the rung deciding what a year may be. Indexed as
@@ -181,6 +188,7 @@ require_member_visibility = { count = 50 }
 
   [layer.members]
   source = "kmeans_members"
+  fields = { id = "entity" }
 
   [layer.content]
   computed = ["centroid", "box", "hull"]

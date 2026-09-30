@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::overlay::Replay;
 use tessera_lifecycle::wal::{
     ChangeOp, OverlaySnapshotEntry, Wal, WalError, WalRecord, HEADER_LEN,
 };
@@ -26,10 +26,9 @@ fn sidecar(base: &Path, n: u64) -> PathBuf {
 }
 
 fn change(tag: u8) -> WalRecord {
-    WalRecord::ChangeByEntity {
-        entity_id: EntityId::new(tag as u64),
-        op: ChangeOp::Suppress,
-    }
+    WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(tag as u64), ChangeOp::Suppress)],
+        }
 }
 
 fn suppression_of(entity: u64) -> OverlaySnapshotEntry {
@@ -42,7 +41,7 @@ fn suppression_of(entity: u64) -> OverlaySnapshotEntry {
 /// A sequence with `files` members, each holding one change record, rotated between them and never
 /// reclaiming. Returns the handle and the position each member ends at.
 fn wal_with_files(base: &Path, files: u64) -> (Wal, Vec<u64>) {
-    let (mut wal, _) = Wal::open(base).unwrap();
+    let mut wal = Wal::open(base).unwrap();
     let mut ends = Vec::new();
     for i in 0..files {
         wal.append(&change(i as u8)).unwrap();
@@ -61,7 +60,8 @@ fn wal_with_files(base: &Path, files: u64) -> (Wal, Vec<u64>) {
 fn a_fresh_log_is_a_one_member_sequence() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
-    let (wal, records) = Wal::open(&base).unwrap();
+    let wal = Wal::open(&base).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
 
     assert!(records.is_empty());
     assert_eq!(wal.members(), vec![1]);
@@ -76,7 +76,7 @@ fn a_fresh_log_is_a_one_member_sequence() {
 fn positions_continue_across_a_rotation() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
-    let (mut wal, _) = Wal::open(&base).unwrap();
+    let mut wal = Wal::open(&base).unwrap();
 
     assert_eq!(wal.position(), 0);
     wal.append(&change(0)).unwrap();
@@ -157,10 +157,9 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
 
     let entity = EntityId::new(42);
     {
-        let (mut wal, _) = Wal::open(&base).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: entity,
-            op: ChangeOp::Suppress,
+        let mut wal = Wal::open(&base).unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -173,16 +172,16 @@ fn a_suppression_survives_the_reclamation_of_the_record_that_carried_it() {
         assert_eq!(deleted, vec![1], "the record's own member must actually go");
     }
 
-    let (_wal, records) = Wal::open(&base).unwrap();
-    let (overlay, _buffer, _established, _resolver) = replay(
-        &records,
-        &dict,
-        Overlay::new(),
-        &tessera_lifecycle::owner_id_only,
-    );
+    let wal = Wal::open(&base).unwrap();
+    let mut replay = Replay::new(&dict, Overlay::new(), &tessera_lifecycle::owner_id_only);
+    for record in wal.records() {
+        let (position, record) = record.unwrap();
+        replay.apply(&record, position, |_, _| false);
+    }
+    let (overlay, _buffer, _resolver) = replay.finish();
     assert!(
         overlay.is_suppressed(entity),
-        "a suppression retires only on unsuppress — reclaiming its record must not retire it"
+        "a live item's suppression retires only on unsuppress; reclaiming its record does not"
     );
 }
 
@@ -194,7 +193,7 @@ fn recovery_walks_every_surviving_member_in_order() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
     {
-        let (mut wal, _) = Wal::open(&base).unwrap();
+        let mut wal = Wal::open(&base).unwrap();
         wal.append(&change(0)).unwrap();
         wal.fsync().unwrap();
         // Nothing reclaimed, so member 1 survives with its record above nothing at all...
@@ -203,7 +202,8 @@ fn recovery_walks_every_surviving_member_in_order() {
         wal.fsync().unwrap();
     }
 
-    let (wal, records) = Wal::open(&base).unwrap();
+    let wal = Wal::open(&base).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(wal.members(), vec![1, 2]);
     assert_eq!(
         records,
@@ -288,7 +288,8 @@ fn a_zero_length_newest_member_is_re_headered_rather_than_refused() {
 
     std::fs::write(member(&base, 3), b"").unwrap();
 
-    let (wal, records) = Wal::open(&base).unwrap();
+    let wal = Wal::open(&base).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(wal.members(), vec![1, 2, 3]);
     assert_eq!(
         records.len(),
@@ -317,7 +318,7 @@ fn a_poisoned_handle_rotates_nothing() {
 
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
-    let (mut wal, _) = Wal::open(&base).unwrap();
+    let mut wal = Wal::open(&base).unwrap();
     wal.append(&change(0)).unwrap();
     wal.fsync().unwrap();
 
@@ -352,7 +353,7 @@ unsafe fn libc_geteuid() -> u32 {
 fn the_first_member_starts_its_records_at_the_header() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("wal.log");
-    let (mut wal, _) = Wal::open(&base).unwrap();
+    let mut wal = Wal::open(&base).unwrap();
     wal.append(&change(0)).unwrap();
     let end = wal.fsync().unwrap();
     assert_eq!(

@@ -4,10 +4,10 @@
 //! to projections: a byte bound, LRU eviction, and removal of entries whose key no request can
 //! produce.
 //!
-//! The single-flight state machine, the four eviction rules and the counted choke point all live in
-//! [`crate::single_flight`] and are argued there. What lives *here* is what is specific to
-//! projections: the key, the weight function, the two pruners' safety argument, and the arithmetic
-//! an operator needs to size a box.
+//! The single-flight state machine, the eviction rules and the counted choke point live in
+//! `tessera-cache` and are argued there. What lives here is specific to projections: the key, the
+//! weight function, the two pruners' safety argument, and the arithmetic an operator needs to size
+//! a box.
 //!
 //! # What removal can and cannot do (I3's cache half)
 //!
@@ -17,7 +17,7 @@
 //! builds `RowProjection::new` over `ProjectionInputs` carrying the session's own frozen fragment,
 //! its satisfied terms and the *pinned* generation's postings, tiers, images and row space — all of
 //! which the key names or the request pins. The route that build takes is priced from those same
-//! inputs and every route returns the identical rows (`crate::compose::RowProjection::new`), so a
+//! inputs and every route returns the identical rows (`crate::projection::RowProjection::new`), so a
 //! miss that prices differently from the build before it still produces what was evicted.
 //! **There is no route by which a miss composes against a different mask than a hit**, which is the
 //! property `eviction_never_widens_a_mask` exists to keep true.
@@ -25,14 +25,14 @@
 use std::sync::Arc;
 
 use croaring::Portable;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::FrozenFragment;
 use tessera_types::TermId;
 
 use crate::cancel::CancelToken;
-use crate::compose::RowProjection;
-use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
+use crate::projection::RowProjection;
+use tessera_cache::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded};
 
 /// `(token_id, view, segments_version)` — the row-projection cache's key (shared-context
 /// constraint 8). `token_id` rather than the token string so the cache never has to hash or
@@ -64,7 +64,7 @@ use crate::single_flight::{CacheStats, CacheWeight, SingleFlightCache, WaitEnded
 ///    something worth carrying a disclosure hazard to avoid. The hazard did not shrink with the
 ///    cost, so the trade moved decisively one way.
 /// 2. **`segments_version` is globally unique within a process**, which is why
-///    [`RowProjectionCache::prune_generation`] may prune on it alone and ignore `Reclaimed::prefix`.
+///    [`RowProjectionCache::prune_generations_below`]'s depth test reads it alone.
 ///    `crate::pins::check_publishable` refuses any publication that does not strictly increase it,
 ///    and design §10.2 makes the prefix name *be* the segment-set version. Relax that guard and
 ///    this pruner starts removing the wrong generation's entries.
@@ -83,8 +83,8 @@ pub(crate) struct RowProjectionKey {
     pub view: String,
     /// The geometry generation the row space belongs to. A bundle swap changes it, and entries
     /// more than [`KEEP_SUPERSEDED_GENERATIONS`] behind become
-    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication; an *overlay*
-    /// swap must not (I11).
+    /// [`RowProjectionCache::prune_generations_below`]'s work at the next publication, which keeps
+    /// only a session's newest in the live prefix; an *overlay* swap must not (I11).
     pub segments_version: u64,
     /// The prefix that geometry belongs to — see fact 3 above for why this is here when
     /// `segments_version` already discriminates within a process.
@@ -94,14 +94,14 @@ pub(crate) struct RowProjectionKey {
 /// A losing arrival's outcome: another caller is already building this key, and this call did not
 /// wait for it. Carries nothing — the caller only needs to know to retry.
 ///
-/// Distinct from `single_flight::Building` so the wrapper's callers depend on this module's
-/// contract rather than on the generic cache's internals.
+/// Distinct from `tessera_cache::Building` so the wrapper's callers depend on this module's
+/// contract rather than on the generic cache's.
 #[derive(Debug)]
 pub(crate) struct CacheBusy;
 
 /// Why a waiting caller ([`RowProjectionCache::get_or_derive_waiting`]) gave up: the wait budget
-/// expired, or the client disconnected. Distinct from `single_flight::WaitEnded` for the reason
-/// [`CacheBusy`] is distinct from `single_flight::Building`.
+/// expired, or the client disconnected. Distinct from `tessera_cache::WaitEnded` for the reason
+/// [`CacheBusy`] is distinct from `tessera_cache::Building`.
 #[derive(Debug)]
 pub(crate) enum CacheWaitEnded {
     Budget,
@@ -132,27 +132,17 @@ pub(crate) enum Peek {
 /// unexpressible instead of forbidden.
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
-/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` and
-/// `auth_data_hash` are the [`tessera_authz::FragmentCache`] key's caller half; both are already
-/// held per session, both are per-token, and neither is a credential (the hash is a digest of one).
+/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` is
+/// what the [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
+/// credential, never the credential.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
     pub(crate) projection: Arc<RowProjection>,
     /// The credential's granted terms, sorted — the fragment cache's key component.
     pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
-    /// `sha256(auth_data)`, the fragment cache's caller obligation.
+    /// `sha256(auth_data)`, part of the mask identity.
     pub(crate) auth_data_hash: [u8; 32],
-    /// **The generation `satisfied_sorted` was resolved against** — carried so the background
-    /// refresh can discharge the other half of that obligation (#112).
-    ///
-    /// The refresh rebuilds a fragment from a term set frozen at some earlier authorise, so it must
-    /// name the generation that term set belongs to and never the one it happens to be running
-    /// against. Pairing the two wrongly poisons `FragmentCache`'s canonical-key memo for every
-    /// later authorise of the same credential — and this pass runs automatically after every
-    /// flush, for every resident session, which is what made the defect look like it had no
-    /// trigger.
-    pub(crate) satisfied_at: u64,
 }
 
 impl CacheWeight for SessionGeometry {
@@ -173,16 +163,15 @@ impl CacheWeight for RowProjection {
     /// ~2×), so the bound is approximate — but that caveat does not apply where it matters here.**
     /// At the ≥25%-coverage dense bound this cache is sized against (a *measured* 125.12 MB per
     /// entry at 10⁹), the mask is bitmap-container dominated and in-memory size equals serialised
-    /// size. The caveat is stated here, at the site that computes the number, because the same claim
-    /// is easy to reach for in `tessera-server::config` to justify a margin it does not explain.
+    /// size.
     ///
-    /// **A projection is run-optimised at construction** (`crate::compose::RowProjection::from_rows`),
+    /// **A projection is run-optimised at construction** (`crate::projection::RowProjection::from_rows`),
     /// so a grant covering runs of row space is charged the run containers it holds rather than the
     /// bitmap containers it would otherwise hold. That moves the charge down and never up — a
     /// container is converted only where the run form is smaller — so the 125.12 MB above stays an
     /// upper bound at that coverage, and an entry that runs well is charged what it costs.
     ///
-    /// The floor applied on top of this (`single_flight::PER_ENTRY_FLOOR_BYTES`) is what stops the
+    /// The floor applied on top of this (`tessera_cache::PER_ENTRY_FLOOR_BYTES`) is what stops the
     /// *opposite* error — a bound that charges a near-empty projection its true handful of bytes
     /// bounds no number of entries.
     fn cache_weight_bytes(&self) -> u64 {
@@ -191,7 +180,7 @@ impl CacheWeight for RowProjection {
 }
 
 /// Cached row-space projections, keyed `(token_id, view, segments_version)` — never recomputed on
-/// the per-viewport path (shared-context constraint 8; see `crate::compose::RowProjection`'s doc
+/// the per-viewport path (shared-context constraint 8; see `crate::projection::RowProjection`'s doc
 /// for the cost this avoids).
 ///
 /// # Sizing: what the bound bounds, and the number an operator actually needs
@@ -206,10 +195,7 @@ impl CacheWeight for RowProjection {
 ///
 /// At the *measured* 125.12 MB per entry at 10⁹ and the branch's 48-way admission width, that
 /// second term is ~6 GB — larger than some deployments' whole cache bound. **An operator sizing a
-/// box from the config key alone will under-provision.** Stated here rather than at the config site
-/// because this is where the second term's operand lives; `tessera-server`'s startup validation
-/// refuses a bound below `expected_concurrent_sessions × per_entry`, which is a floor on the first
-/// term and says nothing about the second.
+/// box from the config key alone will under-provision.**
 pub(crate) struct RowProjectionCache {
     inner: SingleFlightCache<RowProjectionKey, SessionGeometry>,
 }
@@ -264,8 +250,8 @@ impl RowProjectionCache {
     /// `RowSpace::project` would return over the whole space. Four premises hold it up, each a
     /// thing this design must maintain rather than happen to have (write-path §4.6):
     ///
-    /// 1. The flushed entity range is contiguous, disjoint from everything below, and entirely at
-    ///    or above the pre-flush watermark — I9's append-only allocation.
+    /// 1. No entity a flush gives a row holds one in the row space the projection covers: a new id
+    ///    lies above it, and an id a fold freed lost its rows at that fold.
     /// 2. A flush never rewrites the base `permutation.bin` or any earlier extent.
     /// 3. The session's `satisfied` set is fixed at authorise and never re-resolved, so the
     ///    fragment the projection is taken over is the same one throughout.
@@ -322,9 +308,9 @@ impl RowProjectionCache {
     /// and nothing else.
     pub(crate) fn peek(&self, key: &RowProjectionKey) -> Peek {
         match self.inner.peek(key) {
-            crate::single_flight::Peek::Ready(value) => Peek::Ready(value),
-            crate::single_flight::Peek::Building => Peek::Building,
-            crate::single_flight::Peek::Absent => Peek::Absent,
+            tessera_cache::Peek::Ready(value) => Peek::Ready(value),
+            tessera_cache::Peek::Building => Peek::Building,
+            tessera_cache::Peek::Absent => Peek::Absent,
         }
     }
 
@@ -342,9 +328,8 @@ impl RowProjectionCache {
     /// ~200 ms per credential — `probes/2026-08-04-refresh-ladder/`).
     ///
     /// **The fragment is not view-scoped**, so any of this token's entries answers: the fragment
-    /// cache keys on `(satisfied, auth_data_hash, dict_len, watermark)` and none of those is a
-    /// view. The freshest is taken because a later watermark is a strictly better answer to an
-    /// entity-space question.
+    /// cache keys on the satisfied terms and the watermark, and neither is a view. The freshest is
+    /// taken because a later watermark is a strictly better answer to an entity-space question.
     ///
     /// **Per token, never per entity** — the scan cost cannot depend on which identifier was
     /// asked for, which is Critical C-5's constant-time property.
@@ -356,28 +341,54 @@ impl RowProjectionCache {
     /// Both prunes miss those entries in the window that matters — `prune_generations_below` keeps
     /// the generation immediately under the live one, which after a fold is a pre-fold entry — so
     /// the scoping is here, at the read, rather than arranged for by eviction.
+    ///
+    /// **And bounded below by `floor`**, the publication's retention floor, so the drill-down is
+    /// never staler than rung 2 of the viewport beside it. The prune keeps a session's newest
+    /// entry below the floor as the refresh's base; answering from it would call an item absent
+    /// that the viewport, finding neither rung, rebuilds and draws.
     pub(crate) fn freshest_fragment(
         &self,
         token_id: u64,
         prefix: &str,
+        floor: u64,
     ) -> Option<Arc<FrozenFragment>> {
         self.inner
             .ready_entries()
             .into_iter()
-            .filter(|(key, _)| key.token_id == token_id && key.prefix == prefix)
+            .filter(|(key, _)| {
+                key.token_id == token_id && key.prefix == prefix && key.segments_version >= floor
+            })
             .max_by_key(|(key, _)| key.segments_version)
             .map(|(_, geometry)| Arc::clone(&geometry.fragment))
     }
 
-    /// Every `Ready` entry, as `(key, value)` — what the background refresh iterates.
+    /// Each session's newest `Ready` entry per view, as `(key, value)` — what the background
+    /// refresh iterates.
     ///
     /// **O(cache residency), never O(sessions)** (decision 0035's shape, and 0044's D1): the
     /// refresh's whole cost model is that it is bounded by what is resident rather than by how
     /// many sessions exist, and this is where that becomes true. A session with no resident entry
     /// is not refreshed and pays a build on its next request, which is establishment, not
     /// update-induced work.
+    ///
+    /// **Only each session's newest entry per view.** Retention leaves an older entry beside a
+    /// newer one — the one-back entry beside the live one, or a kept base beside what a refresh
+    /// has since derived from it — and deriving from both would produce the same key twice and
+    /// count it twice.
     pub(crate) fn resident(&self) -> Vec<(RowProjectionKey, Arc<SessionGeometry>)> {
-        self.inner.ready_entries()
+        let ready = self.inner.ready_entries();
+        let newest = newest_per_view(&ready);
+        let bases: Vec<bool> = ready
+            .iter()
+            .map(|(key, _)| {
+                newest.get(&(key.token_id, key.view.as_str())) == Some(&key.segments_version)
+            })
+            .collect();
+        ready
+            .into_iter()
+            .zip(bases)
+            .filter_map(|(entry, base)| base.then_some(entry))
+            .collect()
     }
 
     /// Remove every projection belonging to `token_id`. Called when a session is revoked.
@@ -418,9 +429,8 @@ impl RowProjectionCache {
     /// `spawn_blocking`, so a batch of expired sessions costs one pass on a blocking thread rather
     /// than `victims` passes on the thread answering requests. A
     /// secondary `token_id → keys` index would make the pass O(victims); it is declined here
-    /// because a second index is a second bijection to keep in step — the failure
-    /// `crate::single_flight`'s rule 1 exists to prevent — and the exposure above does not justify
-    /// it. Recorded so the trade is visible rather than rediscovered.
+    /// because a second index is a second bijection to keep in step — the failure `tessera-cache`'s
+    /// rule 1 exists to prevent — and the exposure above does not justify it.
     pub(crate) fn prune_token(&self, token_id: u64) -> usize {
         self.inner.retain_keys(|key| key.token_id != token_id)
     }
@@ -439,8 +449,9 @@ impl RowProjectionCache {
     }
 
     /// Drop every projection built against a generation older than `floor`, keeping `floor` and
-    /// everything above it. Called by the publication, with
-    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`].
+    /// everything above it, **and keeping each session's newest projection of each view in the
+    /// live prefix whatever its generation**. Called by the publication, with
+    /// `live - `[`KEEP_SUPERSEDED_GENERATIONS`] and the live generation's prefix.
     ///
     /// # Why a retention depth rather than a reclaim hook
     ///
@@ -450,35 +461,69 @@ impl RowProjectionCache {
     /// was standing in for — **an explicit N-generations-back policy, stated where the cache is
     /// bounded**.
     ///
-    /// **Pruning at the swap, with depth zero, would be wrong**, and it is worth being precise
-    /// about why since the pin argument for that is gone. A flush *extends* row space: the new
-    /// generation's projection for a session is the old one plus the new extent's rows, so the
+    /// **Pruning at the swap, with depth zero, would be wrong.** A flush *extends* row space: the
+    /// new generation's projection for a session is the old one plus the new extent's rows, so the
     /// superseded entry is both the input the background refresh extends and the entry rung 2 of
     /// `Engine::session_geometry`'s ladder serves while the refresh runs. Deleting it at the
     /// instant of the swap deletes both, and every session pays the full rebuild at every tick.
     ///
-    /// **The depth is also what bounds stale-serve.** Rung 2 inserts nothing, so a session whose
-    /// refresh never runs would sit one generation behind for ever; at the next publication its
-    /// entry is two back, this removes it, and its next request builds. Fail-closed staleness,
-    /// bounded at two publications.
+    /// **The newest entry is kept because it is the refresh's only base.** Two publications can
+    /// land before the refresh for the first has taken its snapshot, a flush and then a merge
+    /// under load. The depth alone would then drop the entry both refreshes derive from, both
+    /// would find nothing, and every resident session would pay the full rebuild at its next
+    /// request. Keeping it lets a refresh derive across the gap: the rungs of `crate::refresh` are
+    /// exact at any distance within a prefix. A kept entry survives until a newer `Ready` entry
+    /// for its session and view, an eviction, its token's prune or a fold's publication removes
+    /// it. Nothing reads it but the refresh — rung 2 and [`Self::freshest_fragment`] look no
+    /// further back than the floor — so it is the first thing the byte bound evicts.
     ///
-    /// Pruning on `segments_version` alone, ignoring the prefix, rests on [`RowProjectionKey`]'s
-    /// fact 2 — and a merge is why it must: row ids inside a merged span name different entities
-    /// afterwards, so the prefix is *not* a safe discriminator and `segments_version` is
-    /// (`geometry-pinning.md` §4).
+    /// **Only the live prefix.** Across a fold a kept entry is only a rebuild's input, and a merge
+    /// landing while the fold's pass is still rebuilding would rebuild every session that pass has
+    /// not reached a second time, holding them at 429 behind a pass longer than the rebuild it
+    /// saves. So across a fold the depth alone applies, as it did before.
     ///
-    /// Same cost note as [`Self::prune_token`], with one difference in its favour: this runs on the
-    /// publication path, not on a request handler.
-    pub(crate) fn prune_generations_below(&self, floor: u64) -> usize {
-        self.inner.retain_keys(|key| key.segments_version >= floor)
+    /// The depth test reads `segments_version` alone, ignoring the prefix, and rests on
+    /// [`RowProjectionKey`]'s fact 2 — and a merge is why it must: row ids inside a merged span
+    /// name different entities afterwards, so the prefix is *not* a safe discriminator and
+    /// `segments_version` is (`geometry-pinning.md` §4). Only `Ready` entries count as newer: a
+    /// build in flight may yet fail, and the entry it derives from is then still the base.
+    ///
+    /// # Cost
+    ///
+    /// Two passes under the request path's lock: [`SingleFlightCache::ready_entries`] clones every
+    /// ready key and its `Arc`, then the removal walks every key. At the designed configuration n
+    /// is small, as [`Self::prune_token`] states; at its adversarial n the clone costs more than
+    /// the removal, and both run on the publication path, not on a request handler.
+    pub(crate) fn prune_generations_below(&self, floor: u64, live_prefix: &str) -> usize {
+        let ready = self.inner.ready_entries();
+        let newest = newest_per_view(&ready);
+        self.inner.retain_keys(|key| {
+            key.segments_version >= floor
+                || (key.prefix == live_prefix
+                    && newest.get(&(key.token_id, key.view.as_str()))
+                        == Some(&key.segments_version))
+        })
     }
+}
+
+/// Each session's newest generation per view among `entries`, keyed by token and view.
+fn newest_per_view(
+    entries: &[(RowProjectionKey, Arc<SessionGeometry>)],
+) -> FxHashMap<(u64, &str), u64> {
+    let mut newest: FxHashMap<(u64, &str), u64> = FxHashMap::default();
+    for (key, _) in entries {
+        let version = newest.entry((key.token_id, key.view.as_str())).or_insert(0);
+        *version = (*version).max(key.segments_version);
+    }
+    newest
 }
 
 /// How many superseded generations' projections the cache keeps after a publication.
 ///
 /// **One, and the number is the patch's input rather than a margin.** A flush appends, so the
 /// generation immediately below the live one holds exactly the projection the next request's patch
-/// derives from; a second one back is derivable from the first and is never consulted. Raising this
-/// buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to zero
-/// forfeits the patch and reinstates the full rebuild at every tick.
+/// derives from; a second one back is derivable from the first and is kept only while it is its
+/// session's newest in the live prefix ([`RowProjectionCache::prune_generations_below`]). Raising
+/// this buys nothing and costs a *measured* 125.12 MB per entry per session at 10⁹; lowering it to
+/// zero forfeits the patch and reinstates the full rebuild at every tick.
 pub(crate) const KEEP_SUPERSEDED_GENERATIONS: u64 = 1;

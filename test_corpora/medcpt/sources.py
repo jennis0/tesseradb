@@ -25,6 +25,9 @@ from ..common.paths import ladder, staged
 
 DATASET, VINTAGE = "medcpt-pubmed", "2026-08-27"
 
+#: MeSH's own acquisition, the rung's second staged input.
+MESH, MESH_VINTAGE = "mesh", "2025"
+
 #: The MedCPT article encoder's width.
 EMBED_DIM = 768
 
@@ -37,6 +40,11 @@ RUNG = "medcpt"
 def share() -> Path:
     """The staged acquisition. Never built or served from — read once by `stage.py`."""
     return staged(DATASET, VINTAGE)
+
+
+def mesh_tree() -> Path:
+    """The `Descriptor Name;TreeNumber` file, one line per position. Read once by `mesh.Mesh`."""
+    return staged(MESH, MESH_VINTAGE) / f"mtrees{MESH_VINTAGE}.bin"
 
 
 def staging() -> Path:

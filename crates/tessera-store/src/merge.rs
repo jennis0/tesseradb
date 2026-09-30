@@ -37,12 +37,11 @@ use std::path::Path;
 use croaring::Bitmap;
 
 use tessera_spatial::tiler::ScalarType;
-use tessera_types::{IdentityKey, TesseraId, ROW_ABSENT};
+use tessera_types::{IdentityKey, TesseraId};
 
-use crate::coalesce::{merge_runs, open_runs};
 use crate::error::{Result, StoreError};
-use crate::flush::{digest_of, write_render_presence, FlushOutput};
-use crate::manifest::{LocatorExtent, SegmentDescriptor};
+use crate::flush::{digest_of, write_render_presence};
+use crate::manifest::{FileDigest, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
 use crate::render_presence::RENDER_PRESENCE_DIR;
 use crate::segment_cursor::{gather_scalars, SegmentCursor};
@@ -65,7 +64,7 @@ pub struct MergePolicy {
     /// simply never triggered.
     pub segment_floor_bytes: u64,
     /// The largest total a single merge may produce. Bounds the pool time and the write
-    /// amplification of one merge, and is what keeps the base segment out of selection.
+    /// amplification of one merge.
     pub max_merged_segment_bytes: u64,
 }
 
@@ -84,7 +83,7 @@ impl MergePolicy {
     ///    entirely on a deployment that deletes.
     /// 2. **The same size tier**, by power-of-two class over `max(size, segment_floor_bytes)`.
     /// 3. **Total within `max_merged_segment_bytes`.** This is where a large neighbour blocks a
-    ///    merge, and where the base segment excludes itself.
+    ///    merge.
     ///
     /// The **first** qualifying window in list order is taken rather than the best one. Merging is
     /// idempotent work on a cadence — whatever this leaves, the next tick reconsiders — so a
@@ -148,10 +147,11 @@ pub struct MergeInput {
     pub seg_id: String,
     pub entity_lo: u64,
     pub entity_hi: u64,
+    /// The manifest names the segment's [`crate::edited::EDITED_ROWS_FILE`].
+    pub edited_rows: bool,
 }
 
-/// Everything [`execute_merge`] needs beyond its inputs — the same shape [`crate::flush::FlushInput`]
-/// has, because publication does not care which produced the segment.
+/// Everything [`execute_merge`] needs beyond its inputs.
 pub struct MergeSpec<'a> {
     /// The incarnation of the view this merge writes into (decision 0115) — the inputs' own, a
     /// merge never crossing a drop.
@@ -171,65 +171,32 @@ pub struct MergeSpec<'a> {
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
     pub row_base: u32,
-    /// The live partition watermark, passed through untouched.
-    ///
-    /// **A merge must not move it, and deriving one from the inputs regresses it.** The output
-    /// shape is a flush's, where `entity_hi + 1` is the right answer because a flush's entities are
-    /// the newest in the partition. A merge's are not: merging an *interior* run and then
-    /// publishing `entity_hi + 1` would move the watermark **backwards** past entities that
-    /// already have rows, and composition treats everything at or above it as buffer-resident —
-    /// so those entities would be looked for in a buffer that no longer holds them. Carried rather
-    /// than computed, so the publication path can treat a merge exactly as it treats a flush
-    /// without either of them knowing which it has.
-    pub watermark: u64,
-    /// The live allocator high-water, passed through untouched, for the reason above.
-    pub entity_id_high_water: u64,
 }
 
-/// Merge `spec.inputs` into one segment under `prefix_dir`.
-///
-/// **Row-count preserving, and that is the invariant this function exists to keep.** Dropping a row
-/// — because its entity is tombstoned, because a predicate changed — is the compaction *fold*, and
-/// a fold is invariant-bearing work this layer must not do. Every input row is re-emitted.
-///
-/// **Byte-exact through the code, never through coordinates.** A segment stores the Morton code and
-/// its residual, not the axes, and both are carried through untouched — nothing here dequantises,
-/// so nothing here can re-quantise a point onto a neighbouring cell.
-///
-/// **A k-way merge over the inputs' mapped bytes, feeding [`SegmentWriter`].** Every input is
-/// already `(morton, tessera_id)` ascending (contracts §2.6) and mmapped uncompressed, so a cursor
-/// into one costs two integers and the merged order falls out of a heap over *k* keys. No sort, no
-/// decoded batch, and **no second writer**: this feeds [`SegmentWriter`], whose other producer is
-/// `write_segment` (write-path §7).
-///
-/// *This replaced a concatenate-and-re-sort, which is why decision 0049 could not raise
-/// `max_merged_segment_bytes`: the old path decoded every input into `TilerItem`s and doubled again
-/// at the sort, for a **measured 4.4–4.9×** peak over the inputs' on-disk bytes
-/// (`probes/2026-08-04-maintenance-memory/`), so the cap was a memory bound rather than a
-/// write-amplification knob. The result is identical either way — a merge of runs each sorted by
-/// `(morton, tessera_id)` is exactly `sort_batch`'s total order — which is what makes this a
-/// substitution rather than a change of output.*
-///
-/// **The external-id runs stream too**, by the same k-way shape over inputs already sorted on the
-/// key the output needs — [`merge_runs`], which is also compaction's pass 3 (compaction §3, §10).
-/// What a merge still materialises is the **extent**: `ROW_ABSENT`-filled and 4 B per entity in
-/// the merged span, which is bounded by `max_merged_segment_bytes` here and is the term the fold
-/// must instead write through a mapping.
-///
-/// **Sorting is unconditional** (arch §11.3). Lucene reorders a merged segment for doc-id
-/// locality, an optimisation it may skip under pressure, and the policy this one was drawn from
-/// offered that as a decorator. Here the Morton order *is* the tile index — a segment that is not
-/// internally sorted breaks `tile_ranges`' binary search outright — so it cannot be skipped and
-/// there is nothing to make conditional on a document count.
+/// What a merge produced: the merged segment's descriptor and extent, and its files.
+#[derive(Debug)]
+pub struct MergeOutput {
+    pub segment: SegmentDescriptor,
+    pub extent: SegmentExtent,
+    /// Every file written, prefix-relative, for the manifest's `files` map.
+    pub files: BTreeMap<String, FileDigest>,
+}
+
 /// Names this producer in any error the shared cursor or scalar adapter raises.
 const OP: &str = "execute_merge";
 
+/// Merge `spec.inputs` into one segment under `prefix_dir`.
+///
+/// Every input row is emitted once, in `(morton, tessera_id)` order from a heap over one cursor
+/// per input, with its Morton code and residual copied unchanged; dropping a row is the fold's
+/// work. The extent is held in memory at 4 bytes per entity in the merged span, which
+/// `max_merged_segment_bytes` bounds, and 8 bytes per row an input lists below its span.
 pub fn execute_merge(
     prefix_dir: &Path,
     partition: &str,
     view: &str,
     spec: MergeSpec<'_>,
-) -> Result<FlushOutput> {
+) -> Result<MergeOutput> {
     if spec.inputs.is_empty() {
         return Err(StoreError::MalformedBundle {
             detail: "execute_merge: no inputs".to_string(),
@@ -253,23 +220,20 @@ pub fn execute_merge(
             .join(seg_id)
     };
 
-    let mut cursors: Vec<SegmentCursor> = Vec::with_capacity(spec.inputs.len());
-    let mut run_paths: Vec<std::path::PathBuf> = Vec::with_capacity(spec.inputs.len());
-    for input in spec.inputs {
-        let dir = seg_path(&input.seg_id);
-        cursors.push(SegmentCursor::open(&dir, input.seg_id.clone(), OP)?);
-        run_paths.push(dir.join("external-ids.arrow"));
-    }
-    // Opened here, with the segment cursors, so a missing or malformed run fails the merge before
-    // a byte of output is written. The cursors themselves hold only mapped batches and a position.
-    let run_cursors = open_runs(&run_paths)?;
+    let mut cursors: Vec<SegmentCursor> = spec
+        .inputs
+        .iter()
+        .map(|input| {
+            let dir = seg_path(&input.seg_id);
+            let entities = crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                crate::edited::EditedRows::open(&dir, input.edited_rows)?,
+            ));
+            SegmentCursor::open(&dir, input.seg_id.clone(), OP, entities)
+        })
+        .collect::<Result<_>>()?;
 
     let entity_lo = spec.inputs[0].entity_lo;
     let entity_hi = spec.inputs[spec.inputs.len() - 1].entity_hi;
-    let span =
-        usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
-            detail: format!("execute_merge: entity span {entity_lo}..={entity_hi} is too wide"),
-        })?;
 
     let out_dir = seg_path(spec.seg_id);
     fs::create_dir_all(&out_dir).map_err(|source| StoreError::Io {
@@ -282,13 +246,14 @@ pub fn execute_merge(
         source,
     };
     let mut writer = SegmentWriter::create(&out_dir, spec.scalar_schema).map_err(io)?;
-    let mut extent_rows = vec![ROW_ABSENT; span];
+    // Each merged row's entity, in emission order: the merged row *is* the emission ordinal, so
+    // the extent needs no companion permutation of the entity axis.
+    let mut entities: Vec<u64> = Vec::new();
 
     // The merged order, from a heap over one key per live cursor. `Reverse` because
-    // `BinaryHeap` is a max-heap and row order is ascending; the cursor index is the last
-    // component so the ordering is total even though `(morton, tessera_id)` already is —
-    // `tessera_id` is a bijection and each entity has one row, so no two cursors can offer the
-    // same pair.
+    // `BinaryHeap` is a max-heap and row order is ascending. Two rows share a `tessera_id` where
+    // an edit left the item's deleted entity beside its new one, so the cursor index breaks the
+    // tie: inputs are in flush order, so the row of the entity the item left comes first.
     let mut heap: BinaryHeap<Reverse<(u32, u64, usize)>> = BinaryHeap::with_capacity(cursors.len());
     for (index, cursor) in cursors.iter().enumerate() {
         if let Some((morton, tessera_id)) = cursor.key() {
@@ -303,20 +268,14 @@ pub fn execute_merge(
     let mut new_row_of: Vec<Vec<u32>> = cursors.iter().map(|c| vec![0u32; c.rows]).collect();
 
     let mut row_count: usize = 0;
+    let mut edited: Vec<(u32, u32)> = Vec::new();
     while let Some(Reverse((morton, tessera_raw, index))) = heap.pop() {
         let cursor = &mut cursors[index];
         let row = cursor.row;
         let tessera_id = TesseraId::new(tessera_raw);
-        let (shard, entity) = spec.identity_key.invert(tessera_id);
-        if shard != spec.shard_id {
-            return Err(StoreError::MalformedBundle {
-                detail: format!(
-                    "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
-                     bundle's {} — merging it would place another shard's entity in this \
-                     view's row space",
-                    cursor.seg_id, spec.shard_id
-                ),
-            });
+        let entity = cursor.entity(spec.identity_key, spec.shard_id)?;
+        if spec.identity_key.invert(tessera_id).1 != entity {
+            edited.push((row_count as u32, entity.raw() as u32));
         }
         let scalars = gather_scalars(
             &cursor.columns,
@@ -334,9 +293,7 @@ pub fn execute_merge(
                 scalars: &scalars,
             })
             .map_err(io)?;
-        // The extent is filled as rows are emitted, so it needs no companion permutation of the
-        // entity axis: the merged row *is* the emission ordinal.
-        extent_rows[(entity.raw() - entity_lo) as usize] = row_count as u32;
+        entities.push(entity.raw());
         new_row_of[index][row] = row_count as u32;
         row_count += 1;
 
@@ -346,6 +303,7 @@ pub fn execute_merge(
         }
     }
     writer.finish().map_err(io)?;
+    let edited_written = crate::edited::write_edited_rows(&out_dir, &edited)?;
 
     // ---- the render columns' presence, permuted (decision 0064) ------------------------------
     //
@@ -400,15 +358,8 @@ pub fn execute_merge(
         }
     }
 
-    // The inputs' mappings go before the coalesce and the digests below, which read whole files:
-    // holding *k* segment mappings across work that does not need them is the one place this
-    // function could reintroduce a resident term it just removed.
+    // The inputs' mappings go before the digests below, which read whole files.
     drop(cursors);
-
-    // The runs and their reverse locator are entity-space work, shared verbatim with the
-    // entity-space coalesce publication that does it *without* a segment — see
-    // [`crate::coalesce`] for the key order and the keep-newest rule.
-    merge_runs(&run_cursors, entity_lo, entity_hi, &out_dir)?;
 
     let rel = |name: &str| {
         format!(
@@ -418,21 +369,32 @@ pub fn execute_merge(
         )
     };
     let mut files = BTreeMap::new();
-    for name in [
-        "morton.u32",
-        crate::read::CutIndex::FILE,
-        "columns.arrow",
-        "external-ids.arrow",
-        "ext-locator.u32",
-    ] {
+    for name in ["morton.u32", crate::read::CutIndex::FILE, "columns.arrow"] {
         files.insert(rel(name), digest_of(&out_dir.join(name))?);
     }
     for column in presence_written {
         let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
         files.insert(rel(&name), digest_of(&out_dir.join(&name))?);
     }
+    if edited_written {
+        let name = crate::edited::EDITED_ROWS_FILE;
+        files.insert(rel(name), digest_of(&out_dir.join(name))?);
+    }
 
-    Ok(FlushOutput {
+    // An input's listed row whose entity lies within the merged span takes its slot there.
+    let extent = SegmentExtent::from_rows(
+        spec.seg_id,
+        spec.row_base,
+        (entity_lo, entity_hi),
+        entities,
+    )
+    .ok_or_else(|| StoreError::MalformedBundle {
+        detail: format!(
+            "execute_merge: the inputs' rows are not one row per entity at or below entity \
+             {entity_hi}"
+        ),
+    })?;
+    Ok(MergeOutput {
         segment: SegmentDescriptor {
             view: view.to_string(),
             incarnation: spec.incarnation,
@@ -441,26 +403,8 @@ pub fn execute_merge(
             entity_lo,
             entity_hi,
         },
-        extent: SegmentExtent {
-            entity_lo,
-            entity_hi,
-            seg_id: spec.seg_id.to_string(),
-            row_base: spec.row_base,
-            rows: extent_rows,
-        },
-        external_id_run: rel("external-ids.arrow"),
-        locator_extent: LocatorExtent {
-            path: rel("ext-locator.u32"),
-            entity_lo,
-            entity_hi,
-            external_id_run: rel("external-ids.arrow"),
-        },
+        extent,
         files,
-        // **A merge moves neither watermark**, and both are therefore the caller's live values
-        // rather than anything derived from the inputs — see `MergeSpec::watermark` for why
-        // deriving `entity_hi + 1` here regresses it on any interior merge.
-        watermark: spec.watermark,
-        entity_id_high_water: spec.entity_id_high_water,
     })
 }
 
@@ -488,7 +432,7 @@ mod tests {
             .iter()
             .map(|(entity, x, score)| FlushRow {
                 entity_id: EntityId::new(*entity),
-                external_id: Some(format!("e-{entity}").into_bytes()),
+                number: EntityId::new(*entity),
                 x: *x,
                 y: 0.0,
                 scalars: vec![score.clone()],
@@ -512,6 +456,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema(),
                 row_base: 0,
+                entity_floor: 0,
             },
         )
         .expect("flush");
@@ -519,6 +464,7 @@ mod tests {
             seg_id: seg_id.to_string(),
             entity_lo: rows[0].0,
             entity_hi: rows[rows.len() - 1].0,
+            edited_rows: false,
         }
     }
 
@@ -571,8 +517,6 @@ mod tests {
                 scalar_schema: &schema(),
                 absent_ok: &[],
                 row_base: 0,
-                watermark: 8,
-                entity_id_high_water: 8,
             },
         )
         .expect("merge");
@@ -627,8 +571,6 @@ mod tests {
                 scalar_schema: &schema(),
                 absent_ok: &[],
                 row_base: 0,
-                watermark: 2,
-                entity_id_high_water: 2,
             },
         )
         .expect("merge");

@@ -6,20 +6,16 @@ import '../src/item-card.js';
 import '../src/map.js';
 import '../src/explorer.js';
 import type {TesseraItemCard} from '../src/item-card.js';
-import {deep, deepAll, fakeStore, mount, settle, status, type FakeStore} from './fake-store.js';
+import {deep, deepAll, deepText, fakeStore, mount, settle, status, type FakeStore, meta, scalar} from './fake-store.js';
 
 /**
- * What the two pickers, the map and the item card **draw and wire**, against the fake store
- * (`view-switching.md` §9, the V2 row).
+ * What the two view pickers, the map and the item card draw and call, against the fake store. The
+ * picker rules are the client's and are tested in `core/test/views.test.ts`; here each element
+ * asks for the right one, renders it, and calls `setCurrentView` with the result.
  *
- * The rules the pickers apply — the entries and their order, which view a group is entered at, a
- * view's label — are `@tesseradb/client`'s and are tested there (`core/test/views.test.ts`). What
- * is tested here is that each element asks for the right one, renders it as the boards draw it,
- * and calls `setCurrentView` with what came back.
- *
- * The fixture is one bundle with two plain views and two groups over one key set — an owner and a
- * `members` layout of it — with the keys in an order key sorting would not produce (`2026-Q2`
- * before `2026-Q10`).
+ * The fixture is one bundle with two plain views and two groups over one key set (a group and a
+ * `members` group of it), with keys in an order sorting would not produce (`2026-Q2` before
+ * `2026-Q10`).
  */
 
 afterEach(() => {
@@ -45,28 +41,22 @@ const QUARTERS: {key: string; metadata: Record<string, ViewMetadataValue>}[] = [
   {key: '2026-Q4', metadata: {}}
 ];
 
-function meta(over: Partial<Meta> = {}): Meta {
+function deployment(over: Partial<Meta> = {}): Meta {
   const owner = QUARTERS.map((q) => view(`quarter:${q.key}`, q.key, FLAT, {group: 'quarter', key: q.key, metadata: q.metadata}));
   const members = QUARTERS.map((q) => view(`world:${q.key}`, q.key, GEO, {group: 'world', key: q.key, metadata: {}}));
-  return {
-    apiVersion: 1,
-    idset: 0,
+  return meta({
     views: [view('knn', 'knn', FLAT), view('pca64', 'pca64', GEO), ...owner, ...members],
     groups: [
       {name: 'quarter', title: 'Quarter', membersOf: null, views: owner.map((v) => v.id)},
       {name: 'world', title: 'Quarterly map', membersOf: 'quarter', views: members.map((v) => v.id)}
     ],
-    declaredScalars: [{name: 'title', arrowType: 'utf8', category: null, render: false, index: true}],
-    layers: [],
-    selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144, maxBrowseRows: 200},
-    maxTilesPerRequest: 4096,
-    filterOperands: [],
+    declaredScalars: [scalar('title', 'utf8')],
     ...over
-  };
+  });
 }
 
 /** A store on this fixture, already showing `id`, and the element that reads it. */
-async function picker(tag: 'tessera-view-picker' | 'tessera-key-picker', id: string, m: Meta = meta()) {
+async function picker(tag: 'tessera-view-picker' | 'tessera-key-picker', id: string, m: Meta = deployment()) {
   const store = fakeStore({meta: m, status: status({})});
   store.set('view', {...store.get('view'), id});
   store.setFrame(m.views.find((v) => v.id === id)?.quantisation ?? FLAT);
@@ -97,7 +87,7 @@ describe('<tessera-view-picker>', () => {
   });
 
   it('renders nothing — not an empty select — for a one-view corpus', async () => {
-    const one = meta({views: [view('s0', 'default', FLAT)], groups: []});
+    const one = deployment({views: [view('s0', 'default', FLAT)], groups: []});
     const {host} = await picker('tessera-view-picker', 's0', one);
     expect(deep(host, 'select')).toBeNull();
     expect(deep(host, '[part="field"]')).toBeNull();
@@ -139,7 +129,7 @@ describe('<tessera-view-picker>', () => {
     expect(select.value).toBe('g:quarter');
 
     // A group with no reachable view: no switch, and the select goes back to the current entry.
-    const empty = meta();
+    const empty = deployment();
     empty.groups = [...empty.groups, {name: 'ghost', title: 'Ghost', membersOf: null, views: []}];
     const gone = await picker('tessera-view-picker', 'knn', empty);
     const other = deep(gone.host, 'select') as HTMLSelectElement;
@@ -220,7 +210,7 @@ describe('<tessera-key-picker>', () => {
     expect(parts('step').map((b) => b.getAttribute('data-direction'))).toEqual(['prev', 'next']);
     const view = await picker('tessera-view-picker', 'quarter:2026-Q3');
     expect(deepAll(view.host, '[part="select"]')).toHaveLength(1);
-    expect(deepAll(view.host, '[part="label"]')).toHaveLength(1);
+    expect(deepAll(view.host, '[part="field"]')).toHaveLength(1);
   });
 
   it('renders nothing for a plain view, which is in no group', async () => {
@@ -232,7 +222,7 @@ describe('<tessera-key-picker>', () => {
 describe('<tessera-map> at a switch', () => {
   /** The map, holding a store that has already pushed its first camera. */
   async function map(id: string) {
-    const m = meta();
+    const m = deployment();
     const store = fakeStore({meta: m, status: status({})});
     store.set('view', {...store.get('view'), id});
     store.setFrame(m.views.find((v) => v.id === id)!.quantisation);
@@ -259,7 +249,7 @@ describe('<tessera-map> at a switch', () => {
     const before = pushes(store);
     store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
     await settle(host);
-    // The marks under the cursor are different rows in the next view (owner ruling).
+    // The marks under the cursor are different rows in the next view.
     expect(el.hover).toBeNull();
     expect(pushes(store)).toBe(before);
   });
@@ -280,7 +270,6 @@ describe('<tessera-map> at a switch', () => {
 describe('<tessera-item-card> and the views it reaches', () => {
   const detail = {
     fields: {title: 'A paper'},
-    externalId: null,
     labels: ['quant-ph', '2024'],
     views: [
       {id: 'knn', x: 2 ** 31, y: 2 ** 30},
@@ -290,7 +279,7 @@ describe('<tessera-item-card> and the views it reaches', () => {
   };
 
   async function card(id = 'knn') {
-    const m = meta();
+    const m = deployment();
     const store = fakeStore({meta: m, status: status({})});
     store.set('view', {...store.get('view'), id});
     const host = await mount('<tessera-item-card></tessera-item-card>');
@@ -301,12 +290,12 @@ describe('<tessera-item-card> and the views it reaches', () => {
     return {host, el, store};
   }
 
-  it('draws a chip per reachable view, the current one marked, and the satisfied labels', async () => {
+  it('draws a chip per reachable view, the current one marked, and none for the viewer’s access labels', async () => {
     const {host} = await card();
     const chips = deepAll(host, '[part="view-chip"]');
     expect(chips.map((c) => c.textContent?.trim())).toEqual(['knn', 'pca64']);
     expect(chips.map((c) => c.getAttribute('aria-current'))).toEqual(['true', 'false']);
-    expect(deepAll(host, '[part="label-chip"]').map((c) => c.textContent?.trim())).toEqual(['quant-ph', '2024']);
+    expect(deepText(host)).not.toContain('quant-ph');
   });
 
   it('follows an item into another view, with the position dequantised under that view’s frame', async () => {
@@ -344,7 +333,7 @@ describe('<tessera-explorer>', () => {
   async function following(id: string) {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown; map: {lookAt(x: number, y: number): boolean} | null};
-    const store = fakeStore({meta: meta(), status: status({})});
+    const store = fakeStore({meta: deployment(), status: status({})});
     store.set('view', {...store.get('view'), id});
     store.setFrame(FLAT);
     el.store = store;
@@ -359,17 +348,18 @@ describe('<tessera-explorer>', () => {
     return {host, el, store, looks, follow};
   }
 
-  it('puts both pickers at the top of the toolbar slot', async () => {
+  it('puts both pickers in the toolbar slot and the legend in the colour slot', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');
     const el = host.querySelector('tessera-explorer') as unknown as {store: unknown};
-    const store = fakeStore({meta: meta(), status: status({})});
+    const store = fakeStore({meta: deployment(), status: status({})});
     store.set('view', {...store.get('view'), id: 'quarter:2026-Q3'});
     el.store = store;
     await settle(host);
     const toolbar = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="toolbar"]')!;
     const tags = [...toolbar.children].map((c) => c.tagName.toLowerCase());
-    expect(tags.slice(0, 2)).toEqual(['tessera-view-picker', 'tessera-key-picker']);
-    expect(tags).toContain('tessera-legend');
+    expect(tags).toEqual(['tessera-view-picker', 'tessera-key-picker']);
+    const colour = (host.querySelector('tessera-explorer') as HTMLElement).shadowRoot!.querySelector('slot[name="colour"]')!;
+    expect([...colour.children].map((c) => c.tagName.toLowerCase())).toEqual(['tessera-legend']);
     expect(deep(host, '[part="view-chip"]')).toBeNull();
   });
 

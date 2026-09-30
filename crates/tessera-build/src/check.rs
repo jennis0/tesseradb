@@ -19,10 +19,11 @@
 //! ## What it cannot answer
 //!
 //! Everything that needs a row, which is worth naming because a green check is not a green build:
-//! whether a closed vocabulary's keys cover the values in the data, whether a member id resolves
-//! to an entity this build would assign, whether two artifact rows share a key, whether the
-//! hierarchy's edges contain each other, and — the one that shipped a degenerate map — where the
-//! data actually sits inside its view's extent. The last is the build's clamp report
+//! whether a closed vocabulary's keys cover the values in the data, which rows the identity rule
+//! refuses (a value twice in one file, a row naming two items, a member or attribute row naming
+//! none), whether two artifact rows share a key, whether the hierarchy's edges contain each other,
+//! and — the one that shipped a degenerate map — where the data actually sits inside its view's
+//! extent. The last is the build's clamp report
 //! (`crate::config::Frame`), and it needs the coordinate column read end to end.
 
 use std::path::{Path, PathBuf};
@@ -30,18 +31,62 @@ use std::path::{Path, PathBuf};
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tessera_spatial::tiler::ScalarType;
+use tessera_store::scalar_column;
 
-use crate::config::{
-    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
-};
-use crate::ids::Addressing;
-use crate::input::{column_carries, TERM_ID};
+use crate::config::{ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup};
+use crate::input::TERM_ID;
+
+/// The declaration a finding or a source is about, in its parts.
+///
+/// **Split rather than a sentence**, because the readers are two: an operator reads
+/// `view group 'quarters' view 'q1'`, and a client that has to raise an error against the block
+/// the author wrote reads the block and its name without parsing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Object {
+    /// The block kind as the declaration spells it — `source`, `attribute`, `view`,
+    /// `view group`, `layer`.
+    pub block: &'static str,
+    /// The name the block was declared under.
+    pub name: String,
+    /// The part of it at fault, where a block has several: a group's view key, its roster table, a
+    /// view's `point_visibility`, a layer's `[layer.members]`.
+    pub part: Option<String>,
+}
+
+impl Object {
+    pub fn new(block: &'static str, name: impl Into<String>) -> Object {
+        Object {
+            block,
+            name: name.into(),
+            part: None,
+        }
+    }
+
+    /// The same block, narrowed to one part of it.
+    pub fn part(&self, part: impl Into<String>) -> Object {
+        Object {
+            block: self.block,
+            name: self.name.clone(),
+            part: Some(part.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut rendered = format!("{} '{}'", self.block, self.name);
+        if let Some(part) = &self.part {
+            rendered.push(' ');
+            rendered.push_str(part);
+        }
+        f.pad(&rendered)
+    }
+}
 
 /// One thing wrong, named the way the reader that would have refused it names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// The declaration that owns it — `source 'points'`, `view 's0'`, `layer 'clusters/a'`.
-    pub object: String,
+    pub object: Object,
     pub detail: String,
 }
 
@@ -50,7 +95,7 @@ pub struct Finding {
 /// examined everything.
 #[derive(Debug, Clone)]
 pub struct SourceChecked {
-    pub object: String,
+    pub object: Object,
     /// The path as the declaration resolved it, or `None` for an object declared with no source —
     /// which is legal and is the normal state for a deployment that writes through the service
     /// (`configuration.md` §2).
@@ -66,33 +111,41 @@ pub struct SourceChecked {
 #[derive(Debug, Clone)]
 pub struct FramePreview {
     pub view: String,
-    pub projection: &'static str,
+    pub projection: tessera_spatial::Projection,
     /// The box declared, and the square it snaps to. `None` under `auto`.
     pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
 }
 
-impl FramePreview {
-    /// One line for the view, and one for the snap where there is one.
-    pub fn print(&self) {
+/// One line for the view, and one for the snap where there is one.
+impl std::fmt::Display for FramePreview {
+    fn fmt(&self, f_: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.snapped {
-            None => eprintln!(
+            None => write!(
+                f_,
                 "  {:<20} {}, `extent = \"auto\"` — the frame is fitted to the data, so it is not \
                  known until the build reads the points",
-                self.view, self.projection
+                self.view,
+                self.projection.name()
             ),
             Some((asked, snap)) => {
-                let f = snap.square.bounds();
-                eprintln!(
+                // y runs south, so the square's minimum y is its maximum latitude.
+                let square = snap.square.bounds();
+                let (lon_min, lat_max) = self.projection.inverse(square.x_min, square.y_min);
+                let (lon_max, lat_min) = self.projection.inverse(square.x_max, square.y_max);
+                writeln!(
+                    f_,
                     "  {:<20} {}, asked for lon [{}, {}], lat [{}, {}]",
                     self.view,
-                    self.projection,
+                    self.projection.name(),
                     asked.lon_min,
                     asked.lon_max,
                     asked.lat_min,
                     asked.lat_max
-                );
-                eprintln!(
-                    "  {:<20} {} to the square at z{} ({}, {}) — x [{}, {}], y [{}, {}]",
+                )?;
+                write!(
+                    f_,
+                    "  {:<20} {} to the square at z{} ({}, {}) — lon [{lon_min}, {lon_max}], lat \
+                     [{lat_min}, {lat_max}]",
                     "",
                     if snap.floored {
                         "FLOORED at the offset cap rather than fitted"
@@ -102,11 +155,7 @@ impl FramePreview {
                     snap.square.z,
                     snap.square.x,
                     snap.square.y,
-                    f.x_min,
-                    f.x_max,
-                    f.y_min,
-                    f.y_max
-                );
+                )
             }
         }
     }
@@ -125,6 +174,8 @@ pub struct CheckReport {
     /// Things worth an operator's eye that refuse nothing and leave the check clean: an indexed
     /// keyword whose source footer says it is unique per row (`crate::unique_key`).
     pub warnings: Vec<Finding>,
+    /// Per file read, the unique fields its rows name their items by ([`crate::ids`]).
+    pub identities: Vec<Finding>,
 }
 
 impl CheckReport {
@@ -132,16 +183,16 @@ impl CheckReport {
         self.findings.is_empty()
     }
 
-    fn note(&mut self, object: impl Into<String>, detail: impl Into<String>) {
+    fn note(&mut self, object: &Object, detail: impl Into<String>) {
         self.findings.push(Finding {
-            object: object.into(),
+            object: object.clone(),
             detail: detail.into(),
         });
     }
 
-    fn warn(&mut self, object: impl Into<String>, detail: impl Into<String>) {
+    fn warn(&mut self, object: &Object, detail: impl Into<String>) {
         self.warnings.push(Finding {
-            object: object.into(),
+            object: object.clone(),
             detail: detail.into(),
         });
     }
@@ -179,7 +230,7 @@ fn column_type<'a>(
 /// was looked for under. This is `crate::input`'s `field_index` refusal, made collectable.
 fn require(
     report: &mut CheckReport,
-    object: &str,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     canonical: &str,
@@ -203,7 +254,7 @@ fn require(
 /// `configuration.md` §8's rule, and the one the parser cannot make.
 fn require_named(
     report: &mut CheckReport,
-    object: &str,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     candidates: &[&str],
@@ -216,9 +267,9 @@ fn require_named(
 }
 
 /// Open one source, or record why it could not be opened. `None` means: reported, move on.
-fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSchema> {
+fn open(report: &mut CheckReport, object: &Object, path: &Path) -> Option<ArrowSchema> {
     report.sources.push(SourceChecked {
-        object: object.to_string(),
+        object: object.clone(),
         path: Some(path.display().to_string()),
     });
     match schema_of(path) {
@@ -237,8 +288,7 @@ fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSche
 /// document alone.
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
-    let positional = positional_points(config);
-    check_attribute_sources(config, &positional, &mut report);
+    check_attribute_sources(config, &mut report);
     check_scoped_attribute_sources(config, &mut report);
     for view in &config.views {
         check_view(config, view, &mut report);
@@ -263,7 +313,7 @@ pub fn check(config: &Config) -> CheckReport {
 /// takes `[defaults]`'s, so the columns a file must carry are the columns of the attributes that
 /// named it — and a column reported missing is reported against the file that was supposed to hold
 /// it rather than against a single corpus that no longer exists.
-fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut CheckReport) {
+fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
     // A column with no file to read it from. Legal to declare (`configuration.md` §2), and the
     // normal state for a deployment that writes its values through the service. It is one of the
     // sources this check looked at and found nothing to open, beside a group that names no points
@@ -280,28 +330,26 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
         if carried.binary_search(&index).is_err() {
             report.sources.push(SourceChecked {
-                object: format!("attribute '{}'", attribute.name),
+                object: Object::new("attribute", &attribute.name),
                 path: None,
             });
         }
     }
     for group in &config.attribute_sources {
-        let object = format!("source '{}'", group.name);
+        let object = Object::new("source", &group.name);
         let Some(schema) = open(report, &object, &group.path) else {
             continue;
         };
-        // **A file whose rows are named by their position needs no identity column for its own
-        // attributes.** The group is the view's own points file, and the build joins the columns
-        // of that file by position (`ids::Addressing`).
-        if !positional.contains(&group.path) {
-            require(report, &object, &schema, &group.fields, ENTITY_ID);
-        }
+        // **A file other than a view's points names the item each row belongs to**, as an
+        // attribute-only ingest does; a view's points file's own columns travel on its rows.
+        let points = view_points(config);
+        identify(config, report, &object, &schema, &group.fields, !points.contains(&group.path));
         // **Every declared attribute against the field that must carry it.** Presence and family,
         // not fit: a `u8` column whose data carries 300 is a per-row refusal no schema can
         // anticipate.
         for &index in &group.attributes {
             let attribute = &config.schema.attributes[index];
-            let object = format!("attribute '{}'", attribute.name);
+            let object = Object::new("attribute", &attribute.name);
             let Some((_, field)) = schema.column_with_name(attribute.column()) else {
                 report.note(
                     &object,
@@ -316,7 +364,8 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
                 );
                 continue;
             };
-            if !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if !scalar_column::carries(attribute.ty, category, field.data_type()) {
                 report.note(
                     &object,
                     format!(
@@ -343,7 +392,12 @@ fn check_attribute_sources(config: &Config, positional: &[PathBuf], report: &mut
 /// An indexed keyword whose source footer records a distinct count within a few per cent of its
 /// non-null values (`crate::unique_key`): the one thing about a unique key a check that reads no
 /// row can see, and only where the writer recorded it. A warning, never a finding.
-fn unique_key_by_footer(report: &mut CheckReport, object: &str, path: &Path, column: &str) {
+fn unique_key_by_footer(
+    report: &mut CheckReport,
+    object: &Object,
+    path: &Path,
+    column: &str,
+) {
     match crate::unique_key::footer_distinct_count(path, column) {
         Ok(Some(count)) => {
             if let Some(warning) = count.warning() {
@@ -375,12 +429,12 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
             continue;
         };
         let attribute = &scoped.attribute;
-        let object = format!("attribute '{}'", attribute.name);
+        let object = Object::new("attribute", &attribute.name);
         let Some(schema) = open(report, &object, &source.path) else {
             continue;
         };
+        identify(config, report, &object, &schema, &source.fields, true);
         for (what, column) in [
-            ("the entity id", source.entity_id.as_str()),
             ("the value", attribute.column()),
             ("the view discriminator", source.view_field.as_str()),
         ] {
@@ -396,7 +450,10 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
                 );
                 continue;
             };
-            if column == attribute.column() && !column_carries(attribute, field.data_type()) {
+            let category = attribute.vocabulary.is_some();
+            if column == attribute.column()
+                && !scalar_column::carries(attribute.ty, category, field.data_type())
+            {
                 report.note(
                     &object,
                     format!(
@@ -415,89 +472,68 @@ fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
-/// The plain views whose points file carries no identity column, by path.
-///
-/// A row of one of those files is named by its position in it (`configuration.md` §8), and so is
-/// that file's own attribute column, so [`check_attribute_sources`] does not require an identity
-/// column of it either. Whether the positional route is admissible at all is
-/// [`check_identity`]'s question, asked per view.
-fn positional_points(config: &Config) -> Vec<PathBuf> {
-    config
-        .views
-        .iter()
-        .filter_map(|view| {
-            let path = view.source.as_ref()?;
-            let schema = schema_of(path).ok()?;
-            column_type(&schema, &view.fields, ENTITY_ID)
-                .is_none()
-                .then(|| path.clone())
-        })
-        .collect()
+/// Every points file a view or a group's view reads, by path.
+fn view_points(config: &Config) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = config.views.iter().filter_map(|v| v.source.clone()).collect();
+    for group in &config.view_groups {
+        paths.extend(group.source.clone());
+        if let Roster::Inline(views) = &group.roster {
+            paths.extend(views.iter().filter_map(|v| v.source.clone()));
+        }
+    }
+    paths
 }
 
-/// A view's identity column, required only where something else in the declaration names a row by
-/// it.
-///
-/// **The list is the build's own** (`ids::Addressing`), so a declaration this leaves clean is one
-/// the build accepts. A points file carrying no identity column and nothing to name it for is a
-/// warning saying how its rows are addressed, and the check stays clean.
-fn check_identity(
+/// The unique fields a file's rows name their items by, as the build reads them
+/// ([`crate::ids::carried_unique`]): a line saying which, and a finding where a file whose rows
+/// address items carries none, in the sentence the build refuses it with.
+fn identify(
     config: &Config,
-    view: &crate::config::View,
-    schema: &ArrowSchema,
-    object: &str,
     report: &mut CheckReport,
+    object: &Object,
+    schema: &ArrowSchema,
+    fields: &Fields,
+    addresses: bool,
 ) {
-    if column_type(schema, &view.fields, ENTITY_ID).is_some() {
-        return;
+    let carried = match crate::ids::carried_unique(schema, fields, &config.schema) {
+        Ok(carried) => carried,
+        Err(detail) => {
+            report.note(object, detail);
+            return;
+        }
+    };
+    let tessera = schema
+        .column_with_name(crate::ids::TESSERA_ID_COLUMN)
+        .is_some();
+    if addresses {
+        if let Err(missing) = tessera_lifecycle::resolve::require_identifier(tessera, carried.len())
+        {
+            report.note(object, format!("its rows address items, and {missing}"));
+            return;
+        }
     }
-    let Some(points) = &view.source else {
-        return;
+    let named = match carried.is_empty() {
+        true => "nothing: each row is an item of its own".to_string(),
+        false => carried
+            .iter()
+            .map(|field| field.attribute.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
     };
-    let addressing = Addressing {
-        points,
-        several_views: config.views.len() > 1 || !config.view_groups.is_empty(),
-        // A plain view's rows are its file's, whole. A selection belongs to a group's view, which
-        // requires the identity column here whatever else the declaration says.
-        selection: false,
-        // `tessera check` takes no `--limit`. The build refuses one against this route.
-        limit: false,
-        visibility_source: view.point_visibility.source.as_deref(),
-        attribute_sources: &config.attribute_sources,
-        layers: &config.layers,
-        layer_inputs: &config.layer_sources,
-    };
-    // A source that could not be read is reported where it is opened. Here it leaves the question
-    // unanswered, which is a finding against the view like any other.
-    let needed = match addressing.needs_identity() {
-        Ok(needed) => needed,
-        Err(error) => Some(error.to_string()),
-    };
-    match needed {
-        None => report.warn(
-            object,
-            "no identity column: rows addressable by tessera_id only",
-        ),
-        Some(detail) => report.note(
-            object,
-            format!(
-                "field `{ENTITY_ID}` is read from a column named '{}', which the source does not \
-                 carry, so each row would be named by its position in it (contracts §2.4). \
-                 {detail}",
-                view.fields.of(ENTITY_ID)
-            ),
-        ),
-    }
+    report.identities.push(Finding {
+        object: object.clone(),
+        detail: format!("names items by {named}"),
+    });
 }
 
 fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckReport) {
-    let object = format!("view '{}'", view.name);
+    let object = Object::new("view", &view.name);
     // **The frame, before the file** — a projected view's square is a function of its declaration
     // alone, so it is answered here whether or not the source opens.
     if view.projection != tessera_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: view.name.clone(),
-            projection: view.projection.name(),
+            projection: view.projection,
             snapped: match &view.extent {
                 Extent::LonLat(asked) => {
                     Some((*asked, crate::config::snap_lon_lat(view.projection, asked)))
@@ -511,13 +547,13 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
             object: object.clone(),
             path: None,
         });
-        check_point_visibility(view, None, report);
+        check_point_visibility(config, view, None, report);
         return;
     };
     let Some(schema) = open(report, &object, path) else {
         return;
     };
-    check_identity(config, view, &schema, &object, report);
+    identify(config, report, &object, &schema, &view.fields, false);
 
     // Which geometry shape this file offers, on `crate::input::geometry_kind`'s rule: a `fields`
     // map naming one is the caller deciding, and presence decides only where the map is silent.
@@ -542,7 +578,7 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
         require(report, &object, &schema, &view.fields, "x");
         require(report, &object, &schema, &view.fields, "y");
     }
-    check_point_visibility(view, Some(&schema), report);
+    check_point_visibility(config, view, Some(&schema), report);
 }
 
 /// A view group's files: each view's points under form A, the group's own under form B, and the
@@ -554,11 +590,11 @@ fn check_view(config: &Config, view: &crate::config::View, report: &mut CheckRep
 /// nobody named — and the group-scoped attribute columns, which live in the views' own files where
 /// the attribute declares no source of its own (`views.md` §5).
 fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport) {
-    let object = format!("view group '{}'", group.name);
+    let object = Object::new("view group", &group.name);
     if group.projection != tessera_spatial::Projection::None {
         report.frames.push(FramePreview {
             view: group.name.clone(),
-            projection: group.projection.name(),
+            projection: group.projection,
             snapped: match &group.extent {
                 Extent::LonLat(asked) => {
                     Some((*asked, crate::config::snap_lon_lat(group.projection, asked)))
@@ -588,7 +624,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
     match &group.roster {
         Roster::Inline(views) => {
             for view in views {
-                let object = format!("{object}, view '{}'", view.key);
+                let object = object.part(format!("view '{}'", view.key));
                 let Some(path) = &view.source else {
                     report.sources.push(SourceChecked { object, path: None });
                     continue;
@@ -596,7 +632,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
                 let Some(schema) = open(report, &object, path) else {
                     continue;
                 };
-                check_points(&object, &schema, &group.fields, false, report);
+                check_points(config, &object, &schema, &group.fields, false, report);
                 check_group_labels(&object, &group.point_visibility, &schema, report);
                 for column in &scoped {
                     if schema.column_with_name(column).is_none() {
@@ -622,7 +658,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
             let Some(schema) = open(report, &object, path) else {
                 return;
             };
-            check_points(&object, &schema, &group.fields, true, report);
+            check_points(config, &object, &schema, &group.fields, true, report);
             check_group_labels(&object, &group.point_visibility, &schema, report);
             for column in &scoped {
                 if schema.column_with_name(column).is_none() {
@@ -641,7 +677,7 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
         }
     }
     if let Roster::Table(table) = &group.roster {
-        let object = format!("{object} `[view_group.views]`");
+        let object = object.part("`[view_group.views]`");
         let Some(schema) = open(report, &object, &table.source) else {
             return;
         };
@@ -658,13 +694,14 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
 
 /// One points file's identity and geometry, and — where the group carries one — its discriminator.
 fn check_points(
-    object: &str,
+    config: &Config,
+    object: &Object,
     schema: &ArrowSchema,
     fields: &Fields,
     discriminator: bool,
     report: &mut CheckReport,
 ) {
-    require(report, object, schema, fields, ENTITY_ID);
+    identify(config, report, object, schema, fields, false);
     let names_morton = fields.names("morton") || fields.names("residual");
     let names_xy = fields.names("x") || fields.names("y");
     let has_morton = column_type(schema, fields, "morton").is_some();
@@ -685,114 +722,108 @@ fn check_points(
 /// A group's `point_visibility` against one of its views' files — [`check_point_visibility`]'s
 /// rule, over a group's shared declaration rather than a view's own.
 fn check_group_labels(
-    object: &str,
+    object: &Object,
     point_visibility: &PointVisibility,
     schema: &ArrowSchema,
     report: &mut CheckReport,
 ) {
-    let Some(field) = &point_visibility.field else {
-        return;
-    };
-    match schema.column_with_name(field) {
-        None => report.note(
-            object,
-            format!(
-                "`point_visibility.field = \"{field}\"` names a column this view's source does not \
-                 carry. Its columns are: {}",
-                columns(schema)
-            ),
-        ),
-        Some((_, found)) => {
-            let ok = match found.data_type() {
-                DataType::List(inner) | DataType::LargeList(inner) => {
-                    crate::utf8::is_utf8(inner.data_type())
-                }
-                other => crate::utf8::is_utf8(other),
-            };
-            if !ok {
-                report.note(
-                    object,
-                    format!(
-                        "the access column '{field}' holds {:?}. A point's access terms are \
-                         strings — one, or a list of them",
-                        found.data_type()
-                    ),
-                );
-            }
-        }
+    if let Some(field) = &point_visibility.field {
+        check_access_column(object, field, schema, report);
     }
+}
+
+/// A column named as where access labels are read from: present, and a string or a list of
+/// strings. A view's `point_visibility.field` and a layer's `artifact_visibility.field` both name
+/// one.
+fn check_access_column(object: &Object, field: &str, schema: &ArrowSchema, report: &mut CheckReport) {
+    if let Some(problem) = access_column_problem(field, schema) {
+        report.note(object, problem);
+    }
+}
+
+/// What is wrong with the column named as where access labels are read from, or `None`: it must be
+/// present, and a string, a list of strings or a dictionary of strings. The check asks both; the
+/// build's reader asks only of a column the source carries, and a source without it states no
+/// labels, which the publication refuses.
+pub(crate) fn access_column_problem(field: &str, schema: &ArrowSchema) -> Option<String> {
+    let Some((_, found)) = schema.column_with_name(field) else {
+        return Some(format!(
+            "`{field}` is named as the access column, and this source does not carry it. Its \
+             columns are: {}",
+            columns(schema)
+        ));
+    };
+    (!tessera_store::access_column::is_access_type(found.data_type())).then(|| {
+        format!(
+            "the access column '{field}' holds {:?}. Access labels are strings, one or a list of \
+             them",
+            found.data_type()
+        )
+    })
 }
 
 /// Where each point's access terms come from: a column of the view's own source, or an exploded
 /// relation of its own. Neither is required — `default` alone is the corpus with no permission
 /// model — but a declared one that cannot be read puts every point in no principal's mask.
 fn check_point_visibility(
+    config: &Config,
     view: &crate::config::View,
     view_schema: Option<&ArrowSchema>,
     report: &mut CheckReport,
 ) {
-    let object = format!("view '{}' `point_visibility`", view.name);
-    if let Some(field) = &view.point_visibility.field {
-        if let Some(schema) = view_schema {
-            match schema.column_with_name(field) {
-                None => report.note(
-                    &object,
-                    format!(
-                        "`field = \"{field}\"` names a column the view's source does not carry. \
-                         Its columns are: {}",
-                        columns(schema)
-                    ),
-                ),
-                Some((_, found)) => {
-                    let ok = match found.data_type() {
-                        DataType::List(inner) | DataType::LargeList(inner) => {
-                            crate::utf8::is_utf8(inner.data_type())
-                        }
-                        other => crate::utf8::is_utf8(other),
-                    };
-                    if !ok {
-                        report.note(
-                            &object,
-                            format!(
-                                "the access column '{field}' holds {:?}. A point's access terms \
-                                 are a `list<string>`, or a plain `string` where a point carries \
-                                 one term",
-                                found.data_type()
-                            ),
-                        );
-                    }
-                }
-            }
-        }
+    let object = Object::new("view", &view.name).part("`point_visibility`");
+    if let (Some(field), Some(schema)) = (&view.point_visibility.field, view_schema) {
+        check_access_column(&object, field, schema, report);
     }
     if let Some(path) = &view.point_visibility.source {
         let Some(schema) = open(report, &object, path) else {
             return;
         };
-        let fields = Fields::canonical(object.clone());
-        require(report, &object, &schema, &fields, ENTITY_ID);
+        let fields = Fields::canonical(object.to_string());
+        identify(config, report, &object, &schema, &fields, true);
         require(report, &object, &schema, &fields, TERM_ID);
     }
 }
 
 fn check_layers(config: &Config, report: &mut CheckReport) {
     for sources in &config.layer_sources {
-        let object = format!("layer '{}'", sources.name);
+        let object = Object::new("layer", &sources.name);
         match &sources.artifacts {
             None => report.sources.push(SourceChecked {
                 object: object.clone(),
                 path: None,
             }),
-            // Inline rows are the canonical spelling and there is no file to locate them in.
-            Some(ArtifactSource::Inline(rows)) => report.sources.push(SourceChecked {
-                object: format!("{object} ({} inline artifact(s))", rows.len()),
-                path: None,
-            }),
+            // Inline rows are the canonical spelling and there is no file to locate them in, so
+            // the rules the build's reader states over a row are answerable from the declaration:
+            // `crate::shapes`'s `inline_shape`, which `crate::layers`'s `plan_inline` calls for
+            // the same rows.
+            Some(ArtifactSource::Inline(rows)) => {
+                report.sources.push(SourceChecked {
+                    object: object.part(format!("({} inline artifact(s))", rows.len())),
+                    path: None,
+                });
+                if let Some(declaration) = config.layers.iter().find(|d| d.name == sources.name) {
+                    let kind = crate::shapes::shape_declared(declaration);
+                    for row in rows {
+                        if let Err(detail) = crate::shapes::inline_shape(row, kind) {
+                            report.note(&object, detail);
+                        }
+                    }
+                }
+            }
             Some(ArtifactSource::File { path, fields, .. }) => {
                 if let Some(schema) = open(report, &object, path) {
                     // `key` is the one field a build-published artifact cannot do without: it is
                     // the address that survives a rebuild and what an edge into the layer names.
                     require(report, &object, &schema, fields, "key");
+                    if let Some(field) = config
+                        .layers
+                        .iter()
+                        .find(|d| d.name == sources.name)
+                        .and_then(|d| d.artifact_visibility.field.as_deref())
+                    {
+                        check_access_column(&object, field, &schema, report);
+                    }
                     require_named(
                         report,
                         &object,
@@ -823,11 +854,251 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
             }
         }
         if let Some(members) = &sources.members {
-            let object = format!("{object} `[layer.members]`");
+            let object = object.part("`[layer.members]`");
             if let Some(schema) = open(report, &object, &members.path) {
                 require(report, &object, &schema, &members.fields, "key");
-                require(report, &object, &schema, &members.fields, "entity");
+                identify(config, report, &object, &schema, &members.fields, true);
                 require_named(report, &object, &schema, &members.fields, &["rank"]);
+            }
+        }
+    }
+}
+
+/// The check as one page: what was read, what is wrong, what the declaration implies about frames,
+/// view groups and shape layers, the disclosure decisions it makes, and the verdict.
+///
+/// Every caller renders through this — the binary, the Python extension module, and the SDK
+/// through it — so the page is the same bytes whichever of them ran the check. The disclosure
+/// table is written only on a clean check: a declaration with a finding in it has not been read
+/// far enough for what it discloses to be worth reading.
+pub fn page(config: &Config, report: &CheckReport) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for source in &report.sources {
+        match &source.path {
+            Some(path) => {
+                let _ = writeln!(out, "  read schema  {:<34} {path}", source.object);
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  no source    {:<34} (declared and empty)",
+                    source.object
+                );
+            }
+        }
+    }
+    for finding in &report.findings {
+        let _ = writeln!(out, "  FAILED       {}: {}", finding.object, finding.detail);
+    }
+    // A warning leaves the check clean and the exit status untouched: an indexed keyword the
+    // source's footer says is unique per row is a cost to know about, not a mistake.
+    for warning in &report.warnings {
+        let _ = writeln!(out, "  WARNING      {}: {}", warning.object, warning.detail);
+    }
+    for identity in &report.identities {
+        let _ = writeln!(out, "  identity     {}: {}", identity.object, identity.detail);
+    }
+    if !report.frames.is_empty() {
+        let _ = writeln!(out, "projected views, from the declaration alone:");
+        for frame in &report.frames {
+            let _ = writeln!(out, "{frame}");
+        }
+    }
+    if !config.view_groups.is_empty() {
+        let _ = writeln!(out, "view groups, from the declaration alone:");
+        for group in &config.view_groups {
+            let keys = group.declared_keys();
+            let roster = match (&group.members, keys.len()) {
+                (Some(owner), _) => format!("the views of '{owner}'"),
+                (None, 0) => group.form().to_string(),
+                (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
+            };
+            let _ = writeln!(out, "  {:<20} {roster}", group.name);
+            if !group.metadata.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  {:<20} metadata: {}",
+                    "",
+                    group
+                        .metadata
+                        .iter()
+                        .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        for (attribute, group) in &config.scopes.attributes {
+            let _ = writeln!(
+                out,
+                "  {:<20} attribute '{attribute}'",
+                format!("scope {group}")
+            );
+        }
+        for (layer, group) in &config.scopes.layers {
+            let _ = writeln!(out, "  {:<20} layer '{layer}'", format!("scope {group}"));
+        }
+    }
+    if !report.shapes.is_empty() {
+        let _ = writeln!(out, "shape layers, from the geometry alone:");
+        for shape in &report.shapes {
+            match shape {
+                Ok(shape) => {
+                    let _ = writeln!(out, "{shape}");
+                }
+                Err(why) => {
+                    let _ = writeln!(out, "  not sized: {why}");
+                }
+            }
+        }
+    }
+    if !report.is_clean() {
+        let _ = writeln!(
+            out,
+            "check FAILED: {} finding(s) across {} source(s). Nothing was read but Parquet \
+             schemas, so a clean check is not a clean build: it cannot see a value against a \
+             closed vocabulary, which rows the identity rule refuses, or where the data sits \
+             inside a view's extent",
+            report.findings.len(),
+            report.sources.len()
+        );
+        return out;
+    }
+    write_disclosure(&mut out, &crate::disclosure::Disclosure::of(config));
+    let _ = writeln!(
+        out,
+        "\ncheck OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), {} \
+         vocabulary(ies), {} attribute(s), {} layer(s), {} warning(s)",
+        report.sources.len(),
+        config.views.len(),
+        config.view_groups.len(),
+        config
+            .view_groups
+            .iter()
+            .map(|g| g.declared_keys().len())
+            .sum::<usize>(),
+        config.schema.vocabularies.len(),
+        // Every declared column, the group-scoped families included: they are held apart from the
+        // schema because a family has no slot in the manifest's flat list, not because they are
+        // fewer columns.
+        config.schema.attributes.len() + config.scoped_attributes.len(),
+        config.layers.len(),
+        report.warnings.len()
+    );
+    out
+}
+
+/// The disclosure decisions a declaration makes, as a table an operator reads.
+///
+/// The same values `reports/disclosure.json` carries, and deliberately a second rendering of one
+/// source rather than a second derivation: the file is for a diff between builds and this is for a
+/// person deciding whether the declaration says what they meant.
+fn write_disclosure(out: &mut String, disclosure: &crate::disclosure::Disclosure) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "\nviews");
+    for view in &disclosure.views {
+        match &view.default {
+            Some(default) => {
+                let _ = writeln!(
+                    out,
+                    "  {:<26} labels from {}, default '{default}'",
+                    view.name, view.labels_from
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  {:<26} labels from {}, no default: an unlabelled point is refused",
+                    view.name, view.labels_from
+                );
+            }
+        }
+    }
+    if !disclosure.vocabularies.is_empty() {
+        let _ = writeln!(out, "\nvocabularies");
+        for vocabulary in &disclosure.vocabularies {
+            let _ = writeln!(
+                out,
+                "  {:<26} {}, {}, {} declared value(s){}",
+                vocabulary.name,
+                vocabulary.visibility,
+                vocabulary.value_set,
+                vocabulary.declared_values,
+                if vocabulary.reserved.is_empty() {
+                    String::new()
+                } else {
+                    format!(", reserved {:?}", vocabulary.reserved)
+                }
+            );
+        }
+    }
+    if !disclosure.attributes.is_empty() {
+        let _ = writeln!(out, "\nattributes");
+        for attribute in &disclosure.attributes {
+            let _ = writeln!(
+                out,
+                "  {:<26} {}{}, {}{}, from column '{}'{}",
+                attribute.name,
+                attribute.ty,
+                match &attribute.vocabulary {
+                    Some(v) => format!(" over vocabulary '{v}'"),
+                    None => String::new(),
+                },
+                attribute.placement,
+                if attribute.unique { ", unique" } else { "" },
+                attribute.field,
+                // A family is one column per view of the group, read from those views' own points
+                // and stored under `attrs/<column>/<group>/<key>/`.
+                match &attribute.scope {
+                    Some(group) => format!(", one column per view of '{group}'"),
+                    None => String::new(),
+                }
+            );
+        }
+    }
+    if !disclosure.layers.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nlayers (in declaration order, which is registration order)"
+        );
+        for layer in &disclosure.layers {
+            let _ = writeln!(out, "  {}", layer.name);
+            if let Some(parent) = &layer.expanded_from {
+                let _ = writeln!(out, "      written by `[layer.labels]` on '{parent}'");
+            }
+            let _ = writeln!(
+                out,
+                "      gate '{}' | artifacts {} | members {}",
+                layer.visibility,
+                match &layer.artifact_visibility.field {
+                    Some(field) => format!(
+                        "carry their own in '{field}', else '{}'",
+                        layer.artifact_visibility.default
+                    ),
+                    None => format!("'{}'", layer.artifact_visibility.default),
+                },
+                match layer.require_member_visibility.as_str() {
+                    Some(word) => word.to_string(),
+                    None => layer.require_member_visibility.to_string(),
+                }
+            );
+            if !layer.depends_on.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "      served only where {} is served",
+                    layer.depends_on.join(", ")
+                );
+            }
+            if !layer.content.computed.is_empty() {
+                let _ = writeln!(out, "      computed {}", layer.content.computed.join(", "));
+            }
+            for supplied in &layer.content.supplied {
+                let _ = writeln!(
+                    out,
+                    "      supplied {} '{}' requires {}",
+                    supplied.ty, supplied.name, supplied.require_member_visibility
+                );
             }
         }
     }

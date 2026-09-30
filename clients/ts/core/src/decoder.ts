@@ -5,49 +5,41 @@ import type {ViewportResult} from './types.js';
 export type HeadFrames = {tiles: Uint8Array; subCells: Uint8Array | null; artifacts: Uint8Array | null};
 
 /**
- * Where a response is turned into typed arrays.
+ * Turns a `/v1/viewport` body into typed arrays. The default decodes in web workers, off the thread
+ * that draws; {@link inlineDecoder} decodes on the calling thread, for a test, a script or a
+ * runtime without `Worker`. Pass one as a {@link TesseraClient}'s `decoder` option.
  *
- * Two implementations behind one interface, because the same code runs in a browser and in Node.
- * `workerDecoder` moves the work off the render thread; `inlineDecoder` is what a test, a script or
- * a runtime without `Worker` gets, and is the behaviour this client had throughout.
- *
- * **The fallback is not a degraded mode to be avoided** — it is correct, just synchronous. A
- * consumer that never draws (the golden capture, a Node script) wants it.
- *
- * Three entry points, and which a caller uses is about *when the bytes arrive*, not about what
- * they mean. {@link decode} takes a whole body; {@link decodeHead} and {@link decodePoints} take
- * a streamed response's frames as they land, so a tile is drawable before the last frame of a
- * hundred-megabyte answer has been received.
+ * @category HTTP client
  */
 export type Decoder = {
   /**
-   * `background` routes speculative work to its own lane where the implementation has one.
-   *
-   * **A foreground response must never queue behind an anticipatory one.** The worker decoder is
-   * serial per worker, and anticipation moves multi-megabyte responses — so one shared lane is a
-   * priority inversion: the bytes the user is waiting on sit behind bytes nobody asked for yet.
-   * Two workers, one per lane, and the flag is the routing.
+   * Decodes a whole body. `background` sends the work to a separate worker where the decoder has
+   * one, so a response the user is waiting for does not queue behind speculative work. Rejects with
+   * `Error` for a malformed body.
    */
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
-  /** The counts, the underlay and the artifacts — everything before the first points frame. */
+  /** The counts, the underlay and the artifacts: everything before the first points frame. @internal */
   decodeHead(frames: HeadFrames, background?: boolean): Promise<ViewportHead>;
-  /** One kind-3 frame, decoded alone. Frames are independent Arrow streams by contract. */
+  /** One kind-3 frame, decoded alone. Each frame is an independent Arrow stream. @internal */
   decodePoints(frame: Uint8Array, background?: boolean): Promise<PointsPart>;
-  /** Release the workers, if there are any. */
+  /** Terminates the workers, if there are any, and rejects the decodes they hold. */
   close(): void;
   /**
-   * The last reply's own decode time in the worker, in ms — what the caller measured from the
-   * outside minus the time the request spent queued in its lane. `null` where nothing was
-   * queued or measured (the inline decoder, whose calls *are* the work).
-   *
-   * Under a streamed response this is per *frame*, so a caller wanting the response's figure
-   * accumulates it across the frames it awaited.
+   * The last reply's decode time inside a worker, in milliseconds, excluding time queued. On a
+   * streamed response, the time of the last frame. `null` for the inline decoder and before the
+   * first reply.
    */
   readonly lastWorkerMs: number | null;
 };
 
+/**
+ * A decoder that runs on the calling thread. `background` has no effect and `lastWorkerMs` is
+ * always `null`.
+ *
+ * @category HTTP client
+ */
 export function inlineDecoder(): Decoder {
-  // Synchronous, so there is no queue to invert and the flag is meaningless here.
+  // Synchronous, so `background` has no effect.
   return {
     decode: async (bytes) => decodeViewport(bytes),
     decodeHead: async (frames) => decodeHead(frames),
@@ -57,37 +49,28 @@ export function inlineDecoder(): Decoder {
   };
 }
 
-/**
- * Decode in workers: two foreground lanes and a lazy background one.
- *
- * Each lane is serial — what matters is that the work is off the *render* thread and that a
- * split response's pieces can overlap, not that decoding is wide. See the lane notes below for
- * why two and not more.
- *
- * Returns `null` where `Worker` is unavailable, so the caller falls back rather than failing.
- */
-/**
- * How the worker is made, when a bundle cannot resolve a relative worker file.
- *
- * The default is `new URL('./decode.worker.js', import.meta.url)`, which every bundler that
- * serves the package as files understands. A single-file distribution has no file to point at
- * — the built decoder would fall back to the main thread silently, at tens of milliseconds a
- * response — so it inlines the worker (a Blob URL, with a data URL where blob workers are
- * refused) and installs the factory here before any decoder is built (design §5.9).
- */
+/** The factory {@link setWorkerFactory} installed, or `null` for the default. */
 let workerFactory: (() => Worker) | null = null;
 
+/**
+ * Sets how the default decoder makes a worker, for a host whose bundler cannot load the default.
+ * The default loads `decode.worker.js` from beside this module, which Vite and webpack follow and
+ * bundle. That file has Arrow bundled into it, since a page's import map does not apply inside a
+ * worker, so it also loads unbundled. esbuild does not follow the URL: a host copies the file
+ * beside its output or installs a factory here. The single-file bundle installs one that makes the
+ * worker from a Blob or data URL.
+ *
+ * @param factory - Makes one worker. Read each time a worker is made. `null` restores the default.
+ *
+ * @category HTTP client
+ */
 export function setWorkerFactory(factory: (() => Worker) | null): void {
   workerFactory = factory;
 }
 
 /**
- * A buffer the worker may take: the view's own when it owns the whole thing, a copy otherwise.
- *
- * Transferring detaches, so a view onto a larger buffer must be copied out or the caller loses
- * bytes it still holds. A frame the reader assembled across network chunks owns its buffer and
- * transfers at zero copy; one that lay inside a single chunk is copied, which is a memcpy of at
- * most one flush.
+ * A buffer the worker may take: the view's own where it spans the whole buffer, else a copy.
+ * Transferring detaches the buffer, so a view onto a larger one is copied out.
  */
 function detachable(bytes: Uint8Array): ArrayBuffer {
   const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
@@ -96,12 +79,31 @@ function detachable(bytes: Uint8Array): ArrayBuffer {
   ) as ArrayBuffer;
 }
 
+/** One decode: the message for the worker, and the same decode on the main thread. */
+type Job<T> = {request: () => {message: object; transfer: ArrayBuffer[]}; inline: () => Promise<T>};
+
+/** The worker's messages: `ready` once, when its module has evaluated, then one reply per request. */
+type Reply = {ready: true} | {id: number; result?: never; error?: string; ms?: number};
+
+/**
+ * A decoder that decodes in web workers: two workers that take requests in turn, and a third for
+ * `background` work, made on its first use. Returns `null` where `Worker` is undefined or no
+ * worker can be made.
+ *
+ * A worker holds its requests until it has loaded. One that fails to load has its requests, and
+ * every later one, decoded on the calling thread. One that fails after loading rejects the
+ * decodes it holds, and later requests to it are decoded on the calling thread.
+ *
+ * @category HTTP client
+ */
 export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
 
-  /** One serial lane: a worker, its pending map, and its id counter. */
   let lastWorkerMs: number | null = null;
-  function lane(): {send: <T>(request: object, transfer: Transferable[]) => Promise<T>; close: () => void} | null {
+  const inline = inlineDecoder();
+
+  /** One serial lane: a worker, its pending replies, and its id counter. */
+  function lane(): {send: <T>(job: Job<T>) => Promise<T>; close: () => void} | null {
     let worker: Worker;
     try {
       worker = workerFactory
@@ -111,79 +113,120 @@ export function workerDecoder(): Decoder | null {
       // A bundler that cannot resolve the worker URL, or a runtime that forbids module workers.
       return null;
     }
+    let state: 'loading' | 'ready' | 'dead' = 'loading';
     let nextId = 1;
+    const held: {job: Job<never>; resolve: (r: never) => void; reject: (e: Error) => void}[] = [];
     const pending = new Map<number, {resolve: (r: never) => void; reject: (e: Error) => void}>();
-    worker.onmessage = (event: MessageEvent<{id: number; result?: never; error?: string; ms?: number}>) => {
-      const {id, result, error, ms} = event.data;
-      const waiter = pending.get(id);
+
+    function post<T>(job: Job<T>, resolve: (r: T) => void, reject: (e: Error) => void): void {
+      const id = nextId++;
+      const {message, transfer} = job.request();
+      pending.set(id, {resolve: resolve as (r: never) => void, reject});
+      // Every buffer named here is transferred; the caller does not read it afterwards.
+      worker.postMessage({id, ...message}, transfer);
+    }
+
+    worker.onmessage = (event: MessageEvent<Reply>) => {
+      const reply = event.data;
+      if ('ready' in reply) {
+        if (state !== 'loading') return;
+        state = 'ready';
+        for (const h of held.splice(0)) post(h.job, h.resolve, h.reject);
+        return;
+      }
+      const waiter = pending.get(reply.id);
       if (!waiter) return;
-      pending.delete(id);
-      if (ms !== undefined) lastWorkerMs = ms;
-      if (error !== undefined) waiter.reject(new Error(error));
-      else waiter.resolve(result!);
+      pending.delete(reply.id);
+      if (reply.ms !== undefined) lastWorkerMs = reply.ms;
+      if (reply.error !== undefined) waiter.reject(new Error(reply.error));
+      else waiter.resolve(reply.result!);
     };
-    worker.onerror = (event) => {
-      // A worker that has died cannot answer anything outstanding, and leaving those promises
-      // pending would hang every caller rather than surfacing the failure.
-      const failure = new Error(`decode worker failed: ${event.message}`);
+    worker.onerror = () => {
+      const loaded = state === 'ready';
+      state = 'dead';
+      worker.terminate();
+      for (const h of held.splice(0)) h.job.inline().then(h.resolve, h.reject);
+      if (!loaded) return;
+      const failure = new Error('the decode worker stopped before replying; later decodes run on the main thread');
       for (const waiter of pending.values()) waiter.reject(failure);
       pending.clear();
     };
+
     return {
-      send<T>(request: object, transfer: Transferable[]): Promise<T> {
-        // Every buffer named here is transferred, so the caller must not read it afterwards —
-        // `client.ts` reads each frame once, here, and never again.
-        const id = nextId++;
+      send<T>(job: Job<T>): Promise<T> {
+        if (state === 'dead') return job.inline();
         return new Promise<T>((resolve, reject) => {
-          pending.set(id, {resolve: resolve as (r: never) => void, reject});
-          worker.postMessage({id, ...request}, transfer);
+          if (state === 'ready') post(job, resolve, reject);
+          else held.push({job: job as Job<never>, resolve: resolve as (r: never) => void, reject});
         });
       },
       close() {
+        state = 'dead';
         worker.terminate();
-        for (const waiter of pending.values()) waiter.reject(new Error('decoder closed'));
+        const closed = new Error('decoder closed');
+        for (const h of held.splice(0)) h.reject(closed);
+        for (const waiter of pending.values()) waiter.reject(closed);
         pending.clear();
       }
     };
   }
 
-  // **Two foreground lanes, round-robin.** A split viewport response arrives as several pieces,
-  // and painting pieces as they land only helps if their decodes overlap — one serial lane made
-  // piece 2 wait out piece 1's ~100-300 ms. Two is deliberate: decode is CPU-bound, so a wide pool
-  // buys parallelism the cores may not have while multiplying peak transferred memory.
-  //
-  // A streamed response's frames are dealt round-robin like anything else, so its own frames
-  // decode two at a time; the caller keeps them in order by awaiting them in order.
+  // Two foreground lanes, round-robin, so the pieces of a split response decode in parallel. Decode
+  // is CPU-bound, and more lanes would multiply peak transferred memory. The caller keeps a stream's
+  // frames in order by awaiting them in order.
   const foreground = [lane(), lane()].filter((l) => l !== null);
   if (foreground.length === 0) return null;
   let next = 0;
-  // Created on first use: a consumer that never anticipates never pays for the third worker.
   let backgroundLane: ReturnType<typeof lane> | undefined;
 
-  function send<T>(request: object, transfer: Transferable[], background: boolean): Promise<T> {
+  function send<T>(job: Job<T>, background: boolean): Promise<T> {
     if (background) {
       backgroundLane ??= lane();
-      if (backgroundLane) return backgroundLane.send<T>(request, transfer);
+      if (backgroundLane) return backgroundLane.send(job);
     }
     next = (next + 1) % foreground.length;
-    return foreground[next]!.send<T>(request, transfer);
+    return foreground[next]!.send(job);
   }
 
   return {
     decode(bytes, background = false) {
-      const buffer = detachable(bytes);
-      return send<ViewportResult>({bytes: buffer}, [buffer], background);
+      return send(
+        {
+          request: () => {
+            const buffer = detachable(bytes);
+            return {message: {bytes: buffer}, transfer: [buffer]};
+          },
+          inline: () => inline.decode(bytes)
+        },
+        background
+      );
     },
     decodeHead(frames, background = false) {
-      const tiles = detachable(frames.tiles);
-      const subCells = frames.subCells ? detachable(frames.subCells) : null;
-      const artifacts = frames.artifacts ? detachable(frames.artifacts) : null;
-      const transfer = [tiles, subCells, artifacts].filter((b) => b !== null);
-      return send<ViewportHead>({kind: 'head', tiles, subCells, artifacts}, transfer, background);
+      return send(
+        {
+          request: () => {
+            const tiles = detachable(frames.tiles);
+            const subCells = frames.subCells ? detachable(frames.subCells) : null;
+            const artifacts = frames.artifacts ? detachable(frames.artifacts) : null;
+            const transfer = [tiles, subCells, artifacts].filter((b) => b !== null);
+            return {message: {kind: 'head', tiles, subCells, artifacts}, transfer};
+          },
+          inline: () => inline.decodeHead(frames)
+        },
+        background
+      );
     },
     decodePoints(frame, background = false) {
-      const buffer = detachable(frame);
-      return send<PointsPart>({kind: 'points', bytes: buffer}, [buffer], background);
+      return send(
+        {
+          request: () => {
+            const buffer = detachable(frame);
+            return {message: {kind: 'points', bytes: buffer}, transfer: [buffer]};
+          },
+          inline: () => inline.decodePoints(frame)
+        },
+        background
+      );
     },
     close() {
       for (const l of foreground) l.close();
@@ -195,7 +238,12 @@ export function workerDecoder(): Decoder | null {
   };
 }
 
-/** A worker when one can be had, the inline decoder otherwise. */
+/**
+ * {@link workerDecoder} where a worker can be made, {@link inlineDecoder} otherwise. The decoder a
+ * {@link TesseraClient} uses when given none.
+ *
+ * @category HTTP client
+ */
 export function createDecoder(): Decoder {
   return workerDecoder() ?? inlineDecoder();
 }

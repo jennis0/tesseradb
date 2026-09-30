@@ -4,7 +4,7 @@
  "host": "WSL2, 12 cores, 47 GB; another agent's rung 5 ingest running; nice -n 10, RAYON_NUM_THREADS=3",
  "fixtures": {
   "medcpt36_mesh_descriptors": {
-   "fixture": "/home/joe/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
+   "fixture": "/home/user/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
    "layer": "mesh/descriptors",
    "level": 0,
    "view": "knn",
@@ -519,7 +519,7 @@
      ],
      "histogram": {
       "source": [
-       "opened /home/joe/code/tessera/data/ladder/.measure/medcpt36/allin/bundle/v00000/partitions/default/row-column/row-column-000000-000.tsll"
+       "opened /home/user/code/tessera/data/ladder/.measure/medcpt36/allin/bundle/v00000/partitions/default/row-column/row-column-000000-000.tsll"
       ],
       "millis": 1137.050048,
       "entries": 1658437802,
@@ -2993,7 +2993,7 @@
    ],
    "peak_resident_gb": 5.969645568,
    "mesh_contiguous_4_rerun": {
-    "fixture": "/home/joe/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
+    "fixture": "/home/user/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
     "layer": "mesh/descriptors",
     "level": 0,
     "view": "knn",
@@ -3508,7 +3508,7 @@
       ],
       "histogram": {
        "source": [
-        "opened /home/joe/code/tessera/data/ladder/.measure/medcpt36/allin/bundle/v00000/partitions/default/row-column/row-column-000000-000.tsll"
+        "opened /home/user/code/tessera/data/ladder/.measure/medcpt36/allin/bundle/v00000/partitions/default/row-column/row-column-000000-000.tsll"
        ],
        "millis": 838.472756,
        "entries": 1658437802,
@@ -3925,7 +3925,7 @@
    }
   },
   "medcpt36_clusters_kmeans": {
-   "fixture": "/home/joe/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
+   "fixture": "/home/user/code/tessera/data/ladder/.measure/medcpt36/allin/bundle",
    "layer": "clusters/kmeans",
    "level": 0,
    "view": "knn",
@@ -6926,7 +6926,7 @@
    "peak_resident_gb": 1.01748736
   },
   "paperseek_10m_clusters_kmeans": {
-   "fixture": "/home/joe/code/tessera/data/ladder/paperseek/bundle-10m",
+   "fixture": "/home/user/code/tessera/data/ladder/paperseek/bundle-10m",
    "layer": "clusters/kmeans",
    "level": 0,
    "view": "knn",

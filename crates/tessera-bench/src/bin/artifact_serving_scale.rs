@@ -2232,10 +2232,12 @@ fn main() {
                 entity: EntityId::new(i as u64),
                 key: None,
                 view: None,
+                incarnation: 0,
                 members: to_entities(&in_rows, &space).into(),
                 contents,
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             }
         })
         .collect();

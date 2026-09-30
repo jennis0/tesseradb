@@ -75,7 +75,7 @@ from bench_k_sweep import read_dictionary_descriptors, spawn_with_long_boot_dead
 
 BENCH_BIN = REPO_ROOT / "target" / "release" / "tessera-bench"
 
-# Mirrors `crates/tessera-server/src/config.rs`'s `DEFAULT_ADMISSION_TIMEOUT_MS`. Duplicated here
+# Mirrors `crates/tessera-config/src/defaults.rs`'s `DEFAULT_ADMISSION_TIMEOUT_MS`. Duplicated here
 # (rather than parsed out of the Rust source) because it is a small, load-bearing constant this
 # script needs BEFORE the server it describes has booted, to compute the hang-watchdog deadline
 # and the shed/cold-build cells' own timeout overrides.

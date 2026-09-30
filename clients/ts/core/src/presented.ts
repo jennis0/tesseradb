@@ -6,29 +6,21 @@ import type {Replica, ReplicaFrame} from './replica.js';
 /**
  * The presented frame: the {@link Composition} on screen, and the bookkeeping that puts it there.
  *
- * The driver decides *when* anything happens — requests, retries, revalidation, anticipation,
- * settle timing — and hands over a verdict per paint: fold or derive. This object executes the
- * verdict and holds the result. It used to be the deck binding's business (client-architecture
- * §6 step 3, the half that had not moved); it is in the client because which bands contribute
- * to the frame, and on what authority, is a rule every client must obey, not a rendering detail.
- * `compose.ts` decides; this holds and sequences.
- *
- * **Headless.** The one clock the vis side may own — coalescing paints to one per animation
- * frame — is injected here as a {@link FrameScheduler}, mirroring the driver's injected
- * {@link Clock}, so the whole path from verdict to presented frame runs under a fake scheduler in
- * node. The default is `requestAnimationFrame` where it exists and a 16 ms timeout elsewhere.
- *
- * What the consumer gets is a `Composition` by reference — exact bands and stand-in pieces, never
- * concatenated. Turning pieces into buffers is the vis side's copy to pay (`viewer/src/assemble.ts`).
+ * The driver decides when anything happens and hands over a verdict per paint, fold or derive.
+ * This object carries out the verdict and holds the result; `compose.ts` decides which bands
+ * contribute. Paints are coalesced to one per animation frame through an injected
+ * {@link FrameScheduler}, so the path runs in node under a fake. The consumer gets a `Composition`
+ * by reference, with exact bands and stand-in pieces kept separate; building buffers from them is
+ * the renderer's work.
  */
 
-/** The one vis-side clock, injected: coalesce work to the next paint. `setTimeout`'s shape. */
+/** Schedules work for the next paint. @internal */
 export type FrameScheduler = {
   request(fire: () => void): unknown;
   cancel(handle: unknown): void;
 };
 
-/** `requestAnimationFrame` in a browser; a 16 ms timeout — one 60 Hz frame — anywhere else. */
+/** `requestAnimationFrame` in a browser; a 16 ms timeout, one 60 Hz frame, elsewhere. @internal */
 export function defaultFrameScheduler(): FrameScheduler {
   if (typeof requestAnimationFrame === 'function' && typeof cancelAnimationFrame === 'function') {
     return {
@@ -43,19 +35,49 @@ export function defaultFrameScheduler(): FrameScheduler {
 }
 
 /**
- * The display states, kept distinct because collapsing them is how a fail-closed server becomes a
- * fail-misleading picture (client-interaction §9). `empty` (the principal sees nothing here) and
- * `refused` (we do not know) are semantic opposites; `loading` and `retrying` are neither; `shown`
- * is the only one that may display counts.
+ * What the map is showing, as the store's `status` projection reports it:
+ *
+ * - `idle`: no view has been asked for yet.
+ * - `loading`: a request for the view is in flight.
+ * - `retrying`: the server answered `429` or `503`, and the request will be sent again.
+ * - `shown`: a frame is on screen. Counts may be displayed in this state only.
+ * - `empty`: the answer holds no point this principal may see in view.
+ * - `refused`: the request failed, so what is here is not known.
+ *
+ * A host shows `empty` and `refused` differently, since only `empty` is an answer.
+ *
+ * @category Projections
  */
 export type PresentedStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused';
 
-export type Refusal = {code: string; detail: string};
+/**
+ * Why a request failed, as the store's projections report it.
+ *
+ * @category Projections
+ */
+export type Refusal = {
+  /** A {@link TesseraError}'s `code`, or `fetch-failed` for any other error. */
+  code: string;
+  /** A {@link TesseraError}'s `detail`, or the other error's message. */
+  detail: string;
+};
 
-/** The driver's tier verdict — see `Driver`'s `onFrame` doc for what each costs. */
+/**
+ * The {@link Refusal} a thrown error stands for: the `code` and `detail` of a {@link TesseraError},
+ * or `fetch-failed` and the message for any other error, such as one from a request that reached
+ * no server.
+ *
+ * @category Projections
+ */
+export function refusalOf(error: unknown): Refusal {
+  const e = (error ?? {}) as {code?: string; detail?: string; message?: string};
+  return {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)};
+}
+
+/** The driver's verdict; see `DriverEvents.onFrame`. */
 type Verdict = {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame};
 
-/** What accompanied a presented frame: the plan that chose it and the fetch that fed it. */
+/** What accompanied a presented frame: the plan that chose it and the fetch that fed it. @internal */
 export type Presented = {
   frame: Composition;
   tier: 'fold' | 'derive';
@@ -65,6 +87,7 @@ export type Presented = {
   calibration: {mTarget: number; visibleInView: number | undefined};
 };
 
+/** @internal */
 export type PresenterEvents = {
   /** A frame reached the presented slot. Fires at most once per scheduler tick. */
   onPresented(presented: Presented): void;
@@ -75,10 +98,11 @@ export type PresenterEvents = {
 };
 
 /**
- * Fidelity between the picture and what was served — a check, **not an invariant**. Dropping a
- * mark fails in the safe direction (a thinner picture discloses nothing), but a lost mark has
- * been the signature of every assembly bug so far, so it throws. Exact tiles only; no non-exact
- * tile may carry a count, because a superset read as density overstates (`delta-serving.md` §7).
+ * Throws where the picture differs from what was served: where exact tiles draw a different number
+ * of marks than were served, or a tile that is not exact carries counts, since a superset read as
+ * density overstates. A dropped mark discloses nothing, but it is the sign of an assembly bug.
+ *
+ * @internal
  */
 export function assertCompositionMatchesServed(c: Composition): void {
   if (c.exactDrawn !== c.exactServed) {
@@ -97,6 +121,7 @@ export function assertCompositionMatchesServed(c: Composition): void {
   }
 }
 
+/** @internal */
 export class Presenter {
   private readonly driver: Driver;
   private held: Composition | null = null;
@@ -156,9 +181,8 @@ export class Presenter {
   }
 
   /**
-   * Present this view from the replica's held bands, asking for nothing — see
-   * {@link Driver.redraw}. The switch's immediate publish (`view-switching.md` §3); a view holding
-   * nothing for the camera presents nothing, and the caller's empty frame stands.
+   * Presents this view from the replica's held bands, asking for nothing; see
+   * {@link Driver.redraw}. A view holding nothing for the camera presents nothing.
    */
   redraw(view: ViewState, width: number, height: number): void {
     this.lastView = view;
@@ -167,27 +191,24 @@ export class Presenter {
     this.driver.redraw(view, width, height);
   }
 
-  /** Re-ask for the last view — what a budget change or a dropped replica needs. */
+  /** Asks again for the last view, after a budget change or a dropped replica. */
   reschedule(): void {
     if (this.lastView) this.driver.schedule(this.lastView, this.width, this.height);
   }
 
-  /** A piece of a split response was absorbed: its bands are drawable now, not at the settle. */
+  /** A piece of a split response was absorbed, and its bands are drawable now. */
   absorbed(): void {
     this.driver.absorbed();
   }
 
-  /** Forward a changed marks-on-screen budget; the caller reschedules after. */
+  /** Forwards a changed marks-on-screen budget; the caller reschedules after. */
   setBudget(budget: number): void {
     this.driver.setBudget(budget);
   }
 
   /**
-   * Abandon everything in flight and every timer, and drop the presented frame.
-   *
-   * A frame is dropped rather than kept because the callers — a principal switch, a filter change,
-   * a dataset switch — are all cases where what is on screen answers a question no longer being
-   * asked, and the next derive is the repair.
+   * Abandons everything in flight and every timer, and drops the presented frame. Every caller (a
+   * change of principal, filter or dataset) leaves the frame answering a question no longer asked.
    */
   cancel(): void {
     this.driver.cancel();
@@ -198,10 +219,9 @@ export class Presenter {
   }
 
   /**
-   * Verdicts coalesce to one application per scheduler tick; the newest wins — except that a fold
-   * never replaces a pending derive. The fold's contract is that its information may ride one step
-   * stale, while a dropped derive would leave the driver's presented handle describing a frame the
-   * screen never showed.
+   * Verdicts coalesce to one per scheduler tick and the newest wins, except that a fold does not
+   * replace a pending derive: a fold may be one step stale, while a dropped derive would leave the
+   * driver's handle describing a frame the screen never showed.
    */
   private apply(verdict: Verdict): void {
     if (this.pending?.tier === 'derive' && verdict.tier === 'fold') return;
@@ -220,17 +240,15 @@ export class Presenter {
   }
 
   /**
-   * Execute the driver's tier — no second-guessing here. The reconciliation rule lives in the
-   * driver as one statement; this side only knows how to do what it was told: a fold refreshes
-   * exact bands from the depth index and keeps the stand-ins by reference, a derive composes the
-   * frame the driver already paid the walk for.
+   * Carries out the driver's verdict. A fold refreshes exact bands from the depth index and keeps the
+   * stand-ins by reference; a derive composes the frame the driver derived.
    */
   private applyNow(verdict: Verdict): void {
     const held = this.held;
     let frame: Composition;
     if (verdict.tier === 'fold') {
-      // A fold against nothing drawn can only follow a refusal that cleared the frame while the
-      // driver's handle survived; the settle's derive repairs it, so dropping this one is safe.
+      // A fold with nothing drawn follows a refusal that cleared the frame; the settle's derive
+      // repairs it.
       if (held === null) return;
       frame = this.phase('refresh', () =>
         fold(held, this.replica.exactIn(held.want, held.depth), this.replica.version)
@@ -243,9 +261,7 @@ export class Presenter {
         standIn: fetched.fallback.length
       });
     }
-    // An empty frame over nothing drawn is not a paint: the status callback says `empty`, and a
-    // composition with no marks would make every subscriber rebuild for a picture that has not
-    // changed.
+    // An empty frame over nothing drawn is not a paint; the status reports `empty`.
     if (frame.exactDrawn + frame.provisional === 0 && this.held === null) return;
     assertCompositionMatchesServed(frame);
     this.held = frame;
@@ -265,14 +281,9 @@ export class Presenter {
       this.events.onStatus(status, null);
       return;
     }
-    // A refusal draws no marks: the frame goes, the replica keeps its bands — they are still the
-    // answer to the last view that succeeded, and discarding them would make recovery pay for a
-    // full rewrite.
+    // A refusal drops the frame. The replica keeps its bands, which still answer the last view that
+    // succeeded.
     this.held = null;
-    const e = detail as {code?: string; detail?: string; message?: string} | undefined;
-    this.events.onStatus('refused', {
-      code: e?.code ?? 'fetch-failed',
-      detail: e?.detail ?? e?.message ?? String(detail)
-    });
+    this.events.onStatus('refused', refusalOf(detail));
   }
 }

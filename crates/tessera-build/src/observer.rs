@@ -37,8 +37,6 @@ pub enum BuildStage {
     Assignment,
     /// 6. One pass over the pairs file, writing `postings.arrow` and `pairs.parquet`.
     PostingsWrite,
-    /// 7. The external-id sidecar and its locator.
-    ExternalIds,
     /// 8. Geometry permuted from ordinal into entity order, plus the declared attribute tail. No
     ///    points-file I/O: [`BuildStage::GeometryRead`] did the reading.
     AttributeTail,
@@ -73,6 +71,9 @@ pub enum BuildStage {
     ///    (`probes/2026-08-22-artifact-serving-e2e/` finding 4) — and a stage boundary is what lets
     ///    an observer say which of the two it was.
     Layers,
+    /// 8c′. The unique columns' indexes, each through a spill sort that finds every value held
+    ///    twice.
+    UniqueIndexes,
     /// 9. The tiler sort: `(morton, tessera_id)` ascending.
     TilerSort,
     /// 10. Segment files: `morton.u32`, `permutation.bin`, `columns.arrow`, and their fsyncs.
@@ -107,13 +108,13 @@ impl BuildStage {
             BuildStage::SignatureSort => "signature_sort",
             BuildStage::Assignment => "assignment",
             BuildStage::PostingsWrite => "postings_write",
-            BuildStage::ExternalIds => "external_ids",
             BuildStage::AttributeTail => "attribute_tail",
             BuildStage::FilterPostings => "filter_postings",
             BuildStage::TextIndex => "text_index",
             BuildStage::RecordBlob => "record_blob",
             BuildStage::ColumnRelease => "column_release",
             BuildStage::Layers => "layers",
+            BuildStage::UniqueIndexes => "unique_indexes",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
             BuildStage::ArtifactPass => "artifact_pass",
@@ -130,9 +131,9 @@ impl BuildStage {
         BuildStage::SignatureSort,
         BuildStage::Assignment,
         BuildStage::PostingsWrite,
-        BuildStage::ExternalIds,
         BuildStage::AttributeTail,
         BuildStage::Layers,
+        BuildStage::UniqueIndexes,
         BuildStage::FilterPostings,
         BuildStage::TextIndex,
         BuildStage::RecordBlob,

@@ -1,12 +1,12 @@
 === categories-subclass dense ===
-bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+bundle: /home/user/code/tessera/data/bench-fixtures/2m4
 grant mode: random (bench GrantShape::Random, default) (w=10), reps=25, max_tiles=131072
 
 grant contiguity (universe 2422486 rows): entity-space card=386128 cov=15.9393% containers=35 run_ratio=106.665 | row-space card=386128 cov=15.9393% containers=37 run_ratio=1.750
 GRANT,2422486,386128,35,106.665064,386128,37,1.750380,65|17|77|79|45|76|53|97|51|20
 
 === categories-subclass sparse ===
-bundle: /home/joe/code/tessera/data/bench-fixtures/2m4
+bundle: /home/user/code/tessera/data/bench-fixtures/2m4
 grant mode: spread (deterministic, --sparse) (w=10), reps=25, max_tiles=131072
 
 grant contiguity (universe 2422486 rows): entity-space card=599200 cov=24.7349% containers=36 run_ratio=136.086 | row-space card=599200 cov=24.7349% containers=37 run_ratio=1.666

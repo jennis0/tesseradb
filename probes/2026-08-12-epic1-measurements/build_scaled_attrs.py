@@ -48,7 +48,7 @@ REPLICA = 2_422_486
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--limit", type=int, required=True, help="entity_id < LIMIT")
-ap.add_argument("--data", default="/home/joe/code/tessera/data")
+ap.add_argument("--data", default="/home/user/code/tessera/data")
 ap.add_argument("--out", default=None)
 ap.add_argument("--chunk", type=int, default=5_000_000, help="rows per output row group")
 args = ap.parse_args()

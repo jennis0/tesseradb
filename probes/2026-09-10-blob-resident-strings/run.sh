@@ -2,8 +2,12 @@
 # What routing a blob-resident string column through the record blob's extents costs and saves.
 #
 # Part one builds five ladder corpora with each binary and compares the two bundles file by file
-# (`docs/ingest-campaign.md` §4c): only `MANIFEST.json`'s `created_at` and the `CURRENT` that
-# digests it may differ, and the manifest is then compared field by field.
+# (`docs/ingest-campaign.md` §4c), then the manifests field by field. Each build generates its own
+# identity key, so the two bundles are not byte for byte the same: the manifest's `identity` and
+# `created_at`, the `CURRENT` that digests it, every `columns.arrow` (which stores each row's
+# `tessera_id`) and the manifest's digests of those files differ by construction. So may a file
+# whose rows are ordered by `tessera_id` among points sharing one cell. The listing leaves out the
+# files that differ by construction; anything else it prints is a difference to explain.
 #
 # Part two slices prefixes of the GBIF ladder corpus, builds each with both binaries and samples
 # the bundle root file by file while it runs: the peak, and what stood at it. The slicer and the
@@ -36,11 +40,8 @@ disk="$(cd "$(dirname "$0")/../2026-09-10-build-disk" && pwd)"
 slices="${SLICES:-25 50 100 200}"
 rung6="${RUNG6:-1}"
 mkdir -p "$work"
-# A corpus with no `.env` of its own builds under this one, which is a fixture key and not a
-# deployment's: what the comparison needs is that both binaries use the same lineage.
-export TESSERA_IDENTITY_KEY="${TESSERA_IDENTITY_KEY:-000102030405060708090a0b0c0d0e0f}"
 
-# ---- part one: the same bundle, byte for byte ------------------------------------------------
+# ---- part one: what differs between the two bundles --------------------------------------------
 for name in ${IDENTITY:-gbif-64p multiview treeoflife-1m medcpt-1m geonames}; do
   [ "$name" = none ] && continue
   corpus="$ladder/$name"
@@ -53,7 +54,7 @@ for name in ${IDENTITY:-gbif-64p multiview treeoflife-1m medcpt-1m geonames}; do
         --out "$work/$name-$which" > "$work/$name-$which.log" 2>&1 ) \
       || { echo "$name: $which build failed"; tail -5 "$work/$name-$which.log"; continue; }
   done
-  diff -rq "$work/$name-before" "$work/$name-after" | grep -v -E "MANIFEST\.json|CURRENT"
+  diff -rq "$work/$name-before" "$work/$name-after" | grep -v -E "MANIFEST\.json|CURRENT|columns\.arrow"
   python3 - "$work/$name-before" "$work/$name-after" "$name" <<'PY'
 import json, pathlib, sys
 a, b, name = sys.argv[1], sys.argv[2], sys.argv[3]

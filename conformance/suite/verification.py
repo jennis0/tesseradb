@@ -43,9 +43,9 @@ verb calls and then `Corpus::ingest_batch` beside them. This is the same trust c
 the CLI — the one Rust generator, reached through a build — and deliberately not a Python
 restatement of the materialisers, for §12.1's reason. Two writers of one input set is the cost:
 the shim's calls and `Corpus::config_toml`'s declaration are one obligation held apart in two
-crates, which `test_materialisation.py` exists to keep matched. The shim is cached at a fixed
-path per machine and shares the workspace's target directory, so after the first run its cost is
-a cargo fingerprint check.
+crates, which `test_materialisation.py` exists to keep matched. The shim lives in the checkout's
+own target directory and compiles into it, so after the first run its cost is a cargo fingerprint
+check.
 
 ## What the harness owns, and the two rules a naive harness breaks
 
@@ -65,21 +65,17 @@ current state. Background maintenance a tick might dispatch mid-run (a merge, a 
 is entitled to change no answer, so this mechanism — unlike stage invariance — needs no isolation
 from it.
 
-## Two served shapes the expectations must meet half-way
+## How absent values and the points tail are read
 
-- **A rendered number's absence is served as the type's zero** — the hot column cannot express
-  absence and decision 0064's wire half is deferred — so the expected side maps an absent render
-  number to 0 on both the points tail and the drill-down. A category's absence is its reserved
-  code 0 on the tail and an omitted field at drill-down, which the declaration's own key→code
-  table decides ([`Declaration`], parsed from the materialised `config.toml` rather than restated
-  here).
-- **The points tail is read positionally, not by name.** The tail's buffers are the render columns
-  in manifest order, but the wire currently labels them with the first *k* names of the **full**
-  declaration — the engine hands the serialiser the whole compiled schema while the gather narrows
-  to render columns, so this corpus's `bay` codes arrive under the name `seen_at`. Found by this
-  mechanism's first run; pinned as a strict xfail in `test_total_verification.py` so the fix is
-  noticed. Positional reading is correct both before and after that fix, because the buffer order
-  is the render declaration's either way.
+- **An absent value is null on the points tail and an omitted field at drill-down**, except a
+  category's on the tail, which is its reserved code 0. The declaration's own key→code table
+  decides a category's code ([`Declaration`], parsed from the materialised `config.toml` rather
+  than restated here).
+- **The render columns are read by position.** The points tail is `tessera_id` and `code`, then
+  the render columns in manifest order, each named by its column. [`check_points`] reads the join
+  column and `code` by name and the render columns by position, and
+  `test_the_points_tail_is_named_by_its_render_declaration` checks their names, so a misnamed
+  column fails that test rather than every value comparison after it.
 
 The drill-down surface (`/v1/items`) is where the non-rendered families are verified — it is the
 only reader of all three homes (§3) — and its `404` is a real answer: the row half requires a
@@ -90,7 +86,6 @@ surface.
 
 from __future__ import annotations
 
-import base64
 import io
 import os
 import re
@@ -104,7 +99,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built, write_deployment
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
@@ -115,14 +110,9 @@ from .canonical import Json, Streamed
 #: expected geometry.
 GRID_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
 
-#: A fixed identity key for the fixture bundle: the lineage decision is "a test fixture, minted
-#: deterministically", stated per the build's own rule rather than circumvented. Nothing may
-#: persist a `tessera_id` across builds regardless — the ids are a keyed permutation.
-FIXTURE_ID_KEY_HEX = "000102030405060708090a0b0c0d0e0f"
-
-#: Where the materialiser shim lives, per machine — a fixed path for the same reason as the
-#: catalogue's work dir: the compile is cached across sessions. The corpus *files* are per run.
-SHIM_DIR = Path("/tmp/tessera-corpus-suite/materialise-shim")
+#: Where the materialiser shim lives: in this checkout's target directory, where it is compiled,
+#: since its manifest names this checkout's crates. The corpus *files* are per run.
+SHIM_DIR = REPO_ROOT / "target" / "corpus-materialise-shim"
 
 
 class TotalVerificationFailure(AssertionError):
@@ -265,9 +255,9 @@ def materialise_corpus(
 
 def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
-    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
-    external ids minted from the source entity id (the denies address items by exactly those
-    bytes), and the identity-key decision stated through the environment.
+    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output.
+    Every file names its items by the unique field `id`, the item's number `e`, which is also what
+    the denies address items by.
 
     Nothing names a source or an extent here: the generator's own declaration sits beside the two
     parquet files it names, and carries the grid extent this corpus's expected answers are stated
@@ -285,10 +275,8 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
             str(CLI_BIN), "build",
             "--deployment", str(deployment),
             "--out", str(bundle_root),
-            "--mint-external-ids",
         ],
         cwd=REPO_ROOT,
-        env=build_env(FIXTURE_ID_KEY_HEX),
         check=True,
         capture_output=True,
     )
@@ -300,26 +288,18 @@ def build_bundle(files: CorpusFiles, bundle_root: Path) -> None:
 
 
 def _value_codes(vocabulary: Mapping[str, object]) -> Mapping[str, int] | None:
-    """A vocabulary's `key -> code` map, in either spelling (configuration.md §1).
+    """A vocabulary's pinned `key -> code` table.
 
-    `values` is a table when the caller pinned codes and a bare array when it left them to the
-    build, which assigns from 1 in declaration order, skipping `reserved` and never reaching the
-    absent sentinel. The oracle has to mirror that assignment rather than refuse the spelling: it is
-    the second reader the conformance suite exists to differ against, and a reader that only speaks
-    one half of the surface silently narrows what the suite can cover.
+    A bare array of keys leaves the codes to the build, which draws them at random, so the
+    declaration cannot state them and a fixture checked here pins its codes.
     """
     values = vocabulary.get("values")
     if values is None or isinstance(values, Mapping):
         return values
-    reserved = set(vocabulary.get("reserved", ()))
-    codes: dict[str, int] = {}
-    code = 1
-    for key in values:
-        while code in reserved:
-            code += 1
-        codes[key] = code
-        code += 1
-    return codes
+    raise ValueError(
+        f"vocabulary {vocabulary.get('name')!r} lists bare keys, whose codes the build draws at "
+        "random; pin them as a `[vocabulary.values]` table of `key = code`"
+    )
 
 
 @dataclass(frozen=True)
@@ -434,7 +414,12 @@ def expected_items(seed: int, fx_keys: Iterable[int]) -> dict[int, Expected]:
             fx_key=fx,
             x=columns["x"][i],
             y=columns["y"][i],
-            fields={"fx_key": fx, **{name: columns[name][i] for name in field_names}},
+            # `id` is the unique field, which the materialisers write as `e` itself.
+            fields={
+                "fx_key": fx,
+                "id": columns["e"][i],
+                **{name: columns[name][i] for name in field_names},
+            },
         )
     if set(expected) != set(keys):
         raise TotalVerificationFailure(
@@ -478,8 +463,7 @@ def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]
     if files.ingest is not None:
         with ipc.open_stream(io.BytesIO(files.ingest.read_bytes())) as reader:
             batch = reader.read_all()
-        ids = [int.from_bytes(v, "little") for v in batch.column("external_id").to_pylist()]
-        for e, labels in zip(ids, batch.column("access").to_pylist()):
+        for e, labels in zip(batch.column("id").to_pylist(), batch.column("access").to_pylist()):
             if e in wanted:
                 terms[e].update(int(label) for label in labels)
     missing = [e for e in wanted if not terms[e]]
@@ -518,7 +502,7 @@ def subtract_denies(
 # ---------------------------------------------------------------------------------------------
 
 
-def _streams_table(concatenated: bytes) -> pa.Table | None:
+def streams_table(concatenated: bytes) -> pa.Table | None:
     """Zero or more complete Arrow IPC streams, concatenated — the canonical points/tiles/underlay
     encoding (§12.2). Each stream is self-delimiting, so repeated `open_stream` walks them all."""
     if not concatenated:
@@ -533,7 +517,7 @@ def _streams_table(concatenated: bytes) -> pa.Table | None:
 
 def tile_visible(canon: Streamed) -> dict[int, int]:
     """The tiles surface's masked count per tile — the served side of the census half."""
-    table = _streams_table(canon.tiles)
+    table = streams_table(canon.tiles)
     if table is None:
         return {}
     return dict(zip(table.column("tile").to_pylist(), table.column("visible").to_pylist()))
@@ -542,7 +526,7 @@ def tile_visible(canon: Streamed) -> dict[int, int]:
 def underlay_counts(canon: Streamed) -> dict[int, int]:
     """The underlay's masked count per cell — the same claim as the tiles surface at depth
     `zoom + underlay_offset`, and the only other derived aggregate in the system (§3)."""
-    table = _streams_table(canon.underlay)
+    table = streams_table(canon.underlay)
     if table is None:
         return {}
     return dict(zip(table.column("cell").to_pylist(), table.column("count").to_pylist()))
@@ -562,9 +546,9 @@ def check_points(
     denied_fx: frozenset[int],
     reasons: list[str],
 ) -> int:
-    """Every row of one points surface against its own item: the code, and the render tail
-    positionally (module doc). Returns the number of rows verified."""
-    table = _streams_table(canon.points)
+    """Every row of one points surface against its own item: the code, and the render columns by
+    position (module doc). Returns the number of rows verified."""
+    table = streams_table(canon.points)
     if table is None:
         return 0
     render = declaration.render_columns()
@@ -576,8 +560,8 @@ def check_points(
         return 0
     fx_column = table.column("fx_key").to_pylist()
     codes = table.column("code").to_pylist()
-    # Positions 2.. are the render columns in manifest order; the name check is the strict
-    # xfail's business, not a laxity here (module doc).
+    # Positions 2.. are the render columns in manifest order; their names are checked by
+    # `test_the_points_tail_is_named_by_its_render_declaration`.
     tail = [table.column(2 + i).to_pylist() for i in range(len(render))]
     rows = 0
     for i, fx in enumerate(fx_column):
@@ -606,7 +590,7 @@ def check_points(
             if col.values is not None:
                 want = col.values[value] if value is not None else 0
             else:
-                want = value if value is not None else 0
+                want = value
             if served != want:
                 reasons.append(
                     f"{label}: row {i} (fx {fx:#x}, item {item.e}) serves {col.name!r} = "
@@ -626,7 +610,8 @@ def check_item(
     reasons: list[str],
 ) -> int:
     """One drill-down against its item: every declared field from whichever home holds it, the
-    404 exactly at the harness's own denies, and the external-id join. Returns rows verified."""
+    404 exactly at the harness's own denies, and the unique field `id`, which is the item's `e`.
+    Returns rows verified."""
     status = canon.payload["status"]
     if denied:
         if status != 404:
@@ -644,13 +629,14 @@ def check_item(
     body = canon.payload["body"]
     fields = body["fields"]
     for col in declaration.columns:
-        value = item.fields[col.name]
-        if col.render and col.values is None and value is None:
-            want = 0  # a rendered number's absence is the stored zero (module doc)
-        else:
-            want = value
+        want = item.fields[col.name]
         served = fields.get(col.name)
-        if served != want:
+        if want is None and col.name in fields:
+            reasons.append(
+                f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
+                f"holds no value, which the route leaves out"
+            )
+        elif served != want:
             reasons.append(
                 f"{label}: item {item.e} serves {col.name!r} = {served!r} where the corpus "
                 f"says {want!r}"
@@ -658,12 +644,6 @@ def check_item(
     undeclared = set(fields) - set(declaration.names())
     if undeclared:
         reasons.append(f"{label}: item {item.e} serves undeclared fields {sorted(undeclared)}")
-    want_external = base64.b64encode(item.e.to_bytes(8, "little")).decode()
-    if body.get("external_id") != want_external:
-        reasons.append(
-            f"{label}: item {item.e} serves external_id {body.get('external_id')!r} where the "
-            f"fixture's convention (the source id's little-endian bytes) says {want_external!r}"
-        )
     return 1
 
 
@@ -781,7 +761,7 @@ def verify_rows(
                 f"viewport(zoom={query.zoom}, "
                 f"filters={'yes' if query.filters else 'no'})"
             )
-            table = _streams_table(canon.points)
+            table = streams_table(canon.points)
             served_fx = table.column("fx_key").to_pylist() if table is not None else []
             expected = expected_items(seed, set(served_fx))
             rows += check_points(
@@ -852,7 +832,6 @@ __all__ = [
     "CorpusFiles",
     "Declaration",
     "Expected",
-    "FIXTURE_ID_KEY_HEX",
     "GRID_EXTENT",
     "TotalVerificationFailure",
     "build_bundle",
@@ -864,6 +843,7 @@ __all__ = [
     "expected_items",
     "materialise_corpus",
     "subtract_denies",
+    "streams_table",
     "terms_of",
     "tile_visible",
     "underlay_counts",

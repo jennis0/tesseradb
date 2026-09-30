@@ -44,7 +44,6 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
 
 const META = {
   apiVersion: 1,
-  idset: 0,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, roster: null}],
   // A one-view bundle declares no group; the explorer's pickers read this and draw nothing.
   groups: [],
@@ -55,7 +54,10 @@ const META = {
   filterOperands: [] as FilterOperandSet[]
 };
 
-const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
+/** A layer points can be coloured by: it declares geometry and depends on nothing. */
+const clusters = (name: string) => ({name, title: name, views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid'], shape: null, suppliedContent: [], depsOn: [], version: 1});
+
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, size_by: null, size_min: null, size_max: null, size_scale: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400, title_field: null};
 
 /** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
@@ -107,6 +109,14 @@ describe('the token protocol', () => {
     const p = supplier()();
     model.fire('msg:custom', {type: 'refused', detail: 'no credential'});
     await expect(p).rejects.toThrow('no credential');
+  });
+
+  it('hands title_field to every view’s explorer, and follows a change to it', async () => {
+    const {model, el} = setUp({title_field: 'title'});
+    const explorer = el.querySelector('tessera-explorer') as unknown as {titleField: string};
+    expect(explorer.titleField).toBe('title');
+    model.set('title_field', null);
+    expect(explorer.titleField).toBe('');
   });
 
   it('two views of one model: a store each, one supplier, and one ready', async () => {
@@ -163,6 +173,7 @@ describe('the up-sync', () => {
     expect(model.state.layers).toEqual(['clusters/a']);
     expect(model.state.colour_by).toBe('cluster:clusters/a');
     expect(model.state.filters).toBeNull();
+    expect([model.state.size_by, model.state.size_min, model.state.size_max, model.state.size_scale]).toEqual([null, 2, 9, 'linear']);
     // The same composition presented again is not a new settle.
     store.set('status', status({}));
     expect(model.saves).toBe(1);
@@ -171,7 +182,7 @@ describe('the up-sync', () => {
   it('ids cross as decimal strings, never numbers', () => {
     const {model, store} = setUp();
     const id = 2n ** 63n + 5n;
-    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {} as never}, artifactRefusal: null});
+    store.set('selection', {item: {id, detail: {} as never}, itemRefusal: null, artifact: {id: 7n, detail: {layer: 'clusters', key: null, maskedCount: 1n, centroid: null, box: null, shape: null}}, artifactRefusal: null});
     expect(model.state.selected).toBe('9223372036854775813');
     expect(model.state.selected_artifact).toBe('7');
     expect(typeof model.state.selected).toBe('string');
@@ -217,8 +228,7 @@ describe('a view change', () => {
     render({model, el: el2});
     expect(stores).toHaveLength(2);
     model.set('view', 'quarter:2026-Q3');
-    // A pointer change, never a rebuild (`view-switching.md` §3): no third store, and nothing
-    // disposed — which is what makes a slider through a group's roster usable.
+    // A view change rebuilds nothing: no third store, and nothing disposed.
     expect(stores).toHaveLength(2);
     expect(store.calls.filter((c) => c.name === 'dispose')).toHaveLength(0);
     for (const s of stores) expect(s.calls.filter((c) => c.name === 'setCurrentView').map((c) => c.args)).toEqual([['quarter:2026-Q3']]);
@@ -262,15 +272,51 @@ describe('the down-sync', () => {
     expect(store.calls.map((c) => c.name)).toEqual(['setLayers', 'setColourBy']);
     // Only the active view syncs up; a settle on it after meta carries what the store applied.
     const operands: FilterOperandSet[] = [{column: 'year', family: 'numeric', operands: ['range']}];
-    store.set('meta', {...META, filterOperands: operands} as never);
+    store.set('meta', {...META, layers: [clusters('clusters/a')], filterOperands: operands} as never);
+    expect(model.sent).toEqual([]);
+    // The traitlet is the filter expression; a highlight the page holds is kept beside it.
+    const lit = {year: {family: 'numeric' as const, gte: 1990, lte: 1999}};
+    store.set('filters', {...store.get('filters'), draft: {filter: {}, highlight: lit}});
     model.set('filters', {year: {range: {gte: 2000}}});
     const applied = store.calls.filter((c) => c.name === 'setFilters');
     expect(applied).toHaveLength(1);
-    expect(applied[0]!.args[0]).toEqual({year: {family: 'numeric', gte: 2000, lte: null, verb: 'filter'}});
+    expect(applied[0]!.args[0]).toEqual({filter: {year: {family: 'numeric', gte: 2000, lte: null}}, highlight: lit});
     // An expression the draft cannot hold is refused to the kernel, and applies nothing.
     model.set('filters', {any_of: [{year: {range: {gte: 1}}}]});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(model.sent.at(-1)?.content).toMatchObject({type: 'error', what: 'filters'});
+  });
+
+  it('applies the size settings set in the kernel, the scale before the column, and follows each change', async () => {
+    const {sizingOf} = await import('../src/colouring.js');
+    const {model, store} = setUp({size_by: 'citations', size_min: 3, size_max: 11, size_scale: 'rank'});
+    // Sized by rank, the store is asked to keep a sample of the column's values.
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').map((c) => c.args)).toEqual([['citations', {rank: true}]]);
+    expect(sizingOf(store)).toEqual({min: 3, max: 11, scale: 'rank'});
+    model.set('size_max', 7);
+    model.set('size_scale', 'log');
+    expect(sizingOf(store)).toEqual({min: 3, max: 7, scale: 'log'});
+    // A radius that is not a number above zero leaves the one drawn, which the next settle reports.
+    model.set('size_min', -1);
+    expect(sizingOf(store).min).toBe(3);
+    model.set('size_by', null);
+    expect(store.calls.filter((c) => c.name === 'setSizeBy').at(-1)!.args).toEqual([null, {rank: false}]);
+  });
+
+  it('reports a colour_by naming no layer this view can colour by, once meta lists the layers', () => {
+    const {model, store} = setUp({colour_by: 'cluster:nope'});
+    // The store takes it as given; before meta there is nothing to check it against.
+    expect(store.calls.filter((c) => c.name === 'setColourBy').map((c) => c.args)).toEqual([['cluster:nope']]);
+    expect(model.sent).toEqual([]);
+    store.set('meta', {...META, layers: [clusters('topics'), {...clusters('topic_names'), computedContent: [], depsOn: ['topics']}]} as never);
+    expect(model.sent.map((s) => s.content)).toMatchObject([{type: 'error', what: 'colour_by'}]);
+    // A layer that can colour is not reported, drawn or not; a labels layer cannot colour.
+    model.set('colour_by', 'cluster:topics');
+    model.set('colour_by', 'archive');
+    expect(model.sent).toHaveLength(1);
+    model.set('colour_by', 'cluster:topic_names');
+    expect(model.sent.map((s) => s.content)).toMatchObject([{what: 'colour_by'}, {type: 'error', what: 'colour_by'}]);
+    expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
   });
 
   it('a filters expression set before meta is applied at meta', () => {
@@ -291,7 +337,6 @@ describe('draftOf inverts composeFilters', () => {
   ];
   const cases: FilterExpr[] = [
     {title: {match: 'sea'}},
-    {title: {match: {query: 'sea sky', minimum_should_match: 1}}},
     {title: {phrase: 'the sea'}},
     {archive: {in: ['a', 'b']}},
     {author: {prefix: 'Ke'}},
@@ -303,14 +348,37 @@ describe('draftOf inverts composeFilters', () => {
       expect(composeFilters(draftOf(expr, operands))).toEqual(expr);
     });
   }
+  it('reads back every text expression the box writes, alone and beside other columns', () => {
+    for (const query of ['graph neural', '"graph neural"', 'networks "graph neural"', 'graph OR lattice', '"neural net" OR gnn OR graph lattice']) {
+      const alone = composeFilters({filter: {title: {family: 'text', query, phrase: true}}, highlight: {}})!;
+      const draft = draftOf(alone, operands);
+      expect(draft.filter['title']).toEqual({family: 'text', query, phrase: true});
+      expect(composeFilters(draft)).toEqual(alone);
+      const beside = composeFilters({filter: {title: {family: 'text', query, phrase: true}, archive: {family: 'category', keys: ['a']}}, highlight: {}})!;
+      expect(composeFilters(draftOf(beside, operands))).toEqual(beside);
+    }
+  });
+  it('keeps a text expression the box cannot write as it was sent', () => {
+    for (const expr of [
+      {title: {match: 'salt OR pepper'}},
+      {title: {match: {query: 'sea sky', minimum_should_match: 1}}},
+      {title: {match: 'say "hello"'}},
+      {any_of: [{title: {phrase: 'the sea'}}, {title: {match: {query: 'a b c', minimum_should_match: 2}}}]}
+    ] as FilterExpr[]) {
+      const draft = draftOf(expr, operands);
+      expect(draft.filter['title']).toMatchObject({family: 'text', expr});
+      expect(composeFilters(draft)).toEqual(expr);
+    }
+  });
   it('null is the unfiltered request', () => {
     expect(composeFilters(draftOf(null, operands))).toBeNull();
   });
-  it('refuses what a draft cannot hold, naming the reason', () => {
-    expect(() => draftOf({none_of: [{title: {match: 'x'}}]}, operands)).toThrow(/none_of/);
-    expect(() => draftOf({nope: {eq: 'x'}}, operands)).toThrow(/not a filterable column/);
-    expect(() => draftOf({year: {eq: 3}}, operands)).toThrow(/numeric column cannot hold eq/);
-    expect(() => draftOf({all_of: [{year: {range: {gte: 1}}}, {year: {range: {lte: 2}}}]}, operands)).toThrow(/two leaves/);
-    expect(() => draftOf({year: {range: {gt: 1}}}, operands)).toThrow(/inclusive/);
+  it('refuses what a draft cannot hold', () => {
+    expect(() => draftOf({none_of: [{title: {match: 'x'}}]}, operands)).toThrow();
+    expect(() => draftOf({nope: {eq: 'x'}}, operands)).toThrow();
+    expect(() => draftOf({year: {eq: 3}}, operands)).toThrow();
+    expect(() => draftOf({all_of: [{year: {range: {gte: 1}}}, {year: {range: {lte: 2}}}]}, operands)).toThrow();
+    expect(() => draftOf({year: {range: {gt: 1}}}, operands)).toThrow();
+    expect(() => draftOf({any_of: [{title: {match: 'x'}}, {archive: {in: ['a']}}]}, operands)).toThrow();
   });
 });

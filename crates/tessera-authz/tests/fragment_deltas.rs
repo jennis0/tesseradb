@@ -1,9 +1,8 @@
-//! A fragment build unions the delta postings tiers (§5.2).
+//! A fragment build unions the delta postings tiers.
 //!
 //! Flush produces one delta postings tier per segment, and a fragment build unions across every
-//! live tier. A tier is **sparse** — only the terms present in its flushed set — so a term a tier
-//! does not carry contributes nothing, which is also what makes a promoted term readable: its
-//! ordinal is at or above the base's term count, and the base simply has nothing for it.
+//! live tier. A tier is sparse, only the terms present in its flushed set, so a term a tier does
+//! not carry contributes nothing.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -21,7 +20,7 @@ fn postings_with(dir: &std::path::Path, name: &str, per_term: &[&[u32]]) -> Arc<
     Arc::new(PostingsReader::open(&path, false).unwrap())
 }
 
-/// A sparse tier: `(term, entities)` pairs, ascending by term, and nothing for the gaps.
+/// A sparse tier: `(term, entities)` pairs, ascending by term.
 fn tier_with(dir: &std::path::Path, name: &str, entries: &[(u32, &[u32])]) -> Arc<DeltaTier> {
     let path = dir.join(name);
     let owned: Vec<(TermId, Vec<u32>)> = entries
@@ -32,8 +31,7 @@ fn tier_with(dir: &std::path::Path, name: &str, entries: &[(u32, &[u32])]) -> Ar
     Arc::new(DeltaTier::open(&path).unwrap())
 }
 
-/// The inert case, asserted on bytes rather than on cardinality: no tier changes nothing.
-/// This is what makes the union landable ahead of any flush.
+/// No tiers changes nothing, asserted on bytes rather than on cardinality.
 #[test]
 fn a_build_over_zero_delta_tiers_is_byte_identical() {
     let temp = TempDir::new().unwrap();
@@ -49,8 +47,7 @@ fn a_build_over_zero_delta_tiers_is_byte_identical() {
     );
 }
 
-/// A tier contributes only for terms the session already holds — the union is over `satisfied`,
-/// never over the tier's whole term set (I2).
+/// A tier contributes only for terms the session already holds, never over its whole term set.
 #[test]
 fn a_delta_tier_contributes_only_satisfied_terms() {
     let temp = TempDir::new().unwrap();
@@ -63,9 +60,7 @@ fn a_delta_tier_contributes_only_satisfied_terms() {
     assert!(!fragment.contains(2) && !fragment.contains(11));
 }
 
-/// A tier is sparse: a term it does not carry is a hit of zero cost, not an error. Without this
-/// a promoted descriptor — whose ordinal is at or above the base's term count (§3.2) — would make
-/// every authorise carrying it fail outright.
+/// A tier is sparse: a term it does not carry is a hit of zero cost, not an error.
 #[test]
 fn a_term_no_tier_carries_contributes_nothing_rather_than_failing() {
     let temp = TempDir::new().unwrap();
@@ -84,8 +79,7 @@ fn a_term_no_tier_carries_contributes_nothing_rather_than_failing() {
 }
 
 /// Tiers union rather than shadow: an entity a later tier adds for a term joins the ones the base
-/// and the earlier tiers already carry. Nothing a merge does to the tiers may change this set
-/// (§5.2's content-preserving re-encode).
+/// and the earlier tiers already carry.
 #[test]
 fn every_tier_contributes_and_none_shadows_another() {
     let temp = TempDir::new().unwrap();

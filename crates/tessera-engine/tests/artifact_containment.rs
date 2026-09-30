@@ -26,7 +26,8 @@ use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::artifacts::{ArtifactProjections, ArtifactRows, Containment};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::containment::{signature_shaped, ContainmentPartition, PartitionSource};
 use tessera_engine::denied_rows_of;
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, ContentSet};
@@ -48,19 +49,33 @@ const LARGE: u32 = 5_000;
 const LAYER: &str = "clusters/a";
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
-/// Entities the postings name and the permutation does not cover — **members awaiting a fold**.
+/// The entities a flush published: they own **extent rows** above the base, and their terms are in
+/// a delta tier rather than in `terms/postings.arrow`.
+///
+/// A generating set holding one projects whole, so it clears the projection check and reaches the
+/// containment test. The partition composed from the base postings knows nothing of these terms,
+/// which is why an ordinal whose set reaches above the base rows declines to the masked-count
+/// route.
+const FLUSHED_LO: u32 = UNIVERSE;
+const FLUSHED_HI: u32 = UNIVERSE + 31;
+const FLUSHED_ROWS: u32 = FLUSHED_HI - FLUSHED_LO + 1;
+
+/// An entity no row covers — a member **still in the commit buffer**.
 ///
 /// A generating set holding one is lossy in projection and can never be contained, and the case
 /// only bites because these entities **do** carry terms: an unlabelled member would already fail
 /// the expression, so a fixture that planted one would leave the projection-loss check untested
 /// while appearing to cover it.
-const UNPROJECTABLE: u32 = UNIVERSE + 7;
+const UNPROJECTABLE: u32 = UNIVERSE + 40;
 const LABELLED: u32 = UNIVERSE + 64;
 
 /// The corpus, its postings, its row space, and the artifacts over it.
 struct Fixture {
     _temp: TempDir,
     postings: PostingsReader,
+    /// The flushed entities' terms, as a flush writes them: read when a mask is composed and not
+    /// by the partition's composer.
+    tier: Arc<tessera_authz::DeltaTier>,
     row_space: RowSpace,
     store: ArtifactStore,
     /// `entity → its terms`, kept so the expected answers below are computed from the fixture's
@@ -92,16 +107,33 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
             terms
         })
         .collect();
+    // **The base postings hold the entities the build read; the tier holds the flushed ones.**
+    // That split is the whole reason the partition cannot answer for a set that reaches above the
+    // base rows, so the fixture may not blur it.
     let mut per_term: Vec<Vec<u32>> = vec![Vec::new(); TERMS as usize];
+    let mut per_term_flushed: Vec<Vec<u32>> = vec![Vec::new(); TERMS as usize];
     for (entity, terms) in terms_of.iter().enumerate() {
         for term in terms {
-            per_term[*term as usize].push(entity as u32);
+            if (entity as u32) < UNIVERSE {
+                per_term[*term as usize].push(entity as u32);
+            } else {
+                per_term_flushed[*term as usize].push(entity as u32);
+            }
         }
     }
 
     let postings_path = temp.path().join("postings.arrow");
     write_postings(&postings_path, &per_term, SMALL_TERM_THRESHOLD).unwrap();
     let postings = PostingsReader::open(&postings_path, false).unwrap();
+    let tier_path = temp.path().join("tier.arrow");
+    let entries: Vec<(u32, Vec<u32>)> = per_term_flushed
+        .into_iter()
+        .enumerate()
+        .filter(|(_, entities)| !entities.is_empty())
+        .map(|(term, entities)| (term as u32, entities))
+        .collect();
+    tessera_authz::write_delta_tier_at(&tier_path, &entries, SMALL_TERM_THRESHOLD).unwrap();
+    let tier = Arc::new(tessera_authz::DeltaTier::open(&tier_path).unwrap());
 
     // **A shuffle, not the identity.** Row order and entity order agreeing would let a bug that
     // conflated the two pass every case here.
@@ -111,9 +143,23 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
     }
     let perm_path = temp.path().join("permutation.bin");
     write_permutation(&perm_path, &order, UNIVERSE as u64).unwrap();
-    // The row space stops at `UNIVERSE`, so the labelled entities above it project to nothing —
-    // which is what a member ingested since the last fold looks like from here.
-    let row_space = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), UNIVERSE);
+    // **One flushed segment above the base**, so an entity that arrived by ingest has a row and a
+    // still-buffered one has none. The extent's rows are a shuffle of its own span, as a
+    // Morton-sorted segment's are.
+    let mut extent_rows: Vec<u32> = (0..FLUSHED_ROWS).collect();
+    for i in (1..extent_rows.len()).rev() {
+        extent_rows.swap(i, rng.gen_range(0..=i));
+    }
+    let row_space = RowSpace::new(Arc::new(Permutation::load(&perm_path).unwrap()), UNIVERSE)
+        .with_extent(tessera_store::SegmentExtent {
+            entity_lo: u64::from(FLUSHED_LO),
+            entity_hi: u64::from(FLUSHED_HI),
+            seg_id: "s-flush-0".to_string(),
+            row_base: UNIVERSE,
+            rows: extent_rows,
+            below: Vec::new(),
+        })
+        .expect("the extent continues row space exactly");
 
     let mut store = ArtifactStore::new();
     let mut published = Vec::new();
@@ -135,6 +181,11 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
             if ordinal % 20 == 3 && rank == 0 {
                 set.push(UNPROJECTABLE);
             }
+            // **One artifact in seven draws a member from the flushed segment.** Its set projects
+            // whole, so it reaches the containment test and the partition has to decline it.
+            if ordinal % 7 == 2 {
+                set.push(FLUSHED_LO + (ordinal + rank) % FLUSHED_ROWS);
+            }
             set.sort_unstable();
             set.dedup();
             sets.push(set);
@@ -148,6 +199,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
                 view: None,
+                incarnation: 0,
                 members: members.into(),
                 contents: sets
                     .into_iter()
@@ -162,6 +214,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                     .collect(),
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             },
             None,
         );
@@ -170,6 +223,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
     Fixture {
         _temp: temp,
         postings,
+        tier,
         row_space,
         store,
         terms_of,
@@ -200,12 +254,26 @@ impl Fixture {
         sorted.sort_unstable_by_key(|t| t.raw());
         let cache = FragmentCache::new(&self._temp.path().join("frag"), [1u8; 32], [2u8; 32]);
         let fragment = cache
-            .get_or_build(&sorted, [3u8; 32], 0, &self.postings, &[], UNIVERSE as u64)
+            .get_or_build(
+                &sorted,
+                &self.postings,
+                std::slice::from_ref(&self.tier),
+                u64::from(FLUSHED_HI),
+            )
             .unwrap();
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
-        let mask = compose(&satisfied, overlay, &buffer, base, &self.row_space, &denied);
+        let buffered = tessera_engine::buffered_rows_of(&buffer, &self.row_space);
+        let mask = compose(
+            &satisfied,
+            overlay,
+            &buffer,
+            base,
+            &self.row_space,
+            &denied,
+            Some(&buffered),
+        );
         (mask, satisfied, denied)
     }
 
@@ -217,7 +285,9 @@ impl Fixture {
     fn expected(&self, ordinal: u32, granted: &[u32], overlay: &Overlay) -> Containment {
         for (rank, set) in self.published[ordinal as usize].iter().enumerate() {
             let contained = set.iter().all(|entity| {
-                *entity < UNIVERSE
+                self.row_space
+                    .row_of(EntityId::new(u64::from(*entity)))
+                    .is_some()
                     && self.terms_of[*entity as usize]
                         .iter()
                         .any(|t| granted.contains(t))
@@ -229,6 +299,22 @@ impl Fixture {
             }
         }
         Containment::Unsatisfied
+    }
+
+    /// Whether any of this ordinal's generating sets holds a member the flush published — the
+    /// ordinals the partition declines and the masked-count route answers for.
+    fn reaches_flushed(&self, ordinal: u32) -> bool {
+        self.published[ordinal as usize]
+            .iter()
+            .flatten()
+            .any(|entity| (FLUSHED_LO..=FLUSHED_HI).contains(entity))
+    }
+
+    /// The first ordinal the partition answers for that satisfies `wanted`.
+    fn ordinal_where(&self, wanted: impl Fn(u32) -> bool) -> u32 {
+        (0..self.artifacts)
+            .find(|o| !self.reaches_flushed(*o) && wanted(*o))
+            .expect("the fixture holds such an ordinal")
     }
 }
 
@@ -290,6 +376,7 @@ fn differential(fx: &Fixture) -> bool {
     }
 
     let mut served = 0usize;
+    let mut declined = 0usize;
     let mut settled_eagerly = None;
     for overlay in [&Overlay::new(), &overlay] {
         for granted in principals() {
@@ -304,18 +391,35 @@ fn differential(fx: &Fixture) -> bool {
                     "the masked-count route disagrees with the fixture's own answer at \
                      ordinal {ordinal} for terms {granted:?}"
                 );
-                assert_eq!(
-                    partitioned.satisfied_rank_via(ordinal, &answers, &denied, true),
-                    Some(expected),
-                    "the containment partition disagrees at ordinal {ordinal} for terms \
-                     {granted:?}"
-                );
+                let via = partitioned.satisfied_rank_via(ordinal, &answers, &denied, true);
+                if fx.reaches_flushed(ordinal) {
+                    // **The partition declines and the caller falls back.** Its expression was
+                    // composed without the flushed member's terms, so an answer from it would be
+                    // `Unsatisfied` for every principal — which is exactly issue #150.
+                    assert_eq!(
+                        via, None,
+                        "an ordinal whose generating set reaches above the base rows was answered \
+                         from the partition at ordinal {ordinal} for terms {granted:?}"
+                    );
+                    declined += 1;
+                } else {
+                    assert_eq!(
+                        via,
+                        Some(expected),
+                        "the containment partition disagrees at ordinal {ordinal} for terms \
+                         {granted:?}"
+                    );
+                }
                 if matches!(expected, Containment::Satisfied(_)) {
                     served += 1;
                 }
             }
         }
     }
+    assert!(
+        declined > 0,
+        "no ordinal reached above the base rows, so the declining arm was never exercised"
+    );
     // A run where nothing was ever contained would agree trivially.
     assert!(
         served > fx.artifacts as usize,
@@ -323,6 +427,119 @@ fn differential(fx: &Fixture) -> bool {
          the satisfied path"
     );
     settled_eagerly.expect("the grid ran at least one principal")
+}
+
+/// **A generating set holding a flushed member is served, and to the right principals.** Issue
+/// #150: such a set used to project short of its declared size, so the content was withheld from
+/// everyone. It now projects whole through the extent, and the masked-count route decides it.
+#[test]
+fn a_set_holding_a_flushed_member_is_served_to_a_viewer_who_holds_every_member() {
+    let fx = build_fixture();
+    let rows = fx.rows();
+    let ordinal = (0..fx.artifacts)
+        .find(|o| fx.reaches_flushed(*o))
+        .expect("the fixture draws some set from the flushed segment");
+    let set = &fx.published[ordinal as usize][0];
+    let flushed = *set
+        .iter()
+        .find(|e| (FLUSHED_LO..=FLUSHED_HI).contains(e))
+        .expect("rank 0 holds the flushed member");
+
+    // The set projects to as many rows as the record declares, which is what the withholding gate
+    // reads.
+    assert_eq!(
+        rows.membership().generating(ordinal)[0].cardinality(),
+        set.len() as u64,
+        "the set lost a member on the way into row space"
+    );
+
+    let whole: Vec<u32> = set
+        .iter()
+        .flat_map(|e| fx.terms_of[*e as usize].clone())
+        .collect();
+    let overlay = Overlay::new();
+    let (mask, _, _) = fx.mask(&whole, &overlay);
+    assert_eq!(
+        rows.satisfied_rank(ordinal, &mask, true),
+        Containment::Satisfied(0),
+        "a principal holding every member's terms is served rank 0"
+    );
+
+    // The same principal without the flushed member's terms, which no other member of rank 0
+    // carries: rank 0 is out of contention.
+    let others: Vec<u32> = set
+        .iter()
+        .filter(|e| **e != flushed)
+        .flat_map(|e| fx.terms_of[*e as usize].clone())
+        .collect();
+    if !fx.terms_of[flushed as usize]
+        .iter()
+        .any(|t| others.contains(t))
+    {
+        let (mask, _, _) = fx.mask(&others, &overlay);
+        assert_ne!(
+            rows.satisfied_rank(ordinal, &mask, true),
+            Containment::Satisfied(0),
+            "a principal who cannot see the flushed member was served the content generated \
+             from it"
+        );
+    }
+}
+
+/// **A denied flushed member takes its rank out of contention, exactly as a base-row member does.**
+/// The deny mask is derived over the whole row space, so a suppression reaches an extent row; and
+/// an unsuppress re-derives, so `delete → suppress → unsuppress` leaves the member deleted.
+#[test]
+fn a_suppressed_flushed_member_is_not_contained_and_an_unsuppress_re_derives() {
+    let fx = build_fixture();
+    let rows = fx.rows();
+    let ordinal = (0..fx.artifacts)
+        .find(|o| fx.reaches_flushed(*o))
+        .expect("the fixture draws some set from the flushed segment");
+    let set = &fx.published[ordinal as usize][0];
+    let flushed = EntityId::new(u64::from(
+        *set.iter()
+            .find(|e| (FLUSHED_LO..=FLUSHED_HI).contains(e))
+            .expect("rank 0 holds the flushed member"),
+    ));
+    let granted: Vec<u32> = set
+        .iter()
+        .flat_map(|e| fx.terms_of[*e as usize].clone())
+        .collect();
+
+    let contained = |overlay: &Overlay| {
+        let (mask, _, _) = fx.mask(&granted, overlay);
+        rows.satisfied_rank(ordinal, &mask, true)
+    };
+    assert_eq!(contained(&Overlay::new()), Containment::Satisfied(0));
+
+    let mut overlay = Overlay::new();
+    overlay.apply(flushed, ChangeOp::Suppress);
+    assert_ne!(
+        contained(&overlay),
+        Containment::Satisfied(0),
+        "a suppressed member of the set must take its rank out of contention"
+    );
+
+    let mut overlay = Overlay::new();
+    overlay.apply(flushed, ChangeOp::Unsuppress);
+    assert_eq!(
+        contained(&overlay),
+        Containment::Satisfied(0),
+        "the unsuppress restores the member, and the rank is served again"
+    );
+
+    let mut overlay = Overlay::new();
+    overlay.apply(flushed, ChangeOp::Delete);
+    let deleted = contained(&overlay);
+    assert_ne!(deleted, Containment::Satisfied(0));
+    overlay.apply(flushed, ChangeOp::Suppress);
+    overlay.apply(flushed, ChangeOp::Unsuppress);
+    assert_eq!(
+        contained(&overlay),
+        deleted,
+        "the deletion stands through an unsuppress"
+    );
 }
 
 /// **An unsuppress re-derives; it does not subtract.** `delete → suppress → unsuppress` must leave
@@ -334,13 +551,12 @@ fn an_unsuppress_does_not_restore_a_deleted_member_through_the_partition() {
     let partitioned = fx.rows().with_partition(Some(fx.partition()));
     let granted: Vec<u32> = (0..TERMS).collect();
 
-    // An ordinal whose first rank is contained by a principal holding every term.
-    let ordinal = (0..fx.artifacts)
-        .find(|o| {
-            fx.expected(*o, &granted, &Overlay::new()) == Containment::Satisfied(0)
-                && fx.published[*o as usize].len() > 1
-        })
-        .expect("some artifact's first rank is contained by a principal holding everything");
+    // An ordinal whose first rank is contained by a principal holding every term, and which the
+    // partition answers for.
+    let ordinal = fx.ordinal_where(|o| {
+        fx.expected(o, &granted, &Overlay::new()) == Containment::Satisfied(0)
+            && fx.published[o as usize].len() > 1
+    });
     let member = EntityId::new(u64::from(fx.published[ordinal as usize][0][0]));
 
     let contained_via = |overlay: &Overlay| {
@@ -467,7 +683,7 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     let overlay = Overlay::new();
     let (mask, satisfied, denied) = fx.mask(&granted, &overlay);
     let answers = rows.partition().unwrap().answers(&satisfied);
-    for ordinal in 0..fx.artifacts {
+    for ordinal in (0..fx.artifacts).filter(|o| !fx.reaches_flushed(*o)) {
         assert_eq!(
             plain.satisfied_rank(ordinal, &mask, true),
             rows.satisfied_rank_via(ordinal, &answers, &denied, true)
@@ -502,11 +718,14 @@ fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
     store.seed_level_version(LAYER, 0, 7);
     let composed_at = store.level_version(LAYER, 0);
     assert_eq!(composed_at, 7);
-    let entry = |version: u64| tessera_store::manifest::ContainmentExtent {
+    let entry = |version: u64| tessera_store::manifest::DerivedExtent {
         path: rel.to_string(),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        view: None,
+        incarnation: None,
+        form: tessera_store::manifest::DerivedForm::Containment,
     };
     let source = PartitionSource {
         postings: &fx.postings,
@@ -589,11 +808,14 @@ fn an_adopted_partition_does_not_answer_under_another_prefix() {
     projections.adopt_all(
         tmp.path(),
         "v00000",
-        &[tessera_store::manifest::ContainmentExtent {
+        &[tessera_store::manifest::DerivedExtent {
             path: rel.to_string(),
             layer: LAYER.to_string(),
             level: 0,
             level_version: fx.store.level_version(LAYER, 0),
+            view: None,
+            incarnation: None,
+            form: tessera_store::manifest::DerivedForm::Containment,
         }],
         &fx.store,
     );
@@ -636,6 +858,10 @@ fn the_composed_expression_is_the_members_own_signatures() {
     let partition = partitioned.partition().unwrap();
 
     for ordinal in [0u32, 1, 17, 200] {
+        assert!(
+            !fx.reaches_flushed(ordinal),
+            "ordinal {ordinal} reaches above the base rows, where no expression is composed"
+        );
         for (rank, set) in fx.published[ordinal as usize].iter().enumerate() {
             // The one principal that holds exactly the terms this set's members carry, and no
             // others: it must be contained where the set projected whole.

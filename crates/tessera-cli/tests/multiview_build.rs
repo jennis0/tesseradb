@@ -12,9 +12,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, Float32Array, Float64Array, ListBuilder, StringArray, StringBuilder, UInt64Array,
-    UInt64Builder,
+    Array, ArrayRef, Float32Array, Float64Array, ListArray, ListBuilder, StringArray, StringBuilder,
+    StructArray, UInt64Array,
 };
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -39,6 +40,16 @@ fn position(view: &str, e: u64) -> (f64, f64) {
         "q1" => (90.0 - (e % 5) as f64 * 10.0, (e / 5) as f64 * 7.0),
         _ => ((e % 7) as f64 * 9.0, 90.0 - (e / 7) as f64 * 6.0),
     }
+}
+
+/// Every item's `entity_id`, one row each.
+fn write_ids(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![Field::new("entity_id", DataType::UInt64, false)]));
+    let ids: Vec<u64> = (0..ENTITIES).collect();
+    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(UInt64Array::from(ids))]).unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
 }
 
 /// A points file with no discriminator: `entity_id, x, y, access`, plus `sentiment` where the
@@ -114,19 +125,28 @@ fn write_discriminated(path: &Path) {
     );
 }
 
-/// One artifact per row: `key`, its members, one content value, and — on the scoped layer — the
-/// view it belongs to.
+/// One artifact per row: `key`, its members (each a struct naming its item by `entity_id`), one
+/// content value, and — on the scoped layer — the view it belongs to.
 fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
     let scoped = rows.iter().any(|(_, view, _)| view.is_some());
+    let entries = StructArray::from(vec![(
+        Arc::new(Field::new("entity_id", DataType::UInt64, false)),
+        Arc::new(UInt64Array::from(
+            rows.iter().flat_map(|(_, _, ids)| ids.iter().copied()).collect::<Vec<_>>(),
+        )) as ArrayRef,
+    )]);
+    let item = Arc::new(Field::new("item", entries.data_type().clone(), true));
+    let members = ListArray::new(
+        item.clone(),
+        OffsetBuffer::from_lengths(rows.iter().map(|(_, _, ids)| ids.len())),
+        Arc::new(entries),
+        None,
+    );
     let mut fields = vec![Field::new("key", DataType::Utf8, false)];
     if scoped {
         fields.push(Field::new("quarter", DataType::Utf8, false));
     }
-    fields.push(Field::new(
-        "members",
-        DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-        false,
-    ));
+    fields.push(Field::new("members", DataType::List(item), false));
     fields.push(Field::new(
         "contents",
         DataType::List(Arc::new(Field::new(
@@ -137,13 +157,8 @@ fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
         false,
     ));
     let schema = Arc::new(Schema::new(fields));
-    let mut members = ListBuilder::new(UInt64Builder::new());
     let mut contents = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
-    for (_, _, ids) in rows {
-        for id in ids {
-            members.values().append_value(*id);
-        }
-        members.append(true);
+    for _ in rows {
         contents.values().values().append_value("tag");
         contents.values().append(true);
         contents.append(true);
@@ -158,7 +173,7 @@ fn write_artifacts(path: &Path, rows: &[(&str, Option<&str>, Vec<u64>)]) {
                 .collect::<Vec<_>>(),
         )));
     }
-    columns.push(Arc::new(members.finish()));
+    columns.push(Arc::new(members));
     columns.push(Arc::new(contents.finish()));
     write(path, schema, columns);
 }
@@ -173,6 +188,7 @@ fn write(path: &Path, schema: Arc<Schema>, columns: Vec<ArrayRef>) {
 const CORPUS: &str = r#"
 [sources]
 world    = "world.parquet"
+ids      = "ids.parquet"
 q1       = "q1.parquet"
 q2       = "q2.parquet"
 alt      = "alt.parquet"
@@ -181,6 +197,15 @@ clusters = "clusters.parquet"
 
 [defaults]
 allocation_view = "world"
+
+# Every file names its item by its `entity_id`. No view's points hold every item, so the values
+# are read from a file that does.
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+source = "ids"
 
 [[view]]
 name             = "world"
@@ -269,12 +294,8 @@ schema = "corpus.toml"
 [plugin]
 module = "builtin:passthrough"
 
-[identity]
-env = "TESSERA_TEST_IDENTITY_KEY"
-
 [disclosure]
-min_visible_members = 1
-token_max_lifetime  = 3600
+token_max_lifetime = 3600
 
 [serve]
 viewer  = "127.0.0.1:18081"
@@ -291,6 +312,7 @@ fn the_whole_declaration_builds_and_verifies() {
     let dir = tempfile::tempdir().unwrap();
     let at = |name: &str| dir.path().join(name);
     write_points(&at("world.parquet"), "world", WORLD, false);
+    write_ids(&at("ids.parquet"));
     write_points(&at("q1.parquet"), "q1", Q1, true);
     write_points(&at("q2.parquet"), "q2", Q2, true);
     write_discriminated(&at("alt.parquet"));
@@ -318,8 +340,7 @@ fn the_whole_declaration_builds_and_verifies() {
 
     let built = tessera()
         .current_dir(dir.path())
-        .args(["build", "--mint-id-key"])
-        .env("TESSERA_TEST_IDENTITY_KEY", "")
+        .arg("build")
         .output()
         .expect("the build runs");
     let stderr = String::from_utf8_lossy(&built.stderr).to_string();

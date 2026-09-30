@@ -56,7 +56,7 @@ use std::time::Instant;
 use croaring::Bitmap;
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_store::derived::{resolve_segment, HeldEntry, HeldShape, ShapeIndex};
-use tessera_store::manifest::{RowColumnExtent, ShapeHeldExtent, ShapeRowsExtent};
+use tessera_store::manifest::{DerivedExtent, DerivedForm};
 use tessera_store::read::{Bundle, SegmentData, ViewData};
 use tessera_types::layer::{MembershipSource, RegisteredLayer};
 
@@ -507,12 +507,15 @@ impl ShapeStore {
         store: &ArtifactStore,
     ) -> WarmReport {
         let mut total = WarmReport::default();
-        for segment in &view_data.segments {
+        for (index, segment) in view_data.segments.iter().enumerate() {
             if level.has_staged(&segment.seg_id) {
                 continue;
             }
+            // The first segment is the base only where the row space has one; a view created at
+            // a running service takes every segment as an extent.
+            let base = index == 0 && view_data.row_space.base_rows() > 0;
             let started = Instant::now();
-            if let Some(piece) = persisted.claim(level, segment, store) {
+            if let Some(piece) = persisted.claim(level, segment, base, store) {
                 level.stage(&segment.seg_id, Arc::new(piece));
                 total.pieces_claimed += 1;
                 total.claim_ms += started.elapsed().as_millis() as u64;
@@ -616,9 +619,7 @@ pub struct WarmReport {
 #[derive(Clone, Copy, Default)]
 pub struct PersistedPieces<'a> {
     pub prefix_dir: Option<&'a std::path::Path>,
-    pub shape_rows: &'a [ShapeRowsExtent],
-    pub row_columns: &'a [RowColumnExtent],
-    pub shape_held: &'a [ShapeHeldExtent],
+    pub extents: &'a [DerivedExtent],
 }
 
 impl PersistedPieces<'_> {
@@ -641,11 +642,12 @@ impl PersistedPieces<'_> {
         let Some(prefix_dir) = self.prefix_dir else {
             return Vec::new();
         };
-        let Some(extent) = self
-            .shape_held
-            .iter()
-            .find(|e| e.view == view && e.layer == layer && e.level == level)
-        else {
+        let Some(extent) = self.extents.iter().find(|e| {
+            e.form == DerivedForm::ShapeHeld
+                && e.view.as_deref() == Some(view)
+                && e.layer == layer
+                && e.level == level
+        }) else {
             return Vec::new();
         };
         if extent.level_version != version {
@@ -677,24 +679,31 @@ impl PersistedPieces<'_> {
         }
     }
 
-    /// The piece for `segment` under `level`, if a persisted form supplies it.
+    /// The piece for `segment` under `level`, if a persisted form supplies it. `base` says whether
+    /// `segment` is the view's base, the one segment a row-major column covers.
     fn claim(
         &self,
         level: &ShapeLevel,
         segment: &SegmentData,
+        base: bool,
         store: &ArtifactStore,
     ) -> Option<Vec<Option<Bitmap>>> {
         let prefix_dir = self.prefix_dir?;
-        let same_level = |view: &str, layer: &str, lvl: u32| {
-            view == level.view && layer == level.layer && lvl == level.level
+        let same_level = |e: &DerivedExtent| {
+            e.view.as_deref() == Some(level.view.as_str())
+                && e.layer == level.layer
+                && e.level == level.level
         };
-        if let Some(extent) = self
-            .shape_rows
-            .iter()
-            .find(|e| same_level(&e.view, &e.layer, e.level) && e.seg_id == segment.seg_id)
-        {
-            if extent.level_version != level.level_version || extent.row_count != segment.row_count
+        let shape_rows = self.extents.iter().find_map(|e| match &e.form {
+            DerivedForm::ShapeRows { seg_id, row_count }
+                if same_level(e) && *seg_id == segment.seg_id =>
             {
+                Some((e, *row_count))
+            }
+            _ => None,
+        });
+        if let Some((extent, row_count)) = shape_rows {
+            if extent.level_version != level.level_version || row_count != segment.row_count {
                 tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
@@ -702,7 +711,7 @@ impl PersistedPieces<'_> {
                     seg_id = %segment.seg_id,
                     written_at = extent.level_version,
                     now = level.level_version,
-                    written_rows = extent.row_count,
+                    written_rows = row_count,
                     rows = segment.row_count,
                     "a persisted shape row form is refused: its key is not this level version \
                      and this segment; the segment is resolved again from the geometry"
@@ -739,14 +748,13 @@ impl PersistedPieces<'_> {
             }
             return None;
         }
-        // The column is the base's piece: it is addressed in the view's base row space, which is
-        // exactly one segment at row base zero. A segment whose row count is not the column's is
-        // not that segment.
-        if let Some(extent) = self
-            .row_columns
-            .iter()
-            .find(|e| same_level(&e.view, &e.layer, e.level))
-        {
+        // The column is the base's piece, addressed in the view's base row space, and no other
+        // segment's, whatever its row count.
+        let column = self.extents.iter().find_map(|e| match &e.form {
+            DerivedForm::RowColumn { layout } if base && same_level(e) => Some((e, *layout)),
+            _ => None,
+        });
+        if let Some((extent, layout)) = column {
             if extent.level_version != level.level_version {
                 tracing::warn!(
                     layer = %level.layer,
@@ -759,7 +767,7 @@ impl PersistedPieces<'_> {
                 );
                 return None;
             }
-            let column = match RowColumn::open(&prefix_dir.join(&extent.path), extent.layout) {
+            let column = match RowColumn::open(&prefix_dir.join(&extent.path), layout) {
                 Ok(column) => column,
                 Err(error) => {
                     tracing::warn!(
@@ -775,13 +783,15 @@ impl PersistedPieces<'_> {
                 }
             };
             if column.base_rows() != segment.row_count {
-                // Not the base segment — a flushed one, which no column covers. Ordinary.
-                tracing::info!(
+                tracing::warn!(
                     layer = %level.layer,
                     level = level.level,
                     view = %level.view,
                     seg_id = %segment.seg_id,
-                    "no persisted form covers this segment; it is resolved from the geometry"
+                    column_rows = column.base_rows(),
+                    rows = segment.row_count,
+                    "a persisted row-major column covers a different number of rows than the base \
+                     segment holds; the base segment is resolved again from the geometry"
                 );
                 return None;
             }

@@ -90,6 +90,7 @@ fn row_space_answers_across_the_base_and_its_extents() {
         seg_id: "s1".to_string(),
         row_base: 4,
         rows: vec![2, 0, 1],
+        below: Vec::new(),
     };
 
     let space = RowSpace::new(Arc::new(permutation), 4)

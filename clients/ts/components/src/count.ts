@@ -1,23 +1,24 @@
-import {LitElement, css, html, nothing} from 'lit';
+import {LitElement, css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
 import {formatCount, formatMasked, type Count, type Masked} from '@tesseradb/client';
 import {attachContextRoot, defineOnce} from './define.js';
 import {tokens} from './tokens.js';
 
 /**
- * `<tessera-count>` — renders a `Count` or a `Masked` correctly and nothing else (design §5.3
- * tier 3, §4). Both figures or neither for a sample; one figure or none for a scalar, an inexact
- * one marked approximate; neither against a stale view. The rule is the formatter's
- * (`@tesseradb/client`), so a host writing its own status line uses this and gets it for free —
- * "12,040 of 12,040" against a cluster is false, not secret, and this element cannot render it.
+ * Renders a `Count` or a `Masked` through the client's `formatCount` and `formatMasked`, in the text
+ * face with tabular figures. A sample (`count`) shows both figures, as `4,812 of 12,465`, or neither
+ * when the count is inexact; a scalar (`masked`) shows one figure, marked `≈` when inexact. Nothing
+ * is rendered while `stale` is set. With both properties set, `count` is rendered.
  *
- * `figure="shown"` renders a sample's shown figure alone, for a strip whose next cell is the
- * total: the element still carries the total on `data-total`, so *both figures or neither* holds
- * — the cell is empty exactly when the pair would be — and a reader of the parts can check it.
+ * This element takes no store; the host or another element sets its properties.
  *
- * `part="count"` carries `data-kind` (`sample` or `scalar`), `data-exact`, and `data-empty` when
- * the rule rendered nothing, so the acceptance harness can read the decision and not just the
- * text.
+ * @summary A sample count or a masked count, formatted.
+ * @tagname tessera-count
+ * @category Elements
+ * @csspart count - The figure. Carries `data-kind` (`sample`, `scalar` or `none`), `data-exact`
+ *   (`true` or `false`), `data-empty` (`true` when nothing was rendered) and, under
+ *   `figure="shown"`, `data-total` with the total.
+ * @csspart label - The `label` text after the figure, rendered only when the figure is.
  */
 export class TesseraCount extends LitElement {
   static override styles = [
@@ -27,27 +28,37 @@ export class TesseraCount extends LitElement {
         display: inline;
       }
       [part='count'] {
-        color: var(--tessera-ink);
-        font-family: var(--tessera-font-mono);
+        color: var(--_tessera-ink);
         font-variant-numeric: tabular-nums;
         font-weight: 500;
       }
       [part='label'] {
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         margin-left: 0.4em;
       }
     `
   ];
 
+  /** A sample count: how many marks are shown of how many are served. */
   @property({attribute: false}) accessor count: Count | null = null;
+  /** A masked count over the viewer's visible set, rendered where `count` is not set. */
   @property({attribute: false}) accessor masked: Masked | null = null;
+  /** Renders nothing, since the figures predate a change to the corpus. */
   @property({type: Boolean}) accessor stale = false;
+  /** Text rendered after the figure, such as `matched`. */
   @property() accessor label = '';
+  /**
+   * `both` renders a sample as `shown of total`; `shown` renders the shown figure alone and puts
+   * the total on the part's `data-total`. The figure is empty exactly when the pair would be.
+   */
   @property() accessor figure: 'both' | 'shown' = 'both';
+  /** Shortens figures of a thousand or more to one decimal, as `16.8M`, where room is short. */
+  @property({type: Boolean}) accessor compact = false;
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const kind = this.count ? 'sample' : this.masked ? 'scalar' : 'none';
-    const pair = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
+    const opts = {stale: this.stale, compact: this.compact};
+    const pair = this.count ? formatCount(this.count, opts) : this.masked ? formatMasked(this.masked, opts) : '';
     const text = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[0]! : pair;
     const total = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[1] : undefined;
     const exact = this.count ? this.count.exact : this.masked ? this.masked.exact : false;

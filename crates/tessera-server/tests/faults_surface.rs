@@ -17,7 +17,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::Engine;
@@ -52,12 +52,7 @@ async fn flushes_published(server: &TestServer) -> u64 {
 #[tokio::test]
 async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
     let max_k = config.max_k;
     let mut engine = Engine::open(
@@ -86,8 +81,7 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
     assert_eq!(resp.status(), 200);
 
     // Ingest still acks: the seam sits at publication, not on the WAL path a 200 depends on.
-    let ext = external_id_of(N_ITEMS + 1);
-    let body = build_ingest_batch_optional(&[(Some(&ext[..]), 10.0, 10.0, "0")]);
+    let body = build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
@@ -113,14 +107,12 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
     // The executor arrives: a thread is demonstrably parked, which is the driver's kill
     // precondition. Observed by polling the server's own state rather than sleeping a guessed
     // duration, and bounded so a genuine hang fails rather than wedging CI.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while arrivals(&server, "before_manifest_publish").await < 1 {
-        assert!(
-            Instant::now() < deadline,
-            "timed out: the executor never reached before_manifest_publish"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(
+        "the executor reaching before_manifest_publish",
+        Duration::from_secs(30),
+        async || arrivals(&server, "before_manifest_publish").await >= 1,
+    )
+    .await;
 
     // Parked means *blocked*: the flush has executed, and nothing has been published.
     assert_eq!(
@@ -138,34 +130,21 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while flushes_published(&server).await < 1 {
-        assert!(
-            Instant::now() < deadline,
-            "timed out: the released flush never published"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_until(
+        "the released flush publishing",
+        Duration::from_secs(30),
+        async || flushes_published(&server).await >= 1,
+    )
+    .await;
 }
 
 /// The surface is on the credential-gated plane (401 without the bearer, from the router layer
 /// no route can opt out of) and refuses an unknown site with the contract's 422 rather than
 /// arming nothing silently.
 #[tokio::test]
-async fn the_arming_surface_is_gated_and_names_its_sites() {
+async fn the_arming_surface_is_gated_and_refuses_an_unknown_site() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let resp = server
         .client
@@ -185,4 +164,84 @@ async fn the_arming_surface_is_gated_and_names_its_sites() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 422, "an unknown site is a refusal, never a no-op");
+}
+
+/// An executor that panics reports itself dead: `/readyz` answers 503 on both listeners that
+/// carry it, and `/control/status` names the posture.
+#[tokio::test]
+async fn an_executor_panic_fails_readiness_and_reports_dead() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let config = default_engine_config();
+    let max_k = config.max_k;
+    let mut engine = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        config,
+    )
+    .expect("engine should open against a freshly built bundle");
+    let faults = Arc::new(FaultSwitchboard::new());
+    engine
+        .start_write_executor_with_faults(1024, Arc::clone(&faults))
+        .expect("the write executor starts once per engine");
+    let server = mount_server_with_faults(engine, max_k, generous_test_gate(), faults).await;
+
+    let ready = server
+        .client
+        .get(server.viewer_url("/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ready.status(), 200);
+
+    server.state.faults.arm_pause(
+        tessera_lifecycle::faults::PauseSite::BeforeManifestPublish,
+        tessera_lifecycle::faults::PauseAction::Panic,
+    );
+    let body = build_ingest_batch_optional(&[(None, 10.0, 10.0, "0")]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "faults-surface-panic")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    wait_until(
+        "/readyz answering 503 after the executor panicked",
+        Duration::from_secs(30),
+        async || {
+            let resp = server.client.get(server.viewer_url("/readyz")).send().await;
+            let status = resp.unwrap().status();
+            match status == 503 {
+                true => Ok(()),
+                false => Err(format!("/readyz answers {status}")),
+            }
+        },
+    )
+    .await;
+    let session_ready = server
+        .client
+        .get(server.session_url("/readyz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session_ready.status(), 503);
+    let status = control_status(&server).await;
+    assert_eq!(status["write_executor"]["posture"], "dead");
+    assert_eq!(status["write_executor"]["ready"], false);
 }

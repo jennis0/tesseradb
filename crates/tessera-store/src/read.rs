@@ -70,6 +70,74 @@ pub struct ViewData {
     pub term_images: Option<Arc<crate::term_images::TermImages>>,
 }
 
+impl ViewData {
+    /// The segments paired with their `row_base` in the view's row space, ascending, or `Err`
+    /// naming a segment the row space holds no base for. Keyed on `seg_id`, never zipped by
+    /// position: a merge pushes its segment to the end of `segments` while the row space puts its
+    /// extent where the consumed run was. The build segment has no extent, and its rows begin at 0.
+    pub fn segments_by_row_base(&self) -> std::result::Result<Vec<(&SegmentData, u32)>, String> {
+        let row_bases: HashMap<&str, u32> = self
+            .row_space
+            .extents()
+            .iter()
+            .map(|extent| (extent.seg_id.as_str(), extent.row_base))
+            .collect();
+        let mut base_seen = false;
+        let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            let row_base = match row_bases.get(segment.seg_id.as_str()) {
+                Some(&row_base) => row_base,
+                None if !base_seen => {
+                    base_seen = true;
+                    0
+                }
+                None => return Err(segment.seg_id.clone()),
+            };
+            segments.push((segment.as_ref(), row_base));
+        }
+        segments.sort_unstable_by_key(|&(_, row_base)| row_base);
+        Ok(segments)
+    }
+
+    /// The value rendered column `column` holds for each of `entities` this view has a row for,
+    /// to `visit` in ascending entity order; an absent value is not visited. Each segment's column
+    /// is resolved once, and each entity costs its row lookup and one slot read.
+    pub fn for_each_rendered(
+        &self,
+        column: &str,
+        entities: &croaring::Bitmap,
+        visit: &mut dyn FnMut(u32, tessera_types::scalar::ScalarValue),
+    ) -> std::result::Result<(), String> {
+        let segments = self
+            .segments_by_row_base()
+            .map_err(|seg_id| format!("segment '{seg_id}' has no row base in its view"))?;
+        let slices: Vec<Option<ScalarSlice<'_>>> =
+            segments.iter().map(|(segment, _)| segment.columns.scalar(column)).collect();
+        for entity in entities.iter() {
+            let Some(row) = self.row_space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+            else {
+                continue;
+            };
+            let row = row.raw();
+            let Some(at) = segments
+                .partition_point(|&(_, base)| base <= row)
+                .checked_sub(1)
+            else {
+                continue;
+            };
+            let (segment, base) = segments[at];
+            let local = row - base;
+            if !segment.columns.presence(column).contains(local) {
+                continue;
+            }
+            if let Some(value) = slices[at].as_ref().and_then(|s| s.value_at(local as usize)) {
+                visit(entity, value);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One loaded segment: its row count, its Morton codes (row order, ascending), and a zero-copy
 /// view into its `columns.arrow`.
 #[derive(Debug)]
@@ -81,6 +149,72 @@ pub struct SegmentData {
     /// `morton`, which selection evaluates per cell instead of per row.
     pub cuts: CutIndex,
     pub columns: ColumnsRef,
+    /// Where each row's entity is read ([`crate::edited`]).
+    pub entities: crate::edited::RowEntities,
+}
+
+impl SegmentData {
+    /// Opens a segment's three files from its directory, its rows' entities read from
+    /// `entities`. The error names the file that failed.
+    pub fn load(
+        dir: &Path,
+        seg_id: &str,
+        row_count: u32,
+        entities: crate::edited::RowEntities,
+    ) -> std::result::Result<Self, SegmentLoadError> {
+        Ok(SegmentData {
+            seg_id: seg_id.to_string(),
+            row_count,
+            morton: MortonSlice::load(&dir.join("morton.u32")).map_err(|source| {
+                SegmentLoadError {
+                    file: "morton",
+                    source,
+                }
+            })?,
+            cuts: CutIndex::load(&dir.join(CutIndex::FILE), row_count).map_err(|source| {
+                SegmentLoadError {
+                    file: "cuts",
+                    source,
+                }
+            })?,
+            columns: ColumnsRef::load(&dir.join("columns.arrow")).map_err(|source| {
+                SegmentLoadError {
+                    file: "columns",
+                    source,
+                }
+            })?,
+            entities,
+        })
+    }
+
+    /// The entity row `local` belongs to.
+    pub fn entity_of(
+        &self,
+        local: u32,
+        key: &tessera_types::IdentityKey,
+        shard_id: u32,
+    ) -> Result<tessera_types::EntityId> {
+        self.entities.entity_of(
+            local,
+            self.columns.tessera_id()[local as usize],
+            key,
+            shard_id,
+            &self.seg_id,
+        )
+    }
+}
+
+/// Which of a segment's files would not open, and why.
+#[derive(Debug)]
+pub struct SegmentLoadError {
+    pub file: &'static str,
+    pub source: StoreError,
+}
+
+impl std::fmt::Display for SegmentLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.file, self.source)
+    }
 }
 
 /// One loaded partition: its verified side-manifest, the `n` that manifest was found at, the
@@ -251,8 +385,8 @@ impl Bundle {
     /// segment added, no extent collapsed, no row space rebuilt.
     ///
     /// The entity-space coalesce publication's whole bundle edit (`tessera_engine::coalesce`): it
-    /// rewrites `deltas`, `external_id_runs`, `locator_extents`, `dict_extents` and `files`, every
-    /// one of which addresses entity space. A caller that needed row space to move would be using
+    /// rewrites `deltas`, `dict_extents`, the extents and runs beside them and `files`, every one
+    /// of which addresses entity space. A caller that needed row space to move would be using
     /// one of the two above, and the type is what keeps the two apart.
     pub fn with_manifest(
         &self,
@@ -545,9 +679,16 @@ fn open_prefix(
         // checks even that one against the roster and blanks the view if it disagrees, which is
         // where the *fail-closed* half lives: this pass has the manifest and not yet the log.
         let mut newest: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
+        // The incarnation of each view's first listed segment, which is the one the view's
+        // `permutation.bin` addresses. A key created again after a drop keeps its predecessor's
+        // base listed first until a fold, and that base is not the new incarnation's.
+        let mut based: HashMap<&str, tessera_types::view::ViewIncarnation> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
             let seen = newest.entry(seg_desc.view.as_str()).or_default();
             *seen = (*seen).max(seg_desc.incarnation);
+            based
+                .entry(seg_desc.view.as_str())
+                .or_insert(seg_desc.incarnation);
         }
         let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
@@ -577,8 +718,9 @@ fn open_prefix(
             // manifest is what says which — a view whose permutation no manifest names has none,
             // and reading that as a missing file would refuse the bundle for a view that is
             // simply new.
-            let has_base = segments_manifest.files.contains_key(&perm_rel)
-                || manifest.files.contains_key(&perm_rel);
+            let has_base = based.get(seg_desc.view.as_str()) == Some(&seg_desc.incarnation)
+                && (segments_manifest.files.contains_key(&perm_rel)
+                    || manifest.files.contains_key(&perm_rel));
             let is_base_segment = is_new_view && has_base;
             let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
@@ -608,8 +750,9 @@ fn open_prefix(
                         crate::view_rel(&seg_desc.view),
                         crate::row_entity::ROW_ENTITY_FILE
                     );
-                    let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
-                        || manifest.files.contains_key(&row_entity_rel)
+                    let row_entity = if has_base
+                        && (segments_manifest.files.contains_key(&row_entity_rel)
+                            || manifest.files.contains_key(&row_entity_rel))
                     {
                         let path = view_dir.join(crate::row_entity::ROW_ENTITY_FILE);
                         ensure_verified(
@@ -718,9 +861,40 @@ fn open_prefix(
                 }
             }
 
-            let morton = MortonSlice::load(&morton_path)?;
-            let cuts = CutIndex::load(&cuts_path, seg_desc.row_count)?;
-            let columns = ColumnsRef::load(&columns_path)?;
+            // A base segment's rows name their entities in the view's row-to-entity file. A flush
+            // or merge segment lists the rows an edit moved, a file that must be there and verify
+            // where the manifest names it.
+            let entities = if is_base_segment {
+                match view_entry.row_space.row_entity() {
+                    Some(table) => crate::edited::RowEntities::Table(std::sync::Arc::clone(table)),
+                    None => crate::edited::RowEntities::Numbers,
+                }
+            } else {
+                let rel = format!(
+                    "partitions/{}/{}/segments/{}/{}",
+                    partition_desc.phash,
+                    crate::view_rel(&seg_desc.view),
+                    seg_desc.seg_id,
+                    crate::edited::EDITED_ROWS_FILE
+                );
+                let listed =
+                    segments_manifest.files.contains_key(&rel) || manifest.files.contains_key(&rel);
+                if listed {
+                    ensure_verified(
+                        &rel,
+                        &segments_manifest,
+                        &manifest.files,
+                        &seg_dir.join(crate::edited::EDITED_ROWS_FILE),
+                    )?;
+                }
+                crate::edited::RowEntities::Listed(std::sync::Arc::new(
+                    crate::edited::EditedRows::open(&seg_dir, listed)?,
+                ))
+            };
+            let segment =
+                SegmentData::load(&seg_dir, &seg_desc.seg_id, seg_desc.row_count, entities)
+                    .map_err(|e| e.source)?;
+            let (morton, columns) = (&segment.morton, &segment.columns);
 
             if morton.len() as u32 != seg_desc.row_count
                 || columns.row_count() != seg_desc.row_count
@@ -785,7 +959,7 @@ fn open_prefix(
 
             // Every segment after the first is one a flush appended or a merge collapsed, and it
             // owns row space above the base. Its entity→row mapping is rebuilt here from its own
-            // `tessera_id` column — nothing on disk carries it, deliberately; see
+            // `tessera_id` column and the rows an edit moved; see
             // [`SegmentExtent::rebuild`]. `with_extent` then re-checks contiguity and
             // well-formedness, so a manifest listing segments out of entity order, or one whose
             // `row_count` disagrees with what the extent actually owns, fails closed here rather
@@ -803,11 +977,10 @@ fn open_prefix(
                     }
                 })?;
                 let extent = SegmentExtent::rebuild(
-                    &seg_desc.seg_id,
+                    &segment,
                     seg_desc.entity_lo,
                     seg_desc.entity_hi,
                     row_base,
-                    columns.tessera_id(),
                     &identity_key,
                     manifest.identity.shard_id,
                 )?;
@@ -822,13 +995,7 @@ fn open_prefix(
                     })?;
             }
 
-            view_entry.segments.push(Arc::new(SegmentData {
-                seg_id: seg_desc.seg_id.clone(),
-                row_count: seg_desc.row_count,
-                morton,
-                cuts,
-                columns,
-            }));
+            view_entry.segments.push(Arc::new(segment));
         }
 
         // **Every declared view is a view, with or without rows** (`views.md` §3.2). The map
@@ -1214,7 +1381,10 @@ struct SelectedManifest {
 /// `SEGMENTS-<…>.json` family: the `SEGMENTS-<n>.json.tmp` orphan a crashed manifest write
 /// leaves behind ([`crate::manifest_write`]) does not end in `.json`, is not a candidate, and
 /// must not become a partition failure.
-fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Result<Vec<u64>> {
+pub(crate) fn list_segments_manifests(
+    partition_dir: &Path,
+    partition_label: &str,
+) -> Result<Vec<u64>> {
     let entries = match std::fs::read_dir(partition_dir) {
         Ok(entries) => entries,
         // No such directory at all is not itself a hard read error here: the caller reports a
@@ -1377,10 +1547,8 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// Verify every entry of `files` (path relative to `base`, forward slashes per R1) by exact
 /// size and SHA-256 hex digest. Any missing, mis-sized or mismatched file is a hard error.
 ///
-/// **One exemption, and only one:** the external-ID sidecar's extents and locator
-/// ([`is_sidecar_deferred`]) are skipped here, per contracts §0.3 deviation 9 — they are still
-/// named, still digested in the manifest, and still fully verified by `crate::sidecar` at first
-/// touch. See that predicate's doc for why open-time verification would defeat the deviation.
+/// **One exemption, and only one:** the key runs ([`is_deferred`]), whose pages are checked as
+/// they are read.
 ///
 /// **TOCTOU note:** this reads each file's bytes once, here, to check size+digest; the loader
 /// (`Permutation::load`, `MortonSlice::load`, `ColumnsRef::load`) then separately mmaps the
@@ -1398,30 +1566,11 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
 /// through.
 const DIGEST_CHUNK_BYTES: usize = 1 << 20;
 
-/// `true` if `rel` names a file belonging to the external-ID sidecar — an
-/// `external-ids-<k>.arrow` extent or the `ext-locator.u32` locator, both under an `entities/`
-/// directory (contracts §2.4 r6 fixes both names).
-///
-/// **Contracts §0.3 deviation 9**: these paths are *"exempt from the §2.3 reader protocol's
-/// readiness gate… Nothing is mapped, scanned or verified at open"*. [`verify_files`] therefore
-/// skips them — and that exemption is the whole point of the sidecar's per-extent laziness: at
-/// 10⁹ items the family runs to ~18.9 GB, and digesting it at open would reimpose exactly the
-/// sequential read (and page-cache churn) the deviation exists to remove, for a structure no
-/// viewport request ever touches.
-///
-/// **Their digests stay in the manifest, and verification is deferred, not dropped.**
-/// `ExternalIdSidecar` verifies the extent's (or the locator's) SHA-256 against the manifest
-/// entry at first touch, plus sortedness and declared length, before any answer comes out of it
-/// — see `crate::sidecar`. A file skipped here is a file no request path has read yet; the first
-/// read of it is fully checked.
-fn is_sidecar_deferred(rel: &str) -> bool {
-    let Some((dir, file)) = rel.rsplit_once('/') else {
-        return false;
-    };
-    if dir != "entities" && !dir.ends_with("/entities") {
-        return false;
-    }
-    file == "ext-locator.u32" || (file.starts_with("external-ids-") && file.ends_with(".arrow"))
+/// `true` if `rel` names a key run (`*.keys`, [`crate::key_index`]), which the open does not
+/// digest: each of its pages carries its own checksum, checked the first time the page is read, so
+/// a unique index is not read whole before its first lookup. `tessera verify --deep` digests it.
+fn is_deferred(rel: &str) -> bool {
+    rel.ends_with(".keys")
 }
 
 /// Verify one named file's size and digest. The per-file half of [`verify_files`], split out so
@@ -1429,8 +1578,8 @@ fn is_sidecar_deferred(rel: &str) -> bool {
 fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
     let path = safe_join(base, rel_path)?;
     // The path is still validated (above) even when its bytes are not read here, so an
-    // unsafe `files`-map key cannot hide behind the sidecar's deferral.
-    if is_sidecar_deferred(rel_path) {
+    // unsafe `files`-map key cannot hide behind the deferral.
+    if is_deferred(rel_path) {
         return Ok(());
     }
     // Read in fixed-size chunks, never whole: at 10^9 items `columns.arrow` alone is over 20 GB,
@@ -1480,8 +1629,8 @@ fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
 /// Hash every file the manifest names, in full, before the bundle is served.
 ///
 /// The verification is unconditional — a bundle whose bytes were not checked is a bundle whose
-/// authorisation data was not checked (fail closed) — with one exemption, the external-ID sidecar
-/// ([`is_sidecar_deferred`]).
+/// authorisation data was not checked (fail closed) — with one exemption, the key runs
+/// ([`is_deferred`]).
 ///
 /// **The sweep is parallel because it is I/O-bound, not hash-bound, and the two have different
 /// remedies.** SHA-256 runs at ~2.3 GB/s on one core with the hardware extensions this CPU has, but
@@ -1495,10 +1644,9 @@ fn verify_one(base: &Path, rel_path: &str, digest: &FileDigest) -> Result<()> {
 /// **Deferring the value columns to first touch was considered and declined** (owner ruling,
 /// 2026-08-10). It would have paid off only for columns nobody filters on — every declared column
 /// is opened at generation build, so "first touch" has to mean *first scan* to buy anything, and
-/// that puts a multi-second hash of a 4 GB column on a request path budgeted at 0.5–1 s. The
-/// sidecar's deferral works because its extents are small; a value column is the largest artefact
-/// in the bundle. Parallelism takes the wall clock without touching the fail-closed rule, which is
-/// why `attrs/` is **not** in `is_sidecar_deferred` and contracts §2.4 owes no amendment for it.
+/// that puts a multi-second hash of a 4 GB column on a request path budgeted at 0.5–1 s. A value
+/// column is the largest artefact in the bundle. Parallelism takes the wall clock without touching
+/// the fail-closed rule, which is why `attrs/` is **not** in `is_deferred`.
 ///
 /// **The error is deterministic and does not depend on which worker lost.** Results are collected
 /// and the failure reported is the first in the manifest's own (sorted) order, so a bundle with two
@@ -1536,12 +1684,6 @@ pub struct MortonSlice {
 }
 
 impl MortonSlice {
-    /// The mapped file's size in bytes — the operand of `tessera-server`'s merge-size relation
-    /// (§4's relation 2), which needs a segment's on-disk size and has no other way to ask for it.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// `madvise(MADV_SEQUENTIAL)` on this mapping — compaction §6.1's mitigation, decision 0052.
     ///
     /// **Called by the streaming passes and never by the request path**, which is the whole of what
@@ -1745,13 +1887,6 @@ impl CutIndex {
         self.mmap.is_empty()
     }
 
-    /// This mapping's size in bytes — see [`MortonSlice::byte_len`], which this joins in the
-    /// merge-size relation's operand: the three files are mapped together and a segment's size is
-    /// all of them.
-    pub fn byte_len(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
     /// The row at which each occupied cell begins, ascending.
     pub fn starts(&self) -> &[u32] {
         // SAFETY: as [`MortonSlice::u32`] — a checked multiple of 4 from a page-aligned base.
@@ -1796,6 +1931,30 @@ pub enum ScalarSlice<'a> {
 }
 
 impl ScalarSlice<'_> {
+    /// Row `local`'s slot as a value of the stored type, or `None` past the end. Presence is the
+    /// caller's to ask.
+    pub fn value_at(&self, local: usize) -> Option<tessera_types::scalar::ScalarValue> {
+        use tessera_types::scalar::ScalarValue as V;
+        Some(match self {
+            ScalarSlice::Bool(a) => {
+                (local < arrow::array::Array::len(*a)).then(|| V::Bool(a.value(local)))?
+            }
+            ScalarSlice::Utf8(a) => (local < arrow::array::Array::len(*a))
+                .then(|| V::Utf8(a.value(local).to_string()))?,
+            ScalarSlice::U8(s) => V::U8(*s.get(local)?),
+            ScalarSlice::U16(s) => V::U16(*s.get(local)?),
+            ScalarSlice::U32(s) => V::U32(*s.get(local)?),
+            ScalarSlice::U64(s) => V::U64(*s.get(local)?),
+            ScalarSlice::I8(s) => V::I8(*s.get(local)?),
+            ScalarSlice::I16(s) => V::I16(*s.get(local)?),
+            ScalarSlice::I32(s) => V::I32(*s.get(local)?),
+            ScalarSlice::I64(s) => V::I64(*s.get(local)?),
+            ScalarSlice::F32(s) => V::F32(*s.get(local)?),
+            ScalarSlice::F64(s) => V::F64(*s.get(local)?),
+            ScalarSlice::TimestampUs(s) => V::TimestampUs(*s.get(local)?),
+        })
+    }
+
     /// The stored type's name, for a diagnostic that has to say what it found. Deliberately the
     /// same spelling `ScalarType::arrow_type_name` uses, so a mismatch message names the two sides
     /// in one vocabulary rather than making a reader translate between them.
@@ -1847,11 +2006,6 @@ const FIXED_COLUMNS: [(&str, DataType); 2] = [
 ];
 
 impl ColumnsRef {
-    /// This segment's `columns.arrow` size in bytes — see [`MortonSlice::byte_len`].
-    pub fn byte_len(&self) -> u64 {
-        self.batch.get_array_memory_size() as u64
-    }
-
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -2143,11 +2297,7 @@ fn reject_nulls(
 /// (fail closed on a misaligned buffer rather than silently reallocating) and an explicit
 /// rejection of compressed batches (§ "no compression" in the task brief — decoding would
 /// otherwise quietly succeed via an allocated, decompressed copy, defeating the zero-copy
-/// contract without ever raising an error). Shared with [`crate::sidecar`], which reads the
-/// same on-disk shape (uncompressed, alignment-checked, exactly one batch) for
-/// `external-ids-<n>.arrow` extents — errors come back as `StoreError::InvalidColumns`
-/// regardless of caller; the sidecar remaps them to `InvalidSidecar` at its call sites so the
-/// message names the right file.
+/// contract without ever raising an error). Errors come back as `StoreError::InvalidColumns`.
 pub(crate) fn decode_single_batch(buffer: &Buffer, path: &Path) -> Result<RecordBatch> {
     const FOOTER_TRAILER_LEN: usize = 10; // 4-byte footer length + 6-byte "ARROW1" magic
     if buffer.len() < FOOTER_TRAILER_LEN {
@@ -2316,17 +2466,22 @@ pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
 /// It is also the more honest construction: it *expresses* "sub-cells partition their parent"
 /// rather than searching the whole column again and relying on that being true.
 pub fn tile_ranges_within(seg: &SegmentData, tile: &Tile, within: Range<u32>) -> Range<u32> {
+    let (lo, hi) = tile.code_range();
+    let start = first_code_at_or_past(seg, lo, within.clone());
+    start..first_code_at_or_past(seg, hi, start..within.end)
+}
+
+/// The first row of `within` whose cell code is `code` or past it, found by a binary search of the
+/// sorted Morton column over `within` alone. Where no row of `within` is, the answer is `within`'s
+/// end, held to the column's length; where `within` holds no row of the column, its start.
+pub fn first_code_at_or_past(seg: &SegmentData, code: u64, within: Range<u32>) -> u32 {
     let codes = seg.morton.u32();
     let lo_idx = within.start as usize;
     let hi_idx = (within.end as usize).min(codes.len());
     if hi_idx <= lo_idx {
-        return within.start..within.start;
+        return within.start;
     }
-    let window = &codes[lo_idx..hi_idx];
-    let (lo, hi) = tile.code_range();
-    let start = lo_idx + window.partition_point(|&c| (c as u64) < lo);
-    let end = lo_idx + window.partition_point(|&c| (c as u64) < hi);
-    start as u32..end as u32
+    (lo_idx + codes[lo_idx..hi_idx].partition_point(|&c| (c as u64) < code)) as u32
 }
 
 /// `from + codes[from..].partition_point(|&c| (c as u64) < target)`, reached by doubling out

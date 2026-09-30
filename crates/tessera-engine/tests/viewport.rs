@@ -16,24 +16,18 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use sha2::Digest;
-use tessera_build::{build, BuildArgs};
 use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
-use tessera_engine::{
-    default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
-};
+use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_plugin::{Passthrough, Plugin};
-use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
+use tessera_plugin::Passthrough;
+use tessera_spatial::{morton_of, tiles_for_bbox};
 use tessera_store::read::open_bundle;
-use tessera_store::StoreError;
-use tessera_types::EntityId;
 
 use common::*;
 
@@ -172,7 +166,7 @@ fn c_zero_term_session_sees_nothing() {
     // else, so it names no item. That is the shape of the reservation: a universal *label*, not a
     // universal grant.
     assert_eq!(
-        session.satisfied,
+        *session.satisfied_for_test(),
         [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "zero-term credential grants nothing but the reserved label"
     );
@@ -220,18 +214,16 @@ fn d_suppressing_an_item_drops_the_count_by_one() {
 
     // A WAL pre-populated with a suppression of source item 5. The entity is resolved from the
     // bundle here, exactly as the handler resolves one at admission — a change record names an
-    // entity, never an external id (decision 0048).
+    // entity, never a field value.
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let suppressed_entity = engine_a
-        .resolve_external_id(&SUPPRESS_SOURCE_ID.to_le_bytes())
+    let suppressed_entity = item_of_id(&engine_a, SUPPRESS_SOURCE_ID)
         .unwrap()
         .expect("source item 5 is established in the bundle");
     let wal_path_b = tmp.path().join("wal_b.log");
     {
-        let (mut wal, _initial) = Wal::open(&wal_path_b).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: suppressed_entity,
-            op: ChangeOp::Suppress,
+        let mut wal = Wal::open(&wal_path_b).unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(suppressed_entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -362,25 +354,9 @@ fn theta_does_not_move_when_the_viewport_pans() {
         &tmp.path().join("wal.log"),
         Passthrough::new(),
         EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
             k_max_marks: 128,
             theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
-            // what bounds the window close's O(buffered) copy. Nothing here reaches it.
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
         },
     )
     .unwrap();
@@ -445,23 +421,9 @@ fn no_visible_tile_is_ever_served_empty() {
         &tmp.path().join("wal.log"),
         Passthrough::new(),
         EngineConfig {
-            token_max_lifetime_secs: 3600,
-            max_k: 200,
-            k_min: 2,
             k_max_marks: 128,
             theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
         },
     )
     .unwrap();
@@ -663,780 +625,6 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         got_points, expected_points,
         "points must be a flat concatenation in the reported tile order"
     );
-}
-
-/// `Engine::open` seeds the I9 allocator at `max(manifest high-water, WAL high-water)` — here,
-/// with an empty WAL, that is exactly the bundle's `entity_id_high_water` (== `N_ITEMS`, the
-/// bootstrap build's dense `0..n` assignment).
-#[test]
-fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    assert_eq!(engine.allocator_high_water(), N_ITEMS);
-}
-
-/// `Engine::item` resolves a row wherever it sits: the item asserted here is a source item whose
-/// signature-sorted entity id — and therefore its row — is not among the first built, and it comes
-/// back with the right external id. `Permutation::row_of` is an O(1) bijection lookup and does not
-/// care where the row sits; contracts r6 replaced the identity column's contents with the opaque
-/// `tessera_id`, so a scan of *that* column would search the wrong space entirely.
-///
-/// **What this pins is the reach of the lookup, not its mechanism.** An implementation that walked
-/// the entity-id column top to bottom would find the same row and pass, so the name says "far from
-/// the segment's start" rather than claiming to discriminate a scan.
-///
-/// Mutations this kills: a lookup truncated to a prefix of the rows, or one that searches only the
-/// first segment.
-#[test]
-fn item_lookup_resolves_a_row_far_from_the_segments_start() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let last_source = N_ITEMS - 1;
-    let entity = EntityId::new(source_to_new[&last_source]);
-    let id = test_key().forward(0, entity).unwrap();
-
-    let out = engine.item(&session, id, None).unwrap();
-    assert!(
-        out.is_some(),
-        "an item far from segment start must still resolve through the permutation"
-    );
-    assert_eq!(
-        out.unwrap().external_id,
-        Some(last_source.to_le_bytes().to_vec())
-    );
-}
-
-/// `Engine::item`'s `idset` argument is checked against the ONE generation this
-/// call loads, before inversion, and identically for every `id` — a real, visible id and one
-/// naming nothing both take the same `Err(StaleIdSet)` for the same mismatched idset
-/// (mirrors `item_with_a_stale_idset_is_409_and_a_matching_idset_changes_nothing` in
-/// `tessera-server`'s `http.rs`, at the engine layer this fix moved the check into). A matching
-/// idset is a no-op, same as `None`.
-#[test]
-fn item_idset_check_is_entity_independent_and_decided_before_inversion() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let visible_id = test_key().forward(0, entity).unwrap();
-    let unknown_id = test_key()
-        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
-        .unwrap();
-
-    // Fixture's idset is 1 (see `build_fixture_n`). A matching idset changes nothing.
-    assert!(engine
-        .item(&session, visible_id, Some(1))
-        .unwrap()
-        .is_some());
-
-    // A stale idset is `Err(StaleIdSet)` for a real, visible id...
-    assert!(matches!(
-        engine.item(&session, visible_id, Some(2)),
-        Err(EngineError::StaleIdSet)
-    ));
-    // ...and identically for an id naming nothing — decided before inversion, so it cannot be
-    // used to learn whether an id exists.
-    assert!(matches!(
-        engine.item(&session, unknown_id, Some(2)),
-        Err(EngineError::StaleIdSet)
-    ));
-}
-
-/// A bundle built without minted external IDs (the spec-conformant default — contracts §2.4:
-/// callers supplied none, so the build wrote no extents and no locator) must serve the item
-/// drill-down normally: `external_id` is `None` — the ordinary "identity is the tessera_id"
-/// case — never an `InvalidSidecar` error. Regression test for the review finding that
-/// `external_id_of_checked` treated every built entity of a no-sidecar bundle as a
-/// live-map inconsistency and 500'd the whole `/v1/items` verb.
-#[test]
-fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
-    write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: tmp.path().join("points.parquet"),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
-        out: bundle_root.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: false,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Default::default(),
-    };
-    build(&args).expect("no-mint build should succeed");
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    // Any built entity: below the high-water, no locator anywhere. Drill-down must succeed
-    // with no external id, for the first entity and the last alike.
-    // (`item`'s third argument is the fix-wave idset check, landed on this branch after main's
-    // version of this test was written; `None` preserves its original meaning.)
-    for entity in [0, N_ITEMS - 1] {
-        let id = test_key().forward(0, EntityId::new(entity)).unwrap();
-        let out = engine
-            .item(&session, id, None)
-            .expect("a no-sidecar bundle must serve items, not error");
-        let out = out.expect("a visible item must resolve");
-        assert_eq!(
-            out.external_id, None,
-            "an item with no caller-supplied external id reports None"
-        );
-    }
-}
-
-/// An identifier naming nothing and one naming an invisible item are indistinguishable
-/// — one `Ok(None)` from one code path, with no error variant separating the two.
-#[test]
-fn an_unknown_id_and_an_invisible_one_are_indistinguishable() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&zero_credential()).unwrap();
-
-    // Unknown: an entity id far beyond anything this bundle ever allocated.
-    let unknown_id = test_key()
-        .forward(0, EntityId::new(N_ITEMS + 1_000_000))
-        .unwrap();
-    assert_eq!(engine.item(&session, unknown_id, None).unwrap(), None);
-
-    // Known but invisible: a zero-term session sees nothing, so any real item is invisible.
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let invisible_id = test_key().forward(0, entity).unwrap();
-    assert_eq!(engine.item(&session, invisible_id, None).unwrap(), None);
-}
-
-/// The timing channel is closed rather than narrowed: the entity-space visibility test never
-/// constructs a `RowProjection` (the cached artefact that costs 9.5-19.3s at 10^9), for an unknown
-/// id or an
-/// invisible one, on a session that has never drawn a viewport.
-#[test]
-fn the_item_path_never_constructs_a_row_projection() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    assert_eq!(
-        engine.row_projection_cache_len(),
-        0,
-        "no viewport drawn yet"
-    );
-
-    let unknown_id = test_key().forward(0, EntityId::new(N_ITEMS + 1)).unwrap();
-    engine.item(&session, unknown_id, None).unwrap();
-    assert_eq!(
-        engine.row_projection_cache_len(),
-        0,
-        "an unknown id must not build a projection"
-    );
-
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let visible_id = test_key().forward(0, entity).unwrap();
-    engine.item(&session, visible_id, None).unwrap();
-    assert_eq!(
-        engine.row_projection_cache_len(),
-        0,
-        "a visible id must not build a projection either"
-    );
-}
-
-/// The behaviour the row-space formulation could not offer: a client's FIRST request may be a
-/// drill-down, and a visible item must return `Some` — not a uniform 404 pending a warmed
-/// per-session cache.
-#[test]
-fn drill_down_works_on_a_session_that_has_never_drawn_a_viewport() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let id = test_key().forward(0, entity).unwrap();
-
-    let out = engine.item(&session, id, None).unwrap();
-    assert!(
-        out.is_some(),
-        "a visible item's first request against this session may be a drill-down"
-    );
-}
-
-/// A corrupt sidecar must surface as `Err`, never fold into `Ok(None)` (which
-/// would report "this item has no external id" for one that does, at a `200`). The digest check
-/// runs before Arrow decoding (`tessera_store::sidecar`'s `load_validated`), so corrupting any
-/// byte of the extent is sufficient to trip it, regardless of where in the file it lands.
-#[test]
-fn a_sidecar_error_on_drill_down_is_an_error_not_a_missing_external_id() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    // Resolve the target entity, and open the engine, against the *pristine* extent first —
-    // `Engine::open`'s bundle-open protocol (`tessera_store::read::open_bundle`) eagerly
-    // verifies every manifest-listed file's digest up front (a bundle-level integrity property,
-    // independent of the sidecar's own per-extent laziness), so corrupting the file before open
-    // would fail at `Engine::open` itself rather than exercising the drill-down path this test
-    // targets.
-    let source_to_new = source_to_new_map(&bundle_root, "v00000");
-    let entity = EntityId::new(source_to_new[&0]);
-    let id = test_key().forward(0, entity).unwrap();
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-
-    // Now corrupt the extent's bytes on disk — the sidecar's lazy open verifies digest
-    // and sortedness on first touch, so this failure is deferred until `item()` actually
-    // resolves the visible entity's external id.
-    let bundle = open_bundle(&bundle_root).unwrap();
-    let part = &bundle.partitions["default"];
-    let ext_rel = &part.manifest.external_id_runs[0];
-    let ext_path = bundle_root.join("v00000").join(ext_rel);
-    drop(bundle);
-    let mut bytes = std::fs::read(&ext_path).unwrap();
-    let last = bytes.len() - 1;
-    bytes[last] ^= 0xFF;
-    std::fs::write(&ext_path, bytes).unwrap();
-
-    let err = engine.item(&session, id, None).unwrap_err();
-    assert!(
-        matches!(err, EngineError::Store(StoreError::InvalidSidecar { .. })),
-        "a corrupt sidecar must be Err(EngineError::Store(InvalidSidecar)), never a fail-open \
-         Ok(None): {err:?}"
-    );
-}
-
-// `drill_down_resolves_an_external_id_for_a_post_build_entity` moved to `tests/write.rs` — see
-// that file's module doc. It was this file's only `accept_ingest` call site, and the acceptance
-// API's shape belongs beside the rest of the write path rather than here — leaving it would put a
-// write-path assertion in a file frozen for every
-// track. The subject moved; the shared fixtures did not.
-
-/// S6: `Allocator::try_new`'s own doc calls it "the check that belongs at open", and `Engine::open`
-/// is open — it must refuse a seed at or above `u32::MAX` before any ingest, rather than let the
-/// first allocation surface it as an opaque exhaustion error. The seed comes from durable state
-/// this process did not write (MANIFEST's high-water, or a replayed WAL lease), so a hand-edited or
-/// corrupt value has to fail closed here.
-#[test]
-fn engine_open_refuses_an_out_of_range_allocator_seed() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    // A replayed row at the top of the u32 space — `high_water_from` folds
-    // `entity_id + 1` into the seed, so this is the WAL-side half of the seeding rule, reached
-    // without touching MANIFEST's digest. The refusal fires before replay resolves anything, so
-    // the row's other fields never matter.
-    let wal_path = tmp.path().join("wal.log");
-    {
-        let (mut wal, _initial) = Wal::open(&wal_path).unwrap();
-        wal.append(&WalRecord::IngestBatch {
-            batch_id: "over-the-top".to_string(),
-            body_hash: [0u8; 32],
-            rows: vec![tessera_lifecycle::WalRow {
-                external_id: None,
-                entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
-                view: "s0".to_string(),
-                join: false,
-                descriptors: Vec::new(),
-                x: 0.5,
-                y: 0.5,
-                scalars: Vec::new(),
-                scoped: Vec::new(),
-            }],
-        })
-        .unwrap();
-        wal.fsync().unwrap();
-    }
-
-    let opened = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &wal_path,
-        Passthrough::new(),
-        config(),
-    );
-    let Err(err) = opened else {
-        panic!("a seed at u32::MAX must be refused at open, not at the first ingest");
-    };
-    assert!(
-        matches!(err, EngineError::Malformed(ref d) if d.contains("allocator")),
-        "expected a typed refusal naming the allocator, got {err:?}"
-    );
-}
-
-/// A `Passthrough` in every respect but the hash it declares — the shape of a plugin whose label
-/// rule was changed and whose identity was bumped with it.
-struct RelabellingPlugin;
-
-impl tessera_plugin::Plugin for RelabellingPlugin {
-    fn terms_of_labels(
-        &self,
-        labels: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        Passthrough::new().terms_of_labels(labels)
-    }
-
-    fn terms_of_auth(
-        &self,
-        auth_data: &[u8],
-    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
-        Passthrough::new().terms_of_auth(auth_data)
-    }
-
-    fn present_terms(
-        &self,
-        descriptors: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
-        Passthrough::new().present_terms(descriptors)
-    }
-
-    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
-        Passthrough::new().declared_bounds()
-    }
-
-    fn data_plugin_hash(&self) -> String {
-        // Derived from the real one so this stays a *different* value however the identity moves,
-        // rather than a literal that could one day collide with the passthrough's own.
-        format!("{}ff", &Passthrough::new().data_plugin_hash()[2..])
-    }
-
-    fn auth_plugin_hash(&self) -> String {
-        Passthrough::new().auth_plugin_hash()
-    }
-}
-
-/// Rewrite `MANIFEST.json`'s `data_plugin_hash` to `value` and re-point `CURRENT` at the new
-/// digest, so the bundle still verifies and the hash is the only thing that changed.
-fn rewrite_data_plugin_hash(bundle_root: &Path, value: serde_json::Value) {
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
-    let prefix = current["prefix"].as_str().unwrap().to_string();
-
-    let manifest_path = bundle_root.join(&prefix).join("MANIFEST.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["data_plugin_hash"] = value;
-    let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
-    std::fs::write(&manifest_path, &bytes).unwrap();
-
-    let digest = sha2::Sha256::digest(&bytes);
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(
-        bundle_root.join("CURRENT"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "prefix": prefix,
-            "manifest_digest": hex,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-}
-
-/// **A bundle may only be served by the plugin that labelled it.** `MANIFEST.json` records the
-/// build's `data_plugin_hash` for exactly this check, and nothing downstream of open would notice
-/// its absence: postings written under one label rule are read back intact and resolved against
-/// another, so every item is mislabelled and no error is raised anywhere. `Engine::open` is the
-/// only place the recorded hash and the serving plugin meet.
-///
-/// The check is the *data* hash alone. The auth module's hash keys the mask cache and is not in
-/// the manifest, so there is no equivalent open-time enforcement for it.
-#[test]
-fn engine_open_refuses_a_plugin_whose_data_hash_is_not_the_bundles() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    // The same bundle opens under the plugin that built it — without this the case would pass on
-    // a fixture that was broken for some unrelated reason.
-    Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache-ok"),
-        &tmp.path().join("wal-ok.log"),
-        Passthrough::new(),
-        config(),
-    )
-    .expect("the bundle opens under the plugin that built it");
-
-    let opened = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        RelabellingPlugin,
-        config(),
-    );
-    let Err(err) = opened else {
-        panic!("a bundle labelled by another plugin must be refused, not served mislabelled");
-    };
-    let EngineError::Malformed(detail) = err else {
-        panic!("expected a typed Malformed refusal, got {err:?}");
-    };
-    assert!(
-        detail.contains(&Passthrough::new().data_plugin_hash())
-            && detail.contains(&RelabellingPlugin.data_plugin_hash()),
-        "the refusal must name BOTH hashes so an operator can tell which end is wrong: {detail}"
-    );
-}
-
-/// **Fail closed on a manifest that does not say what labelled it.** An empty `data_plugin_hash`
-/// is a mismatch, not a pass: a bundle that names no labelling rule cannot be shown to have been
-/// labelled by this plugin, and treating "unknown" as agreement would exempt exactly the
-/// hand-written or half-migrated manifest the check exists for.
-#[test]
-fn engine_open_refuses_a_manifest_whose_data_plugin_hash_is_empty() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    rewrite_data_plugin_hash(&bundle_root, serde_json::json!(""));
-
-    let opened = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        Passthrough::new(),
-        config(),
-    );
-    let Err(err) = opened else {
-        panic!("an empty manifest hash must be refused, not treated as agreement");
-    };
-    assert!(
-        matches!(err, EngineError::Malformed(ref d) if d.contains("<empty>")),
-        "the refusal must say the manifest names nothing, not print a blank: {err:?}"
-    );
-}
-
-/// Residency proxy: `Engine::open` must never touch the external-id sidecar (the per-extent
-/// laziness guarantee, contracts §0.3 deviation 9) — this is a proxy, not the memory-residency
-/// measurement itself.
-///
-/// **The files are removed from disk before the engine opens**, and `is_open()` alone would not be
-/// a test of this: it reports only the sidecar's own `OnceLock` state, which a `verify_files` pass
-/// reading and SHA-256'ing every extent and the locator — the whole 18.9 GB sequential read the
-/// deviation exists to remove — never sets. Deleting the files makes any read of them, at any layer,
-/// a hard failure of `Engine::open`, which is the property actually claimed.
-#[test]
-fn engine_open_does_not_touch_the_sidecar() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    // Every sidecar file the build wrote, named from MANIFEST's own `files` map rather than
-    // guessed, so this cannot silently check nothing if the layout moves.
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
-    let prefix_dir = bundle_root.join(current["prefix"].as_str().unwrap());
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(prefix_dir.join("MANIFEST.json")).unwrap()).unwrap();
-    let sidecar_files: Vec<PathBuf> = manifest["files"]
-        .as_object()
-        .unwrap()
-        .keys()
-        // The external-ID sidecar's own files, not everything under `entities/`: the entity→term
-        // transpose lives there too (contracts §2.4) and is deliberately opened *at* `Engine::open`
-        // like the record blob, so deleting it would make this test assert the opposite posture for
-        // an artefact it is not about.
-        .filter(|rel| rel.contains("/entities/external-ids") || rel.contains("/entities/ext-locator"))
-        .map(|rel| prefix_dir.join(rel))
-        .collect();
-    assert!(
-        sidecar_files.len() >= 2,
-        "fixture must write at least an extent and the locator, found {sidecar_files:?}"
-    );
-    // The digests stay in MANIFEST — the deviation defers verification, it does not drop it.
-    for path in &sidecar_files {
-        let rel = path.strip_prefix(&prefix_dir).unwrap().to_string_lossy();
-        let rel = rel.replace('\\', "/");
-        assert!(
-            manifest["files"][&rel]["sha256"].is_string(),
-            "{rel} must keep its digest in MANIFEST so the sidecar can verify it at first touch"
-        );
-        std::fs::remove_file(path).unwrap();
-    }
-
-    let engine = open_engine(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    );
-    assert!(
-        !engine.external_id_sidecar_is_open(),
-        "Engine::open must not touch the external-id sidecar"
-    );
-
-    // Deferred, not dropped: the first resolution *does* reach for the file, and fails closed
-    // because it is gone.
-    let err = engine
-        .resolve_external_id(&source_id_key(0))
-        .expect_err("the first resolution must reach the (now absent) extent and fail closed");
-    assert!(
-        matches!(
-            err,
-            StoreError::InvalidSidecar { .. } | StoreError::Io { .. }
-        ),
-        "expected a typed sidecar/IO error, got {err:?}"
-    );
-}
-
-/// Step 3: latency sanity at 2.4M items — a generous local gate (p99 < 50ms); the real 10ms gate
-/// is the exit measurement, at 10⁹. Builds `/tmp/tessera-2m4` from the real corpus if it is not already there
-/// (disk is tight — this bundle is meant to be reused across runs, not deleted after each one).
-///
-/// `#[ignore]`d: this is a real-corpus, multi-second build plus a real timing measurement, not a
-/// fast unit test — run explicitly with `cargo test --release -p tessera-engine --test viewport \
-/// -- --ignored latency_sanity_at_2_4m_p99_under_50ms`.
-#[test]
-#[ignore = "measurement: builds /tmp/tessera-2m4 from the real corpus and times it — release only, see the doc above"]
-fn latency_sanity_at_2_4m_p99_under_50ms() {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    use std::time::Instant;
-
-    const ITEM_LIMIT: u64 = 2_422_486;
-
-    let bundle_root = PathBuf::from("/tmp/tessera-2m4");
-    if !bundle_root.join("CURRENT").exists() {
-        let args = BuildArgs {
-            views: vec![tessera_build::ViewArgs {
-                visibility: None,
-                view_id: "s0".to_string(),
-                projection: tessera_spatial::Projection::None,
-                // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes,
-                // not coordinates (`read_points`'s Morton branch requires this exact extent).
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 65536.0,
-                    y_min: 0.0,
-                    y_max: 65536.0,
-                },
-                points: PathBuf::from("data/scaled/geometry.parquet"),
-                point_fields: Default::default(),
-                select: None,
-                access: tessera_build::config::AccessInput::relation(PathBuf::from(
-                    "data/scaled/pairs/categories-subclass.pairs.parquet",
-                )),
-            }],
-            anchor: 0,
-            groups: Vec::new(),
-            scoped_attributes: Vec::new(),
-            attribute_sources: Vec::new(),
-            out: bundle_root.clone(),
-            limit: Some(ITEM_LIMIT),
-            identity_key: test_key(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            idset: 1,
-            shard_id: 0,
-            layers: Vec::new(),
-            layer_inputs: Vec::new(),
-            scoped_layers: Default::default(),
-            mint_external_ids: true,
-            emit_oracle_pairs: true,
-            batch_items: None,
-            memory_budget: None,
-            band_rows: None,
-            schema: Default::default(),
-        };
-        build(&args).expect("2.4M fixture build should succeed");
-    }
-
-    let tmp = TempDir::new().unwrap();
-    let engine = Engine::open(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        Passthrough::new(),
-        EngineConfig {
-            token_max_lifetime_secs: 3600,
-            // **Production defaults, deliberately.** Everything else in this file saturates theta
-            // so that masking assertions do not also depend on the density rule — but this is the
-            // only latency gate in the tree, and under saturation the threshold clause never binds,
-            // `admits` is a constant `true`, and the counting/selecting branch is barely exercised.
-            // It would have measured a path the server does not take. Keep these in step with
-            // `tessera-server`'s DEFAULT_* constants.
-            max_k: 1_000,
-            k_min: 2,
-            k_max_marks: 500,
-            theta_target_marks: 16,
-            max_underlay_offset: 4,
-            max_underlay_cells: 8192,
-            max_tiles_per_request: 262_144,
-            compute_threads: default_compute_threads(),
-            flush_max_age_secs: 90,
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            tier_width: None,
-            segment_floor_bytes: None,
-            coalesce_width: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
-        },
-    )
-    .expect("engine should open the 2.4M bundle");
-
-    // A real descriptor from the built dictionary (the real corpus's term ids, unlike the
-    // synthetic fixtures above) — read directly from `terms-0.dict` rather than guessed.
-    let descriptor = first_dictionary_descriptor(&bundle_root);
-    let auth = format!(r#"{{"terms": ["{descriptor}"]}}"#);
-    // Warm token: authorise once, outside the timing loop — a session's fragment is built once
-    // at authorise time (I2) and reused across every viewport, exactly as a real client would.
-    let session = engine
-        .authorise(auth.as_bytes())
-        .expect("authorise should succeed");
-
-    let mut rng = StdRng::seed_from_u64(42);
-    let mut latencies = Vec::with_capacity(300);
-    for _ in 0..300 {
-        let x0: f64 = rng.gen_range(0.0..65000.0);
-        let y0: f64 = rng.gen_range(0.0..65000.0);
-        let x1 = (x0 + rng.gen_range(1.0..500.0)).min(65536.0);
-        let y1 = (y0 + rng.gen_range(1.0..500.0)).min(65536.0);
-        let zoom: u8 = rng.gen_range(4..=12);
-
-        let start = Instant::now();
-        engine
-            .viewport(
-                &session,
-                ViewportRequest::new("s0", zoom, [x0, y0, x1, y1], 30),
-            )
-            .expect("viewport should succeed");
-        latencies.push(start.elapsed());
-    }
-
-    latencies.sort();
-    let p99_idx = ((latencies.len() as f64) * 0.99) as usize;
-    let p99 = latencies[p99_idx.min(latencies.len() - 1)];
-    println!("p99 latency over 300 random viewports at 2.4M items: {p99:?}");
-    assert!(
-        p99.as_millis() < 50,
-        "p99 latency {p99:?} exceeds the 50ms generous local gate (the real 10ms gate is Task \
-         16, at 10⁹)"
-    );
-}
-
-fn first_dictionary_descriptor(bundle_root: &Path) -> String {
-    let dict_path = bundle_root.join("v00000/dictionary/terms-0.dict");
-    let data = std::fs::read(dict_path).unwrap();
-    let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-    String::from_utf8(data[4..4 + len].to_vec()).unwrap()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1752,16 +940,14 @@ fn the_theta_anchor_falls_when_an_item_is_suppressed() {
         .unwrap();
 
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let suppressed_entity = baseline
-        .resolve_external_id(&SUPPRESS_SOURCE_ID.to_le_bytes())
+    let suppressed_entity = item_of_id(&baseline, SUPPRESS_SOURCE_ID)
         .unwrap()
         .expect("source item 5 is established in the bundle");
     let wal_path_b = tmp.path().join("wal_b.log");
     {
-        let (mut wal, _initial) = Wal::open(&wal_path_b).unwrap();
-        wal.append(&WalRecord::ChangeByEntity {
-            entity_id: suppressed_entity,
-            op: ChangeOp::Suppress,
+        let mut wal = Wal::open(&wal_path_b).unwrap();
+        wal.append(&WalRecord::ChangeBatch {
+            changes: vec![(suppressed_entity, ChangeOp::Suppress)],
         })
         .unwrap();
         wal.fsync().unwrap();
@@ -1838,15 +1024,13 @@ fn n_occ_falls_when_a_suppression_empties_a_tile() {
     // The ten entities sharing one lattice position, and one of them on its own.
     let cohort: Vec<u64> = (0..10).map(|i| 5 + i * 1_000).collect();
     let suppress = |wal_path: &std::path::Path, ids: &[u64]| {
-        let (mut wal, _initial) = Wal::open(wal_path).unwrap();
+        let mut wal = Wal::open(wal_path).unwrap();
         for id in ids {
-            let entity = baseline
-                .resolve_external_id(&id.to_le_bytes())
+            let entity = item_of_id(&baseline, *id)
                 .unwrap()
                 .expect("the source item is established in the bundle");
-            wal.append(&WalRecord::ChangeByEntity {
-                entity_id: entity,
-                op: ChangeOp::Suppress,
+            wal.append(&WalRecord::ChangeBatch {
+                changes: vec![(entity, ChangeOp::Suppress)],
             })
             .unwrap();
         }
@@ -1980,7 +1164,7 @@ fn the_background_fill_takes_the_ladder_to_twelve_in_one_walk_off_the_request() 
 
     // Revoking takes any fill still running with it: `prune_token` cancels first and drops the
     // entry, so nothing is left working on behalf of a session that no longer exists.
-    filled.prune_token(session.token_id);
+    filled.prune_token(session.token_id());
     assert_eq!(filled.occupancy_stages_in_flight(), 0);
 }
 
@@ -2090,10 +1274,9 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // 0058); the two are not in tension, because what F4 requires is that *distinct* keys do not
 // serialise, and same-key callers serialising is what single-flight is.
 //
-// The state machine itself (waiting, the four wake paths, panic safety) is proven
-// deterministically — no sleeps, no timing slack — by `tessera-engine`'s own `single_flight`
-// unit tests, which control a build's start and finish with channels because the map is directly
-// reachable there. The tests below instead exercise the real, public `Engine::viewport` path
+// The state machine itself (waiting, the wake paths, panic safety) is proven deterministically —
+// no sleeps, no timing slack — by `tessera-cache`'s unit tests, which control a build's start and
+// finish with channels because the map is directly reachable there. The tests below instead exercise the real, public `Engine::viewport` path
 // end to end, which cannot inject a pause into `RowProjection::new`; they use a large enough
 // synthetic fixture that a cold build takes tens of milliseconds even unoptimised, well above OS
 // thread-wake jitter.
@@ -2172,125 +1355,70 @@ fn concurrent_same_key_viewports_are_all_served_off_one_build() {
     );
 }
 
-/// D-G / F4: distinct sessions' first viewports must build their row projections
-/// **concurrently**, not serialise behind one global lock — the exact regression F4 measured
-/// (Arm A at c=1000: throughput halves while server CPU *drops* from 712% to 426%, the signature
-/// of threads blocked on a lock rather than doing work).
-///
-/// Measured directly: `serial` times N fresh sessions' cold first viewports run one after
-/// another; `concurrent` times N *different* fresh sessions' cold first viewports released
-/// together on N threads. Both exclude `Engine::authorise` (sessions are minted before either
-/// timer starts) so only the row-projection build itself is measured. If builds still serialised
-/// behind one lock, `concurrent` would be roughly `serial` (same total work, funnelled through
-/// one mutex, plus contention overhead); genuine overlap should land `concurrent` well under
-/// `serial` given more than one core.
+/// One session's row-projection build does not block another session's first viewport. The first
+/// session's build is held open inside the build, and the second session's first viewport must
+/// finish while it is held. A lock held across the build, in the cache or in the request path
+/// around it, leaves the second viewport waiting. `tessera-bench`'s load arm measures the
+/// throughput this protects.
 #[test]
-fn distinct_key_first_viewports_overlap_instead_of_serialising() {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    // N=4 concurrent builds need at least N cores to genuinely overlap; on a 2- or 3-core
-    // runner the 70%-of-serial assertion below has too little headroom (some builds queue for a
-    // core regardless of the lock-free design) and flakes for reasons unrelated to F4. Skip
-    // rather than loosen the ratio, so a real regression on well-provisioned runners still fails
-    // loudly.
-    if cores < 4 {
-        eprintln!("skipping distinct_key_first_viewports_overlap_instead_of_serialising: only {cores} cores available, need >= 4 for headroom");
-        return;
-    }
-
-    const N: usize = 4;
-    const ITEMS: u64 = 150_000;
-    // **Best of three, and the retry is not slack in the assertion.** The ratio is asymmetrically
-    // sensitive to whatever else is competing for cores: `serial` needs one core and `concurrent`
-    // needs N, so external load — a full-workspace run putting other test binaries on the same
-    // box — degrades exactly the quantity being measured while leaving its baseline alone. A
-    // genuinely serialised implementation cannot produce a fast `concurrent` on any attempt, so
-    // taking the best observation keeps the regression this test exists to catch while removing
-    // the load sensitivity. Captured failing once during a full-workspace run and not reproduced
-    // in twelve isolated ones, which is the signature of contention rather than of a real change.
-    //
-    // Timing the intervals rather than the totals would not help: under one global lock the
-    // waiting threads block *inside* `viewport`, so their measured intervals overlap just as much
-    // as genuinely concurrent builds do. The totals are what distinguish the two.
-    const ATTEMPTS: usize = 3;
-
+fn a_first_viewport_finishes_while_another_sessions_build_is_held() {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture_n(
         &bundle_root,
         &tmp.path().join("points.parquet"),
         &tmp.path().join("pairs.parquet"),
-        ITEMS,
+        5_000,
     );
     let engine = Arc::new(open_engine(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
     ));
-
-    // Every attempt mints fresh sessions, so every build is genuinely cold: the row-projection
-    // cache keys on `token_id`, so a new token is a new key and nothing is reused across attempts.
-    let measure = || {
-        let serial_sessions: Vec<_> = (0..N)
-            .map(|_| engine.authorise(&full_coverage_credential()).unwrap())
-            .collect();
-        let serial_start = std::time::Instant::now();
-        for session in &serial_sessions {
-            engine
-                .viewport(
-                    session,
-                    ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                )
-                .unwrap();
-        }
-        let serial = serial_start.elapsed();
-
-        let concurrent_sessions: Vec<Arc<Session>> = (0..N)
-            .map(|_| Arc::new(engine.authorise(&full_coverage_credential()).unwrap()))
-            .collect();
-        let barrier = Arc::new(std::sync::Barrier::new(N));
-        let concurrent_start = std::time::Instant::now();
-        let handles: Vec<_> = concurrent_sessions
-            .into_iter()
-            .map(|session| {
-                let engine = Arc::clone(&engine);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    engine
-                        .viewport(
-                            &session,
-                            ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
-                        )
-                        .unwrap();
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-        (serial, concurrent_start.elapsed())
+    let first_viewport = |engine: &Engine| {
+        let session = engine.authorise(&full_coverage_credential()).unwrap();
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", 0, [0.0, 0.0, 1000.0, 1000.0], 5),
+            )
+            .unwrap();
     };
 
-    let mut observed = Vec::with_capacity(ATTEMPTS);
-    for attempt in 1..=ATTEMPTS {
-        let (serial, concurrent) = measure();
-        println!(
-            "distinct-key overlap ({cores} cores, N={N}, attempt {attempt}): \
-             serial={serial:?} concurrent={concurrent:?}"
+    engine.hold_next_projection_build_for_test();
+    let held = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || first_viewport(&engine))
+    };
+    let deadline = std::time::Instant::now() + WAIT;
+    while engine.full_projection_builds() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held build never started"
         );
-        if concurrent < serial * 7 / 10 {
-            return;
-        }
-        observed.push((serial, concurrent));
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
-    panic!(
-        "concurrent never landed under 70% of serial in {ATTEMPTS} attempts on a {cores}-core \
-         machine ({observed:?}) — distinct sessions' first-viewport builds are serialising behind \
-         one lock rather than overlapping (F4)"
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let other = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            first_viewport(&engine);
+            let _ = finished_tx.send(());
+        })
+    };
+    let finished = finished_rx.recv_timeout(WAIT);
+    let builds_while_held = engine.full_projection_builds();
+
+    engine.release_projection_build_for_test();
+    held.join().unwrap();
+    other.join().unwrap();
+    assert!(
+        finished.is_ok(),
+        "a second session's first viewport waited for the first session's build"
     );
+    assert_eq!(builds_while_held, 2, "each session builds its own projection");
 }
 
 /// Byte-format/wire behaviour is unchanged by the D-G refactor: a warm cache must serve output
@@ -2736,12 +1864,8 @@ fn absent_cancel_token_never_aborts() {
 /// ... is NOT worth adding API for ... rely on code review for the per-tile placement").
 ///
 /// **Self-scaling, not a sleep-based guess.** `baseline_elapsed` is this run's own measured time
-/// for the full, uncancelled 16-tile sweep (`zoom = 2`, `underlay_offset = 8` — 4^8 = 65536
-/// sub-cell evaluations per tile, ~1.05M total; measured at ~270ms in this task's tuning run,
-/// comfortably above the floor asserted below). `cancelled_elapsed` should be a small fraction of
-/// `baseline_elapsed` regardless of which checkpoint caught it (measured at ~4ms cancelled against
-/// ~270ms baseline in this task's tuning run — comfortably inside the /2 bound asserted below, with
-/// wide margin to spare).
+/// for the full, uncancelled sweep over the 262,144 tiles of zoom 9, and `cancelled_elapsed` should
+/// be a small fraction of it whichever checkpoint caught the flip.
 #[test]
 fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes() {
     let tmp = TempDir::new().unwrap();
@@ -2757,8 +1881,7 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
         config_for_slow_multi_tile_sweep(),
     ));
 
-    let request =
-        || ViewportRequest::new("s0", 2, [0.0, 0.0, 1000.0, 1000.0], 1).underlay_offset(Some(8));
+    let request = || ViewportRequest::new("s0", 9, [0.0, 0.0, 1000.0, 1000.0], 1);
 
     // Baseline: an uncancelled full sweep over a fresh session, so `baseline_elapsed` reflects
     // this machine's real speed for the whole 16-tile workload (cold row-projection build
@@ -2817,6 +1940,71 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 // Concurrency — intra-request rayon parallelism
 // ---------------------------------------------------------------------------------------------
 
+/// Two engines over one bundle, differing only in `compute_threads`, each answering `request`
+/// once. `items` sizes the fixture; `force_parallel` drops both thresholds to 0 so both take
+/// `pool.install` rather than the serial fold.
+fn viewport_at_one_and_eight_threads(
+    items: u64,
+    force_parallel: bool,
+    request: impl Fn() -> ViewportRequest<'static>,
+) -> (ViewportOut, ViewportOut) {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture_n(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        items,
+    );
+
+    // Separate cache/WAL directories per engine (same read-only bundle) — two independent
+    // `Engine::open`s over the same bundle, differing only in `compute_threads`. `open_engine_with`
+    // joins `cache`/`wal.log` onto the directory it is given, and `Wal::open` does not create that
+    // directory itself (unlike `tmp.path()`, which `TempDir::new` already created), so each must
+    // be made first.
+    let dir_1 = tmp.path().join("a");
+    let dir_8 = tmp.path().join("b");
+    std::fs::create_dir_all(&dir_1).unwrap();
+    std::fs::create_dir_all(&dir_8).unwrap();
+    let engine_1 = open_engine_with(
+        &bundle_root,
+        &dir_1,
+        EngineConfig {
+            compute_threads: 1,
+            ..config()
+        },
+    );
+    let engine_8 = open_engine_with(
+        &bundle_root,
+        &dir_8,
+        EngineConfig {
+            compute_threads: 8,
+            ..config()
+        },
+    );
+
+    // `should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
+    // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
+    // in `src/viewport.rs`. `#[cfg]`, not `if`, because the method does not exist at all without
+    // `bench-timing` — see `Engine::set_serial_fallback_max_rows_for_test`'s doc.
+    #[cfg(feature = "bench-timing")]
+    if force_parallel {
+        engine_1.set_serial_fallback_max_rows_for_test(0);
+        engine_8.set_serial_fallback_max_rows_for_test(0);
+    }
+    // Without `bench-timing` there is no override and both engines take the serial fold, whatever
+    // the caller asked for.
+    #[cfg(not(feature = "bench-timing"))]
+    let _ = force_parallel;
+
+    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
+    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
+
+    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
+    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    (out_1, out_8)
+}
+
 /// THE HEADLINE TEST (D-D/D-F): the same fixture and the same request produce a byte-for-byte
 /// identical `ViewportOut` (`PartialEq` ignores only `timings` — see its hand-written impl)
 /// whether the engine's shared pool has one worker or eight.
@@ -2855,62 +2043,9 @@ fn cancel_flipped_from_another_thread_aborts_a_long_request_before_it_completes(
 /// there is nothing in this response for them to disagree about.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-
-    // Separate cache/WAL directories per engine (same read-only bundle) — two independent
-    // `Engine::open`s over the same bundle, differing only in `compute_threads`. `open_engine_with`
-    // joins `cache`/`wal.log` onto the directory it is given, and `Wal::open` does not create that
-    // directory itself (unlike `tmp.path()`, which `TempDir::new` already created), so each must
-    // be made first.
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    // Force BOTH engines to take the genuine `pool.install` branch regardless of
-    // this fixture's actual row count, by setting each one's threshold to 0
-    // (`should_fold_serially(_, 0)` is unconditionally `false` — pinned directly by
-    // `viewport::tests::should_fold_serially_honours_an_arbitrary_threshold_not_just_the_constant`
-    // in `src/viewport.rs`). Deterministic by construction, so nothing below needs to re-measure
-    // it at runtime. `#[cfg]`, not `if`, because the method does not exist at all without
-    // `bench-timing` — see `Engine::set_serial_fallback_max_rows_for_test`'s doc.
-    #[cfg(feature = "bench-timing")]
-    {
-        engine_1.set_serial_fallback_max_rows_for_test(0);
-        engine_8.set_serial_fallback_max_rows_for_test(0);
-    }
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     let request =
         || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(PARALLEL_HEADLINE_ITEMS, true, request);
 
     assert!(
         out_1.tiles.len() > 1,
@@ -2953,54 +2088,11 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8() {
 /// produces the occupied/empty tile MIX this test is actually for.
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empty_tiles() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_n(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-        PARALLEL_HEADLINE_ITEMS,
-    );
-
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    // Force the genuine parallel branch — see the headline test's identical
-    // comment for the full argument.
-    #[cfg(feature = "bench-timing")]
-    {
-        engine_1.set_serial_fallback_max_rows_for_test(0);
-        engine_8.set_serial_fallback_max_rows_for_test(0);
-    }
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     let bbox = [0.0, 0.0, 1000.0, 1000.0];
     let zoom = 8;
     let request = || ViewportRequest::new("s0", zoom, bbox, 50);
     let candidate_tiles = tiles_for_bbox(bbox, zoom, &extent()).len();
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(PARALLEL_HEADLINE_ITEMS, true, request);
 
     assert!(
         !out_1.tiles.is_empty(),
@@ -3031,45 +2123,11 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_with_sparse_empt
 #[test]
 fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial_fallback_threshold(
 ) {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-
-    let dir_1 = tmp.path().join("a");
-    let dir_8 = tmp.path().join("b");
-    std::fs::create_dir_all(&dir_1).unwrap();
-    std::fs::create_dir_all(&dir_8).unwrap();
-    let engine_1 = open_engine_with(
-        &bundle_root,
-        &dir_1,
-        EngineConfig {
-            compute_threads: 1,
-            ..config()
-        },
-    );
-    let engine_8 = open_engine_with(
-        &bundle_root,
-        &dir_8,
-        EngineConfig {
-            compute_threads: 8,
-            ..config()
-        },
-    );
-
-    let session_1 = engine_1.authorise(&full_coverage_credential()).unwrap();
-    let session_8 = engine_8.authorise(&full_coverage_credential()).unwrap();
-
     // Same request shape as the headline test (multi-tile, underlay) — only the fixture size
     // differs, which is the whole point of this variant.
     let request =
         || ViewportRequest::new("s0", 3, [0.0, 0.0, 1000.0, 1000.0], 50).underlay_offset(Some(2));
-
-    let out_1 = engine_1.viewport(&session_1, request()).unwrap();
-    let out_8 = engine_8.viewport(&session_8, request()).unwrap();
+    let (out_1, out_8) = viewport_at_one_and_eight_threads(N_ITEMS, false, request);
 
     assert!(out_1.tiles.len() > 1, "need more than one non-empty tile");
     if out_8.timings.enabled {

@@ -2,15 +2,28 @@ import {
   checkTrailerCounts,
   decodeViewport,
   parseTrailer,
+  stageNsOf,
   type PointsPart,
   type ViewportHead
 } from './decode.js';
+import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import {readAggregate, type PartialAggregate} from './aggregate.js';
+import {openRecords, type RecordsRead} from './records.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
-/** Where a streamed response's points go, one frame's worth at a time. */
+/**
+ * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
+ * {@link TesseraClient.viewport} decodes them. Parts arrive in the order the server sent them, and
+ * the next part is not handed over until a returned promise settles.
+ *
+ * Each part's `result` holds whole tiles: the counts of the tiles whose points it carries, those
+ * points, and the response's artifacts. Its `subCells` is `null`.
+ *
+ * @category HTTP client
+ */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
 
 /** What either decode path hands back, before the headers are folded in around it. */
@@ -20,14 +33,13 @@ type Decoded = {
   points: number;
   ms: number;
   workerMs: number | null;
+  /** The trailer's `stage_ns`. */
+  stageNs: number[] | null;
 };
 
 /**
- * The point columns of a response that carried none — every streamed response's own result.
- *
- * Fresh buffers each time rather than one shared empty set: a caller that holds a result holds
- * these, and two results sharing a `scalars` object is an aliasing fault waiting for the day
- * something writes to one.
+ * Empty point columns, for a result whose points went to a part sink. Each call makes fresh
+ * buffers, so no two results share a `scalars` object.
  */
 function emptyPoints() {
   return {
@@ -37,14 +49,29 @@ function emptyPoints() {
     world: new Float32Array(0),
     scalars: {} as Record<string, never>,
     membership: {} as Record<string, never>,
-    // No points, so no bits — and `null` is the honest value, being *no highlight column here*
-    // rather than *nothing highlighted*.
+    // No points, so no highlight column. `null` says that; an empty array would say nothing is
+    // highlighted.
     highlighted: null,
     pointsProjection: 'full' as const
   };
 }
 
-/** The same result with its points removed — they were delivered to the sink instead. */
+/**
+ * The trailer's `stage_ns` in a whole body, found by walking the frame headers to the trailer, or
+ * `null` where the walk finds none. The decoder checks the body's grammar.
+ */
+function stageNsOfBody(bytes: Uint8Array): number[] | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 0; at + 5 <= bytes.byteLength; ) {
+    const end = at + 5 + view.getUint32(at + 1, true);
+    if (end > bytes.byteLength) return null;
+    if (bytes[at] === FRAME_TRAILER) return stageNsOf(parseTrailer(bytes.subarray(at + 5, end)));
+    at = end;
+  }
+  return null;
+}
+
+/** The same result with its points removed, since they went to the part sink. */
 function headOnly(result: ViewportResult): ViewportResult {
   return {...result, ...emptyPoints()};
 }
@@ -52,10 +79,9 @@ function headOnly(result: ViewportResult): ViewportResult {
 /**
  * The run of tiles whose served counts add up to one points frame's rows.
  *
- * **A chunk boundary never splits a tile** (`streamed-serving.md` §2), so the frame's rows are
- * exactly some run of the tiles batch and the run is found by adding up the counts the server
- * already sent. A frame whose rows land inside a tile is a wire the client cannot attribute, and
- * it refuses rather than assigning the points to a tile they may not belong to.
+ * The server does not split a tile across frames, so a frame's rows are some run of the tiles
+ * batch, found by adding up the counts the server already sent. A frame whose rows end inside a
+ * tile cannot be attributed, and is refused rather than assigned to a tile it may not belong to.
  */
 function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {tiles: TileCounts[]; next: number} {
   let at = from;
@@ -70,17 +96,29 @@ function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {ti
 }
 
 /**
- * A Tessera error body, `{"error": code, "detail": string}`, with its HTTP status.
+ * A refusal from the server: the HTTP status and the `error` and `detail` of its JSON error body.
+ * A request that reaches no server rejects with the `fetch` error instead, so a caller can tell a
+ * refusal from a transport failure. The `message` is `"<status> <code>: <detail>"`.
  *
- * Typed rather than a bare `Error` because the viewer must be able to tell a refusal from a
- * transport failure: an empty region and a failed region are semantic opposites, and only a typed
- * error lets a caller render them differently.
+ * @category HTTP client
  */
 export class TesseraError extends Error {
   constructor(
+    /** The HTTP status, such as `404` or `422`. */
     readonly status: number,
+    /**
+     * The body's `error` code: `bad-credential`, `expired-token`, `unknown`, `conflict`,
+     * `contract`, `backpressure`, `fail-closed` or `not-ready`. `unknown` also where the body is not
+     * JSON or has no code.
+     */
     readonly code: string,
-    readonly detail: string
+    /** The body's `detail`, saying what was wrong. The HTTP status text where the body has none. */
+    readonly detail: string,
+    /**
+     * The wait the server asked for before the request is sent again, in seconds: its `Retry-After`
+     * header, else the body's `retry_after_s`; `null` where it named none.
+     */
+    readonly retryAfterS: number | null = null
   ) {
     super(`${status} ${code}: ${detail}`);
     this.name = 'TesseraError';
@@ -90,115 +128,182 @@ export class TesseraError extends Error {
 async function fail(response: Response): Promise<never> {
   let code = 'unknown';
   let detail = response.statusText;
+  let wait = response.headers.get('retry-after');
   try {
-    const body = (await response.json()) as {error?: string; detail?: string};
+    const body = (await response.json()) as {error?: string; detail?: string; retry_after_s?: number};
     code = body.error ?? code;
     detail = body.detail ?? detail;
+    wait ??= body.retry_after_s === undefined ? null : String(body.retry_after_s);
   } catch {
-    // A non-JSON body (a proxy's, say) still deserves a typed error rather than a parse crash.
+    // A body that is not JSON, such as a proxy's, still gives a TesseraError.
   }
-  throw new TesseraError(response.status, code, detail);
+  const seconds = wait === null ? NaN : Number(wait);
+  throw new TesseraError(response.status, code, detail, Number.isFinite(seconds) && seconds >= 0 ? seconds : null);
 }
 
+/**
+ * Where a {@link TesseraClient} sends its requests, and how.
+ *
+ * @category HTTP client
+ */
 export type TesseraClientOptions = {
+  /** The viewer listener's base URL, without a trailing slash. Routes under `/v1/` are appended to it. */
   viewerUrl: string;
+  /** The session listener's base URL, without a trailing slash. Routes under `/session/` are appended to it. */
   sessionUrl: string;
   /**
-   * Needed only by `authorise`. Holding it in a browser is a development shape — see
-   * `crates/tessera-server/src/cors.rs` for why the server key that permits it is off unless
-   * typed, and client-interaction §7 for the topology that is actually recommended.
+   * The session credential, sent as the bearer token by `authorise` and `revoke`; no other method
+   * uses it. A browser page can reach the session listener only from an origin the deployment
+   * lists in `serve.dev_cors_origins`, a development setting.
    */
   sessionCredential?: string;
   /**
-   * Per-response decode time — an instrument's hook (design §5.10's measurements), never a
-   * behaviour: `ms` from bytes-in to typed-arrays-out as seen from this thread, with the
-   * response's size and point count, and `workerMs` — the worker's own decode time, so the
-   * difference is what the response spent queued behind another in its lane (`null` where it
-   * decoded inline).
-   *
-   * **On a streamed response `ms` is head-to-last-part and so includes the wire**, there being no
-   * moment at which the bytes are all in hand and none of them decoded; `workerMs` is then the sum
-   * of the frames' own decode times, and is the decode figure.
+   * Called once per viewport response with its decode figures. `ms` runs from the response's
+   * headers to the last typed array, as this thread sees it, and includes reading the body.
+   * `bytes` is the body's size and `points` the points decoded. `workerMs` is the worker's own
+   * decode time, or `null` where the response decoded on this thread, so `ms - workerMs` is time
+   * spent reading and queued. On a streamed response `workerMs` is the sum over the frames.
    */
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
   /**
-   * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
-   *
-   * Exists for tests and for a consumer that already owns a worker pool — not as a switch anyone
-   * needs to think about.
+   * Where responses are decoded. Defaults to a worker where one can be made, and this thread
+   * otherwise, made at the first `viewport` call.
    */
   decoder?: Decoder;
+  /** Used for every request in place of the global `fetch`. */
+  fetch?: typeof fetch;
+  /**
+   * Headers sent on every request. A method's own `authorization` and `content-type` replace a
+   * header of the same name here.
+   */
+  headers?: Record<string, string>;
 };
 
 /**
- * The five viewer/session verbs, and nothing else.
+ * Calls the viewer and session routes, one method per route. It holds no cache or session state;
+ * {@link createStore} holds those.
  *
- * No cache, no view key, no session lifetime, no replica state — client-interaction §10's session
- * client layer, which is what a REST user would have written anyway. The replica store goes
- * *above* this, not inside it, so that this file stays a thing you can read in one sitting and
- * check against the contracts spec.
+ * A method rejects with {@link TesseraError} when the server refuses, and with the `fetch` error
+ * when no server answers. On a viewer route, `401 bad-credential` for a token that worked before
+ * and `403 expired-token` both mean the session has ended. Every count a viewer route returns is
+ * over the items the token's session may see.
+ *
+ * @category HTTP client
  */
 export class TesseraClient {
   /**
    * Where responses are turned into typed arrays.
    *
    * Created lazily and shared across requests. In a browser this is a worker, so decode does not
-   * compete with drawing; everywhere else it is the same synchronous call this always made.
+   * compete with drawing; elsewhere it decodes on this thread.
    */
   private decoder: Decoder | null = null;
 
   constructor(private readonly opts: TesseraClientOptions) {}
 
-  /** Release the decode worker, if one was created. */
+  /**
+   * One request, through the host's `fetch`, with the host's headers and then the route's own,
+   * which replace a host header of the same name in any case.
+   */
+  private send(url: string, init: Omit<RequestInit, 'headers'> & {headers?: Record<string, string>} = {}): Promise<Response> {
+    const headers = new Headers(this.opts.headers);
+    for (const [name, value] of Object.entries(init.headers ?? {})) headers.set(name, value);
+    return (this.opts.fetch ?? fetch)(url, {...init, headers});
+  }
+
+  /** Closes the decoder, terminating its workers if it has any. */
   close(): void {
     this.decoder?.close();
     this.decoder = null;
   }
 
-  async authorise(terms: string[]): Promise<Session> {
+  /**
+   * `POST /session/authorise`: mints a viewer session. The request's `auth_data` is base64 of the
+   * JSON `{"terms": [...]}`, the form the built-in `builtin:passthrough` auth plugin reads.
+   *
+   * @param terms - The access labels to grant, under `builtin:passthrough`. Another auth plugin
+   *   reads them by its own rules.
+   * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
+   *   in seconds since the Unix epoch.
+   * @throws `Error` when the options carry no `sessionCredential`.
+   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
+   *   `422` where the auth plugin refuses `auth_data`, `429` under load.
+   */
+  async authorise(terms: string[], signal?: AbortSignal): Promise<Session> {
     if (!this.opts.sessionCredential) {
       throw new Error('authorise needs a sessionCredential');
     }
-    // **`btoa` takes bytes, not text, and a term is text.** It maps each UTF-16 code unit to one
-    // byte: it throws `InvalidCharacterError` above U+00FF, and below it silently emits Latin-1
-    // rather than UTF-8. The session plane base64-decodes this to a `Vec<u8>` and reads it as UTF-8
-    // JSON (`crates/tessera-server/src/session.rs`), so both halves of that are wrong — a term
-    // carrying an en-dash refuses the whole authorise, and one carrying an accent authorises
-    // against bytes no dictionary holds. Encode to UTF-8 first, then base64 the bytes.
-    const bytes = new TextEncoder().encode(JSON.stringify({terms}));
-    // Chunked because `String.fromCharCode(...bytes)` spreads one argument per byte and overflows
-    // the call stack on a candidate list of any size.
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    }
-    const authData = btoa(binary);
-    const response = await fetch(`${this.opts.sessionUrl}/session/authorise`, {
+    // The session plane reads `auth_data` as base64 of UTF-8 JSON.
+    const authData = base64(new TextEncoder().encode(JSON.stringify({terms})));
+    const response = await this.send(`${this.opts.sessionUrl}/session/authorise`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${this.opts.sessionCredential}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({auth_data: authData})
+      body: JSON.stringify({auth_data: authData}),
+      signal
     });
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {token: string; token_id: number; expires_at: number};
     return {token: body.token, tokenId: body.token_id, expiresAt: body.expires_at};
   }
 
-  async meta(token: string): Promise<Meta> {
-    const response = await fetch(`${this.opts.viewerUrl}/v1/meta`, {
-      headers: {authorization: `Bearer ${token}`}
+  /**
+   * `POST /session/revoke`: ends the session `tokenId` names, so the token itself is not sent
+   * again. An id naming no live session is not refused.
+   *
+   * @throws `Error` when the options carry no `sessionCredential`.
+   * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
+   *   `422` for a malformed request.
+   */
+  async revoke(tokenId: number, signal?: AbortSignal): Promise<void> {
+    if (!this.opts.sessionCredential) {
+      throw new Error('revoke needs a sessionCredential');
+    }
+    const response = await this.send(`${this.opts.sessionUrl}/session/revoke`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.opts.sessionCredential}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({token_id: tokenId}),
+      signal
+    });
+    if (!response.ok) await fail(response);
+  }
+
+  /**
+   * `GET /v1/meta`: the deployment's views, groups, columns, filter operands and selection limits,
+   * and the layers this token's session may know of. The layers differ between principals, so a
+   * result is not shared across tokens.
+   *
+   * @throws {@link TesseraError} when the server refuses.
+   * @throws `Error` when the body lacks a field this client requires, which means the server and
+   *   the client are from different versions.
+   */
+  async meta(token: string, signal?: AbortSignal): Promise<Meta> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/meta`, {
+      headers: {authorization: `Bearer ${token}`},
+      signal
     });
     if (!response.ok) await fail(response);
     const m = (await response.json()) as RawMeta;
+    requireFields(m, META_FIELDS, '/v1/meta');
+    requireFields(m.selection, SELECTION_FIELDS, "/v1/meta's selection");
+    for (const v of m.views) requireFields(v, VIEW_FIELDS, 'a view in /v1/meta');
+    for (const g of m.groups) requireFields(g, GROUP_FIELDS, 'a group in /v1/meta');
+    for (const c of m.declared_scalars) requireFields(c, DECLARED_FIELDS, 'a declared scalar in /v1/meta');
+    for (const c of m.scoped_scalars) requireFields(c, SCOPED_FIELDS, 'a scoped scalar in /v1/meta');
+    for (const f of m.filter_operands) requireFields(f, OPERAND_FIELDS, 'a filter operand in /v1/meta');
+    for (const l of m.layers) {
+      requireFields(l, LAYER_FIELDS, 'a layer in /v1/meta');
+      for (const v of l.levels) requireFields(v, LEVEL_FIELDS, `a level of layer ${l.name} in /v1/meta`);
+    }
+    const category = (c: RawCategory | null) => (c ? {vocabulary: c.vocabulary, kind: c.kind, visibility: c.visibility} : null);
     return {
       apiVersion: m.api_version,
-      idset: m.idset,
-      // The frame and the four projection fields ride with the view they describe, because that
-      // is where the server declares them: both belong to a view, and two views of one bundle may
-      // quantise and project differently (decision 0040). `projection.ts` is what a client does
-      // with them.
+      bundleFormat: m.bundle_format,
       views: m.views.map((s) => ({
         id: s.id,
         displayName: s.display_name,
@@ -212,13 +317,9 @@ export class TesseraClient {
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
         tile: s.tile,
-        // The three roster fields are one record on the wire and one object here — a plain view
-        // has all three null, and `group` alone decides which case this is (`views.md` §3.2).
-        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata ?? {}}
+        // The three roster fields are null together on a plain view, so `group` decides the case.
+        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata!}
       })),
-      // The orderings, so a client can offer previous-and-next without interpreting a key. Empty
-      // is what a deployment of plain views alone publishes, and it wants the same rendering as
-      // "no groups here" — no group picker.
       groups: m.groups.map((g) => ({
         name: g.name,
         title: g.title,
@@ -228,13 +329,22 @@ export class TesseraClient {
       declaredScalars: m.declared_scalars.map((s) => ({
         name: s.name,
         arrowType: s.arrow_type,
-        // Null for a plain column, and the absence is the whole signal: without it a `u16`
-        // category is indistinguishable from a `u16` integer, since the hot path ships the code.
-        category: s.category
-          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, visibility: s.category.visibility}
-          : null,
+        category: category(s.category),
         render: s.render,
-        index: s.index
+        index: s.index,
+        unique: s.unique,
+        analyser: s.analyser,
+        homes: s.homes
+      })),
+      scopedScalars: m.scoped_scalars.map((s) => ({
+        name: s.name,
+        arrowType: s.arrow_type,
+        scope: {group: s.scope.group},
+        category: category(s.category),
+        analyser: s.analyser,
+        render: s.render,
+        index: s.index,
+        views: s.views
       })),
       selection: {
         kMin: m.selection.k_min,
@@ -242,39 +352,39 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset,
-        maxCategoryValues: m.selection.max_category_values ?? 1_000,
-        maxRegionVertices: m.selection.max_region_vertices ?? 10_000,
-        maxRegionCells: m.selection.max_region_cells ?? 262_144,
-        maxBrowseRows: m.selection.max_browse_rows ?? 200
+        maxCategoryValues: m.selection.max_category_values,
+        maxRegionVertices: m.selection.max_region_vertices,
+        maxRegionCells: m.selection.max_region_cells,
+        maxBrowseRows: m.selection.max_browse_rows,
+        maxShapeVertices: m.selection.max_shape_vertices,
+        maxSuggestions: m.selection.max_suggestions,
+        maxSuggestionWalk: m.selection.max_suggestion_walk,
+        maxSuggestSetEntities: m.selection.max_suggest_set_entities,
+        maxPageRows: m.selection.max_page_rows,
+        maxPageBytes: m.selection.max_page_bytes,
+        maxAggregateGroupings: m.selection.max_aggregate_groupings,
+        maxAggregateTop: m.selection.max_aggregate_top,
+        maxAggregateNamed: m.selection.max_aggregate_named,
+        maxAggregateCells: m.selection.max_aggregate_cells
       },
-      // Older servers do not publish it; fall back to the documented default rather than
-      // refusing to run against them.
-      maxTilesPerRequest: m.selection.max_tiles_per_request ?? 262_144,
-      // Absent, not merely empty, when the schema declares nothing filterable — so the fallback is
-      // the empty list and a client draws no filter controls, which is the correct rendering of a
-      // bundle that has none.
-      filterOperands: (m.filter_operands ?? []).map((f) => ({
+      maxTilesPerRequest: m.selection.max_tiles_per_request,
+      filterOperands: m.filter_operands.map((f) => ({
         column: f.column,
         family: f.family,
         operands: f.operands,
-        // Absent for an entity-scoped column, which is every column of a bundle that declares no
-        // view group — so the field is omitted rather than nulled, and a client that never met a
-        // scoped attribute reads the list exactly as it did before.
+        // Present only on a group-scoped column.
         ...(f.scope ? {scope: {group: f.scope.group}} : {})
       })),
-      // Gate-filtered by the server, so this list *is* what this principal may know about — and
-      // the empty list is the honest rendering of both "no layers here" and "none you may reach".
-      layers: (m.layers ?? []).map((l) => ({
+      // Filtered per principal by the server: the layers this principal may know exist.
+      layers: m.layers.map((l) => ({
         name: l.name,
         title: l.title,
         views: l.views,
         membership: l.membership,
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
-        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
+        levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom})),
         computedContent: l.computed_content,
-        // The kind of the layer's one drawn geometry, or null; a server that publishes none is
-        // a server older than the shape columns, and the map then draws boxes for good.
-        shape: l.shape ?? null,
+        shape: l.shape,
         suppliedContent: l.supplied_content,
         depsOn: l.depends_on,
         version: l.version
@@ -283,94 +393,71 @@ export class TesseraClient {
   }
 
   /**
-   * `k` is omitted from the body unless the caller sets it, so the deployment's own ceiling is the
-   * default — contracts §3.2's rule, and the reason a caller who never mentions `k` cannot
-   * decrease it.
+   * `POST /v1/viewport`: for one region at one depth, each tile's counts, a sample of up to `k`
+   * points per tile, and the served artifacts. A field of `req` left unset is left out of the
+   * body, so the server's default applies: `k` defaults to `selection.kMaxMarks` from
+   * {@link TesseraClient.meta}, and the server caps it at `selection.maxK`. `k = 0` asks for the
+   * counts alone, which decode on this thread.
+   *
+   * @param background - Decode on the decoder's background worker, so a response the user is
+   *   waiting for does not queue behind this one. Defaults to `false`.
+   * @param onPart - Receives the points as each points frame is decoded, before the body has
+   *   finished. With a sink the returned `result` carries the counts, sub-cells and artifacts and
+   *   no points. Not called for `k = 0`.
+   * @returns The decoded result, the server's timings, the response's keys (`identityKey`,
+   *   `contentKey`, `pin`, `stale`, `region`) and the body's size in `bytes`.
+   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
+   *   malformed request, `429` under load.
+   * @throws `Error` when the body is malformed or ends before its trailer. Parts already passed to
+   *   `onPart` hold whole tiles and stay correct.
    */
   async viewport(
     token: string,
     req: ViewportRequest,
     signal?: AbortSignal,
-    /** Route decode to the speculative lane — see {@link Decoder.decode}. */
     background = false,
-    /**
-     * Take each points frame as it lands, rather than the whole response at the end.
-     *
-     * **With a sink the returned response carries no points**: every one of them went to the sink,
-     * and handing them over twice would double both the memory and the work. Without one the
-     * response is what it always was. `k = 0` has no points frames and ignores this.
-     */
     onPart?: PartSink
   ): Promise<ViewportResponse> {
+    // Each optional field is sent only when the caller set it, so an unset one takes the server's
+    // default. For `layers`, `levels` and `computed` an empty array is a request for none, which
+    // differs from leaving the field out.
     const body: Record<string, unknown> = {view: req.view, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
-    // JSON has no 64-bit integer, and a Morton prefix at depth 16 needs 32 bits — inside `Number`'s
-    // exact range, so the narrowing is lossless here and stays so for every depth the grid allows.
+    // A tile prefix at depth 16 needs 32 bits, which a JSON number holds exactly.
     if (req.tiles) body.tiles = req.tiles.map(Number);
     if (req.k !== undefined) body.k = req.k;
     if (req.underlayOffset) body.underlay_offset = req.underlayOffset;
-    // Omitted when null, which is the unfiltered request. An empty `all_of` would *also* be
-    // unfiltered, but sending one makes every caller's "no filters" state a distinct request shape
-    // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
-    // then hold two entries for one question.
     if (req.filters) body.filters = req.filters;
-    // The second expression, beside the first and never a second endpoint
-    // (`highlight-and-hierarchy.md` §2). Omitted when null for the reason `filters` is: a request
-    // with an empty highlight and one that never mentioned a highlight are the same question.
     if (req.highlight) body.highlight = req.highlight;
-    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
-    // never mentions it sends the request shape it always sent — the same arrangement
-    // `artifact_rows` takes, for the same reason.
     if (req.pointRows !== undefined) body.point_rows = req.pointRows;
-    // Sent exactly as given, `[]` included: the wire is `string[] | 'all'`, where `[]` (or absent)
-    // is "no layers, charge me nothing", `'all'` is "every layer I reach", and an array is those ∩
-    // the reachable set. The server's old convention that absent meant *all* is gone; this sends
-    // what the caller passed and never substitutes one for the other.
     if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
-    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
-    // never mentions it sends the request shape it always sent.
     if (req.artifactRows !== undefined) body.artifact_rows = req.artifactRows;
-    // **Absent is a real selection here, not a missing one.** Omitting `levels` asks the server to
-    // follow each layer's own declared zoom ranges against this request's depth, so a client that
-    // never thinks about levels gets the one a map would draw. Sent only when the caller named
-    // something, so "follow the declaration" and "give me these" stay distinct request shapes.
     if (req.levels !== undefined) body.levels = req.levels;
-    // **Absent is the layer's declaration and an empty array is *none***, so this is sent only
-    // when the caller named something — an omitted field and `[]` mean opposite things here.
     if (req.computed !== undefined) body.computed = req.computed;
-    // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
-    // an opaque string on this side so a client never has to know its shape.
+    // The stamp is held as the string the server sent and travels as the object it parses to.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
 
-    const response = await fetch(`${this.opts.viewerUrl}/v1/viewport`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/viewport`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body),
+      body: jsonBody(body),
       signal
     });
     if (!response.ok) await fail(response);
-    const stage = response.headers.get('x-tessera-stage-ns');
     const coordinates = {
       identityKey: response.headers.get('x-tessera-identity-key') ?? '',
-      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
-      // comparison this client makes is against another value it took from this same header.
+      // The quotes are the entity-tag syntax and not part of the key.
       contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
       stale: response.headers.get('x-tessera-stale') === '1',
-      // Absent when the request carried no region leaf; `exact` or a cover at a depth otherwise
-      // (`selection-operand.md` §6). A header, so a counts-only reader sees it without a decode.
+      // Absent unless the request carried a region leaf.
       region: parseRegionVerdict(response.headers.get('x-tessera-region'))
     };
     this.decoder ??= this.opts.decoder ?? createDecoder();
-    const decodeStarted = performance.now();
-    // **A counts-only response decodes on this thread.** `k = 0` carries tiles and artifacts and
-    // no points (contracts §3.2) — a few kilobytes to a couple of megabytes of fixed-width rows,
-    // milliseconds to decode — and the worker lanes are serial: measured on the demo, a region's
-    // count queued 7.9 s behind a million-point decode in the lane it was dealt, for a response
-    // the server answered in 5 ms. The channel's and the region's asks are exactly the requests
-    // whose latency the user is waiting on, so they never queue behind a point sweep. It has no
-    // points frames either, so there is nothing for a part sink to be handed.
+    // A counts-only response (`k = 0`) has no points and decodes in milliseconds, so it decodes on
+    // this thread rather than queueing behind a point decode in a worker lane. It has no points
+    // frames to hand a part sink.
     const counts = req.k === 0;
     const decoded =
       onPart && !counts
@@ -385,19 +472,17 @@ export class TesseraClient {
     return {
       result: decoded.result,
       timings: {
-        // Time-to-**first-flush**, not the whole response (`streamed-serving.md` §6): the server's
-        // own cost is the sweep, and the trailer's `stream_us` — which includes every wait on this
-        // client's own reading — is deliberately not this number.
+        // The server's time to its first flush, not to the end of the stream.
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
-        stageNs: stage ? stage.split(',').map(Number) : null
+        stageNs: decoded.stageNs
       },
       ...coordinates,
       bytes: decoded.bytes
     };
   }
 
-  /** The whole body, then the decoder — what a caller holding no part sink gets. */
+  /** Reads the whole body, then decodes it: the path for a caller with no part sink. */
   private async whole(
     response: Response,
     counts: boolean,
@@ -405,40 +490,32 @@ export class TesseraClient {
   ): Promise<Decoded> {
     const started = performance.now();
     const bytes = new Uint8Array(await response.arrayBuffer());
-    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
-    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
-    // the traces, the ring-spend measurement) silently read that zero.
+    // Read before decoding: the worker path transfers the buffer, which detaches it and leaves
+    // `byteLength` at 0.
     const size = bytes.byteLength;
+    const stageNs = stageNsOfBody(bytes);
     const result = counts ? decodeViewport(bytes) : await this.decoder!.decode(bytes, background);
     return {
       result,
       bytes: size,
       points: result.ids.length,
       ms: performance.now() - started,
-      workerMs: counts ? null : this.decoder!.lastWorkerMs
+      workerMs: counts ? null : this.decoder!.lastWorkerMs,
+      stageNs
     };
   }
 
   /**
-   * Consume the body as it arrives, landing each points frame the moment it is whole.
+   * Reads the body as it arrives and hands each points frame to the sink once it is whole, so a
+   * wide view draws before its last byte arrives. The server sends whole tiles per frame, in tile
+   * order, and each frame is an Arrow stream that decodes alone.
    *
-   * **Slow data should cause pop-in, not lag.** A wide view is around a hundred point frames and a
-   * hundred megabytes; reading the body to its end before decoding the first frame means nothing
-   * is drawn until the last byte has landed, and then every tile arrives at once — the wire
-   * streams and the client waits. The server already emits whole tiles per frame, in tile order,
-   * each frame an independently decodable Arrow stream (`streamed-serving.md` §2, §3), which is
-   * precisely the licence to decode and draw one as it completes.
+   * The tiles frame comes first, so each part carries the counts of the tiles its points belong
+   * to. A part is a set of whole bands, and the replica stores it as it stores a whole response.
    *
-   * The tiles frame comes first, so each part carries the run of tile counts its own points
-   * satisfy — walked off the counts the server already sent, since a chunk boundary never splits a
-   * tile. A part is therefore a set of *whole* bands, not a fragment of one, and the replica
-   * stores it exactly as it stores a whole response.
-   *
-   * **What ends the response is the trailer, not the socket.** A body that stops without one is
-   * incomplete by contract and throws here as it always did (`streamed-serving.md` §6); what the
-   * caller has already landed stays landed and stays sound — every part came from the one
-   * generation snapshot and each tile's points are an id-order prefix of `served(T)` — but the
-   * request never resolves, so nothing downstream marks the region covered.
+   * A body that stops without its trailer throws here. The parts already delivered stay correct:
+   * they come from one generation, and each tile's points are an id-order prefix of its served
+   * set. The request does not resolve, so nothing marks the region covered.
    */
   private async streamed(
     response: Response,
@@ -448,8 +525,8 @@ export class TesseraClient {
   ): Promise<Decoded> {
     const started = performance.now();
     if (!response.body) {
-      // A runtime whose `fetch` gives no stream — a polyfill, a mocked transport. The sink is
-      // still handed everything, in one piece; the difference is when, never what.
+      // A `fetch` that gives no stream, such as a polyfill or a mock. The sink gets the whole
+      // result as one part.
       const whole = await this.whole(response, false, background);
       await onPart({result: whole.result, ...coordinates});
       return {...whole, result: headOnly(whole.result)};
@@ -462,23 +539,20 @@ export class TesseraClient {
     let bytes = 0;
     let flushes = 0;
     let points = 0;
-    // Accumulated across the frames, and left null where the decoder measures nothing (the inline
-    // one, whose calls *are* the work) so a zero is never reported as a measurement.
+    // Summed over the frames, and null where the decoder measures nothing, as the inline one does.
     let workerMs: number | null = null;
     // The tiles frame's rows, consumed in step with the point frames that satisfy them.
     let tileAt = 0;
-    // Parts are delivered in wire order however the decode lanes deal the frames, by awaiting
-    // each frame's decode in turn. The chain also carries the sink's own backpressure: reading
-    // continues while a part is absorbed, so the socket is never held for the absorb lane, but a
-    // second part is never handed over before the first has been taken.
+    // Parts are delivered in wire order by awaiting each frame's decode in turn, whichever worker
+    // decodes it. Reading continues while the sink takes a part, but the next part waits until the
+    // sink's promise settles.
     let delivering: Promise<void> = Promise.resolve();
-    // Nobody awaits this chain until the body has been read, and a rejection with no handler in
-    // between is an unhandled rejection rather than this call's failure.
+    // The chain is awaited only after the body has been read. Until then a rejection needs a
+    // handler, or it is reported as unhandled.
     delivering.catch(() => {});
 
-    // Set the moment the read fails — an abort, a transport fault, a frame the grammar refuses.
-    // Nothing lands after it: a request the caller has abandoned must not keep filling a store
-    // behind the view that superseded it, which is the discard a whole-body abort got for free.
+    // Set when the read fails: an abort, a transport fault, or a frame the grammar refuses. No part
+    // is delivered after it, so an abandoned request does not keep filling the store.
     let abandoned = false;
 
     const startHead = () => {
@@ -487,8 +561,8 @@ export class TesseraClient {
     const deliver = (decoding: Promise<PointsPart>) => {
       delivering = delivering.then(async () => {
         const part = await decoding;
-        // Read here, next to the reply it belongs to: the decoder reports the *last* reply's
-        // time, and the head's own reply lands on the same counter.
+        // Read here: the decoder reports the last reply's time, and the head's reply sets the same
+        // counter.
         const frameMs = this.decoder!.lastWorkerMs;
         if (abandoned) return;
         const decodedHead = await decodingHead!;
@@ -500,13 +574,12 @@ export class TesseraClient {
         await onPart({
           result: {
             tiles: run.tiles,
-            // `part` carries `projection`; the result names it `pointsProjection`, the frames'
-            // own answer either way.
+            // The part's `projection` is the result's `pointsProjection`.
             ...part,
             pointsProjection: part.projection,
             subCells: null,
-            // Every part carries the response's artifacts, because that is what a point's
-            // membership column is named through (`bands.ts`) and the frame precedes them all.
+            // Every part carries the response's artifacts, since a point's membership column
+            // names its artifacts through them.
             artifacts: decodedHead.artifacts,
             artifactsIdentity: decodedHead.artifactsIdentity
           },
@@ -533,9 +606,8 @@ export class TesseraClient {
               head.artifacts = frame.payload;
               break;
             case FRAME_POINTS:
-              // The head is complete at the first points frame — the grammar puts every other
-              // frame before it — so this is the earliest the counts and the artifacts can be
-              // decoded, and they are decoded before the points they name.
+              // The grammar puts every head frame before the first points frame, so the head is
+              // complete here and is decoded before the points.
               startHead();
               flushes += 1;
               deliver(this.decoder!.decodePoints(frame.payload, background));
@@ -555,19 +627,16 @@ export class TesseraClient {
       void reader.cancel().catch(() => {});
       throw error;
     }
-    // **Every whole frame is handed over before the response is judged.** A body that stopped
-    // without its trailer is refused below, and what it did deliver is sound — whole tiles from
-    // the one generation snapshot — so the refusal denies the caller a *complete* response, not
-    // the points it already has.
+    // Every whole frame is delivered before the body is checked. A body that stopped without its
+    // trailer is refused below, but the whole tiles it delivered are correct and the caller keeps
+    // them.
     await delivering;
-    // Throws on a body that stopped mid-frame or without its trailer, which is what makes a
-    // truncated response loud rather than short.
+    // Throws on a body that stopped inside a frame or without its trailer.
     frames.end();
     const decodedHead = await decodingHead!;
-    checkTrailerCounts(parseTrailer(trailerBytes!), flushes, points);
-    // Every tile the server said it served points for has had them. The batch decoder gets this
-    // for free by walking one array; here the walk is spread over the parts, so its end is
-    // checked rather than assumed.
+    const trailer = parseTrailer(trailerBytes!);
+    checkTrailerCounts(trailer, flushes, points);
+    // Every tile the server served points for has had them.
     for (let i = tileAt; i < decodedHead.tiles.length; i++) {
       if (decodedHead.tiles[i]!.served !== 0n) {
         throw new Error(
@@ -586,46 +655,44 @@ export class TesseraClient {
       bytes,
       points,
       ms: performance.now() - started,
-      workerMs
+      workerMs,
+      stageNs: stageNsOf(trailer)
     };
   }
 
   /**
-   * `GET /v1/categories/{column}`: what this column's codes stand for.
+   * `GET /v1/categories/{column}`: what a category column's codes stand for, as `code`, `key` and
+   * `title`. With `codes`, resolves those codes alone, in the order given; an empty list returns
+   * `[]` without a request. Without `codes`, lists the whole value set in key order, requesting
+   * page after page until the server returns no cursor.
    *
-   * Two forms, and **the first is the one to reach for**. Passing `codes` resolves exactly those —
-   * which is what a viewer wants, since it knows which codes it drew, and it means a 60,000-value
-   * vocabulary never crosses the wire. Omitting them enumerates the whole set, paging until the
-   * server stops handing back a cursor.
+   * A code missing from the answer is unknown or is a value this principal may not see, and the
+   * server does not say which. A code on a point this session was served always resolves.
    *
-   * **A code that comes back unresolved is not an error.** "No such code" and "a value you cannot
-   * see" are one outcome by contract (contracts §3.2), so the caller gets a shorter list rather
-   * than a refusal, and must not treat a missing code as a failure. A code the client actually
-   * *drew* always resolves: its point was admitted by the mask, so the value has a visible member.
-   *
-   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `derived`
-   * column, whose gate is specified and unbuilt.
+   * @param column - The column's name, or `<column>@<key>` for a group-scoped category pinned to
+   *   one view.
+   * @param opts.codes - The codes to resolve. Left out, the whole value set is listed.
+   * @param opts.limit - The page size when listing, capped at `selection.maxCategoryValues`, which
+   *   is also the default.
+   * @param opts.view - The view whose value set a group-scoped column answers from.
+   * @throws {@link TesseraError} when the server refuses: `404` for a column that is not a category,
+   *   `422` for a malformed request such as `limit: 0` or a group-scoped column named with no view.
    */
   async categories(
     token: string,
     column: string,
-    opts: {codes?: readonly number[]; limit?: number; view?: string} = {}
+    opts: {codes?: readonly number[]; limit?: number; view?: string; signal?: AbortSignal} = {}
   ): Promise<CategoryValue[]> {
-    // Encoded, because a column name reaches this from `/v1/meta` rather than from a literal.
     const base = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}`;
     const out: CategoryValue[] = [];
-    // The view the caller is asking under (contracts §3.2): what a **group-scoped** category's
-    // codes stand for is that view's own column, and the route resolves the view before the
-    // column whatever the column's scope — so naming it costs an entity-scoped column nothing and
-    // is the only thing that answers a scoped one.
+    // A group-scoped category's codes are per view, so the view decides which column answers.
     const view = opts.view ? `view=${encodeURIComponent(opts.view)}` : '';
 
     if (opts.codes) {
-      // Nothing to ask about. Returning early rather than sending `codes=` keeps an empty request
-      // from being read as the *enumeration* form, which would fetch the whole vocabulary.
+      // An empty `codes=` would be read as the enumeration form.
       if (opts.codes.length === 0) return out;
       const url = `${base}?codes=${[...opts.codes].join(',')}${view ? `&${view}` : ''}`;
-      const page = await this.categoryPage(token, url);
+      const page = await this.categoryPage(token, url, opts.signal);
       return page.values;
     }
 
@@ -636,7 +703,7 @@ export class TesseraClient {
       if (cursor !== null) params.set('after', cursor);
       if (opts.view !== undefined) params.set('view', opts.view);
       const query = params.toString();
-      const page = await this.categoryPage(token, query ? `${base}?${query}` : base);
+      const page = await this.categoryPage(token, query ? `${base}?${query}` : base, opts.signal);
       out.push(...page.values);
       cursor = page.next;
     } while (cursor !== null);
@@ -645,9 +712,10 @@ export class TesseraClient {
 
   private async categoryPage(
     token: string,
-    url: string
+    url: string,
+    signal: AbortSignal | undefined
   ): Promise<{values: CategoryValue[]; next: string | null}> {
-    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    const response = await this.send(url, {headers: {authorization: `Bearer ${token}`}, signal});
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawCategories;
     return {
@@ -657,45 +725,70 @@ export class TesseraClient {
   }
 
   /**
-   * `GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary
-   * (`value-suggestion.md`, contracts §3.2). At most `limit` values whose folded key, folded
-   * title or a word start of either has `q` as a prefix, gated exactly as `categories` — a
-   * `public` vocabulary as authored, a `derived` one iff a visible member exists — and ordered by
-   * the matched text, never by frequency, recency or the count.
+   * `/v1/categories/{column}/suggest`: up to `limit` values of a category whose key, title or a
+   * word start of either begins with `q`, compared after case folding. Values are ordered by the
+   * matched text, and only values this principal may see are offered, as for
+   * {@link TesseraClient.categories}. The page echoes `q` as sent, so a caller can match a page to
+   * its request. Without `filters` this is a `GET`; with it, a `POST` carrying the same fields.
    *
-   * **Not behind the compute-admission gate, and one in flight per session.** A second call while
-   * one is outstanding is refused `429` before any work is done; this surfaces as `{status:
-   * 'superseded', retryAfterS}` rather than a thrown {@link TesseraError}, because a debounced
-   * caller's answer to it is *retry*, not *render a refusal* — and a store that never debounces
-   * quite fast enough should not have to catch an exception to know that.
+   * Every `429` the server answers is returned as `{status: 'shed', retryAfterS, detail}`
+   * rather than thrown; {@link SuggestResult} lists the causes.
    *
-   * `q` is echoed on the response exactly as sent (never folded), so a caller can match a page to
-   * the request it has in flight rather than trust arrival order.
+   * @param column - As for {@link TesseraClient.categories}.
+   * @param q - The text typed. Empty matches every value.
+   * @param opts.limit - The page size, capped at `selection.maxSuggestions`, which is also the
+   *   default.
+   * @param opts.counts - `true` adds each value's count of the items carrying it that this
+   *   principal may see, and the page's `total`, the number of items the counts are taken over.
+   * @param opts.view - As for `categories`, and the view `filters` is evaluated in.
+   * @param opts.filters - The filter expression the viewport takes. Each count is then of the items
+   *   in `view` that pass it. It changes nothing else: a value it excludes is offered with count
+   *   `0`. Needs `view`.
+   * @throws {@link TesseraError} for any other refusal: `404` for a column that is not a category,
+   *   `422` for a `q` over 256 bytes, `filters` without `view`, or a malformed request.
    */
   async suggest(
     token: string,
     column: string,
     q: string,
-    opts: {limit?: number; counts?: boolean; view?: string} = {}
+    opts: {limit?: number; counts?: boolean; view?: string; filters?: FilterExpr; signal?: AbortSignal} = {}
   ): Promise<SuggestResult> {
-    const params = new URLSearchParams({q});
-    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-    if (opts.counts) params.set('counts', 'true');
-    if (opts.view !== undefined) params.set('view', opts.view);
-    const url = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest?${params.toString()}`;
-    const response = await fetch(url, {headers: {authorization: `Bearer ${token}`}});
+    const route = `${this.opts.viewerUrl}/v1/categories/${encodeURIComponent(column)}/suggest`;
+    let response: Response;
+    if (opts.filters !== undefined) {
+      const body: Record<string, unknown> = {q, filters: opts.filters};
+      if (opts.limit !== undefined) body.limit = opts.limit;
+      if (opts.counts) body.counts = true;
+      if (opts.view !== undefined) body.view = opts.view;
+      response = await this.send(route, {
+        method: 'POST',
+        headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+        body: JSON.stringify(body),
+        signal: opts.signal
+      });
+    } else {
+      const params = new URLSearchParams({q});
+      if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+      if (opts.counts) params.set('counts', 'true');
+      if (opts.view !== undefined) params.set('view', opts.view);
+      response = await this.send(`${route}?${params.toString()}`, {
+        headers: {authorization: `Bearer ${token}`},
+        signal: opts.signal
+      });
+    }
     if (response.status === 429) {
-      // The body carries `retry_after_s` agreeing with `Retry-After` (contracts §3.1); the header
-      // is read as the fallback for a body that failed to parse, never the other way round, since
-      // the body is what the contract actually requires here.
+      // The body's `retry_after_s` is what the contract requires; the header is the fallback for
+      // a body that does not parse.
       let retryAfterS = Number(response.headers.get('retry-after') ?? '1');
+      let detail: string | null = null;
       try {
-        const body = (await response.json()) as {retry_after_s?: number};
+        const body = (await response.json()) as {retry_after_s?: number; detail?: string};
         if (typeof body.retry_after_s === 'number') retryAfterS = body.retry_after_s;
+        if (typeof body.detail === 'string') detail = body.detail;
       } catch {
         // A non-JSON 429 (a proxy's) still yields a retryable outcome from the header alone.
       }
-      return {status: 'superseded', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1};
+      return {status: 'shed', retryAfterS: Number.isFinite(retryAfterS) ? retryAfterS : 1, detail};
     }
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawSuggest;
@@ -710,85 +803,72 @@ export class TesseraClient {
         match: {field: v.match.field, start: v.match.start, len: v.match.len},
         ...(v.count !== undefined ? {count: v.count} : {})
       })),
-      more: body.more
+      more: body.more,
+      ...(body.total !== undefined ? {total: body.total} : {}),
+      ...regionOf(response)
     };
   }
 
   /**
-   * `POST /v1/items/{tessera_id}`: the whole record, by declared column name.
+   * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
+   * a category given as its vocabulary key and a column the item has no value for left out.
+   * `labels` lists the item's access labels this session satisfies and no others. `views` and
+   * `scoped` cover only the views this principal may reach.
    *
-   * **Named, not positional.** The response is an object keyed by column name covering all three
-   * homes — rendered columns, indexed and category columns (a category as its vocabulary *key*,
-   * already resolved), and blob-resident prose. A column the item carries no value for is **absent
-   * from the object** rather than null, so `name in fields` is the presence test and a missing key
-   * is a fact about the item rather than a gap in the response.
-   *
-   * Nothing here can be read positionally against `/v1/meta`'s `declared_scalars`: the absent
-   * columns are omitted, so index *i* of the response is not column *i* of the schema.
-   *
-   * Beside the record, `labels` names the item's access labels **this session satisfies** and no
-   * others (decision 0114) — the answer to *which of my grants admits me here*, and not to *what
-   * this item is labelled*.
+   * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.
+   * @throws {@link TesseraError} when the server refuses: `404` both for an id that names nothing
+   *   and for an item this principal may not see.
    */
-  async item(token: string, tesseraId: bigint): Promise<ItemDetail> {
-    const response = await fetch(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
+  async item(token: string, tesseraId: bigint, signal?: AbortSignal): Promise<ItemDetail> {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: '{}'
+      body: '{}',
+      signal
     });
     if (!response.ok) await fail(response);
     const body = (await response.json()) as {
       fields: Record<string, unknown>;
-      external_id?: string;
       labels: string[];
       views: {id: string; x: number; y: number}[];
       scoped: Record<string, Record<string, unknown>>;
     };
     return {
       fields: body.fields ?? {},
-      externalId: body.external_id ?? null,
-      // **Not defaulted either**, on `labels`' argument below: both are required by the response
-      // schema and both are always present, empty included. An empty `views` is a real answer —
-      // *none of this item's views is one you can reach* — and `?? []` would give a server that
-      // omitted the field the same reading.
+      // Required by the response schema and read as given: an empty list is an answer.
       views: body.views,
       scoped: body.scoped,
-      // **Not defaulted.** `labels` is required by the response schema and is always present,
-      // empty included — a principal satisfying none of the item's labels is a real answer with a
-      // real shape. A `?? []` here would give a server that omitted the field the same reading as
-      // one that answered "none", which is a nonconforming server made to look correct.
       labels: body.labels
     };
   }
 
   /**
-   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key and masked count.
+   * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key, masked count and geometry in a
+   * view. The count and the geometry are over the members this principal may see. Geometry is in
+   * 32-bit grid units (see {@link GRID32}), and a geometry field is `null` where the layer declares
+   * no such property.
    *
-   * **`view` is required here and optional on {@link item}**, and the asymmetry is real: a point's
-   * record is the same wherever it is read from, but a masked count is an intersection in row
-   * space and row space is per view.
-   *
-   * **`404` is the only failure shape, and it distinguishes nothing.** An identifier naming
-   * nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and
-   * one below its layer's existence criterion are the same answer byte for byte. A caller must not
-   * build a surface that tells them apart; there is nothing to tell them apart by. It throws
-   * {@link TesseraError} like every other refusal.
+   * @param opts.view - The view to count and place the artifact in.
+   * @param opts.zoom - The depth to simplify the shape for, floored and clamped to 0 to 16. Left
+   *   out, the whole stored shape is served.
+   * @throws {@link TesseraError} when the server refuses: one `404` alike for an id naming nothing,
+   *   a point, an artifact of a layer this principal cannot reach, a suppressed artifact and one
+   *   below its layer's existence criterion.
    */
   async artifact(
     token: string,
     tesseraId: bigint,
-    opts: {view: string; idset?: number; zoom?: number}
+    opts: {view: string; zoom?: number; signal?: AbortSignal}
   ): Promise<ArtifactDetail> {
     const body: Record<string, unknown> = {view: opts.view};
-    if (opts.idset !== undefined) body.idset = opts.idset;
-    // The depth the shape is drawn at, for the server's vertex rule (`polygon-membership.md`
-    // §7.2): a predicate or an authored shape is generalised to the pixel at this zoom. Omitted,
-    // the whole presimplified shape is served under the vertex guard alone.
+    // The depth the shape is drawn at, which the server simplifies it to. Left out, the whole
+    // stored shape is served.
     if (opts.zoom !== undefined) body.zoom = Math.max(0, Math.min(16, Math.floor(opts.zoom)));
-    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body)
+      body: jsonBody(body),
+      signal: opts.signal
     });
     if (!response.ok) await fail(response);
     const served = (await response.json()) as {
@@ -803,39 +883,31 @@ export class TesseraClient {
       layer: served.layer,
       // Absent rather than null when the publisher supplied none.
       key: served.key ?? null,
-      // Absent where the layer declares the property, or rather does not: geometry is never
-      // withheld from an artifact that is served at all, so an absence is a fact about the layer.
+      // Absent where the layer declares no such property. A served artifact always has the
+      // geometry its layer declares.
       centroid: served.centroid ?? null,
       box: served.box ?? null,
       shape: served.shape ?? null,
-      // JSON carries it as a number, and a count is not an identifier: it is bounded by the
-      // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
-      // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.
+      // A `bigint`, as the same count is on the Arrow wire, so a panel prints both one way.
       maskedCount: BigInt(served.masked_count)
     };
   }
 
   /**
-   * `POST /v1/artifacts/browse`: a layer's hierarchy by lineage — roots, one artifact's children
-   * and parents, or a name search — each row carrying the masked count and, under a filter, the
-   * matched one (`highlight-and-hierarchy.md` §4).
+   * `POST /v1/artifacts/browse`: one page of a layer's hierarchy, read by parent and child links
+   * whatever the map shows: its roots, one artifact's children with that artifact's parents, or a
+   * search by name. Each row carries its masked count and, where `filters` is set, its matched
+   * count. Rows are ordered by count, highest first, then by `tessera_id`; the count is the matched
+   * one under `filters` and the masked one otherwise. Pass `next` back as `cursor` for the
+   * following page; it is `null` on the last.
    *
-   * **JSON rather than Arrow**, and deliberately: a page is at most `max_browse_rows` small rows,
-   * and the verb is read by the panel and by a notebook alike.
+   * A parent is listed only where this principal is served both ends of the link. A `parent` this
+   * principal is not served answers an empty page.
    *
-   * **Independent of the viewport.** It carries no bbox, no tiles and no zoom, and the answer does
-   * not move when the map does. It carries no `highlight` either: a highlighted view of a
-   * hierarchy is the filtered one, since a count under the highlight's expression is what
-   * `matchedCount` is when that expression is sent as `filters`.
-   *
-   * Identifiers travel as **decimal strings**, as they do in the `region` and `member_of` leaves
-   * and for the same reason: a `tessera_id` is `u64` and JSON has no 64-bit integer.
-   *
-   * A refusal throws {@link TesseraError} like every other. An unknown *layer* is a `422`, being
-   * deployment schema; an artifact this principal was never served is an empty page and never a
-   * refusal, so nothing here is an existence oracle.
+   * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for an
+   *   unknown layer, both `parent` and `q`, `limit: 0` or a malformed filter.
    */
-  async browse(token: string, req: BrowseRequest): Promise<BrowsePage> {
+  async browse(token: string, req: BrowseRequest, signal?: AbortSignal): Promise<BrowsePage> {
     const body: Record<string, unknown> = {view: req.view, layer: req.layer};
     if (req.level !== undefined) body.level = req.level;
     if (req.parent !== undefined) body.parent = req.parent.toString();
@@ -843,20 +915,120 @@ export class TesseraClient {
     if (req.filters) body.filters = req.filters;
     if (req.limit !== undefined) body.limit = req.limit;
     if (req.cursor !== undefined) body.cursor = req.cursor;
-    const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
+    const response = await this.send(`${this.opts.viewerUrl}/v1/artifacts/browse`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-      body: JSON.stringify(body)
+      body: jsonBody(body),
+      signal
     });
     if (!response.ok) await fail(response);
     const page = (await response.json()) as RawBrowsePage;
     return {
       artifacts: (page.artifacts ?? []).map(browseRow),
-      // Present on the children form only and `[]` on the others — the server's own rule, read
-      // as given rather than inferred from which form was sent.
+      // Filled on the children form only.
       parents: (page.parents ?? []).map(browseRow),
       next: page.next ?? null
     };
+  }
+
+  /**
+   * `POST /v1/items`: a bulk read of the items this principal may see in a view. Resolves when the
+   * first response's head arrives. Iterating the result yields each page as an Arrow table,
+   * following each response's cursor until the read ends; {@link RecordsRead} says what ends it
+   * early.
+   *
+   * Each request after the first is the caller's request with `cursor` set to the one the response
+   * before it ended with, and without `count`, which the server takes only on a read's first
+   * request.
+   *
+   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   *   view, `422` for a request {@link ItemsRequest} says is refused or a malformed filter, and
+   *   `429` past the bulk-read admission limit.
+   */
+  items(token: string, req: ItemsRequest, signal?: AbortSignal): Promise<RecordsRead<ItemsHead>> {
+    return this.bulkRead('items', token, req, signal, (raw) => {
+      requireFields(raw, ['order', 'page_rows'], 'the head of a /v1/items response');
+      const head = raw as {order: ItemsHead['order']; page_rows: number; visible?: number; matched?: number};
+      return {order: head.order, pageRows: head.page_rows, visible: head.visible ?? null, matched: head.matched ?? null};
+    });
+  }
+
+  /**
+   * `POST /v1/artifacts`: a bulk read of the artifacts of one layer this principal is served, as
+   * {@link items} reads items.
+   *
+   * @throws {@link TesseraError} when the server refuses the first request: `404` for an unknown
+   *   view, `422` for a request {@link ArtifactsRequest} says is refused or a malformed filter, and
+   *   `429` past the bulk-read admission limit.
+   */
+  artifacts(token: string, req: ArtifactsRequest, signal?: AbortSignal): Promise<RecordsRead<ArtifactsHead>> {
+    return this.bulkRead('artifacts', token, req, signal, (raw) => {
+      requireFields(raw, ['page_rows'], 'the head of a /v1/artifacts response');
+      const head = raw as {page_rows: number; served?: number; matched?: number};
+      return {pageRows: head.page_rows, served: head.served ?? null, matched: head.matched ?? null};
+    });
+  }
+
+  private bulkRead<Head>(
+    route: 'items' | 'artifacts',
+    token: string,
+    req: ItemsRequest | ArtifactsRequest,
+    signal: AbortSignal | undefined,
+    parseHead: (raw: unknown) => Head
+  ): Promise<RecordsRead<Head>> {
+    const request = (cursor?: string) => this.post(route, token, cursor === undefined ? req : {...req, cursor, count: undefined}, signal);
+    return openRecords(req, request, signal, parseHead);
+  }
+
+  /**
+   * `POST /v1/aggregate`: how the items this principal may see in a view are distributed, as one
+   * table of exact counts per grouping. Every page of every table is read, response after response,
+   * each requested from the cursor the one before it ended with, and each table's pages are joined
+   * into one Arrow table. {@link AggregateTable} lists the columns.
+   *
+   * Each response composes the visible set again, so a deletion or suppression accepted during the
+   * read applies from the next response, and {@link AggregateResult.recomposed} says where a page
+   * counted a different state of the corpus.
+   *
+   * ```ts
+   * const {tables} = await client.aggregate(token, {
+   *   view: 'papers',
+   *   filters: {year: {range: {gte: 2020}}},
+   *   groupings: [{}, {by: {field: 'venue', top: 10}}]
+   * });
+   * console.log(tables[0]!.total, tables[1]!.rows.toArray());
+   * ```
+   *
+   * @param options - `follow`: read the responses after the first. Defaults to `true`. With `false`
+   *   the result holds the first response's pages, and {@link AggregateResult.next} is where the
+   *   read continues, to be passed back as `cursor`.
+   * @throws {@link TesseraError} when the server refuses a request: `404` for an unknown view,
+   *   `422` for a request the contract refuses, naming the limit where one is exceeded, and `429`
+   *   under load.
+   * @throws {@link PartialAggregate} for a body cut or ended without its trailer, holding the pages
+   *   read before it and the cursor to read on from; `Error` for a trailer that miscounts the body;
+   *   and the signal's reason once it aborts.
+   */
+  aggregate(token: string, req: AggregateRequest, signal?: AbortSignal, options: {follow?: boolean} = {}): Promise<AggregateResult> {
+    const request = (cursor?: string) => this.post('aggregate', token, cursor === undefined ? req : {...req, cursor}, signal);
+    return readAggregate(req, request, signal, options.follow ?? true);
+  }
+
+  /** One bulk read's request: each field of `given` that is set, under its wire name. */
+  private async post(route: string, token: string, given: object, signal: AbortSignal | undefined): Promise<Response> {
+    const body: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(given)) {
+      if (value !== undefined) body[name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = value;
+    }
+    const response = await this.send(`${this.opts.viewerUrl}/v1/${route}`, {
+      method: 'POST',
+      headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
+      // A `tessera_id` travels as a decimal string.
+      body: jsonBody(body),
+      signal
+    });
+    if (!response.ok) await fail(response);
+    return response;
   }
 }
 
@@ -869,6 +1041,7 @@ type RawBrowseRow = {
   matched_count?: number | string | null;
   rung: number;
   parent_ids?: string[];
+  child_count: number;
 };
 
 type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next?: string | null};
@@ -876,60 +1049,122 @@ type RawBrowsePage = {artifacts?: RawBrowseRow[]; parents?: RawBrowseRow[]; next
 function browseRow(r: RawBrowseRow): BrowseRow {
   return {
     tesseraId: BigInt(r.tessera_id),
-    // Absent rather than null where the publisher supplied none, and where this principal may not
-    // read the text — the two are one state, as they are on the artifacts frame.
+    // Absent where the publisher supplied none and where this principal may not read the text.
+    // The two look the same, as they do on the artifacts frame.
     key: r.key ?? null,
     name: r.name ?? null,
     maskedCount: BigInt(r.masked_count),
     matchedCount: r.matched_count === undefined || r.matched_count === null ? null : BigInt(r.matched_count),
     rung: r.rung,
-    // A null cell is the empty list, which is the fail-closed direction: no parent is invented.
-    parentIds: (r.parent_ids ?? []).map((v) => BigInt(v))
+    // A null cell is the empty list.
+    parentIds: (r.parent_ids ?? []).map((v) => BigInt(v)),
+    childCount: r.child_count
   };
 }
+
+/** The fields `/v1/meta` must carry, and those each of its blocks and list elements must. */
+const VIEW_FIELDS = ['id', 'display_name', 'quantisation', 'projection', 'world_aspect', 'tile_scheme', 'tile', 'group', 'key', 'metadata'];
+const GROUP_FIELDS = ['name', 'title', 'members_of', 'views'];
+/**
+ * A request body as JSON, a `bigint` written as its decimal digits in a string: a filter
+ * comparand past 2^53, which a JSON number read as a double would round, is sent that way.
+ */
+function jsonBody(body: unknown): string {
+  return JSON.stringify(body, (_, value) => (typeof value === 'bigint' ? value.toString() : value));
+}
+
+const DECLARED_FIELDS = ['name', 'arrow_type', 'category', 'analyser', 'render', 'index', 'unique', 'homes'];
+const SCOPED_FIELDS = ['name', 'arrow_type', 'scope', 'category', 'analyser', 'render', 'index', 'views'];
+const OPERAND_FIELDS = ['column', 'family', 'operands'];
+const LAYER_FIELDS = ['name', 'title', 'views', 'membership', 'hierarchy', 'levels', 'computed_content', 'shape', 'supplied_content', 'depends_on', 'version'];
+const LEVEL_FIELDS = ['level', 'title', 'zoom'];
+const META_FIELDS = ['api_version', 'bundle_format', 'views', 'groups', 'declared_scalars', 'scoped_scalars', 'filter_operands', 'selection', 'layers'] as const;
+const SELECTION_FIELDS = [
+  'k_min',
+  'k_max_marks',
+  'max_k',
+  'theta_target_marks',
+  'max_underlay_offset',
+  'max_tiles_per_request',
+  'max_category_values',
+  'max_shape_vertices',
+  'max_region_vertices',
+  'max_region_cells',
+  'max_suggestions',
+  'max_suggestion_walk',
+  'max_suggest_set_entities',
+  'max_browse_rows',
+  'max_page_rows',
+  'max_page_bytes',
+  'max_aggregate_groupings',
+  'max_aggregate_top',
+  'max_aggregate_named',
+  'max_aggregate_cells'
+] as const;
+
+/** Throws where `body` is not an object or lacks one of `fields`. */
+function requireFields(body: unknown, fields: readonly string[], where: string): void {
+  if (typeof body !== 'object' || body === null) throw new Error(`${where} is not an object; the server and this client are from different versions`);
+  for (const field of fields) {
+    if (!(field in body)) throw new Error(`${where} has no \`${field}\`, which the contract requires; the server and this client are from different versions`);
+  }
+}
+
+type RawCategory = {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'};
 
 /** `GET /v1/meta`'s snake_case wire shape, mapped to {@link Meta} above. */
 type RawMeta = {
   api_version: number;
-  idset: number;
+  bundle_format: number;
   views: {
     id: string;
     display_name: string;
     quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
-    projection: ProjectionName;
+    projection: MapProjection;
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
-    /** The roster record (`views.md` §3.2); all three null together on a plain view. */
+    /** The roster record; all three null together on a plain view. */
     group: string | null;
     key: string | null;
     metadata: Record<string, ViewMetadataValue> | null;
   }[];
-  /** The view groups, each its view ids in creation order. Empty where there are none. */
   groups: {name: string; title: string | null; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;
-    category: {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'} | null;
+    category: RawCategory | null;
+    analyser: string | null;
     render: boolean;
     index: boolean;
+    unique: boolean;
+    homes: ('rendered' | 'value_column' | 'record')[];
   }[];
-  filter_operands?: {
+  scoped_scalars: {
+    name: string;
+    arrow_type: ArrowType;
+    scope: {group: string};
+    category: RawCategory | null;
+    analyser: string | null;
+    render: boolean;
+    index: boolean;
+    views: string[];
+  }[];
+  filter_operands: {
     column: string;
     family: FilterOperandSet['family'];
     operands: string[];
     scope?: {group: string};
   }[];
-  /** Absent on a deployment whose server predates layers; empty when this principal reaches none. */
-  layers?: {
+  layers: {
     name: string;
-    title: string;
+    title: string | null;
     views: string[];
     membership: Layer['membership'];
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
-    levels: {level: number; title: string; zoom: [number, number] | null}[];
+    levels: {level: number; title: string | null; zoom: [number, number] | null}[];
     computed_content: string[];
-    shape?: ShapeKind | null;
+    shape: ShapeKind | null;
     supplied_content: string[];
     depends_on: string[];
     version: number;
@@ -940,11 +1175,21 @@ type RawMeta = {
     max_k: number;
     theta_target_marks: number;
     max_underlay_offset: number;
-    max_tiles_per_request?: number;
-    max_category_values?: number;
-    max_region_vertices?: number;
-    max_region_cells?: number;
-    max_browse_rows?: number;
+    max_tiles_per_request: number;
+    max_category_values: number;
+    max_shape_vertices: number;
+    max_region_vertices: number;
+    max_region_cells: number;
+    max_suggestions: number;
+    max_suggestion_walk: number;
+    max_suggest_set_entities: number;
+    max_browse_rows: number;
+    max_page_rows: number;
+    max_page_bytes: number;
+    max_aggregate_groupings: number;
+    max_aggregate_top: number;
+    max_aggregate_named: number;
+    max_aggregate_cells: number;
   };
 };
 
@@ -967,4 +1212,11 @@ type RawSuggest = {
     count?: number;
   }[];
   more: boolean;
+  total?: number;
 };
+
+/** `{region}` where the response carries `x-tessera-region`, and nothing otherwise. */
+function regionOf(response: Response): {region?: RegionVerdict} {
+  const region = parseRegionVerdict(response.headers.get('x-tessera-region'));
+  return region === null ? {} : {region};
+}

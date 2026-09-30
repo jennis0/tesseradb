@@ -47,7 +47,6 @@ use croaring::Bitmap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_store::Bundle;
 
-use crate::session::ExternalIdIndex;
 use crate::Generation;
 
 /// One geometry publication, whole — **the single seam a generation swap may go through**, and the
@@ -86,18 +85,16 @@ pub struct GeometryPublication {
     pub(crate) rotation: Option<PrefixRotation>,
 }
 
-/// The four things a publication into a **new prefix** must carry, and they travel together
-/// because separating them is the fail-open.
+/// The things a publication into a **new prefix** must carry, and they travel together because
+/// separating them is the fail-open.
 ///
-/// A fold rewrites the term index, the fragment identity and the external-id runs, and retires the
-/// deletions it executed. Each of those alone is wrong:
+/// A fold rewrites the term index and the fragment identity, and retires the deletions it
+/// executed. Each of those alone is wrong:
 ///
 /// - new postings with the old fragment identity serves every session a mask built from a term
 ///   index that no longer exists, under a key nothing invalidates — a fold advances no watermark;
 /// - a rotated identity with the old postings makes every fragment rebuild from the superseded
 ///   prefix's file;
-/// - a new prefix with the old external-id sidecar resolves through files reclamation is about to
-///   delete, and answers for keys the fold dropped;
 /// - and **retirement without the identity rotation is Rule F's fail-open in its pure form**
 ///   (write-path §5.4): withdrawing the tombstone while a pre-fold fragment is still reachable
 ///   re-exposes the item the deletion hid. That is why `retired` lives *here* rather than beside
@@ -107,16 +104,19 @@ pub(crate) struct PrefixRotation {
     pub(crate) postings: Arc<PostingsReader>,
     /// The fragment cache under the new prefix's MANIFEST digest — [`FragmentCache::rotate`].
     pub(crate) fragments: Arc<FragmentCache>,
-    /// The new prefix's external-id sidecar.
-    pub(crate) external_index: Arc<ExternalIdIndex>,
     /// The new prefix's filter columns — **opened over it, never cloned from the live
     /// generation**, whose mappings are of the superseded prefix's files. A fold rewrites this
     /// artefact: it blanks the deleted entities' slots, folds every snapshot extent into the base
     /// and rebuilds the derived postings (`filter-index.md` §6.2), so a cloned column would serve
     /// pre-fold values out of files the reclamation is about to unlink — safe to hold on POSIX,
-    /// wrong to serve. It travels with the other three for the reason they travel together: a
+    /// wrong to serve. It travels with the others for the reason they travel together: a
     /// request must never see a geometry from one publication and an artefact from another.
     pub(crate) filter_columns: Arc<crate::filter::FilterColumns>,
+    /// The new prefix's unique indexes, opened over its own manifest for the filter columns'
+    /// reason.
+    pub(crate) unique: Arc<tessera_store::unique::UniqueIndexes>,
+    /// The new prefix's edited-items runs, on the unique indexes' rule.
+    pub(crate) edited: Arc<tessera_store::edited::EditedIndex>,
     /// The executed deletions leaving `deleted` in this swap — Rule F, and empty for a rotation
     /// that retires nothing. **The caller's obligation is compaction §5's rule**, restated at
     /// `tessera_lifecycle::Overlay::retire`: only entities whose row *and* postings this
@@ -126,9 +126,8 @@ pub(crate) struct PrefixRotation {
 }
 
 impl GeometryPublication {
-    /// A publication **within the live prefix** — what a flush and a merge make. The term index,
-    /// the fragment identity and the external-id sidecar all carry forward from the live
-    /// generation.
+    /// A publication **within the live prefix** — what a flush and a merge make. The term index and
+    /// the fragment identity carry forward from the live generation.
     pub fn within_prefix(
         prefix: String,
         segments_version: u64,
@@ -149,7 +148,7 @@ impl GeometryPublication {
     }
 
     /// Carry a [`PrefixRotation`] — what a fold's publication makes, and nothing else. Assembled
-    /// by [`crate::session::Engine::publish_rotated_prefix_for_test`], which is the only producer.
+    /// by [`crate::engine::Engine::publish_rotated_prefix_for_test`], which is the only producer.
     pub(crate) fn rotating(mut self, rotation: PrefixRotation) -> Self {
         self.rotation = Some(rotation);
         self
@@ -230,7 +229,7 @@ impl std::fmt::Display for GeometryRefused {
 impl std::error::Error for GeometryRefused {}
 
 /// Whether `(prefix, segments_version)` may be published over `live` — the identity guard
-/// [`crate::session::Engine::publish_geometry`] runs inside its compare-and-swap loop.
+/// [`crate::engine::Engine::publish_geometry`] runs inside its compare-and-swap loop.
 ///
 /// **`segments_version` must strictly increase, and this refuses rather than warns**, for the
 /// reason this module's doc gives. The mirror case is equally refused: republishing an *older*
@@ -312,8 +311,8 @@ impl std::fmt::Display for ManifestRegression {
 /// (caught by the endurance tier, 2026-08-15), and what contained it was an accident: the boot
 /// rebuilds the buffer by `has_row`, not by the watermark, so the under-report never miscounted.
 ///
-/// **What is compared: every ordered scalar the manifest carries** — `watermark` and
-/// `entity_id_high_water`; everything else in a `SegmentsManifest` is a list or map with
+/// **What is compared: every ordered scalar the manifest carries** — `watermark`,
+/// `entity_id_high_water` and `layer_registry_version`; everything else in a `SegmentsManifest` is a list or map with
 /// per-field replacement rules no total order describes. A new ordered scalar joins this
 /// comparison when it is added, or it inherits the silent version of the defect above.
 pub(crate) fn check_manifest_publishable(
@@ -334,79 +333,36 @@ pub(crate) fn check_manifest_publishable(
             offered: next.entity_id_high_water,
         });
     }
+    if next.layer_registry_version < live.layer_registry_version {
+        return Err(ManifestRegression {
+            field: "layer_registry_version",
+            live: live.layer_registry_version,
+            offered: next.layer_registry_version,
+        });
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
-    use std::sync::Arc;
+    
+    
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
-    use tessera_plugin::Plugin;
-    use tessera_store::manifest::{IdentityDescriptor, Manifest};
-    use tessera_store::Bundle;
+    
+    
+    
 
     use super::*;
 
-    fn empty_postings() -> tessera_authz::PostingsReader {
-        let dir = tempfile::TempDir::new().expect("a temp dir");
-        let path = dir.path().join("postings.arrow");
-        tessera_authz::write_postings(&path, &[], 32).expect("an empty postings file");
-        tessera_authz::PostingsReader::open(&path, false).expect("it opens")
-    }
-
-    /// A `Generation` over an empty synthetic bundle. `check_publishable` reads three scalars off
-    /// it, so an empty partition map is enough and building a real one would make this test about
-    /// the fixture instead.
     fn generation_at(prefix: &str, segments_version: u64, watermark: u64) -> Generation {
-        let manifest = Manifest {
-            bundle_format: 3,
-            created_at: "2026-07-31T00:00:00Z".to_string(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
-            declared_scalars: vec![],
-            vocabularies: vec![],
-            small_term_threshold: 32,
-            entity_id_high_water: 0,
-            identity: IdentityDescriptor {
-                construction: "siphash-2-4".to_string(),
-                rounds: 1,
-                key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: 0,
-                idset: 1,
-            },
-            groups: Vec::new(),
-            views: vec![],
-            partitions: vec![],
-            provenance: serde_json::json!({}),
-            files: BTreeMap::new(),
-        };
-        let (fragments, external_index) = crate::synthetic_generation_parts();
-        Generation {
-            // A test fixture's schema declares nothing filterable, so there is nothing to open.
-            filter_columns: Arc::new(crate::filter::FilterColumns::default()),
-            // And nothing categorical, so no vocabulary has an index.
-            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
-            prefix: prefix.to_string(),
-            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
+        Generation::synthetic(
+            prefix,
             segments_version,
             watermark,
-            bundle: Arc::new(Bundle {
-                manifest,
-                partitions: HashMap::new(),
-            }),
-            dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
-            postings: Arc::new(empty_postings()),
-            fragments,
-            external_index,
-            delta_postings: Vec::new(),
-            overlay_version: 0,
-            overlay: Arc::new(Overlay::new()),
-            buffer: Arc::new(IngestBuffer::new()),
-            // The fixture bundle carries no views, so a fresh derivation is empty.
-            denied: Arc::new(crate::DenyMask::default()),
-        }
+            Overlay::new(),
+            IngestBuffer::new(),
+        )
     }
 
     #[test]
@@ -474,39 +430,7 @@ mod tests {
         tessera_store::manifest::SegmentsManifest {
             watermark,
             entity_id_high_water,
-            entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-            layers: Vec::new(),
-            layer_tombstones: Vec::new(),
-            views: Vec::new(),
-            scoped_columns: Vec::new(),
-            attributes: Vec::new(),
-            scoped_attributes: Vec::new(),
-            vocabularies: Vec::new(),
-            groups: Vec::new(),
-            plain_views: Vec::new(),
-            dead_view_incarnations: Vec::new(),
-            membership_extents: Vec::new(),
-            level_versions: Vec::new(),
-            containment_extents: Vec::new(),
-            tile_index_extents: Vec::new(),
-            row_column_extents: Vec::new(),
-            shape_rows_extents: Vec::new(),
-            shape_held_extents: Vec::new(),
-            term_image_extents: Vec::new(),
-            artifact_record_extents: Vec::new(),
-            segments: Vec::new(),
-            deltas: Vec::new(),
-            dict_extents: Vec::new(),
-            attr_extents: Vec::new(),
-            record_extents: Vec::new(),
-            entity_terms_extents: Vec::new(),
-            text_extents: Vec::new(),
-            external_id_runs: Vec::new(),
-            locator_extents: Vec::new(),
-            tombstones: Vec::new(),
-            deny: Vec::new(),
-            vocabulary_extensions: Vec::new(),
-            files: BTreeMap::new(),
+            ..tessera_store::manifest::SegmentsManifest::empty()
         }
     }
 

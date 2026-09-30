@@ -1,9 +1,10 @@
 //! Criterion micro-benches at 2.4M items — the regression gate ahead of the
 //! 10⁹ exit measurement (`scripts/bench_p99.py`, run once, out of scope for `cargo bench`).
 //!
-//! Reuses `/tmp/tessera-2m4` (built by `tessera-engine/tests/viewport.rs`'s ignored
-//! `latency_sanity_at_2_4m_p99_under_50ms` test, or rebuilt here if missing — shared-context
-//! 2.4M is the "validate" scale; 10⁹ is exit-only).
+//! Reuses `/tmp/tessera-2m4` (built by `tessera-bench`'s `viewport_latency` binary, or rebuilt
+//! here if missing — shared-context 2.4M is the "validate" scale; 10⁹ is exit-only). The
+//! builder below is a second copy of that binary's: `scripts/check-layers.sh` keeps
+//! `tessera-bench` a leaf, so nothing — including this bench — may depend on it.
 //!
 //! Four groups:
 //! 1. `fragment_build` — `tessera_authz::build_fragment` directly against the real postings, for
@@ -28,7 +29,8 @@ use tempfile::TempDir;
 
 use tessera_authz::{build_fragment, FragmentCache, PostingsReader};
 use tessera_build::{build, BuildArgs};
-use tessera_engine::compose::{compose, RowProjection};
+use tessera_engine::compose::compose;
+use tessera_engine::projection::RowProjection;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -88,14 +90,12 @@ fn ensure_bundle() -> PathBuf {
             attribute_sources: Vec::new(),
             out: bundle_root.clone(),
             limit: Some(ITEM_LIMIT),
+            strict: false,
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            idset: 1,
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),
-            mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
             memory_budget: None,
@@ -141,7 +141,7 @@ fn bench_compose(c: &mut Criterion) {
     let cache_tmp = TempDir::new().unwrap();
     let cache = FragmentCache::new(cache_tmp.path(), [0u8; 32], [1u8; 32]);
     let fragment = cache
-        .get_or_build(&terms, [2u8; 32], 0, &postings, &[], ITEM_LIMIT)
+        .get_or_build(&terms, &postings, &[], ITEM_LIMIT)
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
@@ -154,6 +154,7 @@ fn bench_compose(c: &mut Criterion) {
     // Derived once, outside the timed loop, exactly as a publication derives it: the deny half of
     // composition is one `andnot` inside the loop whatever the deny depth, which is the point.
     let denied = tessera_engine::denied_rows_of(&overlay, &view.row_space);
+    let buffered = tessera_engine::buffered_rows_of(&buffer, &view.row_space);
 
     c.bench_function("compose", |b| {
         b.iter(|| {
@@ -164,6 +165,7 @@ fn bench_compose(c: &mut Criterion) {
                 Arc::clone(&base),
                 &view.row_space,
                 &denied,
+                Some(&buffered),
             )
         });
     });

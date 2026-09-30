@@ -52,6 +52,24 @@ def corpus() -> Path:
 
 
 @pytest.fixture
+def checked():
+    """The declaration check over a database, as whichever half of the SDK runs it.
+
+    In process where the extension module is installed, and through the binary where it is not,
+    which is what a test with neither is skipped for.
+    """
+    from tesseradb import _database
+
+    if _database._tessera is None:
+        binary()
+
+    def run(db):
+        return db.check()
+
+    return run
+
+
+@pytest.fixture
 def served(tmp_path, corpus):
     """A committed, served database over the notebook corpus, closed when the test ends.
 
@@ -67,12 +85,23 @@ def served(tmp_path, corpus):
         started.append(db)
         declare(db)
         report = db.commit()
-        assert report.ok, report.output
+        assert report.ok, report.log
         return db
 
     yield build
     for db in started:
         db.close()
+
+
+@pytest.fixture
+def stub_bundle(monkeypatch, tmp_path):
+    """The components' bundle, stubbed: no browser here, and nothing reads its text."""
+    import tesseradb.widget as widget
+
+    stub = tmp_path / "tessera-components.js"
+    stub.write_text("export function render() {}")
+    monkeypatch.setattr(widget, "bundle_path", lambda: stub)
+    return stub
 
 
 # ---------------------------------------------------------------------------- the viewer plane
@@ -147,27 +176,6 @@ def item(db, tessera_id: str, terms=None) -> dict:
 
 
 def browse(db, view: str, layer: str, terms=None, **extra) -> dict:
-    import json as _json
+    """`Viewer.browse_artifacts` as the principal holding `terms`, or as the database's own."""
+    return db.viewer(terms).browse_artifacts(view, layer, **extra)
 
-    body = {"view": view, "layer": layer, **extra}
-    return _json.loads(post(db.viewer_url + "/v1/artifacts/browse", db.token(terms).token, body))
-
-
-def categories(db, column: str, terms=None, **query) -> dict:
-    """`GET /v1/categories/{column}`: what this column's codes stand for (contracts §3.2).
-
-    The bare form pages the value set, which is how a vocabulary declared at a running service is
-    read back: `/v1/meta` names the vocabulary a category reads and carries none of its values.
-    """
-    import json as _json
-    import urllib.parse
-    import urllib.request
-
-    url = f"{db.viewer_url}/v1/categories/{urllib.parse.quote(column, safe='')}"
-    if query:
-        url += "?" + urllib.parse.urlencode(query)
-    request = urllib.request.Request(
-        url, headers={"authorization": f"Bearer {db.token(terms).token}"}
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return _json.loads(response.read())

@@ -6,10 +6,11 @@ names its own layer: the layer's `source` does, and the discriminator column is 
 no way for a layer to ingest another's rows. `attached_*` is the edge a *label* artifact carries to
 the cluster it hangs from; the rung's clusterings carry their own titles as content and use none.
 
-**Members are named by source entity id** — the `entity_id` of the points file — and resolved
-through the build's own assignment. An id the build did not assign refuses the build rather than
-being dropped: a dropped member moves both the count a viewer is shown and the size a proportional
-criterion divides by, quietly, in the direction of hiding the cluster.
+**A member file names each member by the item's `id`**, the value the points file carries as
+`entity_id`, in a column called `entity`; each `[layer.members]` block says so with
+`fields = { id = "entity" }`. A member naming no item is a refused row, counted in the build's
+report, and `tessera build --strict` refuses the build instead. A dropped member moves both the
+count a viewer is shown and the size a proportional criterion divides by, so read that count.
 
 Both stages of the rung write through this class, which is why it is here rather than in
 `prepare.py`: the optional Toponymy stage adds two layers to a directory the first stage wrote,

@@ -15,8 +15,11 @@ build is via the CLI subprocess, same as before).
 from __future__ import annotations
 
 import base64
+import functools
+import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -37,16 +40,20 @@ DEFAULT_PAIRS = "data/scaled/pairs/categories-subclass.pairs.parquet"
 DEFAULT_LIMIT = 250_000
 DEFAULT_EXTENT = "0,65536,0,65536"
 DEFAULT_VIEW = "s0"
+#: The unique attribute both files of the default fixture name their items by, and the column both
+#: carry it in. Its value is the corpus's own item number.
+JOIN_FIELD = "source_id"
+JOIN_COLUMN = "entity_id"
 
 
 # ---------------------------------------------------------------------------------------------
 # Fixture reuse: a stamped recipe, not a predicate over the artefact
 # ---------------------------------------------------------------------------------------------
 #
-# A fixture bundle is built once per machine at a fixed path and reused across sessions. Deciding
+# A fixture bundle is built once per `tessera` binary ([`fixture_dir`]) and reused. Deciding
 # *whether* it may be reused by inspecting the bundle is the construction that failed twice in this
-# file's own history — once on the r6 `identity` object, once on `--mint-external-ids` — and each
-# time the fix was to extend the predicate by one more clause. That is an allowlist, and the input
+# file's own history — once on the r6 `identity` object, once on a build flag — and each time the
+# fix was to extend the predicate by one more clause. That is an allowlist, and the input
 # that is not on it is precisely the one that goes wrong silently.
 #
 # The receipt inverts it: the builder writes down **the whole input set** it built from, and the
@@ -57,21 +64,59 @@ DEFAULT_VIEW = "s0"
 # in `/tmp` carried no record of what produced it.
 
 
-# `tessera_types::BUNDLE_FORMAT`, transcribed. The receipt records the *inputs* a fixture was built
-# from, and the format number is not one of them: it is a property of the engine that built it. A
-# fixture is shared across checkouts at a fixed path, so one built by an engine at another number
-# has to be rebuilt rather than reused — `tessera serve` refuses it, and this suite reads `attrs/`
-# by hand and would decode the older bytes under the newer format's rules.
-BUNDLE_FORMAT = 11
+#: Where the fixture directories live.
+FIXTURE_ROOT = Path("/tmp")
+
+#: How long a fixture directory for another binary may go unused before [`fixture_dir`] deletes it.
+FIXTURE_MAX_IDLE_SECONDS = 7 * 24 * 3600
 
 
-def bundle_format_matches(prefix_dir: Path) -> bool:
-    """Whether the bundle under `prefix_dir` was written at the format this checkout reads."""
-    try:
-        manifest = json.loads((prefix_dir / "MANIFEST.json").read_text())
-    except (OSError, ValueError):
-        return False
-    return manifest.get("bundle_format") == BUNDLE_FORMAT
+def _binary_digest() -> str:
+    return hashlib.sha256(CLI_BIN.read_bytes()).hexdigest()
+
+
+@functools.cache
+def builder_identity() -> str:
+    """The SHA-256 of the `tessera` binary that builds every fixture this session. Every receipt
+    records it ([`write_recipe`]), so a bundle built by any other binary is rebuilt.
+
+    Computed once per process, so a session's fixtures stay at one path if the binary is rebuilt
+    while it runs.
+    """
+    ensure_cli_built()
+    return _binary_digest()
+
+
+def fixture_dir(name: str) -> Path:
+    """Where the fixture `name` lives between runs: `/tmp/tessera-<name>-<digest>`, with the first
+    12 hex digits of [`builder_identity`].
+
+    The binary includes the commit it was built from, so each commit has its own directory, and a
+    rebuild in one checkout never replaces a bundle another checkout is reading. Checkouts with
+    the same binary share one build.
+
+    Each call marks this directory as used, and deletes the directories of `name` for other
+    binaries that have gone unused for 7 days. Only names of exactly that form are deleted.
+    """
+    path = FIXTURE_ROOT / f"tessera-{name}-{builder_identity()[:12]}"
+    keyed = re.compile(rf"tessera-{re.escape(name)}-[0-9a-f]{{12}}")
+    idle_since = time.time() - FIXTURE_MAX_IDLE_SECONDS
+    with os.scandir(FIXTURE_ROOT) as entries:
+        for entry in entries:
+            if entry.name == path.name or not keyed.fullmatch(entry.name):
+                continue
+            try:
+                idle = (
+                    entry.is_dir(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < idle_since
+                )
+            except OSError:
+                continue
+            if idle:
+                shutil.rmtree(entry.path, ignore_errors=True)
+    if path.is_dir():
+        os.utime(path)
+    return path
 
 
 def recipe_path(bundle_root: Path) -> Path:
@@ -92,18 +137,31 @@ def read_recipe(bundle_root: Path) -> dict | None:
         return None
 
 
+def _receipt(wanted: dict) -> dict:
+    """The recipe as stamped: the caller's inputs and the binary that built from them."""
+    return {**wanted, "binary_sha256": builder_identity()}
+
+
+def recipe_matches(bundle_root: Path, wanted: dict) -> bool:
+    """Whether the bundle at `bundle_root` was built from `wanted` by this session's binary."""
+    return read_recipe(bundle_root) == _receipt(wanted)
+
+
 def write_recipe(bundle_root: Path, wanted: dict | None) -> None:
-    """Stamp the recipe, or remove the stamp when `wanted` is `None`.
+    """Stamp the recipe and the binary's digest, or remove the stamp when `wanted` is `None`.
 
     Removing first and stamping last is what makes the receipt mean "this bundle was built from
-    this, completely": a build that dies part way through leaves no receipt at all.
+    this, completely": a build that dies part way through leaves no receipt at all. The binary is
+    hashed again before stamping. If cargo rebuilt it after [`builder_identity`] read it, which a
+    commit or a saved edit during a session causes, nothing is stamped: the bundle serves this
+    session and the next one rebuilds it.
     """
     path = recipe_path(bundle_root)
-    if wanted is None:
-        path.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    if wanted is None or _binary_digest() != builder_identity():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(wanted, indent=2, sort_keys=True))
+    path.write_text(json.dumps(_receipt(wanted), indent=2, sort_keys=True))
 
 
 def free_port() -> int:
@@ -115,22 +173,11 @@ def free_port() -> int:
 def ensure_cli_built() -> None:
     """Build `target/release/tessera` with **default features**, always.
 
-    This deliberately does NOT short-circuit on `CLI_BIN.exists()`. Cargo already
-    no-ops in about a second when nothing has changed, so the saving was negligible —
-    and the cost was severe: an existence check cannot tell a default-feature binary
-    from one built with a *measurement* feature enabled.
-
-    That is not hypothetical. On 2026-07-30 the tail-discrimination probe built a
-    `--features tessera-engine/skip-id-index` binary into this same path. Every
-    subsequent run of this suite silently reused it, so the external-ID index was
-    disabled and every `/control/changes` request panicked the server — surfacing as
-    two `RemoteDisconnected` failures that looked like a code regression and survived
-    a `git stash` (stashing sources does not rebuild a binary), which made them look
-    pre-existing on master. They were an artefact.
-
-    Letting cargo decide is the fix: it tracks the feature set, so a binary left
-    behind with the wrong features is rebuilt rather than trusted. Anything needing a
-    non-default binary must build it to its own path and never to `CLI_BIN`.
+    It does not short-circuit on `CLI_BIN.exists()`: an existence check cannot tell a
+    default-feature binary from one built with a measurement feature, and cargo, which tracks
+    the feature set, rebuilds a binary left behind with the wrong features in about a second
+    when nothing else changed. Anything needing a non-default binary builds it to its own path
+    and never to `CLI_BIN`.
     """
     subprocess.run(
         ["cargo", "build", "--release", "-p", "tessera-cli"],
@@ -178,23 +225,7 @@ control = "127.0.0.1:45721"
     return path
 
 
-#: The environment variable `tessera.toml` names by default, and the one every fixture build here
-#: passes its identity key through. A key on a command line reaches shell history, process
-#: listings and CI logs, so there is no flag that takes one.
-IDENTITY_ENV = "TESSERA_IDENTITY_KEY"
-
-
-def build_env(key_hex: str | None = None) -> dict:
-    """The environment a `tessera build` subprocess runs in: this process's, plus the identity key
-    where the caller has one to state. `--mint-id-key` builds pass `None`."""
-    env = dict(os.environ)
-    env.pop(IDENTITY_ENV, None)
-    if key_hex is not None:
-        env[IDENTITY_ENV] = key_hex
-    return env
-
-
-def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.CompletedProcess:
+def run_build(args: list[str]) -> subprocess.CompletedProcess:
     """Run `tessera build` and hand back the completed process, refusal or not.
 
     The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
@@ -208,7 +239,6 @@ def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.Comp
     return subprocess.run(
         [str(CLI_BIN), "build", *args],
         cwd=REPO_ROOT,
-        env=build_env(key_hex),
         capture_output=True,
         text=True,
         check=False,
@@ -216,7 +246,12 @@ def run_build(args: list[str], *, key_hex: str | None = None) -> subprocess.Comp
 
 
 def open_bundle_with_source(
-    bundle_root: Path, points: Path | str, limit: int | None = None
+    bundle_root: Path,
+    points: Path | str,
+    limit: int | None = None,
+    *,
+    field: str = JOIN_FIELD,
+    column: str | None = JOIN_COLUMN,
 ) -> "object":
     """Open `bundle_root` as an oracle [`Bundle`] with its **source geometry attached**.
 
@@ -231,6 +266,9 @@ def open_bundle_with_source(
     is the tautology the third input exists to remove, and it would fire silently exactly when a
     harness forgot to wire the source up.
 
+    `field` is the unique attribute the points file names its items by and `column` the column it
+    is in; the defaults are the default fixture's.
+
     `limit` must match the `--limit` the bundle was built with: the corpus is 10⁹ rows and the
     fixture is a prefix of it, so reading the whole file to check a prefix would exhaust the
     machine (`read_source_geometry`).
@@ -242,7 +280,9 @@ def open_bundle_with_source(
     from .bundle import Bundle, read_source_geometry  # noqa: PLC0415 — avoids an import cycle
 
     bundle = Bundle(bundle_root)
-    bundle.attach_source_geometry(read_source_geometry(points, bundle.extent, limit))
+    bundle.attach_source_geometry(
+        read_source_geometry(points, bundle.extent, limit, field=field, column=column)
+    )
     return bundle
 
 
@@ -263,27 +303,11 @@ def ensure_fixture_bundle(
     `CURRENT` alone would hand every test a bundle the server will not open, and the failure
     surfaces as an opaque fixture-setup error rather than "your fixture is stale".
 
-    The build is given `--mint-id-key` explicitly. r6 requires a build to refuse unless one of
-    `--carry-id-key-from` / `--identity-file` / the environment / `--mint-id-key` is named,
-    precisely so
-    a human decides the key's lineage rather than a tool inventing one silently. A test fixture is
-    a genuinely new lineage each time it is built, so minting is the correct answer here — and
-    stating it satisfies the rule rather than circumventing it. Note that this makes the fixture's
-    `tessera_id`s differ between rebuilds, which is why nothing may persist them across runs.
+    Every build generates the bundle's identity key, so the fixture's `tessera_id`s differ between
+    rebuilds, which is why nothing may persist them across runs.
 
-    `--mint-external-ids` is passed for the same class of reason and was **missing**, which broke
-    six tests on any checkout that had to build the fixture fresh (three in `reference/tests`,
-    three in `conformance/`, all of them a `KeyError` out of `Bundle.external_id_of`). The flag
-    became opt-in on 2026-07-30 (memo §3.2 D1: contracts §2.4 forbids manufacturing an external ID
-    for an item whose caller supplied none, and the Phase 0 corpus supplies none) and this builder
-    was not updated with it; the suite went on passing only against a `/tmp` fixture built before
-    the flip, and began failing when `/tmp` was wiped. Every test that addresses an item over
-    `/control/changes` needs an external ID to address it *by*, so this fixture must carry them:
-    opt-in in the product, mandatory here.
-
-    Both of those are the same defect twice, and it is the receipt above — not this docstring —
-    that closes the class: reuse is decided by comparing the full argument set against the stamp,
-    so the next flag added here cannot be forgotten by the reuse test.
+    The receipt above, not this docstring, keeps a flag from being forgotten: reuse is decided by
+    comparing the full argument set against the stamp.
     """
     args = _fixture_build_argv(
         bundle_root, points=points, pairs=pairs, limit=limit, extent=extent, view_id=view_id
@@ -294,7 +318,7 @@ def ensure_fixture_bundle(
     if bundle_root.exists():
         print(
             f"fixture at {bundle_root} was not built from this harness's current inputs "
-            f"(stamp={read_recipe(bundle_root)}, wanted={wanted}) — rebuilding"
+            f"(stamp={read_recipe(bundle_root)}, wanted={_receipt(wanted)}) — rebuilding"
         )
     ensure_cli_built()
     write_recipe(bundle_root, None)
@@ -306,7 +330,7 @@ def ensure_fixture_bundle(
         bundle=bundle_root,
         schema=_fixture_config_path(bundle_root),
     )
-    subprocess.run(args, cwd=REPO_ROOT, env=build_env(), check=True)
+    subprocess.run(args, cwd=REPO_ROOT, check=True)
     write_recipe(bundle_root, wanted)
 
 
@@ -328,8 +352,8 @@ def _extent_toml(extent: str) -> str:
 
 
 def _fixture_config_text(view_id: str, extent: str) -> str:
-    """One view, its frame, its geometry, and the relation its points' labels are in. No
-    attributes: this fixture's corpus is the scaled geometry file, which carries none.
+    """One view, its frame, its geometry, and the relation its points' labels are in. The one
+    attribute is the item number both files carry, which names each row's item.
 
     The two sources are named relatively **and overridden on the command line**: the files live
     under `data/scaled/`, which is a path this document may not carry (§3), and an override is
@@ -344,7 +368,18 @@ def _fixture_config_text(view_id: str, extent: str) -> str:
         '[sources]\npoints = "points.parquet"\npairs = "pairs.parquet"\n\n'
         f'[[view]]\nname = "{view_id}"\n{_extent_toml(extent)}\n'
         'source = "points"\n'
-        'point_visibility = { source = "pairs", default = "public" }\n'
+        'point_visibility = { source = "pairs", default = "public" }\n\n'
+        + join_attribute_toml("points")
+    )
+
+
+def join_attribute_toml(source: str) -> str:
+    """The `[[attribute]]` block declaring [`JOIN_FIELD`] unique, read from each file's
+    [`JOIN_COLUMN`] and from `source` for its values. Every file carrying that column names its
+    rows' items by it."""
+    return (
+        f'[[attribute]]\nname = "{JOIN_FIELD}"\ntype = "u64"\nunique = true\n'
+        f'field = "{JOIN_COLUMN}"\nsource = "{source}"\n'
     )
 
 
@@ -378,7 +413,6 @@ def _fixture_build_argv(
     ]
     if limit is not None:
         args += ["--limit", str(limit)]
-    args += ["--mint-id-key", "--mint-external-ids"]
     return args
 
 
@@ -424,12 +458,11 @@ def fixture_recipe(argv: list[str], *, declaration: str = "") -> dict:
     in it now rather than in the invocation, and a bundle quantised against a different frame has
     every stored cell wrong while remaining perfectly well-formed. The binary's path, the `--out`
     path and the `--deployment` path are dropped: none is a property of the fixture, and including
-    them would force a rebuild per worktree.
+    them would force a rebuild per worktree. The binary itself is recorded by [`write_recipe`].
 
-    Note what the recipe cannot pin, and why that is correct: `--mint-id-key` mints a fresh
-    identity key per build, so two bundles from an identical recipe have different `tessera_id`s.
-    The recipe records the *lineage decision*, not the key. Nothing may persist a `tessera_id` from
-    this fixture across runs — the docstring above says so for the same reason.
+    The recipe cannot pin the identity key: every build generates its own, so two bundles from an
+    identical recipe have different `tessera_id`s. Nothing may persist a `tessera_id` from this
+    fixture across runs, as the docstring above says.
     """
     argv = argv[1:]
     for flag in ("--out", "--deployment"):
@@ -464,7 +497,7 @@ def _fixture_bundle_is_usable(bundle_root: Path, wanted: dict) -> bool:
     exactly one segment set per partition (`SEGMENTS-0.json`); any partition carrying more has
     been served against with writes and is rebuilt.
     """
-    if read_recipe(bundle_root) != wanted:
+    if not recipe_matches(bundle_root, wanted):
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
@@ -606,6 +639,34 @@ class Server:
             timeout=30,
         )
 
+    def items(self, token: str, **body) -> requests.Response:
+        """`POST /v1/items` with `body` as given: the raw response, since a refusal is as much an
+        answer here as a body."""
+        return requests.post(
+            f"{self.viewer_base}/v1/items",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+
+    def artifacts(self, token: str, **body) -> requests.Response:
+        """`POST /v1/artifacts` with `body` as given: the raw response."""
+        return requests.post(
+            f"{self.viewer_base}/v1/artifacts",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+
+    def aggregate(self, token: str, **body) -> requests.Response:
+        """`POST /v1/aggregate` with `body` as given: the raw response."""
+        return requests.post(
+            f"{self.viewer_base}/v1/aggregate",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+
     def item(self, token: str, handle: int, pin: str | None = None) -> requests.Response:
         body: dict = {}
         if pin is not None:
@@ -617,16 +678,9 @@ class Server:
             timeout=10,
         )
 
-    def change(self, external_id_b64: str, op: str, access: str | None = None) -> requests.Response:
-        item = {"external_id": external_id_b64, "op": op}
-        if access is not None:
-            item["access"] = access
-        return requests.post(
-            f"{self.control_base}/control/changes",
-            headers={"Authorization": f"Bearer {self.operator_credential}"},
-            json=[item],
-            timeout=10,
-        )
+    def change(self, tessera_id: int | str, op: str, *, strict: bool = False) -> requests.Response:
+        """One `/control/changes` item, naming the item by its `tessera_id`."""
+        return self.changes([{"op": op, "match": {"tessera_id": str(tessera_id)}}], strict=strict)
 
     def browse(self, token: str, **body) -> requests.Response:
         """`POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) — the raw response, not
@@ -648,26 +702,33 @@ class Server:
             timeout=30,
         )
 
-    def publish_artifacts(self, layer: str, **body) -> requests.Response:
-        """`PUT /control/layers/{name}/artifacts` — one publication into one level."""
+    def publish_artifacts(self, layer: str, *, strict: bool = False, **body) -> requests.Response:
+        """`PUT /control/layers/{name}/artifacts` — one publication into one level. `strict`
+        refuses the whole publication at its first refused member."""
         return requests.put(
             f"{self.control_base}/control/layers/{layer}/artifacts",
+            params={"strict": str(strict).lower()},
             headers={"Authorization": f"Bearer {self.operator_credential}"},
             json=body,
             timeout=60,
         )
 
-    def changes(self, items: list[dict]) -> requests.Response:
+    def changes(self, items: list[dict], *, strict: bool = False) -> requests.Response:
+        """`POST /control/changes`. `strict` refuses the whole request at its first refused item;
+        without it, refused items are listed in the answer and the rest applied."""
         return requests.post(
             f"{self.control_base}/control/changes",
+            params={"strict": str(strict).lower()},
             headers={"Authorization": f"Bearer {self.operator_credential}"},
             json=items,
             timeout=10,
         )
 
-    def ingest(self, body: bytes, batch_id: str) -> requests.Response:
+    def ingest(self, body: bytes, batch_id: str, *, strict: bool = False) -> requests.Response:
+        """An Arrow ingest batch. `strict` refuses the whole batch at its first refused row."""
         return requests.post(
             f"{self.control_base}/control/ingest",
+            params={"strict": str(strict).lower()},
             headers={
                 "Authorization": f"Bearer {self.operator_credential}",
                 "x-tessera-batch-id": batch_id,

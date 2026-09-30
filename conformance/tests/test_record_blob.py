@@ -84,7 +84,7 @@ def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue
 
 
 def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root, catalogue_bundle):
-    """Records §3's "a target, not a cap", on the artefact: the planted > 256 KiB note must land
+    """Records §3's "a target, not a cap", on the artefact: the planted 320,000-byte note must land
     in a block above the target holding exactly that one row — never split across blocks — and
     the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
     (records §10's catalogue) are non-degenerate when they land."""
@@ -109,7 +109,7 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
     # The planted oversize entity is the one carrying such a row. `NOTE_OVERSIZE_ID` is the
     # **source** id the note was planted on, so it crosses to entity space here rather than being
     # compared as though the two were one number.
-    oversize_entity = catalogue_bundle.entity_of_source(cat.NOTE_OVERSIZE_ID)
+    oversize_entity = cat.entity_of_source(catalogue_bundle, cat.NOTE_OVERSIZE_ID)
     oversize_entities = {b["first_entity"] for b in oversized}
     assert oversize_entities == {oversize_entity}, (
         f"the oversized rows belong to {sorted(oversize_entities)}, not entity "

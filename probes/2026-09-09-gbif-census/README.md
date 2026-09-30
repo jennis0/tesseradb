@@ -1,6 +1,6 @@
 # What rung 6 (GBIF) is, before anything is built
 
-**Date** 2026-09-09. **Source** `/mnt/nas/joe/tessera/datasets/gbif/2026-06-01/occurrence.parquet`,
+**Date** 2026-09-09. **Source** `/mnt/nas/tessera/datasets/gbif/2026-06-01/occurrence.parquet`,
 8,369 parts, 258.5 GiB compressed, read over SMB. **Box** WSL2, 12 cores, 47 GB.
 
 Two passes, both **measured**, run before a `test_corpora/gbif/` existed. They answer the three

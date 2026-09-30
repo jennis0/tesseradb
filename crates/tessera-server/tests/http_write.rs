@@ -1,6 +1,7 @@
 //! The control plane's **write path**, end to end: `/control/ingest`, `/control/changes`,
-//! `/control/status`, batch-id idempotency, external-id duplicate detection, entity allocation,
-//! WAL behaviour and the health/readiness endpoints.
+//! `/control/status`, batch-id idempotency, rows naming items by a unique value, entity
+//! allocation, WAL behaviour and the health/readiness endpoints. The fixture declares the unique
+//! `id` ([`id_schema`]), so a row or a change names a built item by its source id.
 //!
 //! The viewer and session planes are in `tests/http.rs`, and pins and session revocation in
 //! `tests/http_engine_state.rs`. Shared fixtures live in [`common`]; a few doc comments below refer
@@ -10,11 +11,10 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, Float64Array};
+use arrow::array::{Float32Array, Float64Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
@@ -23,44 +23,19 @@ use tessera_plugin::Passthrough;
 
 use common::*;
 
+/// An Arrow ingest batch of `(id, x, y, access label)` rows, every row carrying its `id`.
 fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
-    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access_array),
-    ]));
-    let ext: Vec<Vec<u8>> = rows
+    let rows: Vec<_> = rows
         .iter()
-        .map(|(id, _, _, _)| external_id_of(*id))
+        .map(|&(id, x, y, access)| (Some(id), x, y, access))
         .collect();
-    let ext_array = BinaryArray::from_iter_values(ext.iter().map(|v| v.as_slice()));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
-
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+    build_ingest_batch_optional(&rows)
 }
 
-/// One row under a raw external id carrying **several** labels — the list's whole point
-/// (decision 0129): each element is one label, however many there are.
-fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
-    let access_array = access_lists(&[labels]);
+/// A batch of one new item per entry of `rows`, each carrying that entry's labels, however many.
+fn build_ingest_batch_labels(rows: &[&[&str]]) -> Vec<u8> {
+    let access_array = access_lists(rows);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access_array),
@@ -68,9 +43,8 @@ fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id])),
-            Arc::new(Float32Array::from_iter_values([10.0])),
-            Arc::new(Float32Array::from_iter_values([10.0])),
+            Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 10.0))),
+            Arc::new(Float32Array::from_iter_values(rows.iter().map(|_| 10.0))),
             Arc::new(access_array),
         ],
     )
@@ -82,27 +56,22 @@ fn build_ingest_batch_labels(external_id: &[u8], labels: &[&str]) -> Vec<u8> {
 
 /// [`build_ingest_batch`] with the coordinate columns at the **wider** width.
 ///
-/// Contracts §3.4: an ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is
-/// widened, which is the rule a points file's coordinate columns are read by — so a corpus
-/// buildable at either width is ingestable at either width (decision 0091). Every other builder
-/// here writes `float32`, which is what keeps that half of the schema exercised too.
+/// An ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is widened, which is
+/// the rule a points file's coordinate columns are read by, so a corpus buildable at either width
+/// is ingestable at either width. Every other builder here writes `float32`.
 fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         access_field(&access_array),
     ]));
-    let ext: Vec<Vec<u8>> = rows
-        .iter()
-        .map(|(id, _, _, _)| external_id_of(*id))
-        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values(
-                ext.iter().map(|v| v.as_slice()),
+            Arc::new(UInt64Array::from_iter_values(
+                rows.iter().map(|(id, _, _, _)| *id),
             )),
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, x, _, _)| *x),
@@ -119,58 +88,15 @@ fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
     writer.into_inner().unwrap()
 }
 
-/// Like [`build_ingest_batch`], but takes the raw `external_id` bytes directly rather than
-/// deriving them from a source id — needed for the duplicate-detection and cap tests, which
-/// must construct exact byte strings (repeats across rows, or a specific length) that
-/// `external_id_of`'s 8-byte little-endian convention cannot express.
-fn build_ingest_batch_raw(rows: &[(&[u8], f32, f32, &str)]) -> Vec<u8> {
-    let access_array = access_column(rows.iter().map(|(_, _, _, a)| *a));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
-        access_field(&access_array),
-    ]));
-    let ext_array = BinaryArray::from_iter_values(rows.iter().map(|(id, _, _, _)| *id));
-    let x_array = Float32Array::from_iter_values(rows.iter().map(|(_, x, _, _)| *x));
-    let y_array = Float32Array::from_iter_values(rows.iter().map(|(_, _, y, _)| *y));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ext_array),
-            Arc::new(x_array),
-            Arc::new(y_array),
-            Arc::new(access_array),
-        ],
-    )
-    .unwrap();
-
-    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
-    writer.write(&batch).unwrap();
-    writer.into_inner().unwrap()
+/// A `/control/changes` item applying `op` to the built item whose `id` is `source_id`.
+fn change(source_id: u64, op: &str) -> serde_json::Value {
+    serde_json::json!({ "op": op, "match": { "id": member(source_id) } })
 }
-
-/// Like [`build_ingest_batch_raw`], but `external_id` is `Option<&[u8]>` per row — contracts §3.4
-/// r6: an ingested item may carry no external id at all, in which case it is addressable only by
-/// the `tessera_id` `/control/ingest`'s response returns for it. The column is declared nullable
-/// here (unlike the other two builders, which happen to always supply a value): this is the
 
 #[tokio::test]
 async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
 
@@ -189,13 +115,11 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
 
     const SUPPRESS_SOURCE_ID: u64 = 5;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -217,18 +141,7 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
 #[tokio::test]
 async fn f_ingest_is_wal_before_ack_and_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]);
 
@@ -244,7 +157,7 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 1);
+    assert_eq!(json["created"], 1);
     assert_eq!(json["over_bound"], 0);
 
     // Replay of the same batch id + body: idempotent 200.
@@ -275,284 +188,98 @@ async fn f_ingest_is_wal_before_ack_and_idempotent() {
     assert_eq!(resp.status(), 409);
 }
 
-/// Contracts §3.1: duplicate external ids *within* one batch are `409 conflict`, and the batch
-/// has NO effect at all -- not even the non-duplicate rows are accepted.
-#[tokio::test]
-async fn ingest_rejects_duplicate_external_ids_within_one_batch() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    let body = build_ingest_batch_raw(&[
-        (b"a".as_slice(), 1.0, 1.0, "0"),
-        (b"b".as_slice(), 2.0, 2.0, "0"),
-        (b"a".as_slice(), 3.0, 3.0, "0"),
-    ]);
+/// Post one ingest batch and return its status and answer.
+async fn post_body(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, serde_json::Value) {
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "dup-batch")
+        .header("x-tessera-batch-id", batch_id)
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "a 409 batch must have no effect at all -- not even the non-duplicate rows"
-    );
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-/// Dedup must consult `Engine::established`, not only the bundle's external-id sidecar. The
-/// sidecar covers only the bundle built at open time; an id ingested five minutes ago in a
-/// *separate*, already-accepted batch lives only in the live map, and a dedup check that misses it
-/// would silently allocate a second entity and orphan the first (see `write.rs`'s
-/// `WritePath::accept_ingest` doc).
+/// A second row carrying the `id` of an item ingested at the running service edits that item: it
+/// keeps its `tessera_id` and takes one new entity id.
 #[tokio::test]
-async fn ingest_rejects_an_external_id_ingested_after_the_build() {
+async fn a_second_row_for_an_ingested_id_edits_its_item() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
+    let server = serve(&tmp).await;
+
+    let (status, first) = post_body(
+        &server,
+        "z-batch-1",
+        build_ingest_batch(&[(N_ITEMS + 1, 1.0, 1.0, "0")]),
     )
     .await;
-
-    let first_body = build_ingest_batch_raw(&[(b"z".as_slice(), 1.0, 1.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-1")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(first_body)
-        .send()
-        .await
+    assert_eq!(status, 200, "{first}");
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
         .unwrap();
-    assert_eq!(resp.status(), 200);
 
-    let high_water_after_first = control_status(&server).await["entity_id_high_water"].clone();
-
-    // A fresh batch id, re-ingesting the same external id: must be rejected, not silently
-    // allocate a second entity for "z".
-    let second_body = build_ingest_batch_raw(&[(b"z".as_slice(), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "z-batch-2")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(second_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_after_first,
-        "the rejected re-ingest must not have allocated a second entity"
-    );
-}
-
-/// The bundle's own external-id sidecar half of duplicate detection: an id already present in
-/// the built bundle (not merely ingested live) must also be rejected.
-#[tokio::test]
-async fn ingest_rejects_an_external_id_already_in_the_bundle() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
+    let (status, second) = post_body(
+        &server,
+        "z-batch-2",
+        build_ingest_batch(&[(N_ITEMS + 1, 9.0, 9.0, "0")]),
     )
     .await;
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    // `external_id_of(0)` names a real item baked into the fixture at build time.
-    let body = build_ingest_batch(&[(0, 5.0, 5.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "bundle-dup-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "conflict");
-
+    assert_eq!(status, 200, "{second}");
     assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before
+        (second["created"].as_u64(), second["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{second}"
+    );
+    assert_eq!(
+        ingested_ids(&second),
+        ingested_ids(&first),
+        "the item keeps its tessera_id"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1),
+        "the edit took one entity id"
     );
 }
 
-/// Ordering matters and is not incidental: the batch-id replay check stays FIRST. An idempotent
-/// retry of an already-accepted batch id + body is a 200 no-op, even though the external id it
-/// carries is (correctly) "already known" by the time the duplicate check would run.
+/// A row carrying the `id` of an item the build stored edits that item, as one ingested at the
+/// service does.
 #[tokio::test]
-async fn an_idempotent_retry_of_an_accepted_batch_is_a_200_not_a_409() {
+async fn a_row_for_an_id_in_the_bundle_edits_its_item() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
+    let server = serve(&tmp).await;
+    let high_water = control_status(&server).await["entity_id_high_water"]
+        .as_u64()
+        .unwrap();
+
+    let (status, answer) = post_body(
+        &server,
+        "bundle-edit",
+        build_ingest_batch(&[(0, 5.0, 5.0, "0")]),
     )
     .await;
-
-    let body = build_ingest_batch_raw(&[(b"replay-me".as_slice(), 1.0, 1.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "replay-batch")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
+    assert_eq!(status, 200, "{answer}");
     assert_eq!(
-        resp.status(),
-        200,
-        "a byte-identical replay of an already-acked batch id must stay a 200, never be caught \
-         by the duplicate-external-id check"
+        (answer["created"].as_u64(), answer["edited"].as_u64()),
+        (Some(0), Some(1)),
+        "{answer}"
+    );
+    assert_eq!(
+        control_status(&server).await["entity_id_high_water"].as_u64(),
+        Some(high_water + 1)
     );
 }
 
-/// Contracts §1 (r6): external ids are capped at ≤ 64 bytes. Off-by-one is the whole point: 64
-/// bytes exactly is accepted, 65 is a typed error, never a silent truncation.
-#[tokio::test]
-async fn ingest_external_id_cap_is_64_bytes_exactly() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let exactly_64 = vec![b'x'; 64];
-    let body = build_ingest_batch_raw(&[(exactly_64.as_slice(), 1.0, 1.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "cap-64")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "exactly 64 bytes must be accepted");
-
-    let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
-
-    let sixty_five = vec![b'y'; 65];
-    let body = build_ingest_batch_raw(&[(sixty_five.as_slice(), 2.0, 2.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "cap-65")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        422,
-        "65 bytes must be a typed contract error, never truncated to 64"
-    );
-    let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["error"], "contract");
-
-    assert_eq!(
-        control_status(&server).await["entity_id_high_water"],
-        high_water_before,
-        "a rejected over-length batch must have no effect"
-    );
-}
-
-/// The point of batching resolution: a large batch must open each bundle extent at most once,
-/// not once per row. The fixture bundle has one external-id extent (built with `N_ITEMS` rows),
-/// so a batch of many distinct, never-before-seen external ids must resolve against it without
-/// the sidecar opening more than that one extent.
+/// A large batch of distinct `id` values no item holds resolves as one batch against the bundle's
+/// unique index and creates an item per row.
 #[tokio::test]
 async fn a_batch_resolution_opens_each_extent_at_most_once() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let rows: Vec<(u64, f32, f32, &str)> = (0..2_000)
         .map(|i| (N_ITEMS + 10_000 + i, in_extent(i), in_extent(i), "0"))
@@ -570,130 +297,13 @@ async fn a_batch_resolution_opens_each_extent_at_most_once() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 2_000);
-}
-
-/// `GET /control/status` must require the operator bearer credential — it discloses
-/// `entity_id_high_water`, a global unmasked corpus-size fact, and the control listener may be
-/// plain loopback TCP, not only a unix socket.
-#[tokio::test]
-async fn control_status_requires_bearer() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth("not-the-operator-credential")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-
-    let resp = server
-        .client
-        .get(server.control_url("/control/status"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-}
-
-/// A `/control/changes` batch whose *later* item fails validation (unknown external
-/// id) must leave every earlier item in the same batch unapplied — validate-first, not
-/// apply-then-abort. Suppresses a real item first in the batch, then names a nonexistent external
-/// id second; the whole request must 404, and the real item's count must be unaffected.
-#[tokio::test]
-async fn changes_batch_validates_before_applying_anything() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-
-    let viewport_req = serde_json::json!({
-        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
-    });
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&viewport_req)
-        .send()
-        .await
-        .unwrap();
-    let (tiles_before, _) = decode_viewport(&resp.bytes().await.unwrap());
-
-    const REAL_SOURCE_ID: u64 = 9;
-    let real_external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(REAL_SOURCE_ID));
-    // Not a real external id (never ingested/built) — must 404 during validation.
-    let bogus_external_id =
-        base64::engine::general_purpose::STANDARD.encode(b"this-external-id-does-not-exist");
-
-    let resp = server
-        .client
-        .post(server.control_url("/control/changes"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([
-            { "external_id": real_external_id, "op": "suppress" },
-            { "external_id": bogus_external_id, "op": "suppress" },
-        ]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 404);
-
-    let resp = server
-        .client
-        .post(server.viewer_url("/v1/viewport"))
-        .bearer_auth(token)
-        .json(&viewport_req)
-        .send()
-        .await
-        .unwrap();
-    let (tiles_after, _) = decode_viewport(&resp.bytes().await.unwrap());
-
-    assert_eq!(
-        tiles_after[0].1, tiles_before[0].1,
-        "the batch's first item must not have been applied once a later item failed validation"
-    );
+    assert_eq!(json["created"], 2_000);
 }
 
 /// Two concurrent acceptances (one `/control/ingest`, one `/control/changes`) must both survive.
 /// An unlocked apply+swap admits a lost-update race in which whichever `store()` wins silently
 /// discards the other's already-fsynced, already-acked change. Runs the engine's
-/// `accept_ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
+/// `ingest`/`accept_change` directly (not through HTTP) on two OS threads, synced to start
 /// together, so both race for the executor.
 ///
 /// **The race is structurally impossible today**, because exactly one thread can publish a
@@ -706,12 +316,7 @@ async fn changes_batch_validates_before_applying_anything() {
 #[test]
 fn concurrent_ingest_and_change_both_survive() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     let mut engine = Engine::open(
         &bundle_root,
@@ -747,9 +352,8 @@ fn concurrent_ingest_and_change_both_survive() {
     let engine = Arc::new(engine);
 
     const SUPPRESS_SOURCE_ID: u64 = 3;
-    let suppress_entity = engine
-        .resolve_external_id(&external_id_of(SUPPRESS_SOURCE_ID))
-        .expect("resolve_external_id should not fail for a healthy bundle")
+    let suppress_entity = unique_holders(&engine, "id", &[member(SUPPRESS_SOURCE_ID)])
+        .expect("the lookup does not fail for a healthy bundle")[0]
         .expect("fixture item must resolve");
 
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -766,35 +370,42 @@ fn concurrent_ingest_and_change_both_survive() {
     let engine_b = Arc::clone(&engine);
     let barrier_b = Arc::clone(&barrier);
     let ingest_thread = std::thread::spawn(move || {
-        let new_external_id = external_id_of(N_ITEMS + 100);
-        // Unallocated: signature-sorted assignment happens on the executor, so a caller does not
-        // name the entity id at all.
-        let row = tessera_lifecycle::UnallocatedRow {
-            external_id: Some(new_external_id.clone()),
-            view: "s0".to_string(),
-            join: None,
-            descriptors: vec![b"0".to_vec()],
-            x: 5.0,
-            y: 5.0,
+        // A caller does not name the entity id at all: the executor assigns it.
+        let row = tessera_lifecycle::IngestRow {
+            tessera_id: None,
+            labels: Some(vec![b"0".to_vec()]),
+            position: Some((5.0, 5.0)),
             scalars: Vec::new(),
-            terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
             scoped: Vec::new(),
+            omitted: Vec::new(),
         };
         barrier_b.wait();
-        engine_b
-            .accept_ingest(vec![row], "concurrent-batch".to_string(), [7u8; 32])
-            .expect("ingest should be accepted")[0]
+        let receipt = engine_b
+            .ingest(tessera_engine::IngestRequest {
+                batch_id: "concurrent-batch".to_string(),
+                body_hash: [7u8; 32],
+                view: Some("s0".to_string()),
+                rows: vec![row],
+                artifacts: Default::default(),
+                strict: false,
+                tessera_id_column: false,
+            })
+            .expect("ingest should be accepted");
+        let tessera_id = receipt.tessera_ids[0].expect("an accepted row has a tessera_id");
+        let entity = engine_b.resolve_tessera_ids(&[tessera_id]).unwrap()[0];
+        (tessera_id, entity.expect("the item it created"))
     });
 
     change_thread.join().unwrap();
     // The id the EXECUTOR assigned, not one this test chose: assignment is off the caller, so the
     // identity to assert against is the one that comes back.
-    let ingested_entity = ingest_thread.join().unwrap();
+    let (ingested_tessera_id, ingested_entity) = ingest_thread.join().unwrap();
 
     // The suppression's effect: a viewport count one lower than the full-coverage baseline.
     // (A buffered item has no row geometry — there is no flush — so the ingested
     // item contributes nothing to any tile's count regardless of correctness; its effect is
-    // checked separately below, via the established external-id map a lost swap would revert.)
+    // checked separately below, by resolving the `tessera_id` it was given, which a lost swap would
+    // leave naming nothing.)
     let session = engine
         .authorise(br#"{"terms": ["0"]}"#)
         .expect("authorise should succeed");
@@ -812,55 +423,33 @@ fn concurrent_ingest_and_change_both_survive() {
          unchanged"
     );
 
-    // The ingest's effect: the newly-accepted external id must resolve to its assigned entity —
-    // a lost update (the ingest's generation swap silently reverted by a racing change, or vice
-    // versa) would make this `None`.
-    let new_external_id = external_id_of(N_ITEMS + 100);
+    // The ingest's effect: the newly-accepted item's `tessera_id` must resolve to its assigned
+    // entity — a lost update (the ingest's generation swap silently reverted by a racing change, or
+    // vice versa) would make this `None`.
     assert_eq!(
         engine
-            .resolve_external_id(&new_external_id)
-            .expect("resolve_external_id should not fail for a healthy bundle"),
+            .resolve_tessera_ids(&[ingested_tessera_id])
+            .expect("resolve_tessera_ids should not fail for a healthy bundle")[0],
         Some(ingested_entity),
         "the concurrent ingest must have survived — a lost update would drop it from the live \
          buffer/established state"
     );
 }
 
-/// Contracts §3.4: an item ingested with no external id at all is still accepted, and the
-/// `tessera_id` the 200 response returns for it is a genuine, correctly-shard-scoped identity for
-/// the entity that was actually allocated — the only way the item is addressable at all, since it
-/// has no external id.
-///
-/// This does not assert a `200` from `/v1/items`. ⊘ There is no flush, so *any* freshly ingested
-/// item — with or without an external id — has no row geometry until the next `tessera build`, and
-/// `Engine::item`'s own doc records that a visible-but-geometryless entity is a `404`, identical to
-/// an unknown one. That limitation is the absent flush, not this path. What this test checks instead
-/// is what the path does promise:
-/// inverting the returned `tessera_id` with the deployment's own identity key yields the right
-/// shard and a freshly-allocated entity id (at or past the bundle's `N_ITEMS` high-water mark),
-/// so the caller genuinely learned a working identity for its item, not a decoy.
+/// An item ingested with no `id` is accepted, and the `tessera_id` the answer gives it is its only
+/// address. Inverting that id with the bundle's key yields the fixture's shard and a
+/// freshly allocated entity, and once the row is published the viewer serves it under that id.
 #[tokio::test]
-async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_id() {
+async fn ingest_without_an_id_returns_a_genuinely_resolvable_tessera_id() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
-    let body = build_ingest_batch_optional(&[(None, 20.0, 20.0, "0")]);
+    let body = build_ingest_batch_optional(&[(None, 20.5, 20.5, "0")]);
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "null-ext-batch")
+        .header("x-tessera-batch-id", "null-id-batch")
         .header("content-type", "application/vnd.apache.arrow.stream")
         .body(body)
         .send()
@@ -868,59 +457,48 @@ async fn ingest_with_a_null_external_id_returns_a_genuinely_resolvable_tessera_i
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 1);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    assert_eq!(json["created"], 1);
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 1);
-    let tessera_id = tessera_ids[0].as_u64().unwrap();
+    let tessera_id = tessera_ids[0];
 
-    // The fixture's own identity key (matches `TEST_KEY_HEX`, shard 0) — inverting independently
-    // of the server proves the response carries a real, working identity, not an opaque number.
     let (shard, entity) = test_key().invert(tessera_types::TesseraId::new(tessera_id));
     assert_eq!(shard, 0, "the fixture bundle is shard 0");
     assert!(
         entity.raw() >= N_ITEMS,
-        "a freshly-ingested item must get an entity id past the bundle's own N_ITEMS range, not \
-         collide with a built-in item"
+        "an ingested item gets an entity id past the bundle's own"
     );
 
-    // ⊘ The absent flush, not a defect in this path: with no flush there is no row geometry for a
-    // freshly-ingested item, so `/v1/items` 404s identically to an unknown id (`Engine::item`'s
-    // doc).
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap();
-    let resp = post_item(&server, token, tessera_id).await;
-    assert_eq!(
-        resp.status(),
-        404,
-        "a buffered (unflushed) item 404s on /v1/items regardless of external id — there is no \
-         flush, so it has no row geometry"
-    );
+    drain(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [20.3, 20.3, 20.7, 20.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: Vec<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, [tessera_id]);
 }
 
-/// Contracts §3.4 (r6): a batch mixing items with and without an external id is accepted whole,
-/// and duplicate detection considers only the supplied ones — the null-external-id rows have
-/// nothing to collide on and must not be rejected or interfere with the others' dedup check.
+/// A batch mixing items with and without an `id` is accepted whole, and only the supplied ids name
+/// an item: the rows without one have nothing to collide on.
 #[tokio::test]
-async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
+async fn ingest_mixed_batch_only_supplied_ids_name_an_item() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[
-        (Some(b"mixed-a".as_slice()), 1.0, 1.0, "0"),
+        (Some(N_ITEMS + 1), 1.0, 1.0, "0"),
         (None, 2.0, 2.0, "0"),
         (None, 3.0, 3.0, "0"),
-        (Some(b"mixed-b".as_slice()), 4.0, 4.0, "0"),
+        (Some(N_ITEMS + 2), 4.0, 4.0, "0"),
     ]);
     let resp = server
         .client
@@ -935,45 +513,30 @@ async fn ingest_mixed_batch_only_supplied_external_ids_participate_in_dedup() {
     assert_eq!(
         resp.status(),
         200,
-        "two null external ids in one batch must not be treated as duplicates of each other"
+        "two rows without an id in one batch must not be treated as duplicates of each other"
     );
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 4);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
-    assert_eq!(tessera_ids.len(), 4);
+    assert_eq!(json["created"], 4);
+    assert_eq!(ingested_ids(&json).len(), 4);
 
-    // A follow-up batch re-using one of the *supplied* external ids must still be caught.
-    let dup_body = build_ingest_batch_optional(&[(Some(b"mixed-a".as_slice()), 9.0, 9.0, "0")]);
-    let resp = server
-        .client
-        .post(server.control_url("/control/ingest"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "mixed-batch-dup")
-        .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(dup_body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 409);
-}
-
-/// Contracts §3.4 (r6): two items with no external id in the *same* batch must not collide with
-/// each other — `null` is not a key that can be duplicated.
-#[tokio::test]
-async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
+    // A follow-up batch re-using one of the supplied ids names that item.
+    let (status, again) = post_body(
+        &server,
+        "mixed-batch-again",
+        build_ingest_batch_optional(&[(Some(N_ITEMS + 1), 9.0, 9.0, "0")]),
     )
     .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["edited"], 1, "{again}");
+    assert_eq!(ingested_ids(&again)[0], ingested_ids(&json)[0]);
+}
+
+/// Two items with no `id` in the *same* batch must not collide with each other — `null` is not a
+/// value that can be duplicated.
+#[tokio::test]
+async fn ingest_two_rows_without_an_id_in_one_batch_do_not_collide() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
 
     let body = build_ingest_batch_optional(&[(None, 1.0, 1.0, "0"), (None, 2.0, 2.0, "0")]);
     let resp = server
@@ -988,14 +551,59 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["accepted"], 2);
-    let tessera_ids = json["tessera_ids"].as_array().unwrap();
+    assert_eq!(json["created"], 2);
+    let tessera_ids = ingested_ids(&json);
     assert_eq!(tessera_ids.len(), 2);
     assert_ne!(
-        tessera_ids[0].as_u64().unwrap(),
-        tessera_ids[1].as_u64().unwrap(),
-        "two null-external-id items must still get distinct entities/tessera_ids"
+        tessera_ids[0], tessera_ids[1],
+        "two items without an id must still get distinct entities/tessera_ids"
     );
+}
+
+/// A `tessera_id` fills 64 bits, and a JSON number past 2^53 is rounded by JavaScript, so the
+/// ingest answer sends each as a decimal string: the same id the viewer serves for that row.
+#[tokio::test]
+async fn ingest_answers_each_rows_tessera_id_as_the_string_the_viewer_serves() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
+    // The fixture's points sit on whole coordinates, so this box holds only these rows.
+    let body = build_ingest_batch_optional(&[
+        (Some(N_ITEMS + 1), 10.4, 10.4, "0"),
+        (None, 10.5, 10.5, "0"),
+        (Some(N_ITEMS + 2), 10.6, 10.6, "0"),
+    ]);
+    let resp = server
+        .client
+        .post(server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "string-ids")
+        .header("content-type", "application/vnd.apache.arrow.stream")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let answer: serde_json::Value = resp.json().await.unwrap();
+    let answered = ingested_ids(&answer);
+    assert_eq!(answered.len(), 3);
+    drain(&server).await;
+
+    let token = token_for(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "view": "s0", "zoom": 12, "bbox": [10.3, 10.3, 10.7, 10.7], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_, points) = decode_viewport(&resp.bytes().await.unwrap());
+    let served: std::collections::BTreeSet<u64> = points.into_iter().map(|(id, _)| id).collect();
+    assert_eq!(served, answered.into_iter().collect());
 }
 
 /// `/healthz` must stay prompt while a viewport request runs, even on this test's single-threaded
@@ -1008,12 +616,10 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
 /// moves to tokio's separate blocking-thread pool (a real OS thread, regardless of runtime
 /// flavor), freeing the one reactor thread to service `/healthz` while it runs.
 ///
-/// Slowness is engineered deterministically via the §3.3 density underlay's `4^offset` sub-cell
-/// fan-out (`tessera_engine::viewport`'s cost model — each sub-cell costs one small binary search
-/// plus one bitmap range-count, independent of corpus size), not via corpus size — so the fixture
-/// stays at the file's default `N_ITEMS` and builds in the same sub-second time every other test
-/// here does. `offset = 12` at `zoom = 0` (one tile, so the tile-count bound never engages) asks
-/// for `4^12 ≈ 16.8M` sub-cell evaluations.
+/// Slowness is engineered by the tile count rather than by corpus size, so the fixture stays at
+/// the file's default `N_ITEMS` and builds as fast as every other test here: the whole extent at
+/// `zoom = 10` is `4^10 ≈ 1M` tiles, each searched for its rows whether it holds any or not. The
+/// request's memory grows with its tiles, about 300 MB of process RSS here.
 ///
 /// **The passing (post-refactor) bound is self-scaling, not a fixed wall-clock bet.** A fixed
 /// `healthz_elapsed < 1s` assumed this debug-profile binary's absolute speed; on a slower or more
@@ -1032,17 +638,11 @@ async fn ingest_two_null_external_ids_in_one_batch_do_not_collide() {
 #[tokio::test]
 async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut config = default_engine_config();
-    // Wide enough to let the request below through `Engine::viewport`'s own bounds checks
-    // (`EngineError::UnderlayRefused`) rather than being rejected before it ever costs anything.
-    config.max_underlay_offset = 12;
-    config.max_underlay_cells = 20_000_000;
+    // Wide enough to let the request below through `Engine::viewport`'s tile bound rather than
+    // being refused before it costs anything.
+    config.max_tiles_per_request = 1 << 20;
     let server = spawn_server_with_config(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -1051,8 +651,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let viewer_url = server.viewer_url("/v1/viewport");
     let client = server.client.clone();
@@ -1062,8 +661,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
             .post(viewer_url)
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
-                "underlay_offset": 12
+                "view": "s0", "zoom": 10, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1
             }))
             .send()
             .await
@@ -1111,7 +709,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     assert!(
         viewport_elapsed > std::time::Duration::from_millis(200),
         "the viewport request finished in {viewport_elapsed:?}, too fast to exercise this test's \
-         starvation scenario -- widen the underlay offset"
+         starvation scenario -- raise the zoom of the slow request"
     );
     assert!(
         healthz_elapsed < viewport_elapsed / 4,
@@ -1120,10 +718,8 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
     );
 }
 
-/// `/control/ingest`'s external ids for [`concurrent_ingests_do_not_delay_a_control_changes_suppress`],
-/// chosen well clear of every other test's ranges in this file (`N_ITEMS`, and the `N_ITEMS +
-/// 10_000 ..` range `a_batch_resolution_opens_each_extent_at_most_once` uses) so a shared-fixture
-/// mistake would show up as a collision 409 rather than silently aliasing another test's ids.
+/// The first `id` [`concurrent_ingests_do_not_delay_a_control_changes_suppress`] ingests, well
+/// clear of the built items' `0..N_ITEMS`, so every row creates an item.
 const CONCURRENT_INGEST_BASE_ID: u64 = 50_000_000;
 const CONCURRENT_INGEST_BATCHES: u64 = 8;
 const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
@@ -1176,18 +772,7 @@ const CONCURRENT_INGEST_ROWS_PER_BATCH: u64 = 40_000;
 #[tokio::test]
 async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Starts here, not just before the suppress request below: `total_ingest_elapsed` (used for
     // the self-scaling bound at the end of this test) must cover every batch's full wall-clock
@@ -1224,14 +809,12 @@ async fn concurrent_ingests_do_not_delay_a_control_changes_suppress() {
     tokio::task::yield_now().await;
 
     const SUPPRESS_SOURCE_ID: u64 = 7;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
     let suppress_start = std::time::Instant::now();
     let suppress_resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -1337,12 +920,7 @@ async fn readyz_status(server: &TestServer, url: String) -> u16 {
 #[tokio::test]
 async fn a_stepped_down_partition_is_not_ready() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     // Copy SEGMENTS-0 to a newer SEGMENTS-1 naming a file that does not exist, so the walk steps
     // down to SEGMENTS-0 and serves.
@@ -1408,12 +986,7 @@ async fn a_stepped_down_partition_is_not_ready() {
 #[tokio::test]
 async fn an_engine_without_a_write_executor_is_not_ready() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     // `mount_server`, not `spawn_server_from_engine`: the latter starts an executor unconditionally.
     let engine = Engine::open(
         &bundle_root,
@@ -1480,18 +1053,7 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
 #[tokio::test]
 async fn a_healthy_server_is_ready_on_every_listener_that_serves_the_probe() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     for url in [
         server.viewer_url("/readyz"),
@@ -1540,12 +1102,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     // The WAL gets its own directory: `chmod` is applied to the *directory*, and the bundle and
     // cache must stay writable.
     let wal_dir = tmp.path().join("wal");
@@ -1590,12 +1147,11 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
     let suppress = |id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
         async move {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .json(&serde_json::json!([change(id, "suppress")]))
                 .send()
                 .await
                 .unwrap()
@@ -1688,12 +1244,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_dir = tmp.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let server = spawn_server(
@@ -1727,7 +1278,6 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
     };
     let before = visible(token.to_string(), viewport_req.clone()).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let _read_only = ReadOnlyWalDir::new(&wal_dir);
 
     let resp = server
@@ -1735,9 +1285,9 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(5),  "op": "suppress" },
-            { "external_id": b64(9),  "op": "unsuppress" },
-            { "external_id": b64(11), "op": "suppress" },
+            change(5, "suppress"),
+            change(9, "unsuppress"),
+            change(11, "suppress"),
         ]))
         .send()
         .await
@@ -1755,20 +1305,6 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
         !detail.contains("refused"),
         "'refused' is false of the apply-anyway case and invites a retry of a suppression that has \
          already taken hold; got: {detail}"
-    );
-    // **The middle item is an `unsuppress`, and it was NOT applied.** Lifecycle §4's
-    // apply-anyway rule covers `Delete`/`Suppress` only, and `Executor::commit_denies`'s failure
-    // fold honours that — an `Unsuppress` whose append fails is refused without touching the
-    // overlay (applying it without durability would re-expose a suppressed item behind a body
-    // that says nothing was applied). The op-blind fold counted it as possibly-in-force along
-    // with the two suppressions, so `some_not_applied` was false and this body never told the
-    // operator that a third of their batch had not taken hold. (This slot exercised `predicate`
-    // until decision 0047 withdrew the op and decision 0048 deleted it; `unsuppress` is now the
-    // whole applies-nothing fold half, so the discrimination is unchanged.)
-    assert!(
-        detail.contains("NOT applied"),
-        "item 2 is an `unsuppress`: refused without applying, so the operator must be told to \
-         re-submit rather than assume the whole batch took hold; got: {detail}"
     );
 
     // **The item assertion discriminates the apply-anyway rule.** A fold that applied nothing on a
@@ -1799,8 +1335,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
 /// identity in every respect but its willingness to block.
 ///
 /// `armed` is a switch rather than a permanent block because the fixture has to *use* the plugin
-/// before it can saturate anything: `/session/authorise` resolves auth terms, and a
-/// `/control/changes` item can only name an external id that ingest already established.
+/// before it can saturate anything: `/session/authorise` resolves auth terms.
 struct ParkingPlugin {
     inner: tessera_plugin::Passthrough,
     armed: Arc<std::sync::atomic::AtomicBool>,
@@ -1830,7 +1365,7 @@ impl tessera_plugin::Plugin for ParkingPlugin {
     fn terms_of_auth(
         &self,
         auth_data: &[u8],
-    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
         self.inner.terms_of_auth(auth_data)
     }
 
@@ -1891,12 +1426,7 @@ const PARKED_MAX_BLOCKING_THREADS: usize = 4;
 const PARKED_INGEST_ADMISSION: usize = 2;
 
 async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (arrived_tx, arrived) = tokio::sync::mpsc::unbounded_channel();
@@ -1939,8 +1469,7 @@ async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
     // connection's DNS resolution goes through `spawn_blocking` — on this deliberately tiny pool
     // that would queue behind the parked handlers and turn a real result into a hang. One
     // round-trip per plane now means every later request rides a pooled keep-alive connection.
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     assert_eq!(viewport_status(&server, &token).await, 200);
     assert_eq!(control_status(&server).await["ingest"]["in_flight"], 0);
 
@@ -1991,19 +1520,14 @@ async fn post_ingest(
     (status, body)
 }
 
-/// Fresh source ids for the bound fixtures below. Offset well clear of `N_ITEMS`, or every batch here
-/// collides with the bundle's own external ids and answers 409 before any bound is consulted.
-/// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes).
-///
-/// **The wrap is not cosmetic.** `/control/ingest` refuses a coordinate outside the declared
-/// quantisation (§6), because Morton codes are computed against it and an out-of-extent point has
-/// no cell to occupy. A fixture that walks its row index straight into a coordinate leaves the
-/// extent at row 1000 and is refused — which is the validation working, not the test being
-/// awkward.
+/// A coordinate inside the fixture bundle's declared extent (0..1000 on both axes), so no row is
+/// clamped onto its edge.
 fn in_extent(i: u64) -> f32 {
     (i % 1000) as f32
 }
 
+/// Fresh `id` values for the bound fixtures below, offset well clear of `N_ITEMS` so every row
+/// creates an item rather than editing one the build stored.
 fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
     const INGEST_BOUND_ID_BASE: u64 = 1_000_000;
     (0..n)
@@ -2032,12 +1556,7 @@ fn rows_from(base: u64, n: u64) -> Vec<(u64, f32, f32, &'static str)> {
 async fn ingest_is_refused_by_buffer_occupancy() {
     const BUFFER_MAX: usize = 8;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2100,77 +1619,31 @@ async fn ingest_is_refused_by_buffer_occupancy() {
     );
 }
 
-/// **An out-of-extent coordinate is refused before ack and leaves no WAL record** (§6).
-///
-/// Morton codes are a fraction of the declared extent, so a point outside it has no cell. Flush is
-/// where a buffered item acquires geometry, so the choice is refuse here or misplace the item in
-/// the grid there. Refused rather than clamped: a clamped point at the boundary cannot be told from
-/// one that belongs there, so clamping would move data with nothing left to notice afterwards.
-///
-/// **The WAL is a sequence, so the length is read from the active member and not from the base
-/// path.** An earlier form of this test read `wal.log` — which is a name for the family and never a
-/// file — so both readings were `Err`, both became 0, and it compared 0 to 0 while asserting
-/// nothing at all.
-#[tokio::test]
-async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
-    let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let wal_path = tmp.path().join("wal.log");
-    let server = spawn_server(&bundle_root, &tmp.path().join("cache"), &wal_path).await;
-
-    let active = wal_path.with_file_name("wal-000001.log");
-    let before = std::fs::metadata(&active)
-        .expect("the active WAL member exists")
-        .len();
-
-    // The fixture's extent is 0..1000 on both axes; 5000 is outside it.
-    let (status, _) = post_ingest(
-        &server,
-        "out-of-extent",
-        &[(9_000_001, 5000.0, 5000.0, "0")],
-        true,
-    )
-    .await;
-    assert_eq!(status, 422, "a coordinate with no cell is a contract error");
-
-    assert_eq!(
-        std::fs::metadata(&active).expect("still there").len(),
-        before,
-        "refused before ack: no entity id, no queue slot, no WAL append"
-    );
-
-    // And an in-extent row on the same server is unaffected — the refusal is per row, not a
-    // posture the endpoint enters.
-    let (status, _) = post_ingest(&server, "fine", &[(9_000_002, 5.0, 5.0, "0")], true).await;
-    assert_eq!(status, 200);
+/// The cell pair of every point served in `bbox` at zoom 8, by `tessera_id`.
+fn served_cells(engine: &Engine, bbox: [f64; 4]) -> std::collections::BTreeMap<u64, (u16, u16)> {
+    let session = engine
+        .authorise(br#"{"terms": ["0"]}"#)
+        .expect("the fixture grants term 0");
+    let out = engine
+        .viewport(&session, ViewportRequest::new("s0", 8, bbox, 200))
+        .expect("the viewport answers");
+    out.points
+        .iter()
+        .map(|(id, code)| {
+            (
+                id.raw(),
+                tessera_build::input::deinterleave((code >> 32) as u32),
+            )
+        })
+        .collect()
 }
 
-/// **An ingest body carries its coordinates at either float width, and the wider one is not
-/// narrowed** (contracts §3.4; `projections.md` §6).
-///
-/// Acceptance alone would pass against an accessor that read a `float64` column and rounded every
-/// value, so the discriminating case is a coordinate whose *width decides whether it has a cell at
-/// all*. The fixture's extent is `0..1000`; one `f32` step there is 6.1 × 10⁻⁵, and
-/// `1000.00002` is inside half of one — so it rounds to exactly `1000.0`, which
-/// `Quantisation::contains` admits as the inclusive maximum. Read at the width the caller sent it,
-/// the same value is outside the extent and has no cell.
-///
-/// A narrowing wire therefore does not merely lose precision here: it acks a row that is outside
-/// the declared extent, and the flush places it on the grid's edge with nothing left to notice.
+/// A coordinate outside the view's extent is stored on the extent's edge and counted in the
+/// receipt, as a build stores and counts one. The extent's maximum is inside it.
 #[tokio::test]
-async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
+async fn an_out_of_extent_coordinate_is_clamped_onto_the_edge_and_counted() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let server = spawn_server(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2178,12 +1651,65 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
     )
     .await;
 
+    // The fixture's extent is 0..1000 on both axes.
+    let rows = [
+        (9_000_001, 5000.0, 5000.0, "0"),
+        (9_000_002, -3.0, 500.0, "0"),
+        (9_000_003, 1000.0, 1000.0, "0"),
+    ];
+    let (status, body) = post_ingest(&server, "outside", &rows, true).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["created"], 3);
+    assert_eq!(body["clamped"], 2, "{body}");
+    tick(&server).await;
+
+    let ids = ingested_ids(&body);
+    let corner = served_cells(&server.state.engine, [995.0, 995.0, 1000.0, 1000.0]);
+    assert_eq!(corner[&ids[0]], (65_535, 65_535));
+    assert_eq!(corner[&ids[2]], (65_535, 65_535));
+    let west = served_cells(&server.state.engine, [0.0, 495.0, 5.0, 505.0]);
+    assert_eq!(west[&ids[1]], (0, 32_768));
+}
+
+/// A non-finite coordinate has no place in any frame, so it is refused before ack and leaves no
+/// WAL record.
+#[tokio::test]
+async fn a_non_finite_coordinate_is_refused_and_leaves_no_wal_record() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
+    let wal_path = tmp.path().join("wal.log");
+    let server = spawn_server(&bundle_root, &tmp.path().join("cache"), &wal_path).await;
+
+    let active = wal_path.with_file_name("wal-000001.log");
+    let before = std::fs::metadata(&active)
+        .expect("the active WAL member exists")
+        .len();
+    for (batch_id, x) in [("nan", f32::NAN), ("infinite", f32::INFINITY)] {
+        let (status, _) = post_ingest(&server, batch_id, &[(9_000_001, x, 5.0, "0")], true).await;
+        assert_eq!(status, 422, "{batch_id}");
+    }
+    assert_eq!(
+        std::fs::metadata(&active).expect("still there").len(),
+        before
+    );
+}
+
+/// **An ingest body carries its coordinates at either float width, and the wider one is not
+/// narrowed** (contracts §3.4; `projections.md` §6).
+///
+/// The extent is `0..1000`, and `1000.00002` rounds to exactly `1000.0` as an `f32`, the extent's
+/// inclusive maximum. Read at the width it was sent, it is outside the extent and is clamped.
+#[tokio::test]
+async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+
     let post = |batch_id: &'static str, rows: Vec<(u64, f64, f64, &'static str)>| {
         let body = build_ingest_batch_f64(&rows);
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
         async move {
-            client
+            let response = client
                 .post(url)
                 .header("x-tessera-batch-id", batch_id)
                 .header("content-type", "application/vnd.apache.arrow.stream")
@@ -2191,17 +1717,12 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
                 .body(body)
                 .send()
                 .await
-                .unwrap()
-                .status()
-                .as_u16()
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body["clamped"].clone())
         }
     };
-
-    assert_eq!(
-        post("wide", vec![(9_100_001, 12.5, 33.25, "0")]).await,
-        200,
-        "a float64 coordinate column is part of the schema, not a contract error"
-    );
 
     let outside = 1_000.000_02_f64;
     assert_eq!(
@@ -2209,10 +1730,12 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
         "the fixture value must round to the extent maximum, or this case discriminates nothing"
     );
     assert_eq!(
-        post("wide-outside", vec![(9_100_002, outside, 33.25, "0")]).await,
-        422,
-        "a coordinate outside the extent at the width it was sent has no cell, whatever it would \
-         have rounded to"
+        post("wide", vec![(9_100_001, outside, 33.25, "0")]).await,
+        (200, serde_json::json!(1))
+    );
+    assert_eq!(
+        post("narrow", vec![(9_100_002, f64::from(outside as f32), 33.25, "0")]).await,
+        (200, serde_json::json!(0))
     );
 }
 
@@ -2226,18 +1749,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
 #[tokio::test]
 async fn control_flush_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let response = server
         .client
@@ -2283,18 +1795,7 @@ async fn control_flush_is_accepted_and_deferred() {
 #[tokio::test]
 async fn control_compact_is_accepted_and_deferred() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let response = server
         .client
@@ -2373,18 +1874,7 @@ async fn control_compact_is_accepted_and_deferred() {
 #[tokio::test]
 async fn status_stage_barriers_move_when_their_stages_run() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // A resident projection for the refresh to replace: authorise and view once, before any flush.
     let auth = authorise(&server, &["0"]).await;
@@ -2445,19 +1935,13 @@ async fn status_stage_barriers_move_when_their_stages_run() {
 
         // Barrier on the round's own publication, exactly as a harness would: the flush counter,
         // not a sleep. The bound is generous for `poll_until_in_flight`'s reason.
-        let mut published = false;
-        for _ in 0..10_000 {
-            status = control_status(&server).await;
-            if status["write_executor"]["flush"]["flushes"].as_u64() == Some(round) {
-                published = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        assert!(
-            published,
-            "round {round}'s flush did not publish within the poll bound: {status}"
-        );
+        let what = format!("round {round}'s flush publishing");
+        status = wait_for(&what, std::time::Duration::from_secs(60), async || {
+            let status = control_status(&server).await;
+            let flushes = status["write_executor"]["flush"]["flushes"].as_u64();
+            (flushes == Some(round)).then_some(status)
+        })
+        .await;
 
         if status["write_executor"]["merges"].as_u64() > Some(0)
             && status["write_executor"]["coalesces"].as_u64() > Some(0)
@@ -2493,20 +1977,183 @@ async fn status_stage_barriers_move_when_their_stages_run() {
 
     // The refresh barrier: the resident projection was replaced. Asynchronous behind the
     // publication, so polled rather than read once.
-    let mut refreshed = false;
-    for _ in 0..10_000 {
-        let now = control_status(&server).await;
-        if now["write_executor"]["flush"]["refreshes"].as_u64() > Some(0) {
-            refreshed = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    wait_until(
+        "the background refresh replacing the resident projection",
+        std::time::Duration::from_secs(60),
+        async || {
+            let now = control_status(&server).await;
+            now["write_executor"]["flush"]["refreshes"].as_u64() > Some(0)
+        },
+    )
+    .await;
+}
+
+/// `/control/status` reports a refresh or a merge publication in flight while it is held, and
+/// clears the flag once it is released.
+#[tokio::test]
+async fn status_reports_a_held_refresh_and_a_held_merge_as_in_flight() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let engine = &server.state.engine;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    // A resident projection, so a flush has something to refresh.
+    let auth = authorise(&server, &["0"]).await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .json(&serde_json::json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let idle = control_status(&server).await;
+    let executor = &idle["write_executor"];
+    assert_eq!(executor["flush"]["refresh_in_flight"], false, "{idle}");
+    assert_eq!(executor["merge_in_flight"], false, "{idle}");
+    assert_eq!(executor["coalesce_in_flight"], false, "{idle}");
+
+    let flush_round = async |round: u64| {
+        let (code, body) = post_ingest(
+            &server,
+            &format!("in-flight-{round}"),
+            &rows_from(40_000 + round * 10, 2),
+            true,
+        )
+        .await;
+        assert_eq!(code, 200, "round {round}'s ingest must land: {body}");
+        let resp = server
+            .client
+            .post(server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 202);
+        wait_until(&format!("round {round}'s flush publishing"), WAIT, async || {
+            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64()
+                == Some(round)
+        })
+        .await;
+    };
+
+    // The refresh a flush arms is held, so the flag stays set until it is released.
+    engine.set_refresh_paused_for_test(true);
+    flush_round(1).await;
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["flush"]["refresh_in_flight"], true, "{held}");
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the released refresh ending", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
+    })
+    .await;
+
+    // Four same-tier flush extents make a merge eligible; its finished unit is held unpublished.
+    engine.set_merge_publication_paused_for_test(true);
+    let mut round = 1;
+    while !engine.merge_publication_is_held_for_test() {
+        round += 1;
+        assert!(round <= 16, "sixteen flush rounds never produced a merge to hold");
+        flush_round(round).await;
+        // A merge the tick dispatched may still be running.
+        wait_until("a dispatched merge finishing", WAIT, async || {
+            engine.merge_publication_is_held_for_test()
+                || control_status(&server).await["write_executor"]["merge_in_flight"] == false
+        })
+        .await;
     }
-    assert!(
-        refreshed,
-        "the background refresh never replaced the resident projection, so a harness waiting on \
-         this barrier would wait for ever"
-    );
+    let held = control_status(&server).await;
+    assert_eq!(held["write_executor"]["merge_in_flight"], true, "{held}");
+    assert_eq!(held["write_executor"]["merges"], 0, "{held}");
+    engine.set_merge_publication_paused_for_test(false);
+    wait_until("the released merge publishing", WAIT, async || {
+        let status = control_status(&server).await;
+        status["write_executor"]["merges"].as_u64() > Some(0)
+            && status["write_executor"]["merge_in_flight"] == false
+    })
+    .await;
+}
+
+/// While the refresh after a flush is held, a session is served from its previous projection, and
+/// `x-tessera-pin` names the previous generation. Once the refresh publishes, it names the new one.
+#[tokio::test]
+async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refresh() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let engine = &server.state.engine;
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap().to_string();
+    let pin_of = async |presented: Option<&serde_json::Value>| {
+        let mut body =
+            serde_json::json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]});
+        if let Some(pin) = presented {
+            body["pin"] = pin.clone();
+        }
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let stale = resp.headers()["x-tessera-stale"].to_str().unwrap() == "1";
+        let pin: serde_json::Value =
+            serde_json::from_str(resp.headers()["x-tessera-pin"].to_str().unwrap()).unwrap();
+        (pin, stale)
+    };
+    let live_version = async || {
+        control_status(&server).await["partitions"][0]["segments_version"]
+            .as_u64()
+            .unwrap()
+    };
+
+    // A resident projection at the opening generation, so the flush has something to refresh.
+    let (before, _) = pin_of(None).await;
+    let version_before = live_version().await;
+    assert_eq!(before["segments_version"], version_before);
+
+    engine.set_refresh_paused_for_test(true);
+    let (code, body) = post_ingest(&server, "pin-served", &rows_from(50_000, 2), true).await;
+    assert_eq!(code, 200, "{body}");
+    let resp = server
+        .client
+        .post(server.control_url("/control/flush"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_until("the flush publishing", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64() == Some(1)
+    })
+    .await;
+    let status = control_status(&server).await;
+    assert_eq!(status["write_executor"]["flush"]["refresh_in_flight"], true, "{status}");
+    let version_after = live_version().await;
+    assert!(version_after > version_before);
+
+    // Served from the previous projection: the pin names the previous generation, and echoing
+    // the pin held from before the flush is not stale.
+    let (during, stale) = pin_of(Some(&before)).await;
+    assert_eq!(during, before);
+    assert!(!stale);
+
+    engine.set_refresh_paused_for_test(false);
+    wait_until("the released refresh ending", WAIT, async || {
+        control_status(&server).await["write_executor"]["flush"]["refresh_in_flight"] == false
+    })
+    .await;
+
+    let (after, stale) = pin_of(Some(&before)).await;
+    assert_eq!(after["segments_version"], version_after);
+    assert_eq!(after["prefix"], before["prefix"]);
+    assert!(stale);
 }
 
 /// **Unbounded ingest hangs the viewer plane rather than shedding it, and this closes that.**
@@ -2640,7 +2287,7 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 /// unbounded lane by `Command::is_never_shed`, and `map_change_batch_error` contains no route from
 /// that lane to a 429 at all.
 ///
-/// The suppression is deliberately a bare `{external_id, op}` with **no `access` field**, so
+/// The suppression is deliberately a bare `{field, value, op}` with **no `access` field**, so
 /// `run_changes` makes no `terms_of_labels` call and the parking plugin cannot block it. That is a
 /// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
 /// mistake it for part of what is being proved.
@@ -2704,15 +2351,13 @@ fn changes_never_429s() {
         assert_eq!(body["error"], "backpressure");
 
         const SUPPRESS_SOURCE_ID: u64 = 5;
-        let external_id =
-            base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             fx.server
                 .client
                 .post(fx.server.control_url("/control/changes"))
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+                .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
                 .send(),
         )
         .await
@@ -2761,7 +2406,7 @@ fn changes_never_429s() {
 /// what makes the wire path *live* is the defaults relation, and that is pinned in `config.rs`.
 ///
 /// **What this proves, and what it does not.** It proves the whole path from `TrySendError::Full`
-/// through `SubmitError::QueueFull`, `map_accept_error`, `ApiError::WriteBackpressure` and onto the
+/// through `SubmitError::QueueFull`, `map_accept_error`, `ShedCause::WriteQueue` and onto the
 /// wire, including the derived `retry_after_s` and its agreeing header. It does **not** prove
 /// anything about the *transition* into fullness — a queue that is never not full cannot
 /// distinguish "429 on Full" from "429 always". Inducing a real transition needs a controllable
@@ -2774,17 +2419,12 @@ fn changes_never_429s() {
 /// be the one firing.
 ///
 /// **Mutations this kills:** mapping `QueueFull` to anything but 429; deleting `retry_after_s`'s
-/// `WriteBackpressure` arm in `error.rs` (the header disappears); `estimate_retry_after_s`
+/// `WriteQueue` cause in `error.rs` (the header disappears); `estimate_retry_after_s`
 /// returning 0.
 #[tokio::test]
 async fn ingest_429s_when_the_queue_is_full() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2853,13 +2493,11 @@ async fn ingest_429s_when_the_queue_is_full() {
 
     // And the never-shed lane is unaffected in the very same state.
     const SUPPRESS_SOURCE_ID: u64 = 6;
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+        .json(&serde_json::json!([change(SUPPRESS_SOURCE_ID, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -2886,12 +2524,7 @@ async fn ingest_429s_when_the_queue_is_full() {
 #[tokio::test]
 async fn an_oversized_batch_is_422_not_a_queue_slot() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -2972,12 +2605,7 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
 #[tokio::test]
 async fn an_oversized_body_is_422_not_413() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let one_row = build_ingest_batch(&rows_from(820, 1));
     let cap = one_row.len();
 
@@ -3067,12 +2695,7 @@ async fn an_oversized_body_is_422_not_413() {
 #[tokio::test]
 async fn backpressure_is_invisible_before_auth() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let one_row = build_ingest_batch(&rows_from(840, 1));
     let cap = one_row.len();
 
@@ -3166,12 +2789,7 @@ async fn backpressure_is_invisible_before_auth() {
     // **Its own bundle**, because both servers run write executors and one executor owns a bundle
     // root (write-path §1.2). Nothing here is about the two sharing a corpus: each server's
     // subject is the order of its own refusals.
-    let bundle_root_b = tmp.path().join("bundle-b");
-    build_fixture(
-        &bundle_root_b,
-        &tmp.path().join("points-b.parquet"),
-        &tmp.path().join("pairs-b.parquet"),
-    );
+    let bundle_root_b = build_fixture(&tmp.path().join("b"), N_ITEMS);
     let mut engine_b = Engine::open(
         &bundle_root_b,
         &tmp.path().join("cache-b"),
@@ -3257,12 +2875,7 @@ async fn backpressure_is_invisible_before_auth() {
 #[tokio::test]
 async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -3277,12 +2890,11 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
     let suppress = |id: u64| {
-        let external_id = base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
         server
             .client
             .post(server.control_url("/control/changes"))
             .bearer_auth(OPERATOR_CREDENTIAL)
-            .json(&serde_json::json!([{ "external_id": external_id, "op": "suppress" }]))
+            .json(&serde_json::json!([change(id, "suppress")]))
             .send()
     };
 
@@ -3343,35 +2955,27 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
 
 /// **`/control/changes` answers 422, not axum's 413, and never before the bearer check.**
 ///
-/// A bare `post(changes)` with a `Json(items)` extractor rejects inside the extractor and answers a
-/// plain **413** — a status outside contracts §3.1's closed code list — with axum's own body. An
-/// operator submitting tens of thousands of suppressions (a couple of MiB of JSON) meets it, on the
-/// never-shed lane, which is where an out-of-list status is least defensible. The remedy is the one
-/// `/control/ingest` uses: `Result<Json<..>, JsonRejection>`, mapped rather than escaping.
+/// The handler takes `Result<ApiJson<..>, ApiJsonRejection>` and maps a body axum could not read,
+/// including one over the byte cap, to a 422 `contract` naming the cap, rather than axum's plain 413.
 ///
 /// Three legs, because the rejection has two shapes and the ordering rule is a third property:
 /// oversize, malformed JSON, and the same oversize body without a credential.
 ///
 /// **Leg 3's refuser is the router layer, and the leg is kept for what it shows.** The 401 comes
 /// from `control::require_operator_credential`, a layer over the whole control router,
-/// rather than from this handler's first statement — so leg 3 no longer discriminates
-/// `Result<Json<..>, _>` from `Json(items)` (the layer answers first either way). It still asserts
+/// rather than from this handler's first statement, so leg 3 does not tell the handler's body
+/// extractor apart from any other (the layer answers first either way). It still asserts
 /// the property that matters on the wire: an unauthenticated caller cannot learn this endpoint's
 /// body cap by bisection. The layer's own coverage is
-/// `every_control_route_not_exempt_requires_the_operator_credential`.
+/// `every_path_on_the_control_listener_needs_the_credential`.
 ///
-/// **Mutations this kills:** taking `Json(items)` instead of `Result<Json<..>, _>` (leg 1 becomes
-/// 413); collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
+/// **Mutations this kills:** taking `ApiJson(items)` instead of the `Result` (leg 1 becomes 413);
+/// collapsing the two rejection shapes onto one detail (leg 2's assertion that it is *not*
 /// reported as an oversize batch goes red); deleting the credential layer (leg 3 becomes 422).
 #[tokio::test]
 async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
@@ -3383,15 +2987,13 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
     engine.start_write_executor(1024).unwrap();
     let server = mount_server(engine, 200, generous_test_gate()).await;
 
-    // A syntactically valid change array well past the 2 MiB cap. Every item names a real external
-    // id, so nothing but the size can be what refuses it.
-    let external_id =
-        base64::engine::general_purpose::STANDARD.encode(external_id_of(SUPPRESS_SOURCE_ID));
+    // A syntactically valid change array well past the 2 MiB cap. Every item names a real item, so
+    // nothing but the size can be what refuses it.
     const SUPPRESS_SOURCE_ID: u64 = 7;
     let mut items = Vec::new();
     while serde_json::to_vec(&items).unwrap().len() < 3 * 1024 * 1024 {
         for _ in 0..10_000 {
-            items.push(serde_json::json!({ "external_id": external_id, "op": "suppress" }));
+            items.push(change(SUPPRESS_SOURCE_ID, "suppress"));
         }
     }
     let oversized = serde_json::to_vec(&items).unwrap();
@@ -3425,7 +3027,7 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("content-type", "application/json")
-        .body("[{\"external_id\": ")
+        .body("[{\"field\": ")
         .send()
         .await
         .unwrap();
@@ -3457,54 +3059,54 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
 
 // --- The control plane's credential gate, at the router ---
 
-/// **Every route on the control plane answers 401 without a credential — asserted over the route
-/// list, not over three hand-written cases, and now with no exceptions at all.**
+/// **No path on the control listener answers without the credential: every mounted route, the
+/// health probes' names and unrouted paths alike.**
 ///
-/// This is the inverse of the usual auth test. `control_status_requires_bearer` names one endpoint
-/// and would stay green forever while a fourth control route shipped wide open; that is exactly how
-/// `/control/status` itself shipped returning `entity_id_high_water` unauthenticated. This iterates
-/// [`CONTROL_PLANE_ROUTES`] and requires **every** entry to refuse, with no exemption list to skip:
-/// `/healthz` and `/readyz` are not on this plane at all
-/// (docs/decisions/0011-health-probes-off-control-plane.md), so the rule under test is the stronger
-/// unconditional one.
+/// The mounted routes are read off `control::router`, the faults build's included; the rest are
+/// paths the router does not serve, so the check must sit ahead of its 404. Each is sent with no
+/// credential and with a wrong one, and each must answer `ApiError::BadCredential`'s own body.
 ///
-/// **What it does and does not guarantee, stated because the difference is the whole design.** The
-/// list is hard-coded: axum 0.8 exposes no route enumeration, so a route added to `control::router`
-/// and not added to `CONTROL_PLANE_ROUTES` is invisible here. What covers *that* case is not this
-/// test but the layer's shape — `require_operator_credential` wraps the whole router, so an
-/// unlisted route is authenticated anyway (and `every_path_on_the_control_listener_needs_the_credential`
-/// demonstrates that directly, on paths the router does not serve at all). This test's job is the
-/// other half: it goes red if the layer is removed or narrowed.
-///
-/// **The 401 must be `ApiError::BadCredential`'s existing shape**, byte for byte — contracts §3.1's
-/// code list is closed, and a layer that invented its own body would be a wire change dressed as a
-/// refactor. Asserted here on `error`, `detail` and the absence of `retry_after_s`.
-///
-/// **Mutations this kills:** deleting the `.layer(from_fn_with_state(..))` call from
-/// `control::router`; re-introducing any exemption in `require_operator_credential`; returning a
-/// bare `StatusCode::UNAUTHORIZED` from the layer instead of `ApiError::BadCredential`; emptying or
-/// shrinking `CONTROL_PLANE_ROUTES` (the count floor below).
+/// **Mutations this kills:** deleting the layer (401 becomes 404 or 405); narrowing it to a
+/// `route_layer` or to some routes; adding an exemption of any shape in
+/// `require_operator_credential`; answering a bare 401 without the error body.
 #[tokio::test]
-async fn every_control_route_requires_the_operator_credential() {
-    use tessera_server::control::CONTROL_PLANE_ROUTES;
-
+async fn every_path_on_the_control_listener_needs_the_credential() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
-    let mut checked = 0usize;
-    for (method, path) in CONTROL_PLANE_ROUTES {
-        checked += 1;
+    let mounted = [
+        ("POST", "/control/ingest"),
+        ("POST", "/control/changes"),
+        ("GET", "/control/status"),
+        ("POST", "/control/flush"),
+        ("POST", "/control/compact"),
+        ("PUT", "/control/layers"),
+        ("DELETE", "/control/layers/topics"),
+        ("PUT", "/control/attributes"),
+        ("PUT", "/control/vocabularies/genre"),
+        ("PATCH", "/control/vocabularies/genre/values"),
+        ("PUT", "/control/views/quarter/2026-Q3"),
+        ("DELETE", "/control/views/quarter/2026-Q3"),
+        ("PUT", "/control/view_groups/quarter"),
+        ("PUT", "/control/views/plain"),
+        ("PUT", "/control/layers/topics/artifacts"),
+        ("PATCH", "/control/layers/topics/artifacts"),
+        ("POST", "/control/faults/arm"),
+        ("GET", "/control/faults/arrivals"),
+        ("POST", "/control/faults/release"),
+    ];
+    let unrouted = [
+        "/healthz",
+        "/readyz",
+        "/healthz/",
+        "/healthzz",
+        "/readyz/x",
+        "/control/healthz",
+        "/no-such-route",
+    ]
+    .map(|path| ("GET", path));
+
+    for (method, path) in mounted.into_iter().chain(unrouted) {
         let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
         for credential in [None, Some("not-the-operator-credential")] {
             let mut req = server
@@ -3517,90 +3119,113 @@ async fn every_control_route_requires_the_operator_credential() {
             assert_eq!(
                 resp.status(),
                 401,
-                "{method} {path} answered {} for credential {credential:?}; every control route, \
-                 without exception, must be refused at the router",
-                resp.status()
+                "{method} {path} with credential {credential:?} must meet the credential check"
             );
             let body: serde_json::Value = resp.json().await.unwrap();
-            assert_eq!(
-                body["error"], "bad-credential",
-                "{method} {path} must answer ApiError::BadCredential's own body, unchanged: {body}"
-            );
-            assert_eq!(body["detail"], "missing or invalid bearer credential");
-            assert!(
-                body.get("retry_after_s").is_none(),
-                "a 401 carries no retry hint: {body}"
-            );
+            assert_eq!(body["error"], "bad-credential", "{method} {path}: {body}");
+            assert!(body.get("retry_after_s").is_none(), "{method} {path}: {body}");
         }
     }
-    assert_eq!(
-        checked,
-        CONTROL_PLANE_ROUTES.len(),
-        "the loop must visit every entry — there is no exemption left to skip one"
-    );
-    assert!(
-        checked >= 3,
-        "the route list has lost its /control/* entries; it is the only thing this test enumerates"
-    );
 }
 
-/// **No path on the control listener answers without the credential — routed, unrouted, or a health
-/// probe.**
-///
-/// The weaker property worth naming, because it is what an exemption list would reduce this to: that
-/// paths *nearly* spelled `/healthz` fall through to the credential check rather than out of it.
-/// There is no exemption to be nearly-matched, so what is asserted is the stronger rule directly —
-/// an arbitrary path answers 401. The near-miss spellings are in the list anyway, not because
-/// matching is a risk but because they are the exact strings a reintroduced exemption would be
-/// written against; and `/healthz` and `/readyz` are themselves *in* the list.
-///
-/// The unrouted paths carry the second half: the layer sits ahead of the router's 404, so probing
-/// the plane's surface unauthenticated yields nothing — an unauthenticated caller cannot even
-/// discover that `/healthz` was removed. That is a consequence of `Router::layer` rather than a
-/// goal, and it is pinned here so a future change to how the layer is mounted cannot flip it to 404
-/// unnoticed.
-///
-/// **Mutations this kills:** re-introducing an exemption list of any shape in
-/// `require_operator_credential` (the `/healthz`, `/readyz` legs go 200 or 404); moving the layer to
-/// a per-route `route_layer` (every unrouted leg goes 404); deleting the layer (401 → 404/405).
+/// **A JSON body of the wrong shape, or a valid one carrying a field the route does not define, is
+/// refused with the error envelope and `contract` on every control route that takes one, and so is
+/// a query string that does not deserialise.** The refused arm leaves its site unarmed: a
+/// suppression afterwards is acknowledged and never reaches the site.
 #[tokio::test]
-async fn every_path_on_the_control_listener_needs_the_credential() {
+async fn a_body_or_query_of_the_wrong_shape_is_a_contract_refusal_on_every_control_route() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let (server, _faults) = serve_with_faults(&tmp).await;
 
-    for path in [
-        "/healthz",
-        "/readyz",
-        "/healthz/",
-        "/healthzz",
-        "/readyz/x",
-        "/control/healthz",
-        "/no-such-route",
-    ] {
+    let wrong_shape = serde_json::json!({ "unexpected": 1 });
+    let routes = [
+        ("PUT", "/control/layers", wrong_shape.clone()),
+        ("PUT", "/control/attributes", wrong_shape.clone()),
+        ("PUT", "/control/vocabularies/genre", wrong_shape.clone()),
+        ("PATCH", "/control/vocabularies/genre/values", wrong_shape.clone()),
+        ("PUT", "/control/view_groups/quarter", wrong_shape.clone()),
+        ("PUT", "/control/views/plain", wrong_shape.clone()),
+        ("PUT", "/control/views/quarter/2026-Q3", wrong_shape.clone()),
+        ("POST", "/control/changes", wrong_shape.clone()),
+        ("POST", "/control/faults/arm", wrong_shape),
+        (
+            "POST",
+            "/control/changes",
+            serde_json::json!([{
+                "op": "suppress", "match": { "id": "999999" }, "unknown_field": 1
+            }]),
+        ),
+        (
+            "POST",
+            "/control/faults/arm",
+            serde_json::json!({ "site": "after_fsync", "unknown_field": 1 }),
+        ),
+    ];
+    for (method, path, body) in routes {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
         let resp = server
             .client
-            .get(server.control_url(path))
+            .request(method.clone(), server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            401,
-            "{path} must meet the credential check, not the router's 404 — the control plane is \
-             uniformly authenticated and exempts nothing"
-        );
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path} {body}");
     }
+    // Every control route that reads a query, sent a parameter it does not define and no body, so
+    // only the query can be refused.
+    let queries = [
+        ("POST", "/control/ingest?wiat=visible"),
+        ("POST", "/control/changes?wiat=visible"),
+        ("POST", "/control/flush?wiat=visible"),
+        ("PUT", "/control/layers?wiat=visible"),
+        ("DELETE", "/control/layers/clusters?wiat=visible"),
+        ("PUT", "/control/attributes?wiat=visible"),
+        ("PUT", "/control/vocabularies/genre?wiat=visible"),
+        ("PATCH", "/control/vocabularies/genre/values?wiat=visible"),
+        ("PUT", "/control/view_groups/quarter?wiat=visible"),
+        ("PUT", "/control/views/plain?wiat=visible"),
+        ("PUT", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("DELETE", "/control/views/quarter/2026-Q3?wiat=visible"),
+        ("PUT", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("PATCH", "/control/layers/clusters/artifacts?wiat=visible"),
+        ("GET", "/control/faults/arrivals?site=after_fsync&wiat=visible"),
+    ];
+    for (method, path) in queries {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let resp = server
+            .client
+            .request(method.clone(), server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused(resp, 422).await, "contract", "{method} {path}");
+    }
+
+    // An armed `after_fsync` would park this suppression, so the request would time out.
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&serde_json::json!([change(9, "suppress")]))
+        .send()
+        .await
+        .expect("the suppression is acknowledged, not parked at a site the refused arm armed");
+    assert_eq!(resp.status(), 200);
+    let arrivals: serde_json::Value = server
+        .client
+        .get(server.control_url("/control/faults/arrivals?site=after_fsync"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(arrivals["arrivals"], 0, "after_fsync is unarmed: {arrivals}");
 }
 
 /// **No request body is buffered on behalf of an unauthenticated caller** — the first and largest of
@@ -3625,9 +3250,9 @@ async fn every_path_on_the_control_listener_needs_the_credential() {
 ///
 /// **What this does NOT show, and is not claimed:** an *authenticated* caller still buffers up to
 /// `ingest_max_batch_bytes`, and the number of connections doing so is unbounded — `axum::serve`
-/// applies no connection cap. What one such connection may cost is bounded at startup by
-/// `config::INGEST_MAX_BATCH_BYTES_CEILING`; how many there may be is a deployment property (SA §8),
-/// and that constant's doc says why the two in-process alternatives were declined.
+/// applies no connection cap. What one such connection may cost is `ingest_max_batch_bytes`; how
+/// many there may be is a deployment property, and `control::ingest`'s doc says why the two
+/// in-process alternatives were declined.
 ///
 /// The timeout is in the **failing** path only; on a healthy build the 401 arrives in microseconds.
 #[tokio::test]
@@ -3635,18 +3260,7 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let mut sock = tokio::net::TcpStream::connect(server.control_addr)
         .await
@@ -3689,43 +3303,18 @@ async fn an_unauthenticated_caller_never_gets_a_byte_of_body_buffered() {
 // Group commit on the deny lane
 // =================================================================================================
 
-/// **One request of N denies costs one fsync, not N.**
-///
-/// This is the whole of the deny lane's group commit, and it needs both halves of the mechanism to
-/// hold: `run_changes` must enqueue the request before collecting any receipt, and the executor's
-/// deny drain must gather what it finds into one window. Break either and the count goes back to N
-/// — a handler that waits per item leaves the executor one entry to gather, and an executor that
-/// commits per entry finds a full queue and ignores it.
-///
-/// **Asserted on `wal_fsyncs`, off `/control/status`, not on a proxy.** Elapsed time would pass on
-/// a fast disk with the amortisation entirely absent; the fsync count is exact and is the claim.
-///
-/// The bound is `2 × ceil(N / DENY_WINDOW_MAX_ENTRIES)` rather than `1`, and the slack is one
-/// specific, measured thing rather than tolerance: the executor can wake on the first item's
-/// doorbell and commit a window of one while the handler is still enqueueing the rest, so a chunk
-/// costs a head window plus its own. The observed value is in the message, so a regression that
-/// stays inside the bound is still visible to whoever reads a failure here.
+/// **One request of N denies is one WAL record and one fsync.** The request is written whole or
+/// not at all, and asserted on the counts `/control/status` publishes rather than on elapsed time,
+/// which would pass on a fast disc with the amortisation absent.
 #[tokio::test]
 async fn a_change_batch_of_n_costs_one_fsync() {
     const N: u64 = 200;
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let items: Vec<serde_json::Value> = (0..N)
-        .map(|i| serde_json::json!({ "external_id": b64(i), "op": "suppress" }))
+        .map(|i| change(i, "suppress"))
         .collect();
 
     let resp = server
@@ -3744,18 +3333,7 @@ async fn a_change_batch_of_n_costs_one_fsync() {
     let appends = after["write_executor"]["wal_appends"].as_u64().unwrap()
         - before["write_executor"]["wal_appends"].as_u64().unwrap();
 
-    let chunks = N.div_ceil(tessera_engine::DENY_WINDOW_MAX_ENTRIES as u64);
-    assert!(
-        fsyncs <= 2 * chunks,
-        "{N} denies in one request must be group-committed: expected at most {} fsyncs, got \
-         {fsyncs}. At one fsync per item this would be {N}, which is the ~300 denies/second \
-         ceiling the deny window exists to remove",
-        2 * chunks
-    );
-    assert_eq!(
-        appends, N,
-        "and exactly one WAL record per item — the window amortises the fsync, never the record"
-    );
+    assert_eq!((appends, fsyncs), (1, 1), "{N} denies in one request are one record");
 }
 
 /// **A deny batch whose append fails applies the `Delete`/`Suppress` items and nothing else.**
@@ -3790,12 +3368,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
+    let bundle_root = build_fixture(tmp.path(), N_ITEMS);
     let wal_dir = tmp.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let server = spawn_server(
@@ -3805,8 +3378,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     )
     .await;
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
     let viewport_req = serde_json::json!({
         "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
@@ -3829,14 +3401,12 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     };
     let before = visible(token.clone(), viewport_req.clone()).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
-
     // B, durably suppressed while the WAL still works.
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .json(&serde_json::json!([{ "external_id": b64(9), "op": "suppress" }]))
+        .json(&serde_json::json!([change(9, "suppress")]))
         .send()
         .await
         .unwrap();
@@ -3854,9 +3424,9 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(5),  "op": "suppress" },
-            { "external_id": b64(9),  "op": "unsuppress" },
-            { "external_id": b64(11), "op": "suppress" },
+            change(5, "suppress"),
+            change(9, "unsuppress"),
+            change(11, "suppress"),
         ]))
         .send()
         .await
@@ -3868,10 +3438,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
         detail.contains("may be in force"),
         "the two suppressions took hold and the operator must be told; got: {detail}"
     );
-    assert!(
-        detail.contains("NOT applied"),
-        "the unsuppress did not take hold and the operator must be told; got: {detail}"
-    );
+    assert_eq!(body["error"], "fail-closed");
 
     assert_eq!(
         visible(token.clone(), viewport_req.clone()).await,
@@ -3880,6 +3447,498 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
          whose append failed applies nothing — applying it re-exposes a suppressed item behind a \
          response that says nothing was applied, and a restart re-hides it)"
     );
+}
+
+// =================================================================================================
+// The shape of /control/status
+// =================================================================================================
+
+/// Every key path `/control/status` serves and each JSON type it takes there across the reads
+/// [`control_status_serves_its_pinned_shape`] makes. `*` stands for every element of an array.
+const STATUS_SHAPE: &[(&str, &str)] = &[
+    ("/bulk", "object"),
+    ("/bulk/admission", "integer"),
+    ("/bulk/in_flight", "integer"),
+    ("/bulk/queue", "integer"),
+    ("/bulk/shed_total", "integer"),
+    ("/bulk/waiting", "integer"),
+    ("/compaction", "object"),
+    ("/compaction/fold_failures", "integer"),
+    ("/compaction/fold_refusals", "integer"),
+    ("/compaction/fold_refusals_by_gate", "object"),
+    ("/compaction/fold_refusals_by_gate/insufficient_disc", "integer"),
+    ("/compaction/fold_refusals_by_gate/insufficient_memory", "integer"),
+    ("/compaction/fold_refusals_by_gate/nothing_to_fold", "integer"),
+    ("/compaction/fold_refusals_by_gate/overlay_diverged", "integer"),
+    ("/compaction/fold_refusals_by_gate/stepped_down", "integer"),
+    ("/compaction/fold_refusals_by_gate/wal_poisoned", "integer"),
+    ("/compaction/fold_requested", "bool"),
+    ("/compaction/folds", "integer"),
+    ("/compaction/last_attr_bytes_read", "integer"),
+    ("/compaction/last_attr_bytes_written", "integer"),
+    ("/compaction/last_refusal", "null|object"),
+    ("/compaction/last_refusal/at_unix", "integer"),
+    ("/compaction/last_refusal/gate", "string"),
+    ("/compaction/last_refusal/had_bytes", "integer|null"),
+    ("/compaction/last_refusal/need_bytes", "integer|null"),
+    ("/compaction/last_rss_bytes", "integer"),
+    ("/compaction/last_secs", "integer"),
+    ("/compaction/live_rows", "integer"),
+    ("/compaction/passes", "array"),
+    ("/compaction/passes/*", "object"),
+    ("/compaction/passes/*/anon_bytes", "integer"),
+    ("/compaction/passes/*/ms", "integer"),
+    ("/compaction/passes/*/pass", "string"),
+    ("/compaction/passes/*/rss_bytes", "integer"),
+    ("/compute", "object"),
+    ("/compute/admission", "integer"),
+    ("/compute/in_flight", "integer"),
+    ("/compute/queue", "integer"),
+    ("/compute/shed_total", "integer"),
+    ("/compute/streaming", "integer"),
+    ("/compute/waiting", "integer"),
+    ("/derived_cache", "object"),
+    ("/derived_cache/bytes", "integer"),
+    ("/derived_cache/entries", "integer"),
+    ("/derived_cache/evictions", "integer"),
+    ("/derived_cache/hit_rate", "float|null"),
+    ("/derived_cache/hits", "integer"),
+    ("/derived_cache/misses", "integer"),
+    ("/entity_id_high_water", "integer"),
+    ("/fragment_cache", "object"),
+    ("/fragment_cache/bound_bytes", "integer"),
+    ("/fragment_cache/building_refusals", "integer"),
+    ("/fragment_cache/bytes", "integer"),
+    ("/fragment_cache/entries", "integer"),
+    ("/fragment_cache/evictions", "integer"),
+    ("/fragment_cache/hits", "integer"),
+    ("/fragment_cache/misses", "integer"),
+    ("/fragment_cache/oversized_admissions", "integer"),
+    ("/fragment_cache/rebuilds", "integer"),
+    ("/fragment_cache/thrashing", "bool"),
+    ("/fragment_cache/young_evictions", "integer"),
+    ("/fragmentation", "object"),
+    ("/fragmentation/allocation", "object"),
+    ("/fragmentation/allocation/containers", "integer"),
+    ("/fragmentation/allocation/postings", "integer"),
+    ("/fragmentation/allocation/rows", "integer"),
+    ("/fragmentation/allocation/runs", "integer"),
+    ("/fragmentation/allocation/scope", "string"),
+    ("/fragmentation/allocation/windows", "integer"),
+    ("/fragmentation/containers", "integer"),
+    ("/fragmentation/postings", "integer"),
+    ("/fragmentation/postings_per_container", "float|null"),
+    ("/fragmentation/rows", "integer"),
+    ("/fragmentation/run_ratio", "float|null"),
+    ("/fragmentation/runs", "integer"),
+    ("/fragmentation/scope", "string"),
+    ("/fragmentation/tiers", "integer"),
+    ("/heap", "object"),
+    ("/heap/anon_bytes", "integer"),
+    ("/heap/file_bytes", "integer"),
+    ("/heap/last_trim_micros", "integer"),
+    ("/heap/last_trim_returned_bytes", "integer"),
+    ("/heap/resident_bytes", "integer"),
+    ("/heap/trim_baseline_bytes", "integer"),
+    ("/heap/trim_growth_bytes", "integer"),
+    ("/heap/trims", "integer"),
+    ("/ingest", "object"),
+    ("/ingest/admission", "integer"),
+    ("/ingest/in_flight", "integer"),
+    ("/ingest/shed_total", "integer"),
+    ("/limits", "object"),
+    ("/limits/changes", "object"),
+    ("/limits/changes/max_body_bytes", "integer"),
+    ("/limits/changes/max_changes_per_request", "integer"),
+    ("/limits/changes/route", "string"),
+    ("/limits/declarations", "object"),
+    ("/limits/declarations/max_body_bytes", "integer"),
+    ("/limits/declarations/max_records_per_request", "integer"),
+    ("/limits/declarations/route", "string"),
+    ("/limits/grow", "object"),
+    ("/limits/grow/max_body_bytes", "integer"),
+    ("/limits/grow/max_members_per_request", "integer"),
+    ("/limits/grow/route", "string"),
+    ("/limits/ingest", "object"),
+    ("/limits/ingest/max_batch_bytes", "integer"),
+    ("/limits/ingest/max_batch_rows", "integer"),
+    ("/limits/ingest/route", "string"),
+    ("/limits/publish", "object"),
+    ("/limits/publish/max_artifacts_per_request", "integer"),
+    ("/limits/publish/max_body_bytes", "integer"),
+    ("/limits/publish/max_excluded_per_request", "integer"),
+    ("/limits/publish/max_shape_vertices", "integer"),
+    ("/limits/publish/route", "string"),
+    ("/masked_count_cache", "object"),
+    ("/masked_count_cache/bytes", "integer"),
+    ("/masked_count_cache/entries", "integer"),
+    ("/masked_count_cache/evictions", "integer"),
+    ("/masked_count_cache/hits", "integer"),
+    ("/masked_count_cache/misses", "integer"),
+    ("/occupancy", "object"),
+    ("/occupancy/bound_bytes", "integer"),
+    ("/occupancy/bytes", "integer"),
+    ("/occupancy/entries", "integer"),
+    ("/occupancy/evictions", "integer"),
+    ("/occupancy/hits", "integer"),
+    ("/occupancy/misses", "integer"),
+    ("/occupancy/walks", "integer"),
+    ("/overlay", "object"),
+    ("/overlay/depth", "integer"),
+    ("/overlay/retirable", "integer"),
+    ("/overlay/soft_limit_alarms", "integer"),
+    ("/partitions", "array"),
+    ("/partitions/*", "object"),
+    ("/partitions/*/partition", "string"),
+    ("/partitions/*/readiness", "bool"),
+    ("/partitions/*/segments_version", "integer"),
+    ("/partitions/*/watermark", "integer"),
+    ("/projection_builds_by_route", "object"),
+    ("/projection_builds_by_route/complement", "integer"),
+    ("/projection_builds_by_route/split", "integer"),
+    ("/projection_builds_by_route/walk", "integer"),
+    ("/projection_builds_by_route/whole_domain", "integer"),
+    ("/publication", "integer"),
+    ("/region_cache", "object"),
+    ("/region_cache/bound_bytes", "integer"),
+    ("/region_cache/building_refusals", "integer"),
+    ("/region_cache/bytes", "integer"),
+    ("/region_cache/entries", "integer"),
+    ("/region_cache/evictions", "integer"),
+    ("/region_cache/hits", "integer"),
+    ("/region_cache/misses", "integer"),
+    ("/region_cache/waits_satisfied", "integer"),
+    ("/row_projection_cache", "object"),
+    ("/row_projection_cache/bound_bytes", "integer"),
+    ("/row_projection_cache/building_refusals", "integer"),
+    ("/row_projection_cache/bytes", "integer"),
+    ("/row_projection_cache/entries", "integer"),
+    ("/row_projection_cache/evictions", "integer"),
+    ("/row_projection_cache/hits", "integer"),
+    ("/row_projection_cache/misses", "integer"),
+    ("/row_projection_cache/oversized_admissions", "integer"),
+    ("/row_projection_cache/thrashing", "bool"),
+    ("/row_projection_cache/waiters_now", "integer"),
+    ("/row_projection_cache/waits_satisfied", "integer"),
+    ("/row_projection_cache/young_evictions", "integer"),
+    ("/segments", "array"),
+    ("/segments/*", "object"),
+    ("/segments/*/count", "integer"),
+    ("/segments/*/partition", "string"),
+    ("/segments/*/view", "string"),
+    ("/sessions", "object"),
+    ("/sessions/retained", "integer"),
+    ("/sessions/sweep_at", "integer"),
+    ("/sessions/sweeps", "integer"),
+    ("/sessions/swept_total", "integer"),
+    ("/suggest_sets", "object"),
+    ("/suggest_sets/builds", "integer"),
+    ("/suggest_sets/bytes", "integer"),
+    ("/suggest_sets/declined", "integer"),
+    ("/suggest_sets/discarded", "integer"),
+    ("/suggest_sets/entries", "integer"),
+    ("/suggest_sets/evictions", "integer"),
+    ("/suggest_sets/hits", "integer"),
+    ("/suggest_sets/in_flight", "integer"),
+    ("/suggest_sets/misses", "integer"),
+    ("/write_executor", "object"),
+    ("/write_executor/apply_nanos_max", "integer"),
+    ("/write_executor/apply_nanos_total", "integer"),
+    ("/write_executor/bench_timing", "bool"),
+    ("/write_executor/coalesce_in_flight", "bool"),
+    ("/write_executor/coalesces", "integer"),
+    ("/write_executor/deny_submitted", "integer"),
+    ("/write_executor/flush", "object"),
+    ("/write_executor/flush/buffered_items", "integer"),
+    ("/write_executor/flush/flush_failures", "integer"),
+    ("/write_executor/flush/flush_requested", "bool"),
+    ("/write_executor/flush/flush_skips", "integer"),
+    ("/write_executor/flush/flushable_items", "integer"),
+    ("/write_executor/flush/flushes", "integer"),
+    ("/write_executor/flush/in_flight", "bool"),
+    ("/write_executor/flush/overlay_publications", "integer"),
+    ("/write_executor/flush/refresh_in_flight", "bool"),
+    ("/write_executor/flush/refreshes", "integer"),
+    ("/write_executor/flush/ticks", "integer"),
+    ("/write_executor/flush_stages", "object"),
+    ("/write_executor/flush_stages/bench_timing", "bool"),
+    ("/write_executor/flush_stages/executions", "integer"),
+    ("/write_executor/flush_stages/executor_nanos", "object"),
+    ("/write_executor/flush_stages/executor_nanos/  .deny_state", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/  .manifest_clone", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/  .vocab_extensions", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/artifacts", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/buffer_rebase", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/compose", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/denied", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/discarded", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/dispatch", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/drop_superseded", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/manifest", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/manifest_commit", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/plan", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/publish_wall", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/rotate", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/shapes_install", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/swap", "integer"),
+    ("/write_executor/flush_stages/executor_nanos/with_segment", "integer"),
+    ("/write_executor/flush_stages/flushes", "integer"),
+    ("/write_executor/flush_stages/pool_nanos", "object"),
+    ("/write_executor/flush_stages/pool_nanos/delta_tier", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/digests", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/drop_plan", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/entity_terms", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/failed", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/filter_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/pool_wall", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/promote", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/record_extent", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/reopen", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/rows", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/scoped_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/segment", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/shapes", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_dict", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_extents", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_postings", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_presence", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_rows", "integer"),
+    ("/write_executor/flush_stages/pool_nanos/text_tokenise_terms", "integer"),
+    ("/write_executor/flush_stages/rows_executed", "integer"),
+    ("/write_executor/flush_stages/rows_published", "integer"),
+    ("/write_executor/foreign_side_manifests", "integer"),
+    ("/write_executor/merge_in_flight", "bool"),
+    ("/write_executor/merges", "integer"),
+    ("/write_executor/posture", "string"),
+    ("/write_executor/ready", "bool"),
+    ("/write_executor/stage_nanos", "object"),
+    ("/write_executor/stage_nanos/.buf_insert", "integer"),
+    ("/write_executor/stage_nanos/.wal_pos", "integer"),
+    ("/write_executor/stage_nanos/admit", "integer"),
+    ("/write_executor/stage_nanos/allocate", "integer"),
+    ("/write_executor/stage_nanos/apply_rows", "integer"),
+    ("/write_executor/stage_nanos/buffer_clone", "integer"),
+    ("/write_executor/stage_nanos/derive_records", "integer"),
+    ("/write_executor/stage_nanos/record_batch", "integer"),
+    ("/write_executor/stage_nanos/submit→receipt", "integer"),
+    ("/write_executor/stage_nanos/swap", "integer"),
+    ("/write_executor/stage_nanos/vocab_mint", "integer"),
+    ("/write_executor/stage_nanos/wal_append", "integer"),
+    ("/write_executor/stage_nanos/wal_fsync", "integer"),
+    ("/write_executor/wal", "object"),
+    ("/write_executor/wal/bytes", "integer"),
+    ("/write_executor/wal/members", "integer"),
+    ("/write_executor/wal/pin_span_bytes", "integer"),
+    ("/write_executor/wal/pinned_at", "integer|null"),
+    ("/write_executor/wal/pinned_by", "null|string"),
+    ("/write_executor/wal/position", "integer"),
+    ("/write_executor/wal/samples", "integer"),
+    ("/write_executor/wal_appends", "integer"),
+    ("/write_executor/wal_fsyncs", "integer"),
+    ("/write_executor/wal_recoveries", "integer"),
+    ("/write_executor/work_completed", "integer"),
+    ("/write_executor/work_depth", "integer"),
+    ("/write_executor/work_in_flight_nanos", "integer"),
+    ("/write_executor/work_service_nanos_ewma", "integer"),
+    ("/write_executor/work_submitted", "integer"),
+];
+
+/// Types in [`STATUS_SHAPE`] that no read in the test shows: a fold is refused with byte figures
+/// only when the host is short of memory or disc.
+const STATUS_TYPES_UNREACHED: &[(&str, &str)] = &[
+    ("/compaction/last_refusal/had_bytes", "integer"),
+    ("/compaction/last_refusal/need_bytes", "integer"),
+];
+
+type Shape = std::collections::BTreeMap<String, std::collections::BTreeSet<&'static str>>;
+
+/// Records each key path under `path` in `value` with the JSON type found there.
+fn status_shape(value: &serde_json::Value, path: &str, shape: &mut Shape) {
+    use serde_json::Value;
+    let kind = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_f64() => "float",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    shape.entry(path.to_owned()).or_default().insert(kind);
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                status_shape(item, &format!("{path}/*"), shape);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                status_shape(field, &format!("{path}/{key}"), shape);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `/control/status` serves only the key paths and types in [`STATUS_SHAPE`], serves a key
+/// whenever it serves the object holding it, and shows every pinned type in one of three reads:
+/// fresh, with a pinned log and a derived-geometry lookup, and after a flush, a fold and a refused
+/// fold.
+#[tokio::test]
+async fn control_status_serves_its_pinned_shape() {
+    const LAYER: &str = "clusters/status";
+    let tmp = TempDir::new().unwrap();
+    // A one-second tick samples the log's gauge each second, so a pin shows within one.
+    let mut config = default_engine_config();
+    config.flush_max_age_secs = 1;
+    let (server, faults) = serve_with_faults_and_config(&tmp, config).await;
+    let mut reads = vec![control_status(&server).await];
+
+    // A growth holds the log until a fold, and a hull is derived for each artifact a viewport
+    // serves.
+    let mut layer = flat_layer(LAYER);
+    layer["content"]["computed"] = serde_json::json!(["hull"]);
+    register(&server, layer).await;
+    let artifacts_url = server.control_url(&format!(
+        "/control/layers/{}/artifacts",
+        LAYER.replace('/', "%2F")
+    ));
+    let resp = server
+        .client
+        .put(&artifacts_url)
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!({
+            "artifacts": [{ "key": "a", "members": members(0..100) }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().await.unwrap());
+    tick(&server).await;
+    let resp = server
+        .client
+        .patch(&artifacts_url)
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!({
+            "artifacts": [{ "key": "a", "members": members(100..200) }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    tick(&server).await;
+    let token = token_for(&server, &["0"]).await;
+    // Each body is read to its end, which is where the artifact sweep derives the hull.
+    for _ in 0..2 {
+        let resp = settled(async || {
+            server
+                .client
+                .post(server.viewer_url("/v1/viewport"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "layers": [LAYER]
+                }))
+                .send()
+                .await
+                .unwrap()
+        })
+        .await;
+        resp.bytes().await.unwrap();
+    }
+    wait_for(
+        "a pinned log",
+        std::time::Duration::from_secs(60),
+        async || {
+            let wal = control_status(&server).await["write_executor"]["wal"].clone();
+            match wal["pinned_by"].is_string() {
+                true => Ok(()),
+                false => Err(format!("wal {wal}")),
+            }
+        },
+    )
+    .await;
+    let pinned_and_derived = control_status(&server).await;
+    assert!(
+        pinned_and_derived["derived_cache"]["hit_rate"].is_f64(),
+        "{pinned_and_derived}"
+    );
+    reads.push(pinned_and_derived);
+
+    flush_and_fold(&server, None).await;
+    // A torn append poisons the log for good, so the next fold is refused.
+    faults.fail_next_appends(1);
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&serde_json::json!([change(5, "suppress")]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let resp = server
+        .client
+        .post(server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    wait_for_executor(&server, "the fold refused", |now| now.fold_refusals > 0).await;
+    reads.push(control_status(&server).await);
+
+    let pinned: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> = STATUS_SHAPE
+        .iter()
+        .map(|(path, kinds)| (*path, kinds.split('|').collect()))
+        .collect();
+    let served: Vec<Shape> = reads
+        .iter()
+        .map(|status| {
+            let mut shape = Shape::new();
+            status_shape(status, "", &mut shape);
+            shape.remove("");
+            shape
+        })
+        .collect();
+    let mut seen = Shape::new();
+    for shape in &served {
+        for (path, kinds) in shape {
+            seen.entry(path.clone()).or_default().extend(kinds);
+        }
+    }
+    let listing: String = seen
+        .iter()
+        .map(|(path, kinds)| {
+            let kinds: Vec<&str> = kinds.iter().copied().collect();
+            format!("    ({path:?}, {:?}),\n", kinds.join("|"))
+        })
+        .collect();
+    for (read, shape) in served.iter().enumerate() {
+        for (path, kinds) in shape {
+            assert!(
+                pinned.get(path.as_str()).is_some_and(|pin| kinds.is_subset(pin)),
+                "read {read} serves {path} as {kinds:?}, pinned as {:?}; every read:\n{listing}",
+                pinned.get(path.as_str())
+            );
+        }
+        for path in pinned.keys() {
+            let holder = &path[..path.rfind('/').unwrap()];
+            let held = holder.is_empty() || shape.get(holder).is_some_and(|k| k.contains("object"));
+            assert!(
+                !held || shape.contains_key(*path),
+                "read {read} serves {holder} without {path}"
+            );
+        }
+    }
+    for (path, kinds) in &pinned {
+        for kind in kinds {
+            let shown = seen.get(*path).is_some_and(|k| k.contains(kind));
+            assert!(
+                shown || STATUS_TYPES_UNREACHED.contains(&(*path, *kind)),
+                "no read serves {path} as {kind}; every read:\n{listing}"
+            );
+        }
+    }
 }
 
 // =================================================================================================
@@ -3899,18 +3958,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
 #[tokio::test]
 async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishes() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let before = control_status(&server).await;
     let frag = &before["fragmentation"];
@@ -3959,28 +4007,12 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
 
     // `POST /control/flush` pulls the tick forward, so the tier figure is testable without
     // waiting out a flush period.
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let frag = loop {
-        let now = control_status(&server).await;
-        if now["fragmentation"]["tiers"].as_u64().unwrap() > 0 {
-            break now["fragmentation"].clone();
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for the requested flush to publish a tier; last: {}",
-            now["fragmentation"]
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    tick(&server).await;
+    let frag = control_status(&server).await["fragmentation"].clone();
+    assert!(
+        frag["tiers"].as_u64().unwrap() > 0,
+        "the flush published a tier: {frag}"
+    );
     assert_eq!(frag["rows"], 3, "the tier covers the flushed rows");
     assert!(
         frag["run_ratio"].as_f64().is_some() && frag["postings_per_container"].as_f64().is_some(),
@@ -4011,18 +4043,7 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
 #[tokio::test]
 async fn control_status_publishes_the_live_segment_count_per_view() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // A build writes exactly one segment per (partition, view) — contracts §2.1.
     let before = control_status(&server).await;
@@ -4063,28 +4084,8 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
          something other than the set a viewport sweeps"
     );
 
-    let resp = server
-        .client
-        .post(server.control_url("/control/flush"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let after = loop {
-        let now = control_status(&server).await;
-        if now["segments"][0]["count"].as_u64().unwrap() > 1 {
-            break now;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for the requested flush to publish a segment; last: {}",
-            now["segments"]
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
+    tick(&server).await;
+    let after = control_status(&server).await;
     assert_eq!(after["segments"][0]["count"], 2);
 
     // The gauge is the generation's own set, not a counter that happens to agree with it today.
@@ -4107,30 +4108,17 @@ async fn control_status_publishes_the_live_segment_count_per_view() {
 /// one while answering 200. The column **name** must reach the caller: "your batch was rejected" is
 /// not actionable against a wide schema.
 ///
-/// The fixture bundle declares no scalars at all (`tessera-build` writes the array empty —
-/// contracts §2.2), so here every non-reserved column is undeclared.
+/// The fixture bundle declares only `id`, so here every other non-reserved column is undeclared.
 #[tokio::test]
 async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Two extra columns: one of a type the old code would have stored, one of a type it dropped in
     // silence. Both are undeclared, so both are refused — and the refusal is about the declaration,
     // not about the type.
     let access = access_column(["0"]);
     let schema = Arc::new(Schema::new(vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
@@ -4140,11 +4128,10 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(BinaryArray::from_iter_values([external_id_of(N_ITEMS + 1)])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(Float32Array::from_iter_values([10.0])),
             Arc::new(access),
-            Arc::new(arrow::array::UInt64Array::from_iter_values([7u64])),
+            Arc::new(UInt64Array::from_iter_values([7u64])),
             Arc::new(arrow::array::Date32Array::from_iter_values([19_000i32])),
         ],
     )
@@ -4173,10 +4160,6 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
         detail.contains("priority_score"),
         "the offending COLUMN NAME must reach the caller, not just a refusal: {detail}"
     );
-    assert!(
-        detail.contains("declared_scalars"),
-        "and it must say what the column failed against: {detail}"
-    );
     assert_eq!(
         control_status(&server).await["entity_id_high_water"],
         high_water_before,
@@ -4186,25 +4169,13 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
 
 /// `x-tessera-view` (contracts §3.4): a known view is accepted, an unknown one is `404`.
 ///
-/// **404, not 422**, because §3.1's code list is closed and its 404 row says "unknown `tessera_id`,
-/// node, external ID **or view**" — which is already what the viewer plane answers. §3.4's 422 is
+/// **404, not 422**: an unknown view is an unknown name, as the viewer plane answers it. A 422 is
 /// for *ambiguity*: a bundle with two or more views and no header. This fixture has one view, so
 /// the ambiguous case is unreachable here and the omitted header is accepted.
 #[tokio::test]
 async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     let high_water_before = control_status(&server).await["entity_id_high_water"].clone();
 
@@ -4264,37 +4235,16 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     );
 }
 
-/// `over_bound_ids` is **base64**, like every other external-ID surface on this plane.
-///
-/// External ids are arbitrary bytes (contracts §1) and JSON has no binary type. `from_utf8_lossy`
-/// replaces every byte that is not valid UTF-8 with U+FFFD, so an operator investigating a
-/// data-quality warning was handed replacement characters instead of an id they could look up —
-/// and identity is the whole of what makes bounds-warn-never-exclude (§6.2 r16) usable.
-///
-/// The id here contains `0xFF`, which is not valid UTF-8 in any position, so the lossy encoding is
-/// demonstrably lossy rather than merely differently spelled.
+/// `over_bound_rows` names each row whose labels resolve past the plugin's bound by its position in
+/// the batch, and bounds warn, never exclude: the batch is accepted, the over-bound row included.
 #[tokio::test]
-async fn over_bound_ids_are_base64_not_lossy_utf8() {
-    use base64::Engine as _;
-
+async fn over_bound_rows_names_each_over_bound_row_by_its_position() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
     // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
     let labels = (0..4_097).map(|i| format!("t{i}")).collect::<Vec<_>>();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let external_id: &[u8] = &[0xFF, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0x00];
 
     let resp = server
         .client
@@ -4302,59 +4252,33 @@ async fn over_bound_ids_are_base64_not_lossy_utf8() {
         .bearer_auth(OPERATOR_CREDENTIAL)
         .header("x-tessera-batch-id", "over-bound-1")
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(build_ingest_batch_labels(external_id, &labels))
+        .body(build_ingest_batch_labels(&[&["0"], &labels, &["0"]]))
         .send()
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         200,
-        "bounds warn, never exclude — the item is indexed regardless (§6.2 r16)"
+        "bounds warn, never exclude — the item is indexed regardless"
     );
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["over_bound"], 1);
-
-    let listed = json["over_bound_ids"][0].as_str().unwrap();
-    assert_eq!(
-        listed,
-        base64::engine::general_purpose::STANDARD.encode(external_id),
-        "the id must round-trip: an operator has to be able to decode it back to the bytes they \
-         sent. Got {listed}"
-    );
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(listed)
-            .unwrap(),
-        external_id,
-        "and it must decode to exactly those bytes — 0xFF has no lossy encoding that survives"
-    );
+    assert_eq!(json["created"], 3, "{json}");
+    assert_eq!(json["over_bound"], 1, "{json}");
+    assert_eq!(json["over_bound_rows"], serde_json::json!([1]), "{json}");
 }
 
-/// **The predicate op is withdrawn** (decision 0047): edit is delete + re-ingest. A request
-/// naming it is a 422 whose detail says what to do instead — wholesale, nothing enqueued.
+/// A change naming the `predicate` op, which does not exist, is a 422.
 #[tokio::test]
-async fn the_predicate_op_is_withdrawn_with_a_422_naming_the_flow() {
+async fn the_predicate_op_is_refused_with_a_422() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = serve(&tmp).await;
 
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
     let resp = server
         .client
         .post(server.control_url("/control/changes"))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&serde_json::json!([
-            { "external_id": b64(3), "op": "predicate", "access": "0" },
+            { "op": "predicate", "match": { "id": member(3) }, "access": "0" },
         ]))
         .send()
         .await
@@ -4362,33 +4286,15 @@ async fn the_predicate_op_is_withdrawn_with_a_422_naming_the_flow() {
     assert_eq!(resp.status(), 422);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "contract");
-    let detail = body["detail"].as_str().unwrap();
-    assert!(
-        detail.contains("delete + re-ingest") && detail.contains("0047"),
-        "the refusal must say what replaced the op; got: {detail}"
-    );
 }
 
-/// **A deleted holder does not block re-ingest; a suppressed one does** (decision 0047, at the
-/// handler's own duplicate check). Deletion forgets the binding — our retention of it must never
-/// refuse a user's write — while suppression is temporary hiding, and re-ingesting a
-/// byte-identical copy past one is the copy-no-deny-can-reach hole the check exists to close.
+/// **A deleted holder of an `id` names nothing; a suppressed one is named.** Deletion forgets the
+/// item, so a row carrying its `id` creates a new one, while suppression is temporary hiding, and a
+/// byte-identical row past one names the suppressed item rather than making a copy no deny reaches.
 #[tokio::test]
-async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
+async fn a_deleted_holder_names_nothing_and_a_suppressed_one_is_named() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let b64 = |id: u64| base64::engine::general_purpose::STANDARD.encode(external_id_of(id));
+    let server = serve(&tmp).await;
     let ingest = |batch: &'static str, ids: Vec<u64>| {
         let client = server.client.clone();
         let url = server.control_url("/control/ingest");
@@ -4409,15 +4315,15 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
                 .unwrap()
         }
     };
-    let change = |op: &'static str, id: u64| {
+    let apply = |op: &'static str, id: u64| {
         let client = server.client.clone();
         let url = server.control_url("/control/changes");
-        let ext = b64(id);
+        let item = change(id, op);
         async move {
             client
                 .post(url)
                 .bearer_auth(OPERATOR_CREDENTIAL)
-                .json(&serde_json::json!([{ "external_id": ext, "op": op }]))
+                .json(&serde_json::json!([item]))
                 .send()
                 .await
                 .unwrap()
@@ -4425,27 +4331,25 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
     };
 
     let fresh = N_ITEMS + 100;
-    assert_eq!(ingest("rebind-1", vec![fresh]).await.status(), 200);
+    let first = ingest("rebind-1", vec![fresh]).await;
+    assert_eq!(first.status(), 200);
+    let first: serde_json::Value = first.json().await.unwrap();
 
-    // Suppressed: still a duplicate — 409, batch has no effect.
-    assert_eq!(change("suppress", fresh).await.status(), 200);
-    let resp = ingest("rebind-2", vec![fresh]).await;
-    assert_eq!(
-        resp.status(),
-        409,
-        "a suppressed holder still collides: suppression is temporary hiding, not deletion"
-    );
+    // Suppressed: the item still holds its `id`, so the same row names it and changes
+    // nothing. Suppression is temporary hiding, not deletion, and no copy is made past it.
+    assert_eq!(apply("suppress", fresh).await.status(), 200);
+    let again: serde_json::Value = ingest("rebind-2", vec![fresh]).await.json().await.unwrap();
+    assert_eq!(again["unchanged"], 1, "{again}");
+    assert_eq!(again["tessera_ids"], first["tessera_ids"], "{again}");
 
-    // Deleted: forgotten — the same bytes under the same external id are accepted.
-    assert_eq!(change("delete", fresh).await.status(), 200);
-    assert_eq!(
-        ingest("rebind-3", vec![fresh]).await.status(),
-        200,
-        "a deleted holder must not block a user's write (decision 0047)"
-    );
+    // Deleted: forgotten, so the same row creates a new item.
+    assert_eq!(apply("delete", fresh).await.status(), 200);
+    let reborn: serde_json::Value = ingest("rebind-3", vec![fresh]).await.json().await.unwrap();
+    assert_eq!(reborn["created"], 1, "a deleted holder names nothing: {reborn}");
+    assert_ne!(reborn["tessera_ids"], first["tessera_ids"], "{reborn}");
 
-    // And the re-bound id is operable: a suppress addresses the new life, answered 200.
-    assert_eq!(change("suppress", fresh).await.status(), 200);
+    // And the `id` names the new item: a suppress addresses it, answered 200.
+    assert_eq!(apply("suppress", fresh).await.status(), 200);
 }
 
 /// Every declarable plain scalar type, by the manifest spelling `contracts §2.6` admits it under.
@@ -4572,82 +4476,23 @@ fn scalar_tail_column(
 
 /// A bundle whose schema declares the full scalar tail, over [`SCALAR_TAIL_N`] base items.
 fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
-    use parquet::arrow::ArrowWriter;
-    use tessera_build::{build, BuildArgs};
-
     let points = tmp.join("points.parquet");
     let pairs = tmp.join("pairs.parquet");
     let n = SCALAR_TAIL_N as usize;
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ];
-    let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(arrow::array::UInt64Array::from_iter_values(
-            0..SCALAR_TAIL_N,
-        )),
-        Arc::new(arrow::array::Float64Array::from_iter_values(
-            (0..SCALAR_TAIL_N).map(|e| ((e * 37) % 1000) as f64),
-        )),
-        Arc::new(arrow::array::Float64Array::from_iter_values(
-            (0..SCALAR_TAIL_N).map(|e| ((e * 53) % 1000) as f64),
-        )),
-    ];
-    for ty in SCALAR_TAIL_TYPES {
-        let column = scalar_tail_base_column(ty, n);
-        fields.push(Field::new(
-            format!("c_{ty}"),
-            column.data_type().clone(),
-            false,
-        ));
-        columns.push(column);
-    }
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w =
-        ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    let ids: Vec<u64> = (0..SCALAR_TAIL_N).collect();
+    let extra = SCALAR_TAIL_TYPES
+        .into_iter()
+        .map(|ty| {
+            let column = scalar_tail_base_column(ty, n);
+            (
+                Field::new(format!("c_{ty}"), column.data_type().clone(), false),
+                column,
+            )
+        })
+        .collect();
+    write_points(&points, &ids, scatter, extra);
     write_pairs_n(&pairs, SCALAR_TAIL_N);
-
-    let schema_path = tmp.join("scalar-tail-schema.toml");
-    std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.clone(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("the scalar-tail fixture build should succeed");
+    build_declared(out, &points, &pairs, &format!("{}{ID_ATTRIBUTE}", scalar_tail_schema_toml()));
 }
 
 /// One ingest batch of one item, carrying [`scalar_tail_planted`]'s value in every declared column
@@ -4656,14 +4501,11 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
 fn build_scalar_tail_ingest_batch() -> Vec<u8> {
     let access = access_column(["0"]);
     let mut fields = vec![
-        Field::new("external_id", DataType::Binary, false),
         Field::new("x", DataType::Float32, false),
         Field::new("y", DataType::Float32, false),
         access_field(&access),
     ];
-    let external_id = external_id_of(9_600_001);
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(BinaryArray::from_iter_values([external_id.as_slice()])),
         Arc::new(Float32Array::from(vec![5.0f32])),
         Arc::new(Float32Array::from(vec![5.0f32])),
         Arc::new(access),
@@ -4690,21 +4532,15 @@ fn build_scalar_tail_ingest_batch() -> Vec<u8> {
 /// (`filter-index.md` §5), so the value that answers has crossed the whole seam: Arrow decode to
 /// `WalScalar`, WAL, buffer, and the flush extent the filter scans.
 ///
-/// This is the regression test for the missing-arm defect (`control.rs`'s `scalar_at` doc): six of
-/// these twelve types were declarable and buildable but refused at ingest with a 422, so the 200
-/// asserted first is half the test. Enumerating [`SCALAR_TAIL_TYPES`] rather than naming the six
-/// keeps the assertion complete against the next type the set grows by.
+/// The 200 asserted first is half the test: a type the build reads and the ingest refuses is one
+/// this catches. Enumerating [`SCALAR_TAIL_TYPES`] keeps the assertion complete against the next
+/// type the set grows by.
 #[tokio::test]
 async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_scalar_tail_fixture(&bundle_root, tmp.path());
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
+    let server = open(&tmp).await;
 
     let resp = server
         .client
@@ -4732,16 +4568,14 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
-    let mut published = false;
-    for _ in 0..10_000 {
-        let status = control_status(&server).await;
-        if status["write_executor"]["flush"]["flushes"].as_u64() == Some(1) {
-            published = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
-    assert!(published, "the flush never published");
+    wait_until(
+        "the flush publishing",
+        std::time::Duration::from_secs(60),
+        async || {
+            control_status(&server).await["write_executor"]["flush"]["flushes"].as_u64() == Some(1)
+        },
+    )
+    .await;
 
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();

@@ -41,11 +41,11 @@ drwxr-xr-x 5 joe joe         4096 Sep  3 03:13 ..
 
 ## abstract spill runs
 42
-915M	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/abstract
-874M	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/openalex_id
-397M	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/publication_year
-116K	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/record
-2.4G	/home/joe/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/title
+915M	/home/user/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/abstract
+874M	/home/user/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/openalex_id
+397M	/home/user/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/publication_year
+116K	/home/user/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/record
+2.4G	/home/user/code/tessera/data/ladder/paperseek/bundle/v00000/partitions/default/attrs/title
 
 ## final sample, 2026-09-03T06:25:05+01:00, before the process was stopped
    03:25:00 04:35:44

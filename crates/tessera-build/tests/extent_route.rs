@@ -17,6 +17,8 @@
 //! arena is 256 MiB and the filesystem has rather more than 512 MiB free — which is why the route
 //! is named here and derived everywhere else (`ExtentRoute`).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -135,6 +137,7 @@ fn route_schema() -> Schema {
         value_set: None,
         index,
         render: false,
+        unique: false,
     };
     Schema {
         attributes: vec![
@@ -151,6 +154,7 @@ fn route_schema() -> Schema {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
         ],
         vocabularies: Default::default(),
@@ -158,7 +162,7 @@ fn route_schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
-    let schema = route_schema();
+    let schema = common::with_id(route_schema());
     BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -184,14 +188,12 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         ),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,

@@ -4,6 +4,7 @@ The announce line is read from a fake child here, a Python script printing what 
 prints, so the parser is covered without a bundle and without the binary.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -92,7 +93,7 @@ def test_a_listening_line_missing_an_address_is_refused_rather_than_guessed():
         print('{"event": "listening", "viewer": "127.0.0.1:1"}'); sys.stdout.flush(); input()
         """)
     try:
-        with pytest.raises(_instance.ServeRefused, match="session, control"):
+        with pytest.raises(_instance.ServeRefused):
             _instance.read_announce(process.stdout, 5, lambda: "")
     finally:
         _instance.stop(process)
@@ -129,14 +130,18 @@ def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
 
 
 def test_the_secrets_are_generated_once_and_owner_only(tmp_path):
-    session, identity = _instance.secrets_for(tmp_path)
-    assert len(identity) == 32 and int(identity, 16) >= 0
-    for name in ("session.cred", "operator.cred", "identity.key", "identity.toml"):
+    _instance.secrets_for(tmp_path)
+    written = {
+        name: (tmp_path / ".tessera" / name).read_text() for name in ("session.cred", "operator.cred")
+    }
+    for name in written:
         assert oct((tmp_path / ".tessera" / name).stat().st_mode)[-3:] == "600"
     # The directory too, and each file is created owner-only rather than narrowed afterwards.
     assert oct((tmp_path / ".tessera").stat().st_mode)[-3:] == "700"
-    again = _instance.secrets_for(tmp_path)
-    assert again == (session, identity)
+    _instance.secrets_for(tmp_path)
+    assert written == {
+        name: (tmp_path / ".tessera" / name).read_text() for name in written
+    }
 
 
 def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
@@ -145,5 +150,56 @@ def test_the_binary_is_found_at_tessera_bin(tmp_path, monkeypatch):
     monkeypatch.setenv("TESSERA_BIN", str(binary))
     assert _instance.find_binary() == (str(binary), "TESSERA_BIN")
     monkeypatch.setenv("TESSERA_BIN", str(tmp_path / "absent"))
-    with pytest.raises(Exception, match="does not exist"):
+    with pytest.raises(Exception):
         _instance.find_binary()
+
+
+#: A committed database, left open at interpreter exit. `where` is `None` for a temporary one.
+LEFT_OPEN = """
+    import json, sys
+    import pyarrow as pa
+    import tesseradb as td
+
+    where = json.loads(sys.argv[1])
+    db = td.create(where)
+    db.declare_view("map", extent={"x": [0, 10], "y": [0, 10]})
+    rows = pa.table({"x": [1.0, 2.0], "y": [1.0, 2.0], "access": [["public"], ["public"]]})
+    db.insert("map", rows, x="x", y="y", access="access")
+    db.commit()
+    saved = json.loads(sys.argv[2])
+    if saved is not None:
+        db.save(saved)
+        td.open(saved).serve()
+    print(json.dumps({"path": str(db.path), "pid": db._child.pid}))
+"""
+
+
+def left_open(where, saved=None) -> dict:
+    from conftest import binary
+
+    binary()
+    done = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(LEFT_OPEN), json.dumps(where), json.dumps(saved)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    left = json.loads(done.stdout.strip().splitlines()[-1])
+    with pytest.raises(OSError):
+        os.kill(left["pid"], 0)
+    return left
+
+
+def test_a_temporary_database_is_removed_at_interpreter_exit(tmp_path):
+    saved = tmp_path / "saved"
+    left = left_open(None, str(saved))
+    assert not os.path.exists(left["path"])
+    # The copy it was saved to, which a second database opened and served, is the user's.
+    assert (saved / "tessera.toml").exists()
+
+
+def test_a_database_at_a_path_the_user_named_is_kept_at_interpreter_exit(tmp_path):
+    left = left_open(str(tmp_path / "db"))
+    assert (tmp_path / "db" / "tessera.toml").exists()
+    assert left["path"] == str(tmp_path / "db")

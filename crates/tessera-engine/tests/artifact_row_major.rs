@@ -36,7 +36,6 @@ use tessera_types::layer::{
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const FLAT: &str = "clusters/flat";
 const TREED: &str = "clusters/treed";
 
@@ -270,28 +269,6 @@ fn assert_same(
          comparison says nothing about containment",
         labels.len()
     );
-}
-
-/// Request a fold and block until it has published.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
@@ -549,7 +526,6 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
     ] {
         let fx = fixture();
         let engine = published(&fx, Some(layout), Some(ServingLayout::ArtifactMajor));
-        let idset = engine.generation().bundle.manifest.identity.idset;
         for credential in [full_coverage_credential(), subset_credential()] {
             let session = engine.authorise(&credential).unwrap();
             let response = engine
@@ -563,7 +539,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
-                    .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
+                    .artifact(&session, artifact.tessera_id, "s0", None)
                     .expect("the identifier resolves")
                     .expect("and the artifact is served to the viewer the viewport served it to");
                 assert_eq!(
@@ -670,11 +646,17 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
+        .flat_map(|p| p.manifest.derived_extents.iter().cloned())
+        .filter(|e| matches!(e.form, tessera_store::manifest::DerivedForm::RowColumn { .. }))
         .collect();
     assert_eq!(extents.len(), fx.row_column_files(&engine).len());
     for extent in &extents {
-        assert_eq!(extent.layout, ServingLayout::RowMajorLabel);
+        assert_eq!(
+            extent.form,
+            tessera_store::manifest::DerivedForm::RowColumn {
+                layout: ServingLayout::RowMajorLabel
+            }
+        );
         assert!(fx
             .root
             .join(&engine.generation().prefix)
@@ -728,7 +710,6 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
     // rather than read from the per-principal cache the viewport just filled: the two routes
     // share that cache by design, and comparing them inside one session compares one answer with
     // itself. A client following a saved link reaches this route cold.
-    let idset = reopened.generation().bundle.manifest.identity.idset;
     for credential in [full_coverage_credential(), subset_credential()] {
         let looking = reopened.authorise(&credential).unwrap();
         let response = reopened
@@ -745,7 +726,7 @@ fn a_fold_over_a_row_major_level_writes_its_column_and_changes_no_answer() {
         let cold = reopened.authorise(&credential).unwrap();
         for artifact in &response.artifacts {
             let alone = reopened
-                .artifact(&cold, artifact.tessera_id, Some(idset), "s0", None)
+                .artifact(&cold, artifact.tessera_id, "s0", None)
                 .expect("the identifier resolves")
                 .expect("and the artifact is served to the viewer the viewport served it to");
             assert_eq!(alone.masked_count, artifact.masked_count);
@@ -916,8 +897,7 @@ fn flat_artifact_entity(engine: &Engine, key: &str) -> EntityId {
         .find(|a| a.layer == FLAT && a.key.as_deref() == Some(key))
         .expect("the artifact is served")
         .tessera_id;
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+    engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("it names what was issued")
 }
 
 /// The row of each of `sources` in the served row space, for a column check.
@@ -1085,15 +1065,15 @@ fn a_fold_that_retires_the_top_artifact_writes_a_column_the_survivors_fit() {
     own_entity_retired("p15", 7_500..8_000, 7_000..7_500);
 }
 
-/// **A column whose coordinate has moved is not adopted**, and the level recomposes on first use.
+/// **A column the level has moved past is completed, not recomposed.** A membership only grows
+/// between folds, so the fold's column labels a subset of the level: the restart takes it and adds
+/// the rows it misses, rather than projecting the level whole and composing a column again.
 ///
-/// The direction of the mistake is what makes equality the only admissible test: a growth adds rows
-/// the column does not label, and an unlabelled row is one no artifact claims — so an artifact
-/// holding it silently stops being a candidate there and its masked count comes back short. That is
-/// a *narrower* answer with nothing reporting a fault, which is exactly what an existence criterion
-/// then renders as absence.
+/// The direction of the mistake is why the answers are compared: a growth adds rows the column
+/// does not label, and an unlabelled row is one no artifact claims, so a column adopted without
+/// its completion serves a masked count short with nothing reporting a fault.
 #[test]
-fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
+fn a_column_the_level_has_moved_past_is_completed_rather_than_recomposed() {
     let fx = fixture();
     let engine = published(
         &fx,
@@ -1104,10 +1084,11 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
     let _ = sweep(&engine);
     assert!(
         !fx.row_column_files(&engine).is_empty(),
-        "the fold wrote a column to be stale about"
+        "the fold wrote a column to be behind"
     );
 
-    // The level moves after the fold wrote its column: a growth the column has never labelled.
+    // The level moves after the fold wrote its column: an artifact published over base rows the
+    // column has never labelled.
     engine
         .publish_artifacts(
             FLAT.into(),
@@ -1130,15 +1111,21 @@ fn a_column_the_level_has_moved_past_is_recomposed_rather_than_adopted() {
         grown,
         "the restart serves what the live engine served"
     );
-    assert_eq!(
-        reopened.columns_adopted(),
-        0,
-        "the fold's column describes a level version the store has moved past"
-    );
     assert!(
-        reopened.columns_composed() > 0,
-        "so it is recomposed on first use, which is what every request did before the fold wrote \
-         anything"
+        reopened.columns_adopted() > 0,
+        "the fold's column is taken although the level has moved past it"
+    );
+    assert_eq!(
+        reopened.columns_composed(),
+        0,
+        "and completed, so nothing is composed"
+    );
+    let form = reopened
+        .held_artifact_form_for_test("s0", FLAT, 0)
+        .expect("the sweep left the level's form held");
+    assert!(
+        !form.membership().rows_held(),
+        "the completed level is served from its column and holds no rows"
     );
 }
 

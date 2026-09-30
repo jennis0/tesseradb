@@ -1,6 +1,7 @@
 // A static harness for the highlight work's element screenshots: the built components against a
 // hand-made store, so the boards can be compared with what actually renders. Untracked.
-import {NO_COUNT, NO_MASKED, SessionArtifactTable, servedLineage, type BrowsePage, type Projections, type ProjectionName, type Store} from '@tesseradb/client';
+import {NO_COUNT, NO_MASKED, type BrowsePage, type Projections, type ProjectionName, type Store} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import '@tesseradb/components';
 
 const layer = (name: string, kind: string, computedContent: string[], title: string) =>
@@ -8,7 +9,7 @@ const layer = (name: string, kind: string, computedContent: string[], title: str
     shape: computedContent.includes('hull') ? 'derived' : null, suppliedContent: ['name'], depsOn: [], version: 1}) as never;
 
 const meta = {
-  apiVersion: 1, idset: 0,
+  apiVersion: 1,
   views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
   groups: [], declaredScalars: [],
   layers: [layer('clusters/kmeans', 'flat', ['centroid', 'box', 'hull'], 'k-means clusters'),
@@ -36,19 +37,19 @@ const projections = {
          highlighted: {value: 3_204, exact: true}, highlighting: true, served: {shown: 4_812, total: 181_900, exact: true}, provisional: 0},
   marks: {bands: [], standIn: [], count: NO_COUNT},
   tiles: {tiles: []},
-  artifacts: {layer: 'clusters/kmeans', layers: ['clusters/kmeans'], served: [], lineage: servedLineage([]), status: 'shown', refusal: null,
+  artifacts: {layer: 'clusters/kmeans', layers: ['clusters/kmeans'], served: [], colourServed: [], attached: new Map(), lineage: servedLineage([]), status: 'shown', refusal: null,
               version: 1, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set<number>(), shapes: new Map(), colours: new Map(),
               palette: 'positional', coverage: {current: 0, stale: 0}},
   selection: {item: null, itemRefusal: null,
               artifact: {id: 111n, detail: {layer: 'mesh/descriptors', key: 'D001943', maskedCount: 288_412n, centroid: null, box: null, shape: null}},
               artifactRefusal: null},
   region: null,
-  filters: {draft: {title: {family: 'text', query: 'quantum entanglement', mode: 'all', verb: 'filter'},
-                    archive: {family: 'category', keys: ['quant-ph'], verb: 'highlight'}},
+  filters: {draft: {filter: {title: {family: 'text', query: 'quantum entanglement', phrase: true}},
+                    highlight: {archive: {family: 'category', keys: ['quant-ph']}}},
             expr: {title: {match: 'quantum entanglement'}},
             highlight: {archive: {in: ['quant-ph']}},
             members: [{layer: 'mesh/descriptors', artifact: 111n, outside: false, verb: 'highlight'}],
-            suggestions: {archive: {q: '', more: false, values: [{code: 1, key: 'quant-ph', title: null, match: {field: 'key', start: 0, len: 0}}]}},
+            suggestions: {archive: {q: '', verb: 'filter', more: false, total: null, values: [{code: 1, key: 'quant-ph', title: null, match: {field: 'key', start: 0, len: 0}}]}},
             suggestErrors: {}},
   legend: {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: null},
   replica: {bytes: 0, points: 0, bands: 0, views: 0, lastPlan: null}
@@ -72,6 +73,7 @@ const store = {
   setLayers: () => {},
   openArtifact: async () => {},
   suggest: () => {},
+  forgetSuggestions: () => {},
   requestFilters: () => ({title: {match: 'quantum entanglement'}}),
   dataXY: (x: number, y: number) => [x, y] as [number, number],
   extentOf: () => null,

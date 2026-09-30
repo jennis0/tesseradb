@@ -64,7 +64,7 @@ use croaring::{Bitmap, Portable};
 use serde_json::{json, Value};
 
 use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
-use tessera_engine::compose::{ProjectionInputs, ProjectionRoute, RowProjection};
+use tessera_engine::{ProjectionInputs, ProjectionRoute, RowProjection};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
 use tessera_store::term_images::{choose, chooser_inputs, ChooserInputs, Route, ROUTE_COSTS};
@@ -541,19 +541,6 @@ fn box_json() -> Value {
     })
 }
 
-/// A stand-in for the `auth_data` hash the engine passes: a principal's own term set, so two
-/// principals never share a fragment-cache key and one principal's two calls always do.
-fn auth_hash(ids: &[TermId]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut acc = 0xcbf2_9ce4_8422_2325u64;
-    for id in ids {
-        acc ^= u64::from(id.raw());
-        acc = acc.wrapping_mul(0x100_0000_01b3);
-    }
-    out[..8].copy_from_slice(&acc.to_le_bytes());
-    out
-}
-
 // ------------------------------------------------------------------------------------------
 // The run
 // ------------------------------------------------------------------------------------------
@@ -856,7 +843,7 @@ fn run(args: Args) -> Result<(), String> {
     for (name, ids) in &resolved {
         eprintln!("principal {name}: {} terms", ids.len());
         let fragment = cache
-            .get_or_build(ids, auth_hash(ids), 0, &postings, &[], 0)
+            .get_or_build(ids, &postings, &[], 0)
             .map_err(|e| format!("principal '{name}': building the fragment: {e}"))?;
         let held = match bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) {
             Some(hi) => fragment.view().range_cardinality(0..=hi),

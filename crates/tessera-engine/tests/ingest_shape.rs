@@ -1,24 +1,6 @@
-//! **What bounds ingest throughput.** Three answers, in the order they were established, because
-//! the first two were wrong in instructive ways.
+//! **What bounds ingest throughput.**
 //!
-//! ## 1. The external-id index was hashed with FxHash (fixed 2026-08-05)
-//!
-//! `WritePath::established` maps caller-supplied external ids to entities. It was an
-//! `FxHashMap<Vec<u8>, EntityId>`; FxHash is rustc's hasher, tuned for small integer-like keys, and
-//! on structured byte strings it clusters badly enough that hashbrown's open addressing degrades
-//! into long probe chains.
-//!
-//! The evidence was sitting beside it: `established_inverse` clones the *same* `Vec<u8>` into an
-//! `EntityId`-keyed map. Same clone, same crate, same lock — **15.38 µs/row against 0.27, a factor
-//! of 60, on key type alone.** Switching that one map to std's SipHash took ingest from
-//! **33.50 to 6.12 µs/row (5.5x)**, that insert from 15.38 to 0.32 (48x).
-//!
-//! **It is a hash-flooding fix before it is a performance fix.** External ids are caller-supplied,
-//! and a weak non-keyed hash over attacker-chosen keys can be driven quadratic — on the single
-//! executor thread whose latency the deny lane's bound depends on. SipHash is randomly keyed per
-//! process. The throughput is the bonus.
-//!
-//! ## 2. The buffer clone (F3) — right model, invisible until the above was fixed
+//! ## 1. The buffer clone (F3)
 //!
 //! `apply_window` deep-copies the whole ingest buffer per commit-window close. With `B` rows
 //! buffered between flushes and a close every `W`:
@@ -28,10 +10,8 @@
 //! per-row cost ∝ B/W
 //! ```
 //!
-//! An earlier revision of this file recorded the law as **refuted**, on a sweep that came back
-//! non-monotone across a 24x change in `B/W`. That was a resolution failure, not a refutation: the
-//! FxHash pathology put the total at ~33 µs/row with ±4 of scatter, and the clone's ~2.3 µs signal
-//! sat underneath it. At the post-fix noise floor the same sweep is clean —
+//! A sweep across a 24x change in `B/W` is clean once the noise floor is below the clone's
+//! ~2.3 µs signal —
 //! **3.10 → 3.34 → 5.27 → 6.45 µs/row at 0.0/1.5/5.5/11.5 predicted copies per row**, a slope of
 //! **291 ns per item copied**, against 200–220 ns measured independently in
 //! `probes/2026-07-31-ingest-baseline`. F3 is confirmed, and at ~37% of ingest cost it was then the
@@ -46,7 +26,7 @@
 //! The lesson worth keeping: a flat sweep refutes nothing until you know the noise floor is below
 //! the effect you are looking for.
 //!
-//! ## 3. Window size has an optimum, and it is not "as large as possible"
+//! ## 2. Window size has an optimum, and it is not "as large as possible"
 //!
 //! Batching amortises per-call overhead and reduces clone count, but `assign_sorted` is `n log n`
 //! in the window's rows — which `config.rs` warns about at `DEFAULT_COMMIT_WINDOW_MAX_ITEMS`
@@ -87,7 +67,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use tessera_engine::{Engine, EngineConfig, WriteStage};
+use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
 
 const BASE: u64 = 1_000_000;
@@ -123,38 +103,18 @@ fn engine(tmp: &std::path::Path, root: &std::path::Path, window: usize) -> Engin
 }
 
 /// Build `n` rows starting at `from` — term 1 of the three, timed by the caller.
-fn build_rows(engine: &Engine, from: usize, n: usize, tag: &str) -> Vec<UnallocatedRow> {
-    build_rows_with_signatures(engine, from, n, tag, 1)
-}
-
-/// As [`build_rows`], but drawing each row's descriptor from `signatures` distinct values.
-///
-/// **The knob exists to test one hypothesis.** `assign_sorted` orders a window by
-/// `(signature, external_id)` and the external-id tie-break only runs where signatures are equal.
-/// With one descriptor for every row, *every* comparison ties and pays two random reads into the
-/// external-id heap on top of the two into the item array — so a fixture that looks neutral is
-/// actually the sort's worst case. `signatures = 1` reproduces that; a larger value does not.
-fn build_rows_with_signatures(
-    engine: &Engine,
-    from: usize,
-    n: usize,
-    tag: &str,
-    signatures: usize,
-) -> Vec<UnallocatedRow> {
+fn build_rows(engine: &Engine, from: usize, n: usize) -> Vec<UnallocatedRow> {
+    let descriptors = vec![b"0".to_vec()];
     (from..from + n)
-        .map(|i| {
-            let descriptors = vec![format!("{}", i % signatures.max(1)).into_bytes()];
-            UnallocatedRow {
-                external_id: Some(format!("{tag}-{i}").into_bytes()),
-                view: "s0".to_string(),
-                join: None,
-                x: ((i * 7) % 1000) as f64,
-                y: ((i * 13) % 1000) as f64,
-                scalars: Vec::new(),
-                terms: engine.resolve_terms(&descriptors),
-                descriptors,
-                scoped: Vec::new(),
-            }
+        .map(|i| UnallocatedRow {
+            view: "s0".to_string(),
+            join: None,
+            x: ((i * 7) % 1000) as f64,
+            y: ((i * 13) % 1000) as f64,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&descriptors),
+            descriptors: descriptors.clone(),
+            scoped: Vec::new(),
         })
         .collect()
 }
@@ -184,12 +144,12 @@ fn row_construction_against_accept_ingest() {
     while done < ROWS {
         let n = 10_000.min(ROWS - done);
         let t = Instant::now();
-        let rows = build_rows(&engine, done, n, "a");
+        let rows = build_rows(&engine, done, n);
         build_total += t.elapsed();
 
         let t = Instant::now();
         engine
-            .accept_ingest(rows, format!("a-{batch}"), [batch as u8; 32])
+            .ingest_rows(rows, format!("a-{batch}"), [batch as u8; 32])
             .expect("ingest is accepted");
         accept_total += t.elapsed();
         done += n;
@@ -213,7 +173,7 @@ fn row_construction_against_accept_ingest() {
 /// harness's own allocation is excluded and what is left is the write path.
 fn ingest_cost(engine: &Engine, total: usize, window: usize, between_flushes: usize) -> f64 {
     let batches: Vec<Vec<UnallocatedRow>> = (0..total / window)
-        .map(|b| build_rows(engine, b * window, window, "s"))
+        .map(|b| build_rows(engine, b * window, window))
         .collect();
 
     let mut spent = Duration::ZERO;
@@ -221,7 +181,7 @@ fn ingest_cost(engine: &Engine, total: usize, window: usize, between_flushes: us
     for (b, rows) in batches.into_iter().enumerate() {
         let t = Instant::now();
         engine
-            .accept_ingest(rows, format!("s-{b}"), [b as u8; 32])
+            .ingest_rows(rows, format!("s-{b}"), [b as u8; 32])
             .expect("ingest is accepted");
         spent += t.elapsed();
         since_flush += window;
@@ -275,57 +235,6 @@ fn cost_against_commit_window_size() {
             ROWS as f64 / secs,
             secs * 1e6 / ROWS as f64,
             stats.wal_fsyncs,
-        );
-    }
-}
-
-/// **Is the ~26 µs/row floor the window sort's degenerate tie-break?**
-///
-/// `assign_sorted` orders each window by `(signature, external_id)`. With one descriptor per row
-/// every comparison ties on the signature and falls through to the external-id compare — two extra
-/// random reads into a heap-allocated key per comparison, ×log₂(W) comparisons per row. Drawing
-/// descriptors from a wider set makes most comparisons resolve on the signature alone.
-///
-/// **Reported, not asserted**, and `apply_nanos_total` is reported beside it so the split between
-/// `apply_window` (clone + inserts + sort) and everything else (WAL, submit, receipt) is visible
-/// rather than inferred. If the floor is the sort, the wide-signature column drops and the apply
-/// share drops with it; if it does not move, the sort is exonerated and the residual is elsewhere.
-#[test]
-#[ignore = "minutes, release only"]
-fn cost_against_signature_diversity() {
-    for signatures in [1usize, 8, 64, 1024] {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = fixture(tmp.path());
-        let engine = engine(tmp.path(), &root, 10_000);
-
-        let batches: Vec<Vec<UnallocatedRow>> = (0..ROWS / 10_000)
-            .map(|b| build_rows_with_signatures(&engine, b * 10_000, 10_000, "g", signatures))
-            .collect();
-
-        let before = engine.write_executor_stats().apply_nanos_total;
-        let t = Instant::now();
-        for (b, rows) in batches.into_iter().enumerate() {
-            engine
-                .accept_ingest(rows, format!("g-{b}"), [b as u8; 32])
-                .expect("ingest is accepted");
-        }
-        let elapsed = t.elapsed();
-        let stats = engine.write_executor_stats();
-        let apply = stats.apply_nanos_total - before;
-        let per_row = |ns: u64| ns as f64 / 1e3 / ROWS as f64;
-        eprintln!(
-            "SIGNATURES n={signatures:>5} {:>7.2} us/row total | apply {:>6.2} | {}",
-            elapsed.as_secs_f64() * 1e6 / ROWS as f64,
-            per_row(apply),
-            WriteStage::ALL
-                .iter()
-                .map(|st| format!(
-                    "{} {:.2}",
-                    st.name(),
-                    per_row(stats.stage_nanos[*st as usize])
-                ))
-                .collect::<Vec<_>>()
-                .join("  "),
         );
     }
 }

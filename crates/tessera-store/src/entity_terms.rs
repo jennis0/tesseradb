@@ -75,8 +75,7 @@
 //! end where the last absolute offset says, and a descending or out-of-range offset pair are all
 //! [`StoreError::InvalidEntityTerms`] — never a truncated answer. The two ends are checked at
 //! open and each pair at the read that uses it, which is O(1) both times: walking every offset at
-//! open would be a 4 GB sequential read at 10⁹, on the path the external-ID sidecar was made lazy
-//! to keep clear. `bases` **is** walked at open, because it is one entry per 65,536 ranks, which
+//! open would be a 4 GB sequential read at 10⁹, on the open path. `bases` **is** walked at open, because it is one entry per 65,536 ranks, which
 //! is 427 KB at 3.5×10⁹, and its order is what the length equality rests on.
 //!
 //! A truncated list would under-report an entity's labels, which on the write path is a **409 that
@@ -84,7 +83,7 @@
 //! read path it would only hide a label the viewer holds, which is the harmless direction — but
 //! the two share this reader, so it is held to the write path's standard.
 //!
-//! # The coalesce merges the extents, and it is a concatenation
+//! # The coalesce merges the extents by entity
 //!
 //! An entity-space coalesce takes a contiguous window of `entity_terms_extents` and replaces it
 //! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: one
@@ -92,11 +91,10 @@
 //! the window's position. Without it the layers accumulate one per flush until the next fold, and the
 //! reader pays file handles and a base-plus-linear probe per lookup.
 //!
-//! **A merge here needs no remap and no dictionary**, which is what makes it a concatenation
-//! rather than the keyword axis's renumbering: the ordinals are dictionary positions, preserved by
-//! every rewrite for the reason above, and the layers are disjoint by **I9**. So the merge walks
-//! the inputs' entity sets in ascending order and copies each list verbatim — the same bytes in
-//! the same order, one file set instead of *k*.
+//! **A merge here needs no remap and no dictionary**, unlike the keyword axis's renumbering: the
+//! ordinals are dictionary positions, preserved by every rewrite for the reason above, and no
+//! entity is in two layers. The layers' entity ranges may interleave, so the merge walks entities
+//! in ascending order across every layer and copies each list verbatim into one file set.
 //!
 //! **It retires nothing.** There is no tombstone parameter to pass and no route to a deletion:
 //! Rule S and Rule F are the fold's (write-path §5.4), and an entity awaiting a deletion keeps
@@ -106,8 +104,7 @@
 //! **No error detail here names a descriptor**, only ordinals, lengths and paths: these strings
 //! reach an operator log, and a descriptor is a compartment name.
 //!
-//! **The reader's details name no entity either** — the external-ID sidecar's rule, at the same
-//! standard and for its reason: a read failure is reachable from a request, contracts §4 has the
+//! **The reader's details name no entity either**: a read failure is reachable from a request, contracts §4 has the
 //! byte-scanner sweep logs as well as payloads for entity ids (**I10**), and a corrupt layer is a
 //! systematic build or flush fault whose file and inconsistency shape are what an operator needs.
 //! The **writer's** own refusals do name the entity, and that is the one place it belongs: they
@@ -401,8 +398,8 @@ impl EntityTerms {
         }
         // **`bases` whole, the offsets at their ends.** One entry per 65,536 ranks is 427 KB at
         // 3.5×10⁹, so the whole array is walked here and its order established once; the offsets
-        // are one entry per rank, and walking those would be the 4 GB sequential read at 10⁹ that
-        // the external-ID sidecar was made lazy to avoid. So the first and the last absolute
+        // are one entry per rank, and walking those would be a 4 GB sequential read at 10⁹ on the
+        // open path. So the first and the last absolute
         // offset are checked here and every pair between them at the read that uses it
         // (`terms_of`), which is the same fail-closed answer at the point where a bad pair could
         // produce a wrong one.
@@ -508,6 +505,11 @@ impl EntityTerms {
             return Ok(None);
         }
         let rank = (self.hasrow.rank(entity) - 1) as usize;
+        self.terms_at(rank).map(Some)
+    }
+
+    /// The list at `rank` in this layer's has-row order.
+    fn terms_at(&self, rank: usize) -> Result<Vec<u32>> {
         let start = self.absolute(rank);
         let end = self.absolute(rank + 1);
         // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
@@ -526,12 +528,69 @@ impl EntityTerms {
             });
         }
         let (start, end) = (start as usize, end as usize);
-        Ok(Some(
-            self.terms[start * 4..end * 4]
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
-        ))
+        Ok(self.terms[start * 4..end * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect())
+    }
+}
+
+/// Every list the disjoint layers `inputs` hold, in ascending entity order across them, but for
+/// the entities in `skip`, whose lists are not decoded.
+///
+/// Each layer's has-row bitmap is walked in order, so a list's rank is counted rather than taken:
+/// a rank per entity sums every container below it, which over a whole layer is quadratic.
+///
+/// A repeated entity is a **refusal**, not a resolution. Disjointness is a property of the
+/// writers, and a merge that picked one of two lists would answer one flush's labels for another's
+/// entity.
+fn for_each_list_in(
+    inputs: &[&EntityTerms],
+    skip: Option<&Bitmap>,
+    f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>,
+) -> Result<()> {
+    let mut cursors: Vec<(std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>, usize)> =
+        inputs
+            .iter()
+            .map(|layer| (layer.hasrow.iter().peekable(), 0))
+            .collect();
+    loop {
+        // The least unconsumed entity across the inputs, and the layer holding it. `k` is a
+        // coalesce window — eight by default — so a scan per entity is cheaper than a heap and
+        // carries the duplicate check for nothing.
+        let mut least: Option<(usize, u32)> = None;
+        for (index, (cursor, _)) in cursors.iter_mut().enumerate() {
+            let Some(&entity) = cursor.peek() else {
+                continue;
+            };
+            match least {
+                Some((held, at)) if entity == at => {
+                    return Err(StoreError::InvalidEntityTerms {
+                        path: inputs[index].dir.clone(),
+                        detail: format!(
+                            "inputs {held} and {index} both hold a term list for one entity; the \
+                             layers of this family are disjoint (I9) and merging them would \
+                             publish one flush's labels under another's"
+                        ),
+                    });
+                }
+                Some((_, at)) if entity > at => {}
+                _ => least = Some((index, entity)),
+            }
+        }
+        let Some((index, entity)) = least else {
+            return Ok(());
+        };
+        let (cursor, rank) = &mut cursors[index];
+        cursor.next();
+        let at = *rank;
+        *rank += 1;
+        if skip.is_some_and(|skip| skip.contains(entity)) {
+            continue;
+        }
+        f(entity, inputs[index].terms_at(at)?)?;
     }
 }
 
@@ -541,11 +600,10 @@ impl EntityTerms {
 /// The output's bases are the writer's own, computed from the running total as the lists are
 /// copied: the merge rebases as it goes and holds no absolute array.
 ///
-/// **A concatenation with bookkeeping, not a merge with a resolution rule.** The layers are
-/// disjoint in entity space (**I9**: an entity id is allocated once, and the flush that minted it
-/// wrote the only layer that holds its list), so no entity appears twice and no input can
-/// contradict another — the output is each entity's own list, byte-for-byte, gathered in ascending
-/// entity order. Term ordinals are positions in the concatenated dictionary extents and are
+/// **A merge by entity with no resolution rule.** An entity id is allocated once and the flush
+/// that minted it wrote the only layer holding its list, so no input can contradict another. The
+/// layers' ranges may interleave, and the merge walks entities in ascending order across them,
+/// copying each entity's own list byte for byte. Term ordinals are positions in the concatenated dictionary extents and are
 /// preserved by every rewrite of the corpus (see this module's doc), so nothing is remapped.
 ///
 /// **Byte-deterministic for a given input set**: the output is a pure function of the entity sets
@@ -570,58 +628,20 @@ pub fn coalesce_entity_terms_extents(
     }
     let mut writer =
         EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path, bases_path)?;
-    let mut cursors: Vec<std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>> = inputs
-        .iter()
-        .map(|layer| layer.hasrow.iter().peekable())
-        .collect();
     let mut written = 0u64;
-    loop {
-        // The least unconsumed entity across the inputs, and the layer holding it. `k` is a
-        // coalesce window — eight by default — so a scan per entity is cheaper than a heap and
-        // carries the duplicate check for nothing.
-        let mut least: Option<(usize, u32)> = None;
-        for (index, cursor) in cursors.iter_mut().enumerate() {
-            let Some(&entity) = cursor.peek() else {
-                continue;
-            };
-            match least {
-                Some((held, at)) if entity == at => {
-                    return Err(StoreError::InvalidEntityTerms {
-                        path: terms_path.to_path_buf(),
-                        detail: format!(
-                            "inputs {held} and {index} both hold a term list for one entity; the \
-                             layers of this family are disjoint (I9) and merging them would \
-                             publish one flush's labels under another's"
-                        ),
-                    });
-                }
-                Some((_, at)) if entity > at => {}
-                _ => least = Some((index, entity)),
-            }
-        }
-        let Some((index, entity)) = least else { break };
-        cursors[index].next();
-        let terms =
-            inputs[index]
-                .terms_of(entity)?
-                .ok_or_else(|| StoreError::InvalidEntityTerms {
-                    path: inputs[index].dir.clone(),
-                    detail: "the layer's own has-row bitmap names an entity its offsets do not \
-                         answer for — a merge input that disagrees with itself"
-                        .to_string(),
-                })?;
+    for_each_list_in(inputs, None, &mut |entity, terms| {
         writer.push(entity, &terms)?;
         written += 1;
-    }
-    drop(cursors);
+        Ok(())
+    })?;
     writer.finish()?;
     Ok(written)
 }
 
 /// The base layer plus every flush extent, probed as one.
 ///
-/// `Arc` per layer, and appended rather than reopened after a flush, for the reason
-/// [`crate::sidecar`] and the record stack both give: the base is the largest artefact of its
+/// `Arc` per layer, and appended rather than reopened after a flush, for the reason the record
+/// stack gives: the base is the largest artefact of its
 /// family and remapping it at every publication would undo a generation's cheap succession.
 pub struct EntityTermsStack {
     layers: Vec<Arc<EntityTerms>>,
@@ -680,11 +700,21 @@ impl EntityTermsStack {
         Ok(None)
     }
 
-    /// Every entity any layer holds a list for, ascending — the fold's walk. The layers are
-    /// disjoint by **I9**, so this is their concatenation in ascending order rather than a merge
-    /// with a dedup; it is built as a union bitmap anyway, because "disjoint" is a property of the
-    /// writers and this is the one place a violation would produce a layer with a repeated entity
-    /// instead of an error.
+    /// Every list any layer holds, in ascending entity order, but for the entities in `skip`,
+    /// whose lists are not read: the fold's walk, skipping what it deletes. A repeated entity
+    /// refuses, the layers being disjoint.
+    pub fn for_each_list(
+        &self,
+        skip: &Bitmap,
+        f: &mut dyn FnMut(u32, Vec<u32>) -> Result<()>,
+    ) -> Result<()> {
+        let layers: Vec<&EntityTerms> = self.layers.iter().map(|layer| &**layer).collect();
+        for_each_list_in(&layers, Some(skip), f)
+    }
+
+    /// Every entity any layer holds a list for, ascending. The layers hold
+    /// disjoint entities whose ranges may interleave, so the union walks entities in order across
+    /// every layer.
     /// Returned as a bitmap rather than an iterator so the caller iterates it in place: at 10⁹
     /// the materialised `Vec<u32>` is 4 GB, where the Roaring union of dense ascending runs is a
     /// few containers.
@@ -723,7 +753,7 @@ fn map(path: &Path) -> Result<Mmap> {
     let file = File::open(path).map_err(|e| io(path, e))?;
     // SAFETY: the file is a published, immutable bundle artefact (contracts §2.1 — every file but
     // `CURRENT` is immutable and a prefix grows only by whole new files), so nothing truncates it
-    // under the mapping. Identical justification to the external-ID sidecar's extents.
+    // under the mapping.
     unsafe { Mmap::map(&file) }.map_err(|e| io(path, e))
 }
 
@@ -886,6 +916,37 @@ mod tests {
         assert_eq!(grown.terms_of(7).unwrap(), Some(vec![4]));
     }
 
+    /// **The fold's walk does not read the list of an entity it deletes**, so a damaged list
+    /// under a deletion does not stop the fold that removes it; the same list refuses a walk that
+    /// keeps its entity.
+    #[test]
+    fn a_walk_skipping_an_entity_does_not_read_its_list() {
+        let base = tempfile::tempdir().unwrap();
+        let mut writer = EntityTermsWriter::create(base.path()).unwrap();
+        writer.push(0, &[1]).unwrap();
+        writer.push(1, &[2, 3]).unwrap();
+        writer.push(2, &[4]).unwrap();
+        writer.finish().unwrap();
+        // Entity 1's list ends before it starts: rank 2's start offset, which is rank 1's end.
+        let offsets = base.path().join(ENTITY_TERMS_OFFSETS_FILE);
+        let mut bytes = std::fs::read(&offsets).unwrap();
+        bytes[8..12].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&offsets, bytes).unwrap();
+        let stack = EntityTermsStack::open(Some(base.path()), &[]).unwrap();
+
+        let mut walked = Vec::new();
+        stack
+            .for_each_list(&Bitmap::of(&[1]), &mut |entity, _| {
+                walked.push(entity);
+                Ok(())
+            })
+            .expect("the damaged list is not read");
+        assert_eq!(walked, vec![0, 2]);
+        assert!(stack
+            .for_each_list(&Bitmap::new(), &mut |_, _| Ok(()))
+            .is_err());
+    }
+
     /// **A layer holding nothing must still open.** A flush that published only joining rows
     /// mints no entity and writes an empty layer — four files, one of them zero bytes — and a
     /// reader that refused it would fail the whole generation's open on a legitimate publication.
@@ -977,6 +1038,25 @@ mod tests {
                 merged.terms_of(entity).unwrap(),
                 stack.terms_of(entity).unwrap(),
                 "entity {entity} answers differently after the merge"
+            );
+        }
+    }
+
+    /// Layers whose entities interleave, as two views flushed from one commit window leave them,
+    /// merge by entity and answer what the stack answered.
+    #[test]
+    fn a_merge_of_interleaved_extents_answers_what_the_layered_read_answered() {
+        let (a, first) = round_trip(&[(1u32, vec![1]), (3, vec![]), (4, vec![2, 5])]);
+        let (b, second) = round_trip(&[(0u32, vec![7]), (2, vec![1, 9]), (5, vec![3])]);
+        let stack = EntityTermsStack::open(None, &[paths_of(a.path()), paths_of(b.path())]).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        assert_eq!(merge_into(out.path(), &[&first, &second]), 6);
+        let merged = EntityTermsStack::open(None, &[paths_of(out.path())]).unwrap();
+        for entity in 0..8 {
+            assert_eq!(
+                merged.terms_of(entity).unwrap(),
+                stack.terms_of(entity).unwrap(),
+                "entity {entity}"
             );
         }
     }

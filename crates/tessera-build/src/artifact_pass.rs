@@ -51,11 +51,12 @@ use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
 use tessera_store::derived::{resolve_segment, HeldShape, ShapeIndex};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
 use tessera_store::derived::{DerivedIndex, Filed, LevelShape, PostingSlice, SignatureIndex};
+use tessera_store::manifest::DerivedForm;
 use tessera_store::permutation::ProjectScratch;
 use tessera_store::RowSpace;
 use tessera_types::layer::{MembershipSource, RegisteredLayer, ServingLayout};
@@ -103,13 +104,9 @@ impl LevelLayoutReport {
 /// What the pass produced, for the manifest and for the report.
 #[derive(Default)]
 pub struct ArtifactPass {
-    pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
-    pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
-    /// The persisted row form of every spatial level that got no column — see
-    /// `ShapeRowsExtent`.
-    pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
-    /// Every spatial level's decompositions, so the engine's open assembles rather than descends.
-    pub shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
+    /// Every derived file the pass wrote: tile indexes, row-major columns, shape row forms and
+    /// held shapes.
+    pub derived_extents: Vec<tessera_store::manifest::DerivedExtent>,
     /// Every file this pass wrote, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
     pub paths: Vec<std::path::PathBuf>,
@@ -297,6 +294,17 @@ pub fn run(
         };
         // One membership at a time, exactly as the fold observes it: the figure is the same either
         // way and what differs is what is held while it runs.
+        //
+        // A borrowing level is observed over the membership it is served on, because
+        // `members_of` answers with the target's where the record declares none (decision 0145).
+        // The report and the layout pick are then about the level as served. What this pass then
+        // files for such a level is true when it is written and the engine does not read it: the
+        // borrowed set moves with the target's level version, the file is keyed on this level's,
+        // so the engine serves a borrowing level artifact-major and derives its tile index from
+        // the form it has just resolved (`ArtifactRows::inherit`). Two directions would change
+        // that. Observe a borrowing level as artifact-major here, so no column is written for one;
+        // or carry the borrowed versions in the extent's manifest entry, so a reader can claim a
+        // filed index while they still match.
         let shape = derived::observe_shape(space.base_rows(), &|visit| {
             if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
                 walk_resolved(rows, visit);
@@ -308,7 +316,9 @@ pub fn run(
                 }
                 visit(
                     ordinal,
-                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                    &store
+                        .members_of(record)
+                        .projected(|part| space.project_base_with(part, &mut scratch.borrow_mut())),
                 );
             }
         });
@@ -362,37 +372,44 @@ pub fn run(
         }
         let ordinals = store.level(layer, *level).count() as u32;
         tile_indexes.push(Filed {
-            view: view.to_string(),
+            view: Some(view.to_string()),
             // **A build coins each key once, so every structure it writes is the declared
             // incarnation** (decision 0115). There is no drop at a build to leave a predecessor.
-            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
-            layout: *layout,
+            form: DerivedForm::TileIndex,
             bytes: derived::FiledBytes::InHand(derived::project_tile_index(
                 ordinals,
                 space.base_rows(),
                 &|visit| {
-                if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
-                    walk_resolved(rows, visit);
-                    return;
-                }
-                for (ordinal, record) in store.level(layer, *level) {
-                    if elsewhere(layer, *level, ordinal) {
-                        continue;
+                    if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
+                        walk_resolved(rows, visit);
+                        return;
                     }
-                    visit(
-                        ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
-                    );
-                }
+                    for (ordinal, record) in store.level(layer, *level) {
+                        if elsewhere(layer, *level, ordinal) {
+                            continue;
+                        }
+                        visit(
+                            ordinal,
+                            &store.members_of(record).projected(|part| {
+                                space.project_base_with(part, &mut scratch.borrow_mut())
+                            }),
+                        );
+                    }
                 },
             )),
         });
     }
-    pass.tile_index_extents =
-        derived::file_tile_indexes(prefix_dir, partition, MANIFEST_N, index, tile_indexes);
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir,
+        partition,
+        MANIFEST_N,
+        index,
+        tile_indexes,
+    ));
 
     // ---- the row-major columns: every level that is ---------------------------------------------
     //
@@ -432,19 +449,21 @@ pub fn run(
                     }
                     visit(
                         ordinal,
-                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                        &store.members_of(record).projected(|part| {
+                            space.project_base_with(part, &mut scratch.borrow_mut())
+                        }),
                     );
                 }
             },
         );
         match staged {
             Ok(Some(path)) => columns.push(Filed {
-                view: view.to_string(),
-                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+                view: Some(view.to_string()),
+                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
                 layer: layer.clone(),
                 level: *level,
                 level_version: store.level_version(layer, *level),
-                layout: *layout,
+                form: DerivedForm::RowColumn { layout: *layout },
                 bytes: derived::FiledBytes::Staged(path),
             }),
             // The build-time half of the refusal the declaration could not make: whether an
@@ -470,8 +489,7 @@ pub fn run(
             ),
         }
     }
-    pass.row_column_extents =
-        derived::file_row_columns(prefix_dir, partition, MANIFEST_N, index, columns);
+    let columns = derived::file_derived(prefix_dir, partition, MANIFEST_N, index, columns);
 
     // ---- the shape row forms: every spatial level whose persisted form is not a column ---------
     //
@@ -479,36 +497,39 @@ pub fn run(
     // artifact-major — and one recorded row-major whose column would not compose, which is served
     // artifact-major — has no other durable form of what was just resolved, so the row form is
     // written for it, keyed by the build's segment and the level's version.
-    let mut shape_rows: Vec<derived::FiledShapeRows> = Vec::new();
+    let mut shape_rows: Vec<Filed> = Vec::new();
     if let Some(segment) = &segment {
         for ((layer, level), rows) in &resolved {
-            let has_column = pass
-                .row_column_extents
+            let has_column = columns
                 .iter()
-                .any(|e| &e.layer == layer && e.level == *level && e.view == view);
+                .any(|e| &e.layer == layer && e.level == *level);
             if has_column {
                 continue;
             }
             let level_version = store.level_version(layer, *level);
-            shape_rows.push(derived::FiledShapeRows {
-                view: view.to_string(),
-                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            shape_rows.push(Filed {
+                view: Some(view.to_string()),
+                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
                 layer: layer.clone(),
                 level: *level,
                 level_version,
-                seg_id: segment.seg_id.clone(),
-                row_count: segment.row_count,
-                bytes: derived::shape_rows_bytes(
+                form: DerivedForm::ShapeRows {
+                    seg_id: segment.seg_id.clone(),
+                    row_count: segment.row_count,
+                },
+                bytes: derived::FiledBytes::InHand(derived::shape_rows_bytes(
                     level_version,
                     &segment.seg_id,
                     segment.row_count,
                     rows,
-                ),
+                )),
             });
         }
     }
-    pass.shape_rows_extents =
-        derived::file_shape_rows(prefix_dir, partition, MANIFEST_N, index, shape_rows);
+    pass.derived_extents.extend(columns);
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir, partition, MANIFEST_N, index, shape_rows,
+    ));
 
     // ---- the decompositions, per spatial level ------------------------------------------------
     let held: Vec<Filed> = decomposed
@@ -526,29 +547,24 @@ pub fn run(
                 })
                 .collect();
             Filed {
-                view: view.to_string(),
-                incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+                view: Some(view.to_string()),
+                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
                 layer: layer.clone(),
                 level: *level,
                 level_version,
-                layout: ServingLayout::ArtifactMajor,
-                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(level_version, &entries)),
+                form: DerivedForm::ShapeHeld,
+                bytes: derived::FiledBytes::InHand(derived::shape_held_bytes(
+                    level_version,
+                    &entries,
+                )),
             }
         })
         .collect();
-    pass.shape_held_extents =
-        derived::file_shape_held(prefix_dir, partition, MANIFEST_N, index, held);
+    pass.derived_extents.extend(derived::file_derived(
+        prefix_dir, partition, MANIFEST_N, index, held,
+    ));
 
-    for entry in &pass.tile_index_extents {
-        pass.paths.push(prefix_dir.join(&entry.path));
-    }
-    for entry in &pass.row_column_extents {
-        pass.paths.push(prefix_dir.join(&entry.path));
-    }
-    for entry in &pass.shape_rows_extents {
-        pass.paths.push(prefix_dir.join(&entry.path));
-    }
-    for entry in &pass.shape_held_extents {
+    for entry in &pass.derived_extents {
         pass.paths.push(prefix_dir.join(&entry.path));
     }
     pass.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -567,21 +583,14 @@ fn load_build_segment(
     let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(crate::BUILD_SEG_ID);
-    let morton = MortonSlice::load(&dir.join("morton.u32"));
-    let cuts = tessera_store::read::CutIndex::load(
-        &dir.join(tessera_store::read::CutIndex::FILE),
+    match SegmentData::load(
+        &dir,
+        crate::BUILD_SEG_ID,
         row_count,
-    );
-    let columns = ColumnsRef::load(&dir.join("columns.arrow"));
-    match (morton, cuts, columns) {
-        (Ok(morton), Ok(cuts), Ok(columns)) => Some(SegmentData {
-            seg_id: crate::BUILD_SEG_ID.to_string(),
-            row_count,
-            morton,
-            cuts,
-            columns,
-        }),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+        tessera_store::edited::RowEntities::Numbers,
+    ) {
+        Ok(segment) => Some(segment),
+        Err(error) => {
             eprintln!(
                 "artifact pass: the segment this build just wrote would not reopen ({error}); \
                  every shape layer is recorded in its pinned or default layout and resolved at \
@@ -620,7 +629,7 @@ pub fn containment(
     partition: &str,
     data_plugin_hash: &str,
     index: &mut DerivedIndex,
-) -> Vec<tessera_store::manifest::ContainmentExtent> {
+) -> Vec<tessera_store::manifest::DerivedExtent> {
     if data_plugin_hash != tessera_plugin::Passthrough::new().data_plugin_hash() {
         return Vec::new();
     }
@@ -682,16 +691,19 @@ pub fn containment(
             }
         };
         composed.push(Filed {
-            view: String::new(),
-            incarnation: tessera_store::manifest::DECLARED_INCARNATION,
+            view: None,
+            incarnation: None,
             layer: layer.clone(),
             level: *level,
             level_version: store.level_version(layer, *level),
-            layout: ServingLayout::ArtifactMajor,
-            bytes: derived::FiledBytes::InHand(derived::compose_containment(&contents, &signatures)),
+            form: DerivedForm::Containment,
+            bytes: derived::FiledBytes::InHand(derived::compose_containment(
+                &contents,
+                &signatures,
+            )),
         });
     }
-    derived::file_containment(prefix_dir, partition, MANIFEST_N, index, composed)
+    derived::file_derived(prefix_dir, partition, MANIFEST_N, index, composed)
 }
 
 /// The pass's own report, printed where `report_attribute_coverage` prints — so both entry points
@@ -763,13 +775,19 @@ pub fn report(pass: &ArtifactPass) {
             );
         }
     }
+    let written = |dir: &str| {
+        pass.derived_extents
+            .iter()
+            .filter(|e| e.form.dir() == dir)
+            .count()
+    };
     eprintln!(
         "  wrote {} tile index(es), {} row-major column(s), {} shape row form(s), {} \
          decomposition file(s)",
-        pass.tile_index_extents.len(),
-        pass.row_column_extents.len(),
-        pass.shape_rows_extents.len(),
-        pass.shape_held_extents.len(),
+        written("tile-index"),
+        written("row-column"),
+        written("shape-rows"),
+        written("shape-held"),
     );
 
     // **What a whole-layer response costs, reported and never refused**

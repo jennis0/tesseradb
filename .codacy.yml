@@ -1,0 +1,7 @@
+---
+# Measurements, slides, corpus data and a generated notebook: nothing here is maintained source.
+exclude_paths:
+  - "probes/**"
+  - "presentation/**"
+  - "test_corpora/**/*.json"
+  - "clients/py/examples/notebook.ipynb"

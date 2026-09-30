@@ -7,6 +7,8 @@
 //! sentinel in its permutation and present in the other's, and a view's row count is its own
 //! population rather than the entity total.
 
+mod common;
+
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,8 +23,6 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, IdentityKey};
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
@@ -131,6 +131,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
     write_points(&quarter_points, "quarter:2026-Q2", QUARTER);
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&world_points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -157,22 +158,20 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
             }],
         }],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a two-view build succeeds");
 
@@ -244,8 +243,9 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
     assert_eq!(quarter_only, QUARTER.end - WORLD.end);
 }
 
-/// **The label is the entity's, not the row's** (`views.md` §7): a per-view label column that
-/// disagrees between two views is a refusal naming the entity, not a union.
+/// **The label is the item's, not the row's** (`views.md` §7): a per-view label column that
+/// disagrees between two views about one item, named in both by its `id`, refuses the build
+/// rather than taking the union.
 #[test]
 fn a_label_that_disagrees_between_views_refuses() {
     use arrow::array::StringArray;
@@ -295,32 +295,32 @@ fn a_label_that_disagrees_between_views_refuses() {
             default: Some("public".to_string()),
         },
     };
-    let error = build(&BuildArgs {
+    let (schema, attribute_sources) = common::id_attributes(&a);
+    build(&BuildArgs {
         views: vec![field_view("a", &a), field_view("b", &b)],
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect_err("a disagreeing label refuses");
-    let message = format!("{error}");
-    assert!(message.contains("entity_id 5"), "{message}");
-    assert!(message.contains("different access labels"), "{message}");
+    assert!(
+        !dir.path().join("bundle").join("CURRENT").exists(),
+        "a refused build publishes no bundle"
+    );
 }
 
 /// **Form B: one file, a discriminator column** (`views.md` §3.1). Each view's rows are picked
@@ -339,6 +339,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
     let pairs = dir.path().join("pairs.parquet");
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -348,22 +349,20 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a form B build succeeds");
 
@@ -414,14 +413,12 @@ fn a_discriminator_value_outside_the_roster_refuses() {
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -526,6 +523,7 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         points,
         fields: &fields,
         select: None,
+        kept: None,
     };
 
     let group = frame_of(
@@ -533,7 +531,6 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         tessera_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2), of(q3)],
-        None,
     )
     .expect("one frame over both sources");
     let alone = frame_of(
@@ -541,14 +538,13 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         tessera_spatial::Projection::None,
         &Extent::Auto { margin: 0.0 },
         &[of(q2)],
-        None,
     )
     .expect("one frame over one source");
 
     // The group's box holds both views' data; the single view's does not hold the other's.
     for path in [q2, q3] {
         let rows = tessera_build::input::read_points(
-            tessera_build::input::Source::new(path, &fields, &INTEGER_IDS),
+            tessera_build::input::Source::every_row(path, &fields),
             tessera_spatial::Projection::None,
             &group.extent,
         )
@@ -562,7 +558,10 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
         alone.extent
     );
     // Nothing clamps: the box was fitted to every row it will place.
-    assert!(group.refusal().is_none());
+    let tessera_build::input::PointSurvey::Coordinates(survey) = &group.survey else {
+        panic!("the group's sources carry coordinates");
+    };
+    assert_eq!(survey.clamped, 0);
 }
 
 /// **The roster as a table** (`views.md` §3.1's form B): the keys are rows of a file, read before
@@ -654,6 +653,77 @@ fields = { key = "quarter" }
     assert_eq!(config.anchor_view(&registry).expect("the anchor"), 0);
 }
 
+/// **A roster table's integer that does not fit its declared width is refused**, naming the row
+/// and the column, and one that fits is read as written. The column is `int64` both times, so the
+/// width checked is the declaration's rather than the file's.
+#[test]
+fn a_roster_tables_integer_past_its_declared_width_is_refused() {
+    use arrow::array::{Int64Array, StringArray};
+
+    for (tier, fits) in [(300i64, false), (255, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        write_discriminated(
+            &dir.path().join("quarter-alt.parquet"),
+            &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
+        );
+        let roster = dir.path().join("roster.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("quarter", DataType::Utf8, false),
+            Field::new("tier", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3"])),
+                Arc::new(Int64Array::from(vec![1, tier])),
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let config = dir.path().join("corpus.toml");
+        std::fs::write(
+            &config,
+            r#"
+[sources]
+alt    = "quarter-alt.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "quarter:2026-Q2"
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+metadata         = { tier = "u8" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+        )
+        .unwrap();
+        let config = tessera_build::config::Config::parse(&config, &Default::default())
+            .expect("the declaration parses");
+        let registry = config.build_views();
+        if !fits {
+            assert!(registry.is_err(), "{tier} does not fit a u8 and is refused");
+            continue;
+        }
+        let registry = registry.expect("a value that fits is read");
+        assert_eq!(
+            registry[1].group.as_ref().unwrap().metadata.get("tier"),
+            Some(&tessera_build::config::MetadataValue::Int(tier))
+        );
+    }
+}
+
 /// **A roster table's `visibility` column may be a list, at either width** (`views.md` §6,
 /// decision 0132): each element is one label taken verbatim, a comma included, and the list
 /// width and the string width are the writer's choice. `large_list<large_utf8>` is the widest
@@ -741,6 +811,101 @@ fields = { key = "quarter" }
     assert_eq!(gate_of(2), None, "a null row takes the group's gate");
 }
 
+/// **Declared words are stored trimmed** by the rule a running service stores them by: a plain
+/// view's and a group's gate, a roster table's gate, and a point default. ` public ` alone is no
+/// gate, and a padded point default is stored as its label.
+#[test]
+fn declared_gates_and_point_defaults_are_stored_trimmed() {
+    use arrow::array::{Int64Array, StringArray};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_discriminated(
+        &dir.path().join("quarter-alt.parquet"),
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER), ("2026-Q4", QUARTER)],
+    );
+    write_discriminated(&dir.path().join("world.parquet"), &[("world", WORLD)]);
+    let roster = dir.path().join("roster.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("visibility", DataType::Utf8, true),
+        Field::new("label", DataType::Utf8, false),
+        Field::new("starts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3", "2026-Q4"])),
+            Arc::new(StringArray::from(vec![Some(" finance "), Some(" public "), None])),
+            Arc::new(StringArray::from(vec!["Q2", "Q3", "Q4"])),
+            Arc::new(Int64Array::from(vec![1i64, 2, 3])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let config = dir.path().join("corpus.toml");
+    std::fs::write(
+        &config,
+        r#"
+[sources]
+alt    = "quarter-alt.parquet"
+world  = "world.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "world"
+
+[[view]]
+name             = "world"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "world"
+visibility       = [" 0 ", "1 "]
+point_visibility = { default = " 7 " }
+
+[[view]]
+name             = "open"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "world"
+visibility       = " public "
+point_visibility = { default = " public " }
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+visibility       = " 0 "
+point_visibility = { field = "access", default = " public " }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the registry compiles");
+    let view = |id: &str| registry.iter().find(|v| v.id == id).expect(id);
+    let labels = |l: &[&str]| Some(l.iter().map(|l| l.to_string()).collect::<Vec<_>>());
+
+    assert_eq!(view("world").visibility, labels(&["0", "1"]));
+    assert_eq!(view("world").point_visibility.default.as_deref(), Some("7"));
+    assert_eq!(view("open").visibility, None);
+    assert_eq!(view("open").point_visibility.default.as_deref(), Some("public"));
+    assert_eq!(view("quarter:2026-Q2").visibility, labels(&["finance"]));
+    // A roster row of ` public ` and a null row both take the group's gate, trimmed.
+    assert_eq!(view("quarter:2026-Q3").visibility, labels(&["0"]));
+    assert_eq!(view("quarter:2026-Q4").visibility, labels(&["0"]));
+    assert_eq!(
+        view("quarter:2026-Q4").point_visibility.default.as_deref(),
+        Some("public")
+    );
+}
+
 /// **A listed key with no rows is an empty view** (`views.md` §3.1) — declared, materialised, and
 /// holding nobody: its permutation is sentinel everywhere and its segment has no rows.
 #[test]
@@ -751,6 +916,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
     let pairs = dir.path().join("pairs.parquet");
     write_pairs(&pairs);
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![
@@ -760,22 +926,20 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("an empty view builds");
 
@@ -853,7 +1017,9 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         value_set: None,
         index: true,
         render: false,
+        unique: false,
     };
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![
             selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
@@ -867,27 +1033,31 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             views: vec![0, 1],
             source: None,
         }],
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a scoped family builds");
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    assert!(bundle.manifest.declared_scalars.is_empty());
+    let declared: Vec<&str> = bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(declared, ["id"], "a scoped family is no declared scalar");
     let attrs = out
         .join("v00000")
         .join("partitions/default/attrs/sentiment/quarter_alt");
@@ -1002,6 +1172,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
     }
 
     let out = dir.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&world_points);
     build(&BuildArgs {
         views: vec![
             view_args("world", &world_points, &pairs),
@@ -1025,22 +1196,20 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             }],
         }],
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a wide two-view build succeeds");
 

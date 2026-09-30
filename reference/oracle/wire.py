@@ -5,7 +5,8 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 1  tiles      (tile, visible, matched, served,      exactly one, first
                         highlighted)
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
-    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
+    kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order;
+                        a scalar with no value is null
     kind 4  trailer    JSON                                   exactly one, last
     kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
                         key, masked_count, the derived           any points; absent when none served
@@ -81,6 +82,9 @@ class Artifact(NamedTuple):
     #: The same bit for `all_of[filters, highlight]` (`highlight-and-hierarchy.md` §2), and `None`
     #: where the request carried no `highlight`.
     highlighted: bool | None
+    #: The identifier of the artifact this row is attached to, a row of the same response, or
+    #: `None` for a row attached to nothing.
+    target: int | None = None
 
 
 FRAME_TILES = 1
@@ -258,6 +262,7 @@ def decode_frames(data: bytes):
                         "rung",
                         "matched",
                         "highlighted",
+                        "target",
                     )
                 }
                 shapes = "shape_x" in names
@@ -295,6 +300,7 @@ def decode_frames(data: bytes):
                             parent_ids=list(columns["parent_ids"][row] or []),
                             matched=columns["matched"][row],
                             highlighted=columns["highlighted"][row],
+                            target=columns["target"][row],
                         )
                     )
             if not artifacts:
@@ -409,3 +415,130 @@ def decode_viewport_artifacts(data: bytes):
     """
     _tiles, _points, _sub_cells, artifacts, _trailer = decode_frames(data)
     return artifacts if artifacts is not None else []
+
+
+# `POST /v1/items` is framed the viewport's way with kinds of its own:
+#
+#     kind 6  head       JSON {order, page_rows, visible?, matched?}   exactly one, first
+#     kind 7  records    one Arrow stream of one batch                  one or more; none only
+#                                                                    where cancelled at once
+#     kind 8  page end   JSON {next, ended_by}                          one after each records frame
+#     kind 4  trailer    JSON {pages, rows, next, ended_by, stream_us}  exactly one, last
+#
+# The viewport's decoder above does not accept these kinds, and this one accepts only these.
+FRAME_ITEMS_HEAD = 6
+FRAME_RECORDS = 7
+FRAME_PAGE_END = 8
+
+_ITEMS_KINDS = {FRAME_ITEMS_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+ITEMS_TRAILER_KEYS = frozenset({"pages", "rows", "next", "ended_by", "stream_us"})
+
+
+class ItemsBody(NamedTuple):
+    """One `POST /v1/items` body, split and checked but not decoded past its JSON."""
+
+    head: dict
+    #: Each records frame's payload with the page end that follows it, parsed.
+    pages: list[tuple[bytes, dict]]
+    trailer: dict
+    #: The head's, the page ends' and the trailer's payloads as sent.
+    json_payloads: list[bytes]
+
+
+def split_items_frames(data: bytes) -> ItemsBody:
+    """An items body split strictly: truncation, a kind outside the four, a head not first, a
+    trailer not last, a records frame without its page end or a page end without its records
+    frame all raise, so a truncated body never reads as a shorter response."""
+    frames: list[tuple[int, bytes]] = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        if kind not in _ITEMS_KINDS:
+            raise ValueError(f"unknown frame kind {kind} at byte {at} in an items body")
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        start = at + 5
+        end = start + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        frames.append((kind, data[start:end]))
+        at = end
+    if len(frames) < 2 or frames[0][0] != FRAME_ITEMS_HEAD or frames[-1][0] != FRAME_TRAILER:
+        raise ValueError("an items body is a head first and a trailer last")
+    middle = frames[1:-1]
+    if len(middle) % 2:
+        raise ValueError("a records frame without its page end")
+    pages = []
+    for (records_kind, records), (end_kind, end) in zip(middle[::2], middle[1::2]):
+        if records_kind != FRAME_RECORDS or end_kind != FRAME_PAGE_END:
+            raise ValueError("an items body pairs each records frame with the page end after it")
+        pages.append((records, json.loads(end)))
+    trailer = json.loads(frames[-1][1])
+    if set(trailer) != ITEMS_TRAILER_KEYS:
+        raise ValueError(f"the items trailer's keys are {sorted(trailer)}")
+    json_payloads = [frames[0][1], *(end for (_, end) in middle[1::2]), frames[-1][1]]
+    return ItemsBody(json.loads(frames[0][1]), pages, trailer, json_payloads)
+
+
+# `POST /v1/aggregate` is framed as an items body is, with a table head where the items head was,
+# one per table and no response head:
+#
+#     kind 9  table head JSON {grouping, total, reference_total?, groups?, resumed}
+#                                                  before a table's first page in this response
+#     kind 7  records    one Arrow stream of one batch of the table's rows
+#     kind 8  page end   JSON {next, ended_by}     one after each records frame
+#     kind 4  trailer    JSON, as an items trailer, and `recomposed: true` where a page counted a
+#                        changed corpus                                 exactly one, last
+FRAME_TABLE_HEAD = 9
+
+_AGGREGATE_KINDS = {FRAME_TABLE_HEAD, FRAME_RECORDS, FRAME_PAGE_END, FRAME_TRAILER}
+
+
+class AggregateBody(NamedTuple):
+    """One `POST /v1/aggregate` body, split and checked but not decoded past its JSON."""
+
+    #: Each table head, parsed, with the `(records payload, page end)` pairs that follow it.
+    tables: list[tuple[dict, list[tuple[bytes, dict]]]]
+    trailer: dict
+
+
+def split_aggregate_frames(data: bytes) -> AggregateBody:
+    """An aggregate body split strictly: truncation, a kind outside the four, a trailer not last,
+    a page before any table head, or a records frame without its page end all raise."""
+    frames: list[tuple[int, bytes]] = []
+    at = 0
+    while at < len(data):
+        if len(data) - at < 5:
+            raise ValueError(f"truncated frame header at byte {at}")
+        kind = data[at]
+        if kind not in _AGGREGATE_KINDS:
+            raise ValueError(f"unknown frame kind {kind} at byte {at} in an aggregate body")
+        (length,) = struct.unpack_from("<I", data, at + 1)
+        start = at + 5
+        end = start + length
+        if end > len(data):
+            raise ValueError(f"frame at byte {at} claims a payload past the end of the body")
+        frames.append((kind, data[start:end]))
+        at = end
+    if not frames or frames[-1][0] != FRAME_TRAILER:
+        raise ValueError("an aggregate body ends with its trailer")
+    tables: list[tuple[dict, list[tuple[bytes, dict]]]] = []
+    middle = frames[:-1]
+    index = 0
+    while index < len(middle):
+        kind, payload = middle[index]
+        if kind == FRAME_TABLE_HEAD:
+            tables.append((json.loads(payload), []))
+            index += 1
+            continue
+        if kind != FRAME_RECORDS or index + 1 >= len(middle) or middle[index + 1][0] != FRAME_PAGE_END:
+            raise ValueError("an aggregate body pairs each records frame with the page end after it")
+        if not tables:
+            raise ValueError("a page before any table head")
+        tables[-1][1].append((payload, json.loads(middle[index + 1][1])))
+        index += 2
+    trailer = json.loads(frames[-1][1])
+    if set(trailer) - {"recomposed"} != ITEMS_TRAILER_KEYS or trailer.get("recomposed", True) is not True:
+        raise ValueError(f"the aggregate trailer is {trailer}")
+    return AggregateBody(tables, trailer)

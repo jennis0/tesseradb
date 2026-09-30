@@ -4,64 +4,96 @@ import type {ReplicaFrame} from './replica.js';
 import type {TileRect} from './rects.js';
 
 /**
- * Frame composition: which bands contribute to a drawn frame, at what prefix length, on what
- * authority — the invariant-bearing half of what the viewer's `assemble.ts` used to decide,
- * moved to `tessera-client` (client-architecture §5) so the rules a dependent client must obey
- * are enforced where every client gets them, and testable without a browser.
+ * Frame composition: which bands contribute to a drawn frame, at what prefix length, and on what
+ * authority. The rules every client must keep:
  *
- * The rules, each load-bearing:
- *
- * - **Any drawn subset of a band is an id-order prefix** (`delta-serving.md` §7) — anything else
- *   makes the cache the second sampler I7 forbids. Enforced by construction: contributions are
- *   `limit` prefixes and index lists that only ever shorten, over ids asserted ascending at
- *   `bandSplitter`.
- * - **Ground an exact band answers admits no stand-in, whatever coverage says.** The replica
- *   clips stand-ins by coverage rects; exact bands can precede their rect. The exact set itself
- *   is the shared authority, so derive-time and fold-time cannot disagree — the granularity
- *   drift that oscillated thousands of tiles per frame when they could.
- * - **Descendant stand-ins are density-matched per drawn tile, not per band**, one floor per
- *   tile, largest-remainder across bands — a per-band floor handed a coarse tile a mark per
- *   tiny deep band, up to ~200x its own density.
- * - **Evaluated per contributing band projected onto the integer grid, never per viewport
- *   tile** — a per-tile pass would re-buy the O(tiles) walk measured at 181 ms for a 262k-tile
- *   region. Ancestors stay one piece with an index list; only exact and descendant claims (one
- *   tile each) touch per-tile state.
- * - **No counts on non-exact tiles**: provenance rides with every contribution so the consumer
- *   can suppress the number channel where the marks are a superset.
+ * - Every contribution is an id-order prefix of a band, or of a band's points inside a clip, so
+ *   the client never samples differently from the server.
+ * - Ground an exact band answers takes no stand-in, whatever the coverage says: exact bands can
+ *   arrive before their coverage rectangle. `compose` and `fold` both test against the exact set,
+ *   so they agree.
+ * - Descendant stand-ins are density-matched per drawn tile, by largest remainder across bands. A
+ *   floor per band would give a coarse tile one mark per small deep band.
+ * - The work is per contributing band on the integer grid, never per viewport tile.
+ * - Tiles that are not exact carry no counts, since their marks are a superset.
  */
 
-/** One tile's contribution to the draw, and the authority it rests on. */
+/**
+ * One entry of a {@link Composition}'s `tiles`: one band's contribution to the frame, and whether
+ * it is the server's exact answer for its tile.
+ *
+ * @category Projections
+ */
 export type ComposedTile = {
+  /** The tile's Morton prefix at `depth`. */
   prefix: bigint;
-  /** The depth `prefix` is addressed at — the band's own, not necessarily the frame's. */
+  /** The depth `prefix` is addressed at: the band's own, which may differ from the frame's. */
   depth: number;
+  /**
+   * True where the marks are the server's served points for this tile at the frame's depth. False
+   * for a stand-in, whose marks may be a superset of what the server would serve here.
+   */
   exact: boolean;
-  /** Marks this entry puts on screen — for an exact tile, exactly `served`. */
+  /** Marks this entry puts on screen; the tile's `served` count for an exact tile. */
   drawn: number;
-  /** The server's own counts, present only for an exact tile. */
+  /**
+   * The server's counts for the tile, or `null` for a stand-in. `visible` is how many items this
+   * principal may see in the tile, `matched` how many of those match the filter, `highlighted` how
+   * many of those match the highlight, and `served` how many points were sent.
+   */
   counts: {visible: bigint; matched: bigint; highlighted: bigint; served: number} | null;
 };
 
-/** A stand-in contribution: a band, drawn as `indices` (ancestors) or a `limit` prefix. */
-export type StandInPiece = {band: Band; indices: number[] | null; limit: number};
+/**
+ * One entry of a {@link Composition}'s `standIn`: a band drawn over ground that no exact band
+ * answers yet. It is a band held from another depth, or one that eviction cut short.
+ *
+ * @category Projections
+ */
+export type StandInPiece = {
+  /** The band, by reference. */
+  band: Band;
+  /** Indices into the band's points to draw, in order, or `null` to draw its first points. */
+  indices: number[] | null;
+  /** How many points to draw: the first `limit` of `indices`, or of the band where it is `null`. */
+  limit: number;
+};
 
+/**
+ * The frame on screen, as the store's `view` projection holds it: which bands are drawn and on
+ * what authority. Exact bands are the server's answer for their tiles at the frame's depth. A
+ * stand-in holds points from elsewhere, drawn until the exact answer arrives, and carries no count.
+ * Bands are held by reference; building draw buffers from them is the renderer's work.
+ *
+ * @category Projections
+ */
 export type Composition = {
+  /** The tile depth the frame is drawn at, 0 to 16. */
   depth: number;
+  /** @internal */
   want: TileRect;
+  /** The replica's version when the frame was composed or last refreshed. Compare for equality only. */
   version: number;
-  /** Exact bands, by reference — the slab writes them once; nothing here copies them. */
+  /** The exact bands, by reference. */
   exact: Band[];
-  /** Stand-in pieces in coarsest-first order, already density-matched and supersession-filtered. */
+  /**
+   * The stand-in pieces, coarsest first. Pieces from deeper bands are thinned to the density of
+   * the frame's depth, and no piece covers ground an exact band answers.
+   */
   standIn: StandInPiece[];
+  /** One entry per exact band and per stand-in piece. */
   tiles: ComposedTile[];
+  /** Marks drawn from exact bands. */
   exactDrawn: number;
+  /** The sum of the exact bands' `served` counts. Equal to `exactDrawn` in every frame presented. */
   exactServed: number;
+  /** The sum of the exact bands' `visible` counts: items this principal may see in those tiles. */
   visibleInView: number;
-  /** Σ stand-in marks — what the pieces will materialise to. */
+  /** Stand-in marks in total. It counts marks on screen and says nothing of how many items exist. */
   provisional: number;
   /**
-   * True where the stand-ins rode along from an older composition (a fold) rather than being
-   * derived for this one — what the settle exists to repair.
+   * True where the stand-ins were carried from an older frame when fresh exact bands were added.
+   * The next full composition replaces them.
    */
   standInStale: boolean;
 };
@@ -74,7 +106,7 @@ function exactTileSet(exact: readonly Band[], dim: number): Set<number> {
   return tiles;
 }
 
-/** Derive a full composition from a replica frame — the expensive tier; rate-limit the caller. */
+/** Derives a full composition from a replica frame. The expensive path; the caller rate-limits it. @internal */
 export function compose(frame: ReplicaFrame): Composition {
   const tiles: ComposedTile[] = [];
   const exact: Band[] = [];
@@ -82,11 +114,9 @@ export function compose(frame: ReplicaFrame): Composition {
   let exactServed = 0;
   let visibleInView = 0;
 
-  // **A truncated band is not exact.** Eviction keeps a band's head and its `served` figure;
-  // counting it exact would fail the drawn-equals-served fidelity check on every paint until the
-  // refetch heals it — a crash loop under exactly the memory pressure eviction exists for. Its
-  // head is still an id-order prefix, so it is demoted to a stand-in over its own tile: drawn,
-  // stale-marked, counts suppressed, refetched when its ground is next planned.
+  // A truncated band is not exact: it keeps its `served` figure, so counted as exact it would fail
+  // the drawn-equals-served check on every paint until refetched. Its head is still a prefix, so it
+  // is drawn as a stand-in over its own tile.
   const truncated: Band[] = [];
   for (const band of frame.exact) {
     if (band.ids.length === 0) continue;
@@ -109,8 +139,7 @@ export function compose(frame: ReplicaFrame): Composition {
 
   const dim = 2 ** frame.depth;
   const exactTiles = exactTileSet(exact, dim);
-  // A truncated head still answers its tile for supersession: without this, held descendants
-  // would draw over the same ground and the patch reads dense-then-thin instead of loading.
+  // A truncated head still answers its tile, so held descendants do not draw over it.
   for (const band of truncated) exactTiles.add(band.x * dim + band.y);
   const span = WORLD_SIZE / dim;
 
@@ -188,11 +217,11 @@ export function compose(frame: ReplicaFrame): Composition {
 }
 
 /**
- * Fold fresh exact bands into a held composition — the cheap tier.
+ * Folds fresh exact bands into a held composition. The exact half is recomputed; the stand-in
+ * pieces are carried, with ground now exact removed, and returned by reference when nothing was
+ * removed so a consumer can keep its buffers.
  *
- * The exact half is fully recomputed; the stand-in pieces ride along **filtered against the new
- * exact set** (ground just answered admits no stand-in) and are returned by reference when
- * nothing was filtered, which is what lets a consumer skip re-materialising its buffers.
+ * @internal
  */
 export function fold(held: Composition, exact: Band[], version: number): Composition {
   const tiles: ComposedTile[] = [];
@@ -206,7 +235,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
   for (const band of exact) {
     if (band.ids.length === 0) continue;
     if (band.ids.length < band.served) {
-      // Same demotion as {@link compose}: eviction's head is a stand-in now, never exact.
+      // Drawn as a stand-in, as in {@link compose}.
       truncated.push(band);
       continue;
     }
@@ -223,7 +252,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
     });
   }
   const exactTiles = exactTileSet(live, dim);
-  // As in {@link compose}: a truncated head answers its tile for supersession purposes.
+  // As in {@link compose}, a truncated head answers its tile.
   for (const band of truncated) exactTiles.add(band.x * dim + band.y);
 
   let standIn = held.standIn;
@@ -246,7 +275,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
         continue;
       }
       if (band.depth === held.depth) {
-        // A carried truncated head; superseded if its tile has become exact.
+        // A carried truncated head, dropped once its tile is exact.
         if (exactTiles.has(band.x * dim + band.y)) {
           changed = true;
           continue;
@@ -266,9 +295,8 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
     if (changed) standIn = kept;
   }
 
-  // Non-exact tile entries are rebuilt from the pieces that actually survived — a carried entry
-  // keeps a `drawn` its refiltered piece no longer has, and every per-tile reader (the density
-  // audit first among them) would sum marks that are not drawn.
+  // Stand-in tile entries are rebuilt from the surviving pieces, so `drawn` matches what a refiltered
+  // piece draws.
   let provisional = 0;
   for (const piece of standIn) {
     const drawn = piece.indices ? Math.min(piece.indices.length, piece.limit) : piece.limit;
@@ -291,7 +319,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
   };
 }
 
-/** Ancestor marks over exact tiles are dropped — the same integer-grid test at both tiers. */
+/** Drops an ancestor's marks over exact tiles, by the same integer-grid test in both paths. */
 function filterAncestor(
   band: Band,
   indices: number[] | null,

@@ -2,23 +2,24 @@
 
 A battery is a list of queries and a recorded response per query (§12.2):
 
-    Query    = Meta | Categories | Viewport | Region | Item
+    Query    = Meta | Categories | Suggest | Viewport | Aggregate | Item | Browse | ArtifactCard
     Recorded = dict[Query, Canonical]
 
 The membership is §3's table, and it is small because the query surface is deliberately small —
 the same property that makes the leak register enumerable. Every served surface is here: the
-schema (`/v1/meta`), a category's values (`/v1/categories/{column}`), the viewport's three
-streamed surfaces (tiles, points, underlay — the underlay must be *requested*, since at
-`underlay_offset = 0` it emits nothing and silently drops out of every comparison), the region
-summary, and the drill-down (`/v1/items/{id}`), which earns its place twice over: it is the only
-surface that reads all three homes, so a blob-resident field dropped by a producer is visible
-nowhere else.
+schema (`/v1/meta`), a category's values (`/v1/categories/{column}`) and its typeahead
+(`/suggest`), the viewport's streamed surfaces (tiles, points, underlay and artifacts, with a
+filter or a highlight where asked — the underlay must be *requested*, since at
+`underlay_offset = 0` it emits nothing and silently drops out of every comparison, and the
+artifacts only where `layers` names some), the counts by group over a drawn region
+(`/v1/aggregate`), the drill-down
+(`/v1/items/{id}`), which earns its place twice over: it is the only surface that reads all three
+homes, so a blob-resident field dropped by a producer is visible nowhere else, and a layer's
+browse page (`/v1/artifacts/browse`) and one artifact's card (`/v1/artifacts/{id}`).
 
-`/v1/region` is specified (contracts §3.2) and **not in the router**, so the battery carries it as
-an [`Absent`] entry — an explicitly marked absence rather than a query that silently never runs.
-`test_battery.py` pins both halves: that the marker is present, and that the route still refuses,
-so the day it lands a test fails and the marker is promoted to a live query instead of quietly
-shadowing a surface that now exists.
+The region breakdown the correctness suite named is served by `/v1/aggregate`: one query with a
+region as its set, the whole visible set as its reference, and a size, a value breakdown, a
+density surface and a density per value as its groupings.
 
 **The battery always carries one viewport deep enough to hold saturated tiles** ([`DEEP_ZOOM`]),
 because the stage-invariance comparison needs a surface where membership is comparable and
@@ -47,12 +48,12 @@ from typing import Iterable, Sequence, Union
 
 import requests
 
-from .canonical import Canonical, Json, canonicalise_viewport
+from .canonical import Canonical, Json, canonicalise_viewport, table_rows
 
 
 @dataclass(frozen=True)
 class Meta:
-    """`GET /v1/meta` — the schema, operand list and idset. Absence from the battery would hide a
+    """`GET /v1/meta` — the schema and operand list. Absence from the battery would hide a
     producer that dropped a declared column from the manifest (§3)."""
 
 
@@ -83,6 +84,10 @@ class Viewport:
     #: Canonical JSON (`json.dumps(..., sort_keys=True)`) or None — text so the query is hashable.
     filters: str | None = None
     underlay_offset: int = 0
+    #: Canonical JSON for the `highlight` expression, or None.
+    highlight: str | None = None
+    #: Canonical JSON for `layers` (`"all"` or a list of names), or None for no artifact pass.
+    layers: str | None = None
 
     def __post_init__(self):
         if (self.bbox is None) == (self.tiles is None):
@@ -90,19 +95,15 @@ class Viewport:
 
 
 @dataclass(frozen=True)
-class Region:
-    """`POST /v1/region` — counts and breakdowns over a polygon; the path whose divergence from
-    the tile path §3 names. ⊘ Not routed today: the battery carries this query wrapped in
-    [`Absent`], and [`record_one`] refuses it, loudly, until the route exists."""
+class Aggregate:
+    """`POST /v1/aggregate`: counts by group over a set, compared with a reference. Every field
+    but `view_id` is canonical JSON text, as on [`Viewport`]; `reference` `"{}"` is the whole
+    visible set."""
 
     view_id: str
-    polygon: tuple[tuple[float, float], ...] | None = None
-    bbox: tuple[float, float, float, float] | None = None
+    groupings: str
     filters: str | None = None
-
-    def __post_init__(self):
-        if (self.polygon is None) == (self.bbox is None):
-            raise ValueError("exactly one of polygon/bbox — the contract's own rule (§3.2)")
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,23 +115,41 @@ class Item:
     tessera_id: int
 
 
-Query = Union[Meta, Categories, Viewport, Region, Item]
+@dataclass(frozen=True)
+class Suggest:
+    """`GET /v1/categories/{column}/suggest`: the typeahead over a category's values, with the
+    per-principal counts when `counts` is set."""
+
+    column: str
+    q: str
+    counts: bool = False
 
 
 @dataclass(frozen=True)
-class Absent:
-    """A surface the battery names and cannot run — present so the gap is a visible, pinned fact
-    of the battery rather than an omission nobody can distinguish from an oversight.
+class Browse:
+    """`POST /v1/artifacts/browse`: one page of a layer's hierarchy. The roots form when `parent`
+    and `q` are both None, the children form with a `parent` tessera id, the search form with `q`."""
 
-    [`record`] skips these; the battery's tests assert they are still true absences (the route
-    still refuses), so a marker cannot outlive the gap it marks.
-    """
+    view_id: str
+    layer: str
+    parent: int | None = None
+    q: str | None = None
+    #: Canonical JSON, as on [`Viewport`].
+    filters: str | None = None
 
-    query: Query
-    reason: str
+
+@dataclass(frozen=True)
+class ArtifactCard:
+    """`POST /v1/artifacts/{tessera_id}`: one artifact as this principal sees it."""
+
+    tessera_id: int
+    view_id: str
 
 
-Battery = tuple[Union[Query, Absent], ...]
+Query = Union[Meta, Categories, Suggest, Viewport, Aggregate, Item, Browse, ArtifactCard]
+
+
+Battery = tuple[Query, ...]
 
 Recorded = dict[Query, Canonical]
 
@@ -182,7 +201,7 @@ def build_battery(
         d["name"] for d in meta.get("declared_scalars", []) if d.get("category") is not None
     )
 
-    entries: list[Query | Absent] = [Meta()]
+    entries: list[Query] = [Meta()]
     entries += [Categories(column) for column in category_columns]
     entries += [
         Viewport(view_id, zoom, bbox=bbox, k=k, underlay_offset=underlay_offset)
@@ -205,30 +224,47 @@ def build_battery(
                 underlay_offset=underlay_offset,
             )
         )
-    entries.append(
-        Absent(
-            Region(view_id, bbox=bbox),
-            reason="/v1/region is not in the router (correctness-suite §12.2); "
-            "test_battery.py pins the absence so the marker cannot outlive it",
-        )
-    )
+    entries.append(_aggregate(meta, view_id, bbox))
     entries += [Item(tessera_id) for tessera_id in item_ids]
     return tuple(entries)
 
 
-def record(server, token: str, battery: Iterable[Query | Absent]) -> Recorded:
+def _aggregate(meta: dict, view_id: str, bbox: tuple[float, float, float, float]) -> Aggregate:
+    """The counts over the left half of `bbox` against everything visible: the size, the first
+    countable category's values by count with and without cells, and a density surface."""
+    countable = sorted(
+        d["name"]
+        for d in meta.get("declared_scalars", [])
+        if d.get("category") is not None
+        and (d.get("index") or d.get("render") or d["category"].get("visibility") == "derived")
+    )
+    groupings: list[dict] = [{}, {"cells": {"depth": 4}}]
+    if countable:
+        groupings += [
+            {"by": {"field": countable[0], "top": 5}},
+            {"by": {"field": countable[0], "top": 3}, "cells": {"depth": 2}},
+        ]
+    x0, y0, x1, y1 = bbox
+    region = {"region": {"bbox": [x0, y0, (x0 + x1) / 2, y1]}}
+    return Aggregate(
+        view_id,
+        groupings=_canonical_json(groupings),
+        filters=_canonical_json(region),
+        reference="{}",
+    )
+
+
+def _canonical_json(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def record(server, token: str, battery: Iterable[Query]) -> Recorded:
     """Issue the battery against a live server and canonicalise every response.
 
     `server` is `oracle.harness.Server` (or anything with its `viewer_base`/`meta`/`item`
-    surface). [`Absent`] entries are skipped — they are markers, and their truth is asserted by
-    the battery's own tests, not silently re-discovered per recording.
+    surface).
     """
-    recorded: Recorded = {}
-    for entry in battery:
-        if isinstance(entry, Absent):
-            continue
-        recorded[entry] = record_one(server, token, entry)
-    return recorded
+    return {entry: record_one(server, token, entry) for entry in battery}
 
 
 def record_one(server, token: str, query: Query) -> Canonical:
@@ -237,6 +273,41 @@ def record_one(server, token: str, query: Query) -> Canonical:
         return Json(server.meta(token))
     if isinstance(query, Categories):
         return Json({"pages": _category_pages(server, token, query.column)})
+    if isinstance(query, Suggest):
+        params = {"q": query.q}
+        if query.counts:
+            params["counts"] = "true"
+        resp = requests.get(
+            f"{server.viewer_base}/v1/categories/{query.column}/suggest",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=10,
+        )
+        return _status_and_body(resp, (200, 404))
+    if isinstance(query, Browse):
+        body: dict = {"view": query.view_id, "layer": query.layer}
+        if query.parent is not None:
+            body["parent"] = str(query.parent)
+        if query.q is not None:
+            body["q"] = query.q
+        if query.filters is not None:
+            body["filters"] = json.loads(query.filters)
+        resp = requests.post(
+            f"{server.viewer_base}/v1/artifacts/browse",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=30,
+        )
+        # A layer this principal cannot reach is refused as an unknown one: a real answer here.
+        return _status_and_body(resp, (200, 422))
+    if isinstance(query, ArtifactCard):
+        resp = requests.post(
+            f"{server.viewer_base}/v1/artifacts/{query.tessera_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"view": query.view_id},
+            timeout=10,
+        )
+        return _status_and_body(resp, (200, 404))
     if isinstance(query, Viewport):
         return canonicalise_viewport(_viewport_body(server, token, query))
     if isinstance(query, Item):
@@ -247,13 +318,18 @@ def record_one(server, token: str, query: Query) -> Canonical:
         if resp.status_code not in (200, 404):
             resp.raise_for_status()
         return Json({"status": resp.status_code, "body": resp.json()})
-    if isinstance(query, Region):
-        raise NotImplementedError(
-            "/v1/region is not routed; the battery carries it as a marked Absent entry rather "
-            "than a query that silently never runs (correctness-suite §12.2). When the route "
-            "lands, write its Batches canonicalisation and promote the marker."
-        )
+    if isinstance(query, Aggregate):
+        return canonicalise_aggregate(server, token, query)
     raise TypeError(f"not a battery query: {query!r}")
+
+
+def _status_and_body(resp: requests.Response, answers: tuple[int, ...]) -> Json:
+    """A JSON surface whose refusals in `answers` are real answers; any other status is a harness
+    failure."""
+    if resp.status_code not in answers:
+        resp.raise_for_status()
+        raise RuntimeError(f"unexpected {resp.status_code}: {resp.text}")
+    return Json({"status": resp.status_code, "body": resp.json()})
 
 
 def _category_pages(server, token: str, column: str) -> list[dict]:
@@ -303,6 +379,10 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
         body["filters"] = json.loads(query.filters)
     if query.underlay_offset:
         body["underlay_offset"] = query.underlay_offset
+    if query.highlight is not None:
+        body["highlight"] = json.loads(query.highlight)
+    if query.layers is not None:
+        body["layers"] = json.loads(query.layers)
     resp = requests.post(
         f"{server.viewer_base}/v1/viewport",
         headers={"Authorization": f"Bearer {token}"},
@@ -313,16 +393,50 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
     return resp.content
 
 
+def canonicalise_aggregate(server, token: str, query: Aggregate) -> Json:
+    """Every table of the whole read, carried across responses by the trailer's cursor: each
+    table's head without `resumed`, and its rows joined across pages as plain values.
+
+    Cursors and times are left out, since they differ between two issues of one request; page
+    boundaries are left out because a table's rows are the same however they are paged."""
+    body: dict = {"view": query.view_id, "groupings": json.loads(query.groupings)}
+    if query.filters is not None:
+        body["filters"] = json.loads(query.filters)
+    if query.reference is not None:
+        body["reference"] = json.loads(query.reference)
+    heads: dict[int, dict] = {}
+    rows: dict[int, list[dict]] = {}
+    while True:
+        resp = requests.post(
+            f"{server.viewer_base}/v1/aggregate",
+            headers={"Authorization": f"Bearer {token}"},
+            json=body,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        tables, trailer = table_rows(resp.content)
+        for head, table in tables:
+            grouping = head["grouping"]
+            heads.setdefault(grouping, {k: v for k, v in head.items() if k != "resumed"})
+            rows.setdefault(grouping, []).extend(table)
+        if trailer["next"] is None:
+            break
+        body["cursor"] = trailer["next"]
+    return Json({"tables": [{"head": heads[g], "rows": rows.get(g, [])} for g in sorted(heads)]})
+
+
 __all__ = [
-    "Absent",
+    "Aggregate",
+    "ArtifactCard",
     "Battery",
+    "Browse",
     "Categories",
     "DEEP_ZOOM",
     "Item",
     "Meta",
     "Query",
     "Recorded",
-    "Region",
+    "Suggest",
     "Viewport",
     "build_battery",
     "record",

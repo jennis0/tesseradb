@@ -4,7 +4,7 @@
 //! it must be re-derivable from the log byte-for-byte. The field this file pins is the one §2.1's
 //! contiguity arithmetic assumes and the format did not carry.
 
-use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow};
+use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow, WalScalar};
 use tessera_types::EntityId;
 
 /// The view a row belongs to is durable, because a flush segment's entity range is
@@ -14,7 +14,6 @@ fn a_wal_row_round_trips_its_view() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
-        external_id: Some(b"ext-1".to_vec()),
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -25,8 +24,10 @@ fn a_wal_row_round_trips_its_view() {
         scoped: Vec::new(),
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".into(),
             body_hash: [0u8; 32],
             rows: vec![row.clone()],
@@ -34,7 +35,8 @@ fn a_wal_row_round_trips_its_view() {
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     match &records[0] {
         WalRecord::IngestBatch { rows, .. } => assert_eq!(rows[0], row),
         other => panic!("expected an IngestBatch, got {other:?}"),
@@ -93,7 +95,6 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
     assert_ne!(f64::from(y as f32), y);
 
     let row = WalRow {
-        external_id: Some(b"ext-1".to_vec()),
         entity_id: EntityId::new(7),
         view: "default".to_string(),
         join: false,
@@ -104,8 +105,10 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
         scoped: Vec::new(),
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".into(),
             body_hash: [0u8; 32],
             rows: vec![row.clone()],
@@ -113,7 +116,8 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     match &records[0] {
         WalRecord::IngestBatch { rows, .. } => {
             assert_eq!(rows[0].x, x);
@@ -146,11 +150,24 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// design's format landed (`ingest.md` §7.1, decision 0136): a 20 growth read at 21 takes the
 /// next record's leading bytes for the leaving set it does not carry, a 20 publication takes the
 /// members' length for the view's, and a 20 content takes the first forty bytes of its
-/// generating set for a digest and a cardinality.
+/// generating set for a digest and a cardinality. **23** is the version before a publication
+/// carried its view's incarnation: a 23 publication read at 24 takes the members' length for it.
+/// **25** is the version before an attribute declaration carried `unique`. **26** is the version
+/// before an ingest batch carried its receipt and a change request became one record: a 26 batch
+/// read at 27 takes the next record's leading bytes for the receipt it does not carry. **27** is
+/// the version before an ingest batch carried its edits: a 27 batch read at 28 takes its receipt's
+/// length for the edits'. **28** is the version before a view drop carried its deletions: a 28 drop
+/// read at 29 takes the next record's leading bytes for them. **29** is the version before a row
+/// lost its external id: a 29 row read at 30 takes the external id's tag for its entity. **30** is
+/// the version before a receipt's `tessera_id` was optional: a 30 receipt read at 31 takes the
+/// identifier's first byte for the option's tag.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16, 17, 18, 19, 20].into_iter().enumerate() {
+    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+        .into_iter()
+        .enumerate()
+    {
         let at = dir.path().join(format!("v{index}"));
         std::fs::create_dir(&at).unwrap();
         std::fs::write(at.join("wal-000001.log"), header_at_version(version, 1, 0)).unwrap();
@@ -164,7 +181,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(21, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(31, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -196,24 +213,81 @@ fn view_create_and_drop_round_trip() {
         incarnation: 2,
     };
     {
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&WalRecord::ViewCreate {
             view: created.clone(),
         })
         .unwrap();
         wal.append(&WalRecord::ViewDrop {
             view: dropped.clone(),
+            deleted: vec![EntityId::new(7), EntityId::new(9)],
         })
         .unwrap();
         wal.fsync().unwrap();
     }
-    let (_wal, records) = Wal::open(&path).unwrap();
+    let wal = Wal::open(&path).unwrap();
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
     match (&records[0], &records[1]) {
-        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone }) => {
+        (WalRecord::ViewCreate { view }, WalRecord::ViewDrop { view: stone, deleted }) => {
             assert_eq!(view, &created);
             assert_eq!(stone, &dropped);
+            assert_eq!(deleted, &[EntityId::new(7), EntityId::new(9)]);
         }
         other => panic!("expected a create then a drop, got {other:?}"),
     }
+}
+
+/// A row carrying one value of every scalar kind is written to the log as these bytes. A change to
+/// the scalar's encoding changes them, and is a `WAL_VERSION` bump.
+#[test]
+fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("wal.log");
+    let row = WalRow {
+        entity_id: EntityId::new(3),
+        view: "v".to_string(),
+        join: false,
+        descriptors: Vec::new(),
+        x: 0.5,
+        y: 0.25,
+        scalars: vec![
+            WalScalar::Bool(true),
+            WalScalar::U8(0xab),
+            WalScalar::U16(0xabcd),
+            WalScalar::U32(0x0102_0304),
+            WalScalar::U64(u64::MAX),
+            WalScalar::I8(-2),
+            WalScalar::I16(-300),
+            WalScalar::I32(-70_000),
+            WalScalar::I64(i64::MIN),
+            WalScalar::F32(1.5),
+            WalScalar::F64(-2.25),
+            WalScalar::TimestampUs(1_700_000_000_000_000),
+            WalScalar::Utf8("k".to_string()),
+            WalScalar::Null,
+        ],
+        scoped: vec![WalScalar::U8(1)],
+    };
+    {
+        let mut wal = Wal::open(&path).unwrap();
+        wal.append(&WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
+            batch_id: "b".into(),
+            body_hash: [0u8; 32],
+            rows: vec![row],
+        })
+        .unwrap();
+        wal.fsync().unwrap();
+    }
+    let bytes = std::fs::read(dir.path().join("wal-000001.log")).unwrap();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hex,
+        "5457414c1f000100000000000000000000000000000086000000010162000000000000000000000000000000\
+         0000000000000000000000000000000000010301760000000000000000e03f000000000000d03f0e000101ab\
+         02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff01090000c0\
+         3f0a00000000000002c00b8080f281838985060c016b0d0101010000a8d5d049"
+    );
 }

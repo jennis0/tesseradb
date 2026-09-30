@@ -563,6 +563,13 @@ impl RowColumn {
     /// function, so what reaches this is `crates/tessera-bench/src/bin/epoch_shard_tile_index.rs`
     /// and this crate's tests. Kept because it is the projection the two routes are asserted equal
     /// against.
+    ///
+    /// ⊘ It reads the membership each record declares. An attached artifact that declares none is
+    /// served over its target's (decision 0145), which is read from the artifact store, and this
+    /// function is not given one. Its callers project levels whose artifacts carry no attachment,
+    /// so the two agree there and would not on a borrowing level. Taking the store, as
+    /// [`crate::tile_index::TileIndex::project`] does, is the fix, and it moves the bench's call
+    /// with it.
     pub fn project<'a, I>(
         ordinals: u32,
         space: &RowSpace,
@@ -575,7 +582,10 @@ impl RowColumn {
     {
         let each = |visit: &mut dyn FnMut(u32, &Bitmap)| {
             for (ordinal, record) in level() {
-                visit(ordinal, &space.project_base(&record.members));
+                visit(
+                    ordinal,
+                    &record.members.projected(|part| space.project_base(part)),
+                );
             }
         };
         Self::assemble(ordinals, space.base_rows(), layout, scratch, &each)
@@ -1356,6 +1366,14 @@ impl RowColumn {
                 }
             })
             .collect();
+        // An ordinal published after the base was written is live and labels no base row.
+        if let Some(later) = live.get(out.len()..) {
+            out.extend(
+                later
+                    .iter()
+                    .map(|&live| if live { TILE_INDEX_EMPTY } else { TILE_INDEX_HOLE }),
+            );
+        }
         let mut widen = |ordinal: u32, row: u32| {
             let Some(e) = out.get_mut(ordinal as usize) else {
                 return;

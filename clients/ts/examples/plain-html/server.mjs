@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-// The app server beside the plain-HTML page: the one place the deployment's *session credential*
-// lives. The browser never holds it — the page asks this server for a viewer token for the
-// signed-in user, and this server calls `POST /session/authorise` on its behalf (design
-// client-components §5.3). Node's `http`, no framework.
+// The app server beside the plain-HTML page, and the only holder of the session credential. The
+// page asks it for a viewer token for the signed-in user, and it calls `POST /session/authorise`
+// on the user's behalf. Node's `http`, no framework.
 //
-//   node server.mjs            # http://localhost:5180, against the demo's planes
+//   node server.mjs            # http://localhost:5180, against the demo's servers
 //
-// It also serves the page and the self-contained bundle, and proxies `/v1/*` to the viewer plane
-// on the same origin, forwarding the six response headers a replica is keyed by
-// (client-obligations rule 10) — the production topology until a viewer-plane CORS surface
-// exists (README, "In production").
+// It also serves the page and the self-contained bundle, and proxies `/v1/*` to the viewer server
+// on the same origin with every response header, including those the client's replica is keyed by.
 import {createServer} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {Readable} from 'node:stream';
@@ -19,9 +16,8 @@ import {fileURLToPath} from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * The endpoint. What authority the call carries is the auth plugin's business: under
- * `builtin:passthrough`, the only plugin today, the claims are taken as given — so this function
- * is the component that asserts what its user may see (the README says what that means).
+ * Mint a viewer token for `terms`. Under `builtin:passthrough` the server takes the claims as
+ * given, so this function is what asserts what its user may see.
  *
  * @param {{sessionUrl: string, credential: string}} cfg
  * @param {string[]} terms  the signed-in user's claims, from the app's own session
@@ -39,8 +35,8 @@ export async function authorise({sessionUrl, credential}, terms) {
 }
 
 /**
- * Forward one request to the viewer plane and stream the answer back, every response header
- * kept — a proxy that drops headers it does not know keeps none of the six.
+ * Forward one request to the viewer server and stream the answer back with every response header,
+ * since the client keys its replica on some of them.
  *
  * @param {string} viewerUrl
  * @param {import('node:http').IncomingMessage} req
@@ -72,9 +68,18 @@ export async function proxy(viewerUrl, req, res) {
  * @param {{sessionUrl: string, viewerUrl: string, credential: string, users: Record<string, {label: string, terms: string[]}>, bundleDir: string}} cfg
  */
 export function createHandler(cfg) {
-  const page = readFile(join(here, 'index.html'), 'utf8');
-  const bundle = readFile(join(cfg.bundleDir, 'tessera-components.js'));
-  const sri = readFile(join(cfg.bundleDir, 'tessera-components.js.sri'), 'utf8').then((s) => s.trim());
+  /** The bundle's file, read on each request, or `null` where it has not been built. @param {string} name */
+  const built = async (name) => {
+    try {
+      return await readFile(join(cfg.bundleDir, name));
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT') return null;
+      throw e;
+    }
+  };
+  /** @param {import('node:http').ServerResponse} res */
+  const unbuilt = (res) =>
+    json(res, 503, {error: `${join(cfg.bundleDir, 'tessera-components.js')} is not built; run: npm run bundle -w @tesseradb/components`});
   /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -84,21 +89,26 @@ export function createHandler(cfg) {
         return json(res, 200, Object.entries(cfg.users).map(([name, u]) => ({name, label: u.label})));
       }
       if (url.pathname === '/token' && req.method === 'POST') {
-        // The user comes from the app's own sign-in; here it is a query parameter naming one of
-        // `users.json`'s entries, which is where a real app would consult its session instead.
+        // The user is a query parameter naming an entry in `users.json`; a real app would read
+        // its own session.
         const user = cfg.users[url.searchParams.get('user') ?? ''];
         if (!user) return json(res, 404, {error: 'unknown user'});
         return json(res, 200, await authorise(cfg, user.terms));
       }
       if (url.pathname === '/tessera-components.js') {
+        const bundle = await built('tessera-components.js');
+        if (!bundle) return unbuilt(res);
         res.writeHead(200, {'content-type': 'text/javascript', 'cache-control': 'no-store'});
-        return res.end(await bundle);
+        return res.end(bundle);
       }
       if (url.pathname === '/') {
-        // The integrity hash is the one the bundle beside this server was built with; a page
-        // deployed as a static file pastes it in and fails closed when the file changes.
+        // The integrity hash of the bundle beside this server. A static page pastes it in, and the
+        // browser refuses the bundle if the file changes.
+        const sri = await built('tessera-components.js.sri');
+        if (!sri) return unbuilt(res);
+        const page = await readFile(join(here, 'index.html'), 'utf8');
         res.writeHead(200, {'content-type': 'text/html; charset=utf-8'});
-        return res.end((await page).replace('__SRI__', await sri));
+        return res.end(page.replace('__SRI__', sri.toString('utf8').trim()));
       }
       json(res, 404, {error: 'not found'});
     } catch (e) {

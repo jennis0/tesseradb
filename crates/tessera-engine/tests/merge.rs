@@ -6,7 +6,7 @@
 //! - **The segment count comes down**, which is the axis the entity-space coalesce cannot bound
 //!   and the whole reason this half exists.
 //! - **No item is lost.** A merge is row-count preserving and drops no posting: every item stays
-//!   visible, at the same coordinates, and every external id still resolves to the same entity.
+//!   visible, at the same coordinates, and every unique value still names the same entity.
 //!   Dropping a row would be the compaction *fold*, which is invariant-bearing work this layer
 //!   must not do.
 //! - **Row space is permuted, so a projection that spans it cannot be served stale**, and the
@@ -24,7 +24,7 @@
 //! this file passes against that bug.
 //!
 //! So these cases assert on the served `tessera_id` set. `tessera_id` is a blinding permutation of
-//! the entity id under the deployment key (I10, decision 0014) — a function of the entity, never
+//! the entity id under the bundle's key (I10, decision 0014) — a function of the entity, never
 //! of the row — so it is stable across a merge by construction, and set equality across the swap
 //! is exactly the discrimination a count cannot make. `publish_merge` re-derives the mask over the
 //! new row space for this reason; these are the tests that hold it to it.
@@ -64,16 +64,10 @@ use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
 
+const WAIT: Duration = Duration::from_secs(30);
+
 /// `MergePolicy::tier_width` — how many adjacent, same-tier extents select a merge.
 const TIER_WIDTH: usize = 4;
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 fn open_engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
     Engine::open(
@@ -157,7 +151,7 @@ const ROWS_EACH: usize = 8;
 
 /// The served set as `tessera_id`s.
 ///
-/// `tessera_id` is a blinding permutation of the entity id under the deployment key (I10) — a
+/// `tessera_id` is a blinding permutation of the entity id under the bundle's key (I10) — a
 /// function of the entity, never of the row — so it is stable across a merge by construction, and
 /// set equality across the swap is the discrimination a count cannot make.
 fn served_ids(
@@ -211,32 +205,31 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
         let mut rows = Vec::new();
         let mut items = Vec::new();
         for t in 0..ROWS_EACH {
-            let external_id = format!("ext-{s}-{t}");
+            let key = format!("ext-{s}-{t}");
             let descriptors = if t.is_multiple_of(2) {
                 vec![b"0".to_vec(), b"1".to_vec()]
             } else {
                 vec![b"0".to_vec()]
             };
             rows.push(UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 // x ≡ s (mod TIER_WIDTH), scaled to distinct cells inside the extent.
                 x: ((t * TIER_WIDTH + s) * 20) as f64,
                 y: 5.0,
-                scalars: Vec::new(),
+                scalars: keyed(&key),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
                 scoped: Vec::new(),
             });
-            items.push(external_id);
+            items.push(key);
         }
         let entities = engine
-            .accept_ingest(rows, format!("batch-{s}"), [s as u8; 32])
+            .ingest_rows(rows, format!("batch-{s}"), [s as u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the flush to publish", || {
+        wait_until("the flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
         by_segment.push(entities.into_iter().zip(items).collect());
@@ -273,7 +266,7 @@ fn run_merge(engine: &Engine, entities: &[EntityId]) {
     let before = rows_of(engine, entities);
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     let after = rows_of(engine, entities);
@@ -483,7 +476,9 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
         engine.generation().bundle.partitions["default"]
             .manifest
             .tombstones
-            .contains(&deleted.raw()),
+            .entities()
+            .expect("a written manifest's tombstones decode")
+            .contains(deleted.raw() as u32),
         "the merge's manifest must carry the tombstone forward — nothing retires it before the \
          fold, and no fold runs here"
     );
@@ -525,7 +520,7 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
     engine
         .accept_change(entity, ChangeOp::Suppress)
         .expect("a suppression is accepted");
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -580,7 +575,7 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
     engine.set_merge_publication_paused_for_test(true);
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to complete and hold", || {
+    wait_until("the merge to complete and hold", WAIT, || {
         engine.merge_publication_is_held_for_test()
     });
     // Off again, so nothing dispatches a second merge over the same extents.
@@ -598,7 +593,7 @@ fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
     assert!(engine.generation().overlay.is_suppressed(entity));
 
     engine.set_merge_publication_paused_for_test(false);
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -660,20 +655,9 @@ fn a_merge_collapses_segments_and_loses_no_item() {
          the Morton code, never through a dequantise-and-requantise"
     );
 
-    // Every binding survives the run coalesce the merge performed on the way.
-    for (entity, external_id) in &items {
-        assert_eq!(
-            engine
-                .resolve_external_id(external_id.as_bytes())
-                .expect("resolvable"),
-            Some(*entity),
-            "external id {external_id} lost its binding to the merge"
-        );
-        assert_eq!(
-            engine.external_id_of(*entity).expect("no inconsistency"),
-            Some(external_id.as_bytes().to_vec()),
-            "and the reverse direction still answers for it"
-        );
+    // Every value still names its item: the merge leaves the key runs as they were.
+    for (entity, key) in &items {
+        assert_eq!(item_of_key(&engine, key), Some(*entity), "{key} lost its item to the merge");
     }
 }
 
@@ -704,7 +688,7 @@ fn a_merge_moves_geometry_and_the_refresh_replaces_every_projection() {
         "a merge permutes row space, so it must bump the geometry version — the only safe \
          discriminator a row-space artefact may key on"
     );
-    wait_until("the refresh to replace the entry", || {
+    wait_until("the refresh to replace the entry", WAIT, || {
         engine.refreshes() >= 1
     });
 
@@ -762,7 +746,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
         (64 + TIER_WIDTH * ROWS_EACH) as u64,
         "every item survives the merge and the restart"
     );
-    for (entity, external_id) in &items {
+    for (entity, key) in &items {
         assert!(
             generation.bundle.partitions["default"].views["s0"]
                 .row_space
@@ -771,12 +755,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
             "entity {} lost its row across the merge and the restart",
             entity.raw()
         );
-        assert_eq!(
-            reopened
-                .resolve_external_id(external_id.as_bytes())
-                .expect("resolvable"),
-            Some(*entity)
-        );
+        assert_eq!(item_of_key(&reopened, key), Some(*entity));
     }
 }
 
@@ -811,7 +790,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
         engine.set_merge_publication_paused_for_test(true);
         engine.set_merge_for_test(true);
         engine.request_flush();
-        wait_until("the merge to complete and hold", || {
+        wait_until("the merge to complete and hold", WAIT, || {
             engine.merge_publication_is_held_for_test()
         });
         // Off again, so the tick that publishes the flush below does not dispatch a second merge
@@ -823,7 +802,6 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             .map(|t| {
                 let descriptors = vec![b"0".to_vec()];
                 UnallocatedRow {
-                    external_id: Some(format!("late-{t}").into_bytes()),
                     view: "s0".to_string(),
                     join: None,
                     x: ((t * TIER_WIDTH) * 20) as f64,
@@ -836,17 +814,17 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             })
             .collect();
         engine
-            .accept_ingest(batch, "batch-late".to_string(), [9u8; 32])
+            .ingest_rows(batch, "batch-late".to_string(), [9u8; 32])
             .expect("ingest is accepted");
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the late flush to publish", || {
+        wait_until("the late flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
         let watermark_served = engine.generation().watermark;
 
         engine.set_merge_publication_paused_for_test(false);
-        wait_until("the merge to publish", || {
+        wait_until("the merge to publish", WAIT, || {
             engine.write_executor_stats().merges >= 1
         });
 
@@ -916,7 +894,7 @@ fn a_racer_inside_a_merges_refresh_window_is_shed_rather_than_rebuilding() {
 
     // Released, the window closes and the same request is served.
     engine.set_refresh_paused_for_test(false);
-    wait_until("the refresh to land", || engine.refreshes() >= 1);
+    wait_until("the refresh to land", WAIT, || engine.refreshes() >= 1);
     let served = viewport(&engine, &session);
     assert_eq!(
         served.tiles.iter().map(|t| t.visible).sum::<u64>(),
@@ -993,14 +971,12 @@ fn a_session_established_inside_a_merges_refresh_window_is_served_rather_than_sh
 // against that exact defect.
 // ---------------------------------------------------------------------------------------------
 
-/// One flushed segment of `rows` items, at unique external ids namespaced by `tag`.
+/// One flushed segment of `rows` items.
 fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> {
     let mut batch = Vec::new();
     for t in 0..rows {
-        let external_id = format!("cfg-{tag}-{t}");
         let descriptors = vec![b"0".to_vec()];
         batch.push(UnallocatedRow {
-            external_id: Some(external_id.into_bytes()),
             view: "s0".to_string(),
             join: None,
             x: ((t % 47) * 20) as f64,
@@ -1012,11 +988,11 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
         });
     }
     let entities = engine
-        .accept_ingest(batch, format!("cfg-batch-{tag}"), [(101 + tag) as u8; 32])
+        .ingest_rows(batch, format!("cfg-batch-{tag}"), [(101 + tag) as u8; 32])
         .expect("ingest is accepted");
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     entities
@@ -1073,7 +1049,7 @@ fn a_configured_tier_width_reaches_selection_and_changes_when_a_merge_fires() {
 
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the width-2 merge to publish", || {
+    wait_until("the width-2 merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     assert_eq!(
@@ -1135,7 +1111,7 @@ fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge
 
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the same-class merge to publish", || {
+    wait_until("the same-class merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -1236,7 +1212,7 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
 
     // Proceeds: release, and the publication lands whole.
     faults.release();
-    wait_until("the released merge publishes", || {
+    wait_until("the released merge publishes", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
     assert!(
@@ -1253,5 +1229,151 @@ fn the_merge_publication_seam_parks_the_executor_between_execution_and_publicati
         served_ids(&engine, &session),
         served_before,
         "and every item is served across it, at the same identities"
+    );
+}
+
+/// **A flush handed back while the executor is parked is published once, and the bundle reopens.**
+///
+/// The flush finishes on the pool after the executor's drain and before its tick, the window in
+/// which the flush is no longer running and not yet published. The tick that follows must not
+/// plan the same rows again, and every late item ends at one row, served once by this process and
+/// found at that row by a restart.
+///
+/// The merge seam is the lever: the executor parks in `publish_merge`, after its drain and before
+/// its tick, and the held flush is released into that window.
+#[test]
+fn a_flush_handed_back_while_the_executor_is_parked_is_published_once() {
+    use tessera_lifecycle::faults::{PauseAction, PauseSite};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        64,
+    );
+    let (engine, faults) = engine_at_with_faults(tmp.path(), &root);
+    engine.set_merge_for_test(false);
+    flush_interleaved_segments(&engine);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served_before = served_ids(&engine, &session).len();
+
+    // One tick dispatches both: a flush of four new items, held on the pool once it has
+    // executed, and a merge of the four earlier segments, which parks the executor.
+    faults.arm_pause(PauseSite::BeforeMergePublish, PauseAction::Stall);
+    engine.set_merge_for_test(true);
+    engine.set_flush_paused_for_test(true);
+    let late: Vec<UnallocatedRow> = (0..4)
+        .map(|i| {
+            let descriptors = vec![b"0".to_vec()];
+            UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                x: (10 + i * 40) as f64,
+                y: 15.0,
+                scalars: Vec::new(),
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
+    let late = engine
+        .ingest_rows(late, "batch-late".to_string(), [9u8; 32])
+        .expect("ingest is accepted");
+    engine.request_flush();
+    wait_until("the flush to hold on the pool", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    faults.await_arrivals(PauseSite::BeforeMergePublish, 1, WAIT);
+
+    // The flush is handed back while the executor is parked past its drain, and a tick is owed
+    // when it wakes.
+    engine.set_flush_paused_for_test(false);
+    wait_until("the flush to be handed back", WAIT, || {
+        engine.flush_handed_back_for_test()
+    });
+    engine.request_flush();
+    faults.release();
+
+    // Everything settles: the buffer empties, nothing is in flight, and two further ticks have
+    // run, so every flush handed back has been drained and published or discarded.
+    wait_until("the late items to publish", WAIT, || {
+        let stats = engine.write_executor_stats();
+        stats.buffered_items == 0 && !stats.flush_in_flight
+    });
+    for _ in 0..2 {
+        let ticks = engine.write_executor_stats().ticks;
+        engine.request_flush();
+        wait_until("a tick", WAIT, || engine.write_executor_stats().ticks > ticks);
+    }
+    assert_eq!(
+        served_ids(&engine, &session).len(),
+        served_before + late.len(),
+        "the late items are served once each by the process that published them"
+    );
+
+    // And the bundle on disc is one a restart opens, holding each late item at one row.
+    let bundle = tessera_store::open_bundle(&root).expect("the bundle on disc opens");
+    let row_space = &bundle.partitions["default"].views["s0"].row_space;
+    let mut rows: Vec<u32> = late
+        .iter()
+        .map(|e| row_space.row_of(*e).expect("a late item has a row").raw())
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    assert_eq!(rows.len(), late.len(), "each late item at its own row");
+}
+
+/// **A layer registered after the last flush survives a merge and a restart, at its version.** The
+/// registration's own side-manifest names it, a cycle with nothing buffered rotates the log past
+/// its record, and the merge then writes the newest manifest; a merge that assembled that manifest
+/// from the partition's state at the last flush would leave the layer nowhere.
+#[test]
+fn a_layer_registered_before_a_merge_survives_it_and_a_restart() {
+    use tessera_types::layer::{
+        ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
+    };
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+
+    engine
+        .register_layer(LayerDeclaration {
+            scope: Default::default(),
+            name: "clusters/a".into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership: MembershipSource::Enumerated,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Nested,
+                prune_children: false,
+            },
+            content: ContentDeclaration {
+                computed: Vec::new(),
+                supplied: Vec::new(),
+            },
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: None,
+            shape: None,
+        })
+        .expect("the layer registers");
+    let version = engine.registered_layer("clusters/a").unwrap().version;
+    let cycle = engine.request_flush_publication();
+    wait_until("the empty cycle to close", WAIT, || engine.publication() >= cycle);
+
+    run_merge(&engine, &entities);
+    drop(engine);
+    let reopened = engine_at(tmp.path(), &root);
+    assert_eq!(
+        reopened.registered_layer("clusters/a").map(|l| l.version),
+        Some(version)
     );
 }

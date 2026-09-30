@@ -123,7 +123,8 @@ it was not.
 | `title` | text | index | `match` and `phrase`; drill-down |
 | `abstract` | text | index | as above |
 | `authors` | text | index | the surnames `corpus.parquet` carries, joined |
-| `arxiv_id` | keyword | index | the external identifier |
+| `arxiv_id` | keyword | index | arXiv's own identifier |
+| `id` | `u64` | unique | names a paper in every file: the row number `prepare.py` gives each paper |
 
 Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
 refused, the hot column being a fixed-width slot per row.
@@ -259,7 +260,7 @@ layouts stop being an assertion.
 
 Three numbers make that a healthy build. The data's bounds sit **inside** the frame with headroom.
 Nothing **clamps** — quantisation clamps rather than filters, so a point outside the frame is stored
-on its edge, and past half the corpus the build refuses outright. And nearly every point keeps **a
+on its edge, and the build counts every one it stored there. And nearly every point keeps **a
 position of its own**, so two papers far apart in the embedding are far apart on the map.
 
 **What the failure looks like, since this pipeline used to produce it.** Writing raw UMAP

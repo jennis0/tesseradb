@@ -12,7 +12,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float64Array, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -24,6 +24,8 @@ use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::IdentityKey;
+
+mod common;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 64;
@@ -104,12 +106,14 @@ fn text_schema(index: bool) -> Schema {
             value_set: None,
             index,
             render: false,
+            unique: false,
         }],
         vocabularies: HashMap::new(),
     }
 }
 
 fn build_with(schema: Schema) -> tempfile::TempDir {
+    let schema = common::with_id(schema);
     let dir = tempfile::tempdir().unwrap();
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
@@ -138,14 +142,12 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -166,38 +168,6 @@ fn partition_dir(out: &Path) -> PathBuf {
     let bundle = open_bundle(out).unwrap();
     let phash = bundle.partitions.keys().next().unwrap().clone();
     out.join(current_prefix(out)).join("partitions").join(phash)
-}
-
-fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
-    let bundle = open_bundle(out).unwrap();
-    let part = bundle.partitions.values().next().unwrap();
-    let prefix = current_prefix(out);
-    let mut map = HashMap::new();
-    for rel in &part.manifest.external_id_runs {
-        let path = out.join(&prefix).join(rel);
-        let reader =
-            arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap();
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                map.insert(
-                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
-                    ent.value(i),
-                );
-            }
-        }
-    }
-    map
 }
 
 /// **The index and the blob, both, from one build.**
@@ -228,7 +198,7 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
         tessera_authz::postings::PostingsReader::open(&column_dir.join("postings.arrow"), false)
             .expect("the postings open");
     assert_eq!(postings.term_count(), terms.len() as u32);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     for probe in ["quick", "fox", "日本語", "bear"] {
         let ordinal = terms.iter().position(|t| t == probe).expect("a known term");
         let posting = postings
@@ -237,8 +207,10 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
             .expect("the term has one");
         let mut got: Vec<u32> = match posting {
             tessera_authz::postings::PostingRef::Array(bytes) => bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect(),
             tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
         };
@@ -270,11 +242,17 @@ fn an_indexed_text_column_writes_a_token_index_and_a_blob_row() {
             .unwrap_or_else(|| panic!("source {source} has no blob row"));
         assert_eq!(
             fields,
-            vec![tessera_filter::RecordField {
-                tag: 0,
-                value: RecordValue::Utf8(prose_of(source)),
-            }],
-            "source {source}'s prose"
+            vec![
+                tessera_filter::RecordField {
+                    tag: 0,
+                    value: RecordValue::Utf8(prose_of(source)),
+                },
+                tessera_filter::RecordField {
+                    tag: 1,
+                    value: RecordValue::U64(source),
+                },
+            ],
+            "source {source}'s prose, and the `id` a test finds it by"
         );
     }
 }
@@ -300,13 +278,19 @@ fn an_unindexed_text_column_has_the_blob_row_and_no_index() {
         Access::Read,
     )
     .expect("the blob is where an unindexed text value lives");
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     assert_eq!(
         blob.fields_of(source_of[&5]).unwrap(),
-        Some(vec![tessera_filter::RecordField {
-            tag: 0,
-            value: RecordValue::Utf8(prose_of(5)),
-        }])
+        Some(vec![
+            tessera_filter::RecordField {
+                tag: 0,
+                value: RecordValue::Utf8(prose_of(5)),
+            },
+            tessera_filter::RecordField {
+                tag: 1,
+                value: RecordValue::U64(5),
+            },
+        ])
     );
 }
 
@@ -348,7 +332,7 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
 
     // A helper predicting the answer from the fixture's own values, which is the oracle's relation:
@@ -433,7 +417,7 @@ fn match_never_answers_outside_the_candidate() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
 
     let everything = FilterOperand::Match {
         query: "quick".to_string(),
@@ -468,15 +452,9 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
     tessera_engine::filter::FilterColumns::open(
         &out.join(current_prefix(out)),
         &phash,
-        &bundle.manifest.declared_scalars,
-        &bundle.manifest.scoped_scalars(),
-        &|view: &str| bundle.manifest.incarnation_of(view),
-        &bundle.manifest.vocabularies,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
+        &bundle.manifest,
+        // A built bundle has flushed nothing, so every column is its base layer alone.
+        Default::default(),
         &[],
         false,
     )
@@ -501,7 +479,7 @@ fn a_minimum_above_the_query_s_token_count_matches_nothing() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
     let got = |query: &str, minimum: Option<u32>| -> u64 {
         columns
@@ -559,7 +537,7 @@ fn a_negation_over_a_text_column_is_refused() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
 
     let negation = FilterExpr::NoneOf(vec![FilterExpr::Leaf {
@@ -623,7 +601,7 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
     let sources = |operand: FilterOperand| -> Vec<u64> {
         let hits = columns
@@ -750,7 +728,7 @@ fn a_phrase_never_answers_or_reads_outside_the_candidate() {
     let dir = build_with(text_schema(true));
     let out = dir.path().join("bundle");
     let columns = open_columns(&out);
-    let source_of = source_to_entity(&out);
+    let source_of = common::entities_of(&out, "id", 0..N);
     let operand = FilterOperand::Phrase {
         query: "quick brown".to_string(),
     };

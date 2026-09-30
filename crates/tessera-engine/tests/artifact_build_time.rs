@@ -17,11 +17,10 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_types::{EntityId, TesseraId};
+use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const CLUSTERS: &str = "clusters/a";
 const LABELS: &str = "topics/x";
 /// The cluster's membership, in source ids. Every third source id carries the subset term, so a
@@ -35,6 +34,12 @@ clusters         = "clusters.parquet"
 clusters_members = "clusters_members.parquet"
 topics           = "topics.parquet"
 topics_members   = "topics_members.parquet"
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"
@@ -55,6 +60,7 @@ content = { computed = ["centroid"] }
 
   [layer.members]
   source = "clusters_members"
+  fields = { id = "entity" }
 
 [[layer]]
 name = "topics/x"
@@ -70,6 +76,7 @@ depends_on = ["clusters/a"]
 
   [layer.members]
   source = "topics_members"
+  fields = { id = "entity" }
 
   [[layer.content.supplied]]
   name = "topic"
@@ -173,13 +180,6 @@ fn topic_members() -> Vec<(&'static str, Option<u32>, u64)> {
     rows
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
 /// A bundle built **with** its layers and artifacts — no control-plane call anywhere.
 fn fixture() -> Fixture {
     try_fixture(write_topics).expect("a build carrying layers")
@@ -220,22 +220,20 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &config.schema),
         out: root.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: config.layers,
         layer_inputs: config.layer_sources,
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: config.schema,
     };
     tessera_build::build(&args)?;
     Ok(Fixture {
@@ -252,24 +250,8 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 fn of_layer<'a>(served: &'a [ArtifactOut], layer: &str) -> Vec<&'a ArtifactOut> {
     served.iter().filter(|a| a.layer == layer).collect()
-}
-
-fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **The headline.** A bundle that has never seen a control-plane call serves its clusters with
@@ -320,7 +302,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
     let cluster_id = of_layer(&served, CLUSTERS)[0].tessera_id;
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, label_id, None, "s0", None)
+        .artifact(&session, label_id, "s0", None)
         .unwrap()
         .is_some());
 
@@ -334,7 +316,7 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
         "the label goes with its cluster"
     );
     assert!(engine
-        .artifact(&session, label_id, None, "s0", None)
+        .artifact(&session, label_id, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -382,7 +364,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     assert_eq!(built.masked_count, MEMBERS.count() as u64);
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     assert!(engine
-        .artifact(&session, published_id, None, "s0", None)
+        .artifact(&session, published_id, "s0", None)
         .unwrap()
         .is_some());
 }
@@ -464,11 +446,11 @@ fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claim
         .manifest;
     assert!(
         manifest
-            .containment_extents
+            .derived_extents
             .iter()
-            .any(|e| e.layer == LABELS),
+            .any(|e| e.form == tessera_store::manifest::DerivedForm::Containment && e.layer == LABELS),
         "the label layer's generating sets have a partition the build composed: {:?}",
-        manifest.containment_extents
+        manifest.derived_extents
     );
 
     // The gauges: one adopted at the open, none composed by the request that used it.

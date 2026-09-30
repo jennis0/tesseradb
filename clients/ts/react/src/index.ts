@@ -1,42 +1,38 @@
-import {useEffect, useRef, useState, useSyncExternalStore} from 'react';
+/**
+ * React hooks for the headless store. {@link useTesseraStore} creates a store for a component's
+ * lifetime, and {@link useProjection} reads one of its projections and re-renders when it changes.
+ * The React components for the elements are in the `@tesseradb/react/components` entry. This
+ * entry imports neither Lit nor deck.gl.
+ *
+ * @module @tesseradb/react
+ */
+import {useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore} from 'react';
 import {createStore, type ProjectionName, type Projections, type Store, type StoreOptions, type TokenSupplier} from '@tesseradb/client';
 
-/**
- * `@tesseradb/react` — the headless store in React (design client-components §4, adapters).
- *
- * Two hooks. `useTesseraStore` owns a store for the component's lifetime and `useProjection`
- * reads one projection through `useSyncExternalStore`, which the store's projections were shaped
- * for: each is an immutable object replaced on change, so the snapshot is stable between changes
- * and React never sees a tear. Nothing here renders; the map, the panels and their wrappers are
- * behind the `/components` entry, so a hooks-only install pulls neither Lit nor deck.gl.
- *
- * **The store is built in an effect, not during render.** StrictMode mounts, unmounts and
- * remounts every component in development, running each effect's cleanup between; a store made
- * during render would be disposed by the first cleanup and never rebuilt, while one made with no
- * cleanup at all would leak a driver — its timers and its decode worker — on every remount. With
- * the build and the `dispose` paired inside one effect, the double mount costs one store built
- * and thrown away, and the one left alive is the one the second effect made. The first render
- * therefore sees `null`, which is the honest state: there is no store until the effect runs.
- */
-
+/** The options of {@link useTesseraStore}: the options of {@link createStore}, with `authorise` read through a ref. */
 export type UseTesseraStoreOptions = Omit<StoreOptions, 'authorise'> & {
   /**
-   * A token supplier the store renews before expiry. Read through a ref, so a supplier written
-   * inline — a new function on every render — neither rebuilds the store nor is left behind
-   * holding a stale closure.
+   * A function the store calls for a new token before the current one expires. The hook reads it
+   * through a ref, so an inline function neither rebuilds the store nor goes stale. A store serves
+   * one viewer: to show another, call `clear()` on the store or give the component a new `key`.
    */
   authorise?: TokenSupplier;
 };
 
 /**
- * A store for this component's lifetime. Rebuilt only when what identifies the session changes
- * — `viewerUrl`, `token`, `view` — and disposed when the component unmounts or those change;
- * `null` until the effect that builds it has run.
+ * Creates a store with {@link createStore} for the component's lifetime, and disposes of it on
+ * unmount. The store is rebuilt when `viewerUrl`, `token` or `view` changes, or when `authorise` is
+ * given or removed. A change to any other option takes effect at the next rebuild.
+ *
+ * The store is built in an effect, so the first render returns `null`. Options with none of
+ * `token`, `authorise` or `client` throw from that effect, as `createStore` does.
  */
 export function useTesseraStore(options: UseTesseraStoreOptions): Store | null {
   const [store, setStore] = useState<Store | null>(null);
   const latest = useRef(options);
-  latest.current = options;
+  useLayoutEffect(() => {
+    latest.current = options;
+  });
   const {viewerUrl, token, view} = options;
   const hasAuthorise = options.authorise !== undefined;
   useEffect(() => {
@@ -58,9 +54,12 @@ const noop = () => {};
 const unsubscribed = () => noop;
 
 /**
- * One projection, read through `useSyncExternalStore`. Re-renders when that projection is
- * replaced and not when another is; `null` while there is no store (the first render under
- * {@link useTesseraStore}, or a host that has not opened one).
+ * Reads one projection of `store` through `useSyncExternalStore`, and re-renders the component
+ * when that projection is replaced. A change to another projection does not re-render it.
+ *
+ * @param store - The store, such as the one {@link useTesseraStore} returns.
+ * @param name - The projection to read, such as `marks` or `legend`.
+ * @returns The projection, or `null` while `store` is `null`.
  */
 export function useProjection<K extends ProjectionName>(store: Store, name: K): Projections[K];
 export function useProjection<K extends ProjectionName>(store: Store | null, name: K): Projections[K] | null;
@@ -70,5 +69,4 @@ export function useProjection<K extends ProjectionName>(store: Store | null, nam
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export type {Count, Masked, ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';
-export {formatCount, formatMasked, NO_COUNT, NO_MASKED} from '@tesseradb/client';
+export type {ProjectionName, Projections, Store, StoreOptions, TokenSupplier} from '@tesseradb/client';

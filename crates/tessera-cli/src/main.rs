@@ -1,18 +1,22 @@
-//! `tessera` — one binary for the build pipeline and (later) the server (SA §3: Rust is the
-//! implementation language for engine, build and serving alike).
+//! `tessera`: the one binary that builds, checks, verifies and serves a bundle.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod records;
+
 use clap::{Parser, Subcommand};
 use tessera_spatial::Bounds;
-use tessera_store::manifest::identity_key_fingerprint;
-use tessera_types::{IdentityKey, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
+use tessera_types::IdentityKey;
+
+#[cfg(test)]
+mod reference;
 
 #[derive(Parser)]
 #[command(
     name = "tessera",
-    about = "Tessera: a permission-masked point service",
+    about = "Build a Tessera bundle from a corpus declaration, check the declaration, verify the \
+             bundle and serve it.",
     // The commit rather than the crate version: a measurement is read against a tree, and the
     // crate version does not move between two of them.
     version = tessera_build::BUILD_COMMIT
@@ -23,239 +27,290 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)] // `Build` carries the identity-key flags; the enum is
-                                     // parsed once per process invocation, never hot.
 enum Command {
-    /// Build a bundle from this deployment's corpus declaration and the sources it names.
+    /// Build a bundle from the corpus declaration and the source files it names.
     ///
-    /// **`tessera build`, with no flags at all, is the whole invocation.** `tessera.toml` — found
-    /// by walking up from the working directory — says where the declaration is and where the
-    /// bundle goes; the declaration says where the corpus is and what frame it is quantised
-    /// against; the environment carries the identity key. Everything below is an override or a
-    /// performance knob (`configuration.md` §3).
+    /// `tessera build` needs no flags. It reads `tessera.toml` from the
+    /// working directory, or from the nearest directory above it that has one. That file names
+    /// the corpus declaration in `[build] schema` (default `schema.toml`) and the bundle
+    /// directory in `[bundle] path`, each relative to the file's own directory. The declaration
+    /// names the source files.
+    ///
+    /// Every build creates a new bundle with a new key for its `tessera_id`s, so a `tessera_id`
+    /// read from an earlier bundle does not name an item in this one. A copy of a bundle keeps
+    /// its `tessera_id`s.
+    ///
+    /// The other flags override `tessera.toml` or tune the build.
     Build {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
-        /// working directory.
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// Bundle root to create, overriding `tessera.toml`'s `bundle.path`.
+        /// Write the bundle to this directory instead of `[bundle] path` in `tessera.toml`.
         ///
-        /// **The same value the server's `bundle_path` is**, seen from the other side, which is
-        /// why it is declared once rather than typed twice: a build and a server naming different
-        /// directories is a server serving whatever was there before.
-        #[arg(long)]
+        /// `tessera serve` opens `[bundle] path`, so it does not serve a bundle written
+        /// elsewhere.
+        #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
-        /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
-        #[arg(long)]
-        limit: Option<u64>,
-        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`: one TOML document
-        /// declaring the corpus, its views, its vocabularies, its attributes and its layers
-        /// (configuration.md §1).
+        /// Build only the items whose value of the declaration's one unique integer attribute is
+        /// below this value, and the rows of every file that name them.
         ///
-        /// **A build input, never server configuration** (configuration.md §4). It compiles into
-        /// MANIFEST.json and the server reads the compiled form, so a server cannot be restarted
-        /// against a bundle whose columns disagree with a schema it holds.
+        /// A view's points row whose value is at or above the limit, or null, creates no item. A
+        /// negative value counts as its unsigned 64-bit value, at least 2^63, so the limit drops
+        /// it. Refused when the declaration has no unique integer attribute, or more than one. A
+        /// row that names a kept item by any unique field is read whatever its own value. A row
+        /// that names none is left out: in a view's points it creates no item where its value is
+        /// at or above the limit or null, and in any other file it is reported as outside the
+        /// limit, since it may name an item the limit left out. The exception is a file that
+        /// names items by the limit's attribute alone, whose row naming no item is refused where
+        /// its value is below the limit.
+        #[arg(long, value_name = "VALUE")]
+        limit: Option<u64>,
+        /// Refuse the build at the first file with a row the identity rule refuses.
+        ///
+        /// Without it, a row naming two items, naming an item or a unique value an earlier row of
+        /// its file names, or, outside a view's points, naming no item, is left out and the build
+        /// goes on. The refused rows are printed, and written to `reports/refused.json` in the
+        /// bundle where there are any.
+        #[arg(long)]
+        strict: bool,
+        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
+        ///
+        /// The declaration is compiled into the bundle's `MANIFEST.json`, and the server reads
+        /// it from there.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
-        /// repeatable (configuration.md §8).
+        /// Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable.
         ///
-        /// **An override, not a binding.** `[sources]` already writes every path, relative to the
-        /// declaration itself, so the ordinary build names no files here at all. This is for the
-        /// deployment that stages one source elsewhere, and NAME is the source's own name in
-        /// `[sources]` — so one override moves every block reading that file at once.
-        ///
-        /// Fail-closed both ways: a name `[sources]` does not carry is a refusal listing the ones
-        /// it does, and an override never *creates* a source — so a closed vocabulary cannot be
-        /// opened, nor a view given geometry, from the command line alone.
-        ///
-        /// Note the interaction with `--limit` for a member source: a member outside the limited
-        /// prefix names nothing this build assigned, and refuses it. Limit the members file with
-        /// the corpus.
+        /// A relative PATH is read from the working directory, not from the declaration's
+        /// directory. Every block that reads the source reads PATH. Refused when `[sources]` has no source
+        /// called NAME (the message lists the names it has), and when NAME is given twice. The
+        /// flag replaces a source's path and cannot add a source.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
-        /// Mint an external ID for every item from its source entity id, and write the
-        /// external-id extents and locator. **Off by default**: contracts §2.4 forbids
-        /// manufacturing an external ID for an item whose caller supplied none, and this
-        /// build's inputs carry none — the flag exists so benchmark fixtures can keep carrying
-        /// the sidecar's cost realistically (2026-07-30 memo §3.2 D1).
-        #[arg(long)]
-        mint_external_ids: bool,
-        /// Skip writing `pairs.parquet`. The file serves only the test-time reference oracle
-        /// and build-cadence tooling — nothing on any request path reads it — so a deployment
-        /// that runs no conformance suite against the bundle can save writing and hashing it.
+        /// Do not write `pairs.parquet`.
+        ///
+        /// The server does not read the file. The conformance suite and `tessera verify --deep`
+        /// do, and `verify --deep` passes a bundle without one.
         #[arg(long)]
         no_oracle_pairs: bool,
-        /// Signature-sort batch size in items (design §11.1 r23: assignment is
-        /// signature-sorted per batch). Omit to derive the largest batch the memory budget
-        /// supports — usually the whole corpus in one batch. Whatever is used is recorded in
-        /// MANIFEST provenance when it batches, and is **identity-bearing**: a rebuild
-        /// preserving this corpus's identity must replay the recorded value
-        /// (`--carry-id-key-from` does so automatically).
-        #[arg(long)]
+        /// Assign internal ids in batches of this many items.
+        ///
+        /// Default: the largest batch the memory budget allows, which is the whole corpus when
+        /// it fits. Refused when the batch does not fit the budget, or when it is less than half
+        /// the size the budget allows. A build of more than one batch records the size in the
+        /// bundle.
+        #[arg(long, value_name = "ITEMS")]
         batch_items: Option<u64>,
-        /// Peak-memory budget for the build's own structures, e.g. `24g`, `900m` or bytes.
-        /// Omit to derive from the machine's available memory. Batch and band sizing, and the
-        /// fail-closed pre-flight, all follow from it.
-        #[arg(long, value_parser = parse_byte_size)]
+        /// Peak memory for the build's own structures, in bytes or with a `k`, `m` or `g`
+        /// suffix, such as `24g`.
+        ///
+        /// Default: 80% of the available memory or of the process's cgroup limit, whichever is
+        /// lower, kept between 2 GiB and 1 TiB, and 24 GiB where available memory cannot be
+        /// read. Batch and band sizes follow from it. A build that would not fit is refused
+        /// before it assigns internal ids, with the arithmetic in the message.
+        #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
 
-        /// Print each pipeline stage's wall time, row count and peak RSS as it completes.
+        /// Print each build stage's wall time, row count and peak resident memory to stderr as
+        /// the stage ends.
         ///
-        /// **What it is for**: "which of the twelve stages bends with scale" is the question every
-        /// sizing decision here turns on, and without this a build reports one total and one
-        /// stage's own figure — so an optimisation is aimed at whichever stage was last watched
-        /// through `top`. The observer sees durations and counts and nothing derived from the
-        /// corpus, and the timed path is the shipping one: `build` is `build_observed` with a
-        /// no-op, so there is no second code path to drift.
+        /// Peak resident memory is the process's high-water mark when the stage ended, so it
+        /// shows the stage in which the peak was reached.
         #[arg(long)]
         stage_timings: bool,
 
-        /// Write the same per-stage records as JSON to this path at the end of the build.
+        /// Write the per-stage records to this file as JSON when the build ends, including one
+        /// that fails partway.
         ///
-        /// The stderr lines `--stage-timings` prints are for a person watching a build; a
-        /// measurement campaign wants the same numbers in a file it can put beside a rung's other
-        /// figures on one schema. Both may be given, and this one enables the observation on its
-        /// own. One object per stage, in report order: `stage`, `wall_s`, `rows`,
-        /// `peak_rss_kib`, `started_at`, `ended_at`.
+        /// One object per stage, in order, with `stage`, `wall_s`, `rows`, `peak_rss_kib`,
+        /// `started_at` and `ended_at`. It does not need `--stage-timings`.
         #[arg(long, value_name = "PATH")]
         stage_timings_json: Option<PathBuf>,
-
-        /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
-        /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
-        #[arg(long, value_name = "BUNDLE_ROOT")]
-        carry_id_key_from: Option<PathBuf>,
-        /// Read the deployment's identity key from a file — `[identity]\nkey = "<32 lowercase
-        /// hex>"`, plus an optional `idset = <n>`.
-        ///
-        /// The ordinary route is the environment: `tessera.toml`'s `[identity] env` names the
-        /// variable (default `TESSERA_IDENTITY_KEY`), and a `.env` beside `tessera.toml` may
-        /// supply it. This flag is for the deployment that would rather keep the key in a `0600`
-        /// file, which an environment — readable from `/proc` — is not.
-        #[arg(long, value_name = "PATH")]
-        identity_file: Option<PathBuf>,
-        /// Explicitly mint a fresh 16-byte key from the OS CSPRNG at idset 1 and print it
-        /// prominently. **Starts a NEW identity lineage; every `tessera_id` any client holds
-        /// becomes wrong.**
-        #[arg(long)]
-        mint_id_key: bool,
-        /// Required to proceed when a key was carried or supplied *and* it disagrees with
-        /// another given source. **Invalidates every `tessera_id` any client holds, and — since
-        /// the key is now part of the storage sort key — reorders every row.**
-        #[arg(long)]
-        rotate_id_key: bool,
-        /// Advance `identity.idset` while keeping the key: the repartitioning/resharding signal
-        /// (contracts §2a).
-        #[arg(long)]
-        bump_idset: bool,
-        /// Set `identity.idset` explicitly. Accompanies **any** key source — the environment,
-        /// `--identity-file` (whose `[identity].idset`, if present, it overrides) or
-        /// `--carry-id-key-from` (whose carried idset it overrides) — and is the only way to
-        /// state an idset for a key source that records none. Default 1.
-        #[arg(long)]
-        idset: Option<u32>,
     },
-    /// Check the declaration against the files it names — **schemas only, never a row** — and
-    /// print the disclosure decisions it makes.
+    /// Check the declaration against the column schemas of the files it names, without reading
+    /// a row.
     ///
-    /// **What a CI job runs.** It resolves exactly what `tessera build` resolves — the same
-    /// `tessera.toml` found the same way, the same declaration, the same `--file` overrides — and
-    /// then opens each source's Parquet footer to ask whether the columns the declaration named
-    /// are there and can carry what it said they carry. Seconds, and every finding rather than the
-    /// first: a build stops at the first thing wrong because everything after it is wasted work,
-    /// and a check exists to be fixed in one pass.
+    /// `tessera check` finds `tessera.toml`, the declaration and the `--file` overrides as
+    /// `tessera build` does, and stops at the first error in `tessera.toml` or the declaration,
+    /// such as a missing key or a TOML syntax error. Once both parse, it reads the footer of
+    /// each source Parquet file and reports every column that is missing or has the wrong type,
+    /// not only the first. It reads no rows except the geometry of shape layers, which it reads
+    /// to size them.
     ///
-    /// It cannot answer anything needing a row — whether a closed vocabulary covers the keys in
-    /// the data, whether a member id resolves, or where the data sits inside its view's extent,
-    /// which is the build's own clamp report.
+    /// The report goes to stderr: the files read, the findings, warnings, the columns each file
+    /// names items by, the frames the views will have, the view groups, the shape layers' sizes,
+    /// and on a clean check the disclosure table. The exit status is non-zero when there is a
+    /// finding, such as a file other than a view's points with no column to name items by; a
+    /// warning does not change it.
+    ///
+    /// It cannot check anything that needs a row: whether a closed vocabulary covers the values
+    /// in the data, which rows the identity rule refuses, or where the data lies in its view's
+    /// extent. `tessera build` reports those.
     Check {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up.
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
-        /// The corpus declaration, overriding `tessera.toml`'s `build.schema`.
+        /// Read this corpus declaration instead of `[build] schema` in `tessera.toml`.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Read one of the declaration's sources from somewhere else: `--file NAME=PATH`,
-        /// repeatable — the same override `tessera build` takes, so a check and the build it
-        /// guards see one set of files.
+        /// Read the source NAME in the declaration's `[sources]` from PATH instead. Repeatable,
+        /// and the same override `tessera build` takes.
         #[arg(long = "file", value_name = "NAME=PATH", value_parser = parse_file_binding)]
         file: Vec<(String, PathBuf)>,
-        /// Write the control-plane payloads to stdout instead of the disclosure table: one JSON
-        /// object, a key per runtime block kind — `layers`, `attributes`, `vocabularies`, `views`,
-        /// `view_groups` — each an array in declaration order.
+        /// Print the declaration to stdout as the JSON request bodies the control plane takes,
+        /// to declare the same corpus on a running service.
         ///
-        /// A layer body and an attribute body carry their own `name`, so those two arrays are the
-        /// bodies themselves. A vocabulary, a view and a view group are addressed by a path
-        /// segment, so each of those entries is `{ "name", "body" }`. A vocabulary's entry also
-        /// carries `values` — the `PATCH /control/vocabularies/{name}/values` page its inline
-        /// values make — or `values_source`, naming the `[sources]` key a sourced value set reads:
-        /// those keys are rows rather than declaration, and are not emitted.
-        ///
-        /// **This is the one thing a declare-only deployment cannot get anywhere else.** Such a
-        /// deployment authors every layer twice — once as TOML to compile an empty bundle, once as
-        /// JSON to create it online — and a `[[layer]]` block minus its acquisition keys *is* that
-        /// payload (`configuration.md` §2). The parser has already produced it by the time this
-        /// runs. Findings still go to stderr and still decide the exit status, so a payload is
-        /// never emitted from a declaration that failed its check.
+        /// Printed only when the check has no finding. The output is one object with the keys
+        /// `layers`, `attributes`, `vocabularies`, `views` and `view_groups`, each an array in
+        /// declaration order. A layer or attribute entry is the request body itself. A
+        /// vocabulary, view or view group entry is `{ "name", "body" }`, because its name goes
+        /// in the route's path. A vocabulary entry also has `values`, the body for `PATCH
+        /// /control/vocabularies/{name}/values`, or `values_source`, the `[sources]` name its
+        /// values are read from. Values read from a source are not printed.
         #[arg(long)]
         payloads: bool,
     },
-    /// Verify a bundle: the read protocol (digests, manifests) plus permutation bijectivity and
-    /// the identity column (contracts §2.6: `tessera_id` re-derived from the key).
+    /// Verify a bundle's files and every row's `tessera_id`.
+    ///
+    /// It opens the bundle as the server does. That checks every manifest digest, the size and
+    /// SHA-256 of every file except the unique indexes' runs, and that each segment's permutation
+    /// maps one-to-one onto its rows. `--deep` hashes those runs too. It then confirms that the row space holds exactly the rows the segments claim, and computes
+    /// each row's `tessera_id` again from the identity key, failing on the first row that
+    /// differs.
+    ///
+    /// It also prints to stderr each indexed keyword column's count of distinct values against
+    /// its rows, with a warning for a column whose values are unique per row. A warning does not
+    /// fail the verify.
     Verify {
-        /// Bundle root (the directory containing `CURRENT`).
+        /// The bundle directory, the one holding `CURRENT`.
         bundle: PathBuf,
-        /// Also run the deep structural pass (correctness-suite §11): postings sorted,
-        /// duplicate-free and bounded; the external-id locator and its sidecar agreeing in both
-        /// directions; dictionary extents positional and never repeating a descriptor; and
-        /// `pairs.parquet` matching the base postings it was written with. Point it at a bundle
-        /// no live engine is publishing into.
+        /// Also check the bundle's internal structures.
+        ///
+        /// The term lists must be sorted, free of duplicates and in range; dictionary records must
+        /// not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
+        /// render column must be present in every segment; each unique column's index must be
+        /// hashed against the manifest, name at most one live item for a value and agree with the
+        /// column's values in both directions; and `pairs.parquet`, when present, must match the
+        /// term lists it was written with. Run it on a bundle no running server is writing to.
         #[arg(long)]
         deep: bool,
     },
-    /// Analyse text through the shipped tokeniser, one input per line, tokens tab-separated.
+    /// Split text into tokens with an analyser built into this binary. Each input line prints as
+    /// one line, its tokens separated by tabs.
     ///
-    /// **The conformance oracle's access to the analyser** (`records-and-search.md` §4.4). The
-    /// oracle derives expected `match` results from the fixture's own values and must pass them
-    /// through the *same* pipeline the index was built with; reimplementing it in Python would
-    /// test PyICU's ICU4C against icu4x rather than testing Tessera. This verb is that access, on
-    /// the harness's existing drive-the-CLI precedent.
-    ///
-    /// It is also how a client diagnoses an empty `match`: `/v1/meta` publishes each text column's
-    /// analyser identity (`declared_scalars[].analyser`), and running the query text through the
-    /// analyser that identity names shows whether it segmented the way the index did.
+    /// When a `match` filter returns nothing, this shows how the index split the text.
+    /// `/v1/meta` publishes each text column's analyser identity as
+    /// `declared_scalars[].analyser`, such as `unicode/icu4x-2.2/p1`. The analyser's name is the
+    /// part before the first `/`; run the query text through the analyser of that name. The
+    /// conformance suite uses the command to compute expected `match` results with the analyser
+    /// the index was built with.
     Tokenise {
-        /// Text to analyse. Repeatable. With none given, reads one input per line from stdin.
+        /// Text to split. Repeatable. With none, reads one input per line from stdin.
         #[arg(long = "text")]
         text: Vec<String>,
-        /// Which analyser, by declared name (decision 0070). A column records the identity this
-        /// resolves to — `/v1/meta` publishes it per column — and an unknown name is refused
-        /// rather than defaulted.
-        #[arg(long, default_value = tessera_analyse::UNICODE)]
+        /// The analyser to use, by name. An unknown name is refused with the list of names this
+        /// binary carries.
+        #[arg(long, value_name = "NAME", default_value = tessera_analyse::UNICODE)]
         analyser: String,
-        /// Print the analyser's identity and exit — what a column records, and what a rebuild moves.
+        /// Print the analyser's identity, the value a text column records, and exit.
         #[arg(long)]
         identity: bool,
     },
-    /// The correctness suite's generated corpus: expected items by served join key, and expected
-    /// masked counts per tile (`docs/design/correctness-suite.md` §8, §12.1).
-    ///
-    /// **The suite's access to the generator**, on the `tokenise` precedent: expected answers must
-    /// come from the same statement of the corpus the fixtures were materialised from, and a
-    /// Python reimplementation would put the fixture under test rather than the system. The verb
-    /// granularity is deliberate — one `items` call per recorded response and one `census` per
-    /// run, never a call per row — so the O(n) work stays in Rust and the driver compares vectors.
+    /// Generators for the conformance suite's corpus. Internal, and not shown in help.
+    #[command(hide = true)]
     Corpus {
         #[command(subcommand)]
         command: CorpusCommand,
     },
-    /// Serve a bundle: the three HTTP planes (viewer/session/control), per `tessera.toml`.
+    /// Ask a running server whether it is ready, and exit 0 if it is or 1 if it is not.
     ///
-    /// Takes no required flag: the same `tessera.toml` `tessera build` wrote into names the
-    /// bundle to open (`configuration.md` §3).
+    /// Finds `tessera.toml` as `tessera build` does and sends `GET /readyz` to the viewer address
+    /// in `[serve]`. The server answers 503 while its write-ahead log cannot be written, when the
+    /// thread that applies writes has stopped, and when part of the bundle is served from an
+    /// older list of segments because the newest could not be used. Otherwise it answers 200,
+    /// even while a write to disc hangs.
+    ///
+    /// The command exits 0 on a 200. It exits 1, with the reason on stderr, on any other answer,
+    /// on no answer within `--timeout`, when nothing is listening, and when `tessera.toml` is
+    /// refused or declares no viewer address. A server starts listening only once it has opened
+    /// its bundle, so the check fails until then.
+    ///
+    /// Exit 1 means stop sending viewer requests to the server, and keep sending it deletions and
+    /// suppressions, which it still applies when its log has failed. It does not call for a
+    /// restart: a restart undoes each deletion or suppression the server answered with 500
+    /// because the log could not be written, until that change is sent again.
+    ///
+    /// A viewer address of `0.0.0.0` or `[::]` is reached on loopback, so run the command on the
+    /// machine or in the container the server runs in. The Docker image's health check runs it.
+    Health {
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
+        #[arg(long, value_name = "PATH")]
+        deployment: Option<PathBuf>,
+        /// Seconds the whole request may take, from connecting to reading the answer.
+        #[arg(long, value_name = "SECONDS", default_value_t = 3)]
+        timeout: u64,
+    },
+    /// Read every item a session token may see in one view, with the fields named, from a running
+    /// server, and write them as Arrow IPC or Parquet.
+    ///
+    /// The server answers `POST /v1/items` a page at a time, several pages to a response, and ends
+    /// each response with a cursor for the next. This requests responses until no row remains and
+    /// writes each page as it arrives. Each of the route's fields is the argument of the same
+    /// name, sent only when given, so the server's own setting applies otherwise.
+    ///
+    /// The columns are `tessera_id`, the fields in the order named, the system fields in the order
+    /// named, then `tessera:matched` under `--keep-unmatched`. A category field is a dictionary
+    /// column of its value keys, each page's dictionary holding the keys of its own rows. A read
+    /// that returns no row writes these columns with no rows.
+    ///
+    /// A read cut short leaves the whole pages read before it in the output, exits 1 and prints
+    /// the cursor to read the rest with. The first response's head, with the counts under
+    /// `--count`, is printed on stderr at the end.
+    ///
+    /// For example, `tessera items --server http://127.0.0.1:8080 --view papers --fields
+    /// title,year --system-fields labels --out papers.parquet`.
+    Items(records::ItemsArgs),
+    /// Read every artifact of one layer a session token is served, with the properties named, from
+    /// a running server, and write them as Arrow IPC or Parquet.
+    ///
+    /// An artifact is one member of a layer: a cluster, a region, a node in a taxonomy. The read is
+    /// carried across `POST /v1/artifacts` responses, and written, as `tessera items` carries and
+    /// writes one. The columns are `tessera_id`, the properties in the order named, then
+    /// `matched_count` under `--filters`. The rows are in order of level, and in the order they
+    /// were published within a level.
+    ///
+    /// For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --layer
+    /// clusters --fields key,masked_count --format ipc > clusters.arrows`.
+    Artifacts(records::ArtifactsArgs),
+    /// Serve the bundle that `tessera.toml` names.
+    ///
+    /// Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path` and
+    /// replays the write-ahead log at `[bundle] wal`, all before it binds any address. It then
+    /// listens on the viewer, session and control addresses in `[serve]`. When all three are bound
+    /// it prints one line of JSON to stdout naming them. Diagnostics go to stderr, in colour only
+    /// when stderr is a terminal.
+    ///
+    /// SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits
+    /// 0. Stopping ends every viewer session, because sessions are held in memory. A write is
+    /// acknowledged only once the write-ahead log holds it on disc, so stopping loses no
+    /// acknowledged write. A deletion or suppression answered with 500 because the log could not
+    /// be written is in force but not on disc, and a restart undoes it until the change is sent
+    /// again.
+    ///
+    /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
+    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or
+    /// operator credential is not set or its file cannot be read. Under `[serve]`,
+    /// `session_credential_file` or `session_credential_env` names the file or environment
+    /// variable holding the session credential, and `operator_credential_file` or
+    /// `operator_credential_env` the operator's. It also refuses when the bundle cannot be read
+    /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
+    /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
-        /// This deployment's `tessera.toml`, instead of the one found by walking up from the
-        /// working directory (SA §7).
+        /// Read this `tessera.toml` instead of searching for one upward from the working
+        /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
     },
@@ -383,6 +438,87 @@ enum ArtifactCensusLayer {
     Treed,
 }
 
+/// `GET /readyz` on the viewer plane, waiting at most `timeout` to connect and for the answer.
+fn readyz(mut addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<(), String> {
+    if addr.ip().is_unspecified() {
+        addr.set_ip(match addr {
+            std::net::SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+            std::net::SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+        });
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("starting the HTTP client: {e}"))?;
+    let status = client
+        .get(format!("http://{addr}/readyz"))
+        .send()
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("{addr} did not answer /readyz within {} s", timeout.as_secs())
+            } else if e.is_connect() {
+                format!("no server answering at {addr}: {}", innermost(&e))
+            } else {
+                format!("{addr}: {}", innermost(&e))
+            }
+        })?
+        .status();
+    match status.as_u16() {
+        200 => Ok(()),
+        code => Err(format!("{addr} answered /readyz with {code}: not ready")),
+    }
+}
+
+/// The last error in `e`'s chain of sources, which names the cause: an HTTP client's own message
+/// names only the request that failed.
+fn innermost(e: &dyn std::error::Error) -> String {
+    let mut last = e;
+    while let Some(source) = last.source() {
+        last = source;
+    }
+    last.to_string()
+}
+
+/// Exit with success on the first SIGTERM or SIGINT, from a thread of its own so the handler is
+/// in place before the bundle opens. Inside a container the server is PID 1, which the kernel
+/// sends no signal it has no handler for.
+fn exit_on_termination() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
+    };
+    let (term, int) = runtime.block_on(async {
+        (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        )
+    });
+    let (mut term, mut int) = match (term, int) {
+        (Ok(term), Ok(int)) => (term, int),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("tessera serve: SIGTERM and SIGINT will not stop the server: {e}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        let name = runtime.block_on(async {
+            tokio::select! {
+                _ = term.recv() => "SIGTERM",
+                _ = int.recv() => "SIGINT",
+            }
+        });
+        eprintln!("tessera serve: stopped on {name}");
+        std::process::exit(0);
+    });
+}
+
 fn parse_extent(raw: &str) -> Result<Bounds, String> {
     let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
     if parts.len() != 4 {
@@ -406,242 +542,6 @@ fn parse_extent(raw: &str) -> Result<Bounds, String> {
     Ok(extent)
 }
 
-/// What [`resolve_identity`] decided: the parsed key, its canonical hex form (carried alongside
-/// the key rather than recovered from it — `IdentityKey` deliberately has no hex accessor, to
-/// preserve its redacted `Debug`), and the idset this build's MANIFEST should record.
-struct ResolvedIdentity {
-    key: IdentityKey,
-    hex: String,
-    idset: u32,
-    /// Set only by `--mint-id-key`, so the caller can print it prominently — the one and only
-    /// place a freshly minted key is ever surfaced.
-    minted: bool,
-}
-
-/// The N-1 refusal message (contracts §2.2, plan Critical N-1): named once so the CLI's refusal
-/// and every test asserting it read the same text.
-///
-/// `env_name` is whatever `tessera.toml`'s `[identity] env` names, because a message telling an
-/// operator to set `TESSERA_IDENTITY_KEY` when their own file named something else is worse than
-/// no message.
-fn no_key_decision_message(env_name: &str) -> String {
-    format!(
-        "no identity key decision: set ${env_name} (or put it in a .env beside tessera.toml) to \
-         this deployment's key, pass --carry-id-key-from <bundle> to keep its lineage from an \
-         existing bundle (the normal rebuild), pass --identity-file <path> to read it from a 0600 \
-         file, or pass --mint-id-key to start a new lineage — which invalidates every tessera_id \
-         any client holds."
-    )
-}
-
-/// The identity key as the environment supplies it: the process environment first, then a `.env`
-/// beside `tessera.toml`.
-///
-/// **The process environment wins.** A `.env` is a convenience for a working copy; an operator who
-/// exported a variable for one invocation has said something more specific than a file checked in
-/// beside the config, and a file quietly overriding them would be the wrong way round.
-///
-/// **The `.env` parse is written out here rather than taken as a dependency.** It is `KEY=VALUE`
-/// per line, `#` comments and blanks skipped, an optional `export ` prefix, and one layer of
-/// matching quotes stripped — which is the whole of what this file is for. A crate would bring
-/// variable interpolation, multi-line values and `.env.local` layering, none of which anything
-/// here reads, into the process that holds the identity key.
-fn identity_from_environment(env_name: &str, deployment: &Path) -> Option<(String, String)> {
-    if let Ok(value) = std::env::var(env_name) {
-        if !value.trim().is_empty() {
-            return Some((value.trim().to_string(), format!("${env_name}")));
-        }
-    }
-    let dotenv = deployment.parent().unwrap_or(Path::new("")).join(".env");
-    let text = std::fs::read_to_string(&dotenv).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != env_name {
-            continue;
-        }
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-            .unwrap_or(value);
-        if value.is_empty() {
-            return None;
-        }
-        return Some((
-            value.to_string(),
-            format!("{} ({env_name})", dotenv.display()),
-        ));
-    }
-    None
-}
-
-/// Read `identity.key`, `identity.idset`, `identity.construction` and `identity.rounds`
-/// verbatim from `bundle_root`'s current `MANIFEST.json` (contracts §2.2's `--carry-id-key-from`
-/// behaviour). A direct JSON read rather than the full digest-verifying read protocol: carrying
-/// a key forward needs the manifest's own claims, not a re-verification of every segment file.
-fn read_carried_identity(bundle_root: &Path) -> Result<(String, u32, String, u32), String> {
-    let current_path = bundle_root.join("CURRENT");
-    let current_bytes = std::fs::read(&current_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
-    let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
-        .map_err(|e| {
-        format!(
-            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-            current_path.display()
-        )
-    })?;
-    let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| {
-            format!(
-                "--carry-id-key-from {}: MANIFEST.json does not parse (does it predate the r6 \
-                 identity column?): {e}",
-                manifest_path.display()
-            )
-        })?;
-    Ok((
-        manifest.identity.key,
-        manifest.identity.idset,
-        manifest.identity.construction,
-        manifest.identity.rounds,
-    ))
-}
-
-/// Read `--identity-file`'s minimal TOML shape: `[identity]\nkey = "<32 lowercase hex>"`, plus an
-/// **optional** `idset = <u32>`.
-///
-/// **The idset belongs in this file** (contracts §2.2 designates a file as one home for the key
-/// bundle and leaves "the file's wider schema … not specified here", so extending it is
-/// legitimate). Without it, a deployment that advanced to idset 2 for a repartition and then
-/// rebuilt from its key file — the spec's own recommended rebuild path — republished idset 1, and
-/// a stale pre-repartition `tessera_id` then compared *equal* and was accepted: exactly the
-/// failure §2.2 says the idset exists to prevent. A key file that records no idset still means
-/// idset 1 (the lineage never advanced), and `--idset` overrides whatever the file says.
-///
-/// Unknown top-level sections are ignored (so a later phase's wider deployment config file can
-/// grow without breaking this binary); an unknown key *inside* `[identity]` is an error, so a
-/// misspelt `kye =` does not fall through to a refusal that reads "no key given". There is no
-/// default search path — the caller always names this path explicitly, which is the only reason
-/// this flag counts as an explicit decision under N-1.
-fn read_identity_file(path: &Path) -> Result<(String, Option<u32>), String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("--identity-file {}: {e}", path.display()))?;
-    let value: toml::Value = text
-        .parse()
-        .map_err(|e| format!("--identity-file {}: invalid TOML: {e}", path.display()))?;
-    let table = value
-        .as_table()
-        .ok_or_else(|| format!("--identity-file {}: not a TOML table", path.display()))?;
-    let identity = table.get("identity").ok_or_else(|| {
-        format!(
-            "--identity-file {}: missing [identity] section",
-            path.display()
-        )
-    })?;
-    let identity_table = identity.as_table().ok_or_else(|| {
-        format!(
-            "--identity-file {}: [identity] must be a table",
-            path.display()
-        )
-    })?;
-    for key_name in identity_table.keys() {
-        if key_name != "key" && key_name != "idset" {
-            return Err(format!(
-                "--identity-file {}: unknown key '{key_name}' in [identity] (expected 'key' or \
-                 'idset')",
-                path.display()
-            ));
-        }
-    }
-    let key = identity_table
-        .get("key")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            format!(
-                "--identity-file {}: [identity].key is missing or not a string",
-                path.display()
-            )
-        })?;
-    let idset = match identity_table.get("idset") {
-        None => None,
-        Some(value) => {
-            let raw = value.as_integer().ok_or_else(|| {
-                format!(
-                    "--identity-file {}: [identity].idset must be an integer",
-                    path.display()
-                )
-            })?;
-            // §2.2: conforming writers start at 1 and advance; 0 (or a value past `u32`) is a
-            // config error, and `IdentityDescriptor::validate` would refuse it at read time
-            // anyway — refuse it here, where the operator can still see which file said it.
-            let idset = u32::try_from(raw).map_err(|_| {
-                format!(
-                    "--identity-file {}: [identity].idset {raw} is out of range for a u32",
-                    path.display()
-                )
-            })?;
-            if idset == 0 {
-                return Err(format!(
-                    "--identity-file {}: [identity].idset is 0; conforming writers start at 1 and \
-                     advance (contracts §2.2)",
-                    path.display()
-                ));
-            }
-            Some(idset)
-        }
-    };
-    Ok((key.to_string(), idset))
-}
-
-/// Draw a fresh 16-byte key from the OS CSPRNG, retrying on a degenerate draw (`k1 == 0`,
-/// including the all-zero key — memo §1.3). The **only** place randomness enters the build.
-fn mint_identity_key() -> (IdentityKey, String) {
-    use rand::RngCore;
-    loop {
-        let mut bytes = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        if let Ok(key) = IdentityKey::from_hex(&hex) {
-            return (key, hex);
-        }
-        // A degenerate draw is vanishingly rare (k1 == 0 out of a uniform 64-bit half) — retry.
-    }
-}
-
-/// The carried bundle's recorded signature-batch size, if its build batched at all (absent
-/// key == one batch — pre-batching manifests never carry it).
-fn read_carried_batch_items(bundle_root: &Path) -> Result<Option<u64>, String> {
-    let current_path = bundle_root.join("CURRENT");
-    let current_bytes = std::fs::read(&current_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", current_path.display()))?;
-    let current: tessera_store::manifest::CurrentPointer = serde_json::from_slice(&current_bytes)
-        .map_err(|e| {
-        format!(
-            "--carry-id-key-from {}: CURRENT is not valid JSON: {e}",
-            current_path.display()
-        )
-    })?;
-    let manifest_path = bundle_root.join(&current.prefix).join("MANIFEST.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("--carry-id-key-from {}: {e}", manifest_path.display()))?;
-    Ok(manifest
-        .provenance
-        .get("batch_items")
-        .and_then(|v| v.as_u64()))
-}
-
 /// `24g` / `512m` / `1073741824` — the human forms a budget is actually typed in.
 fn parse_byte_size(value: &str) -> Result<u64, String> {
     let value = value.trim();
@@ -658,193 +558,13 @@ fn parse_byte_size(value: &str) -> Result<u64, String> {
         .ok_or_else(|| "byte size overflows u64".to_string())
 }
 
-// Eight parameters, and they are eight *decisions*: three key sources, the variable's name for
-// the message, and the four flags that say what to do with what they produce. Grouping them into
-// a struct would hide which of them a given refusal is about, which is the one thing every message
-// in here has to say.
-/// Resolve the deployment identity key from its four sources — the environment (or a `.env`),
-/// `--identity-file`, `--carry-id-key-from`, and `--mint-id-key` — applying every refusal rule
-/// contracts §2.2/§2a specifies. Called, and must fail, **before any build work starts**: no
-/// output directory, no input read (plan Critical N-1).
-///
-/// **There is no flag that takes a key.** One on a command line reaches shell history, process
-/// listings and CI logs, so the ordinary route is a variable `tessera.toml` names and the
-/// alternative is a `0600` file, which an environment — readable from `/proc` — is not.
-#[allow(clippy::too_many_arguments)]
-fn resolve_identity(
-    carry_id_key_from: &Option<PathBuf>,
-    identity_file: &Option<PathBuf>,
-    from_environment: Option<(String, String)>,
-    env_name: &str,
-    mint_id_key: bool,
-    rotate_id_key: bool,
-    bump_idset: bool,
-    idset_flag: Option<u32>,
-) -> Result<ResolvedIdentity, String> {
-    let mut sources: Vec<(String, String)> = Vec::new();
-    let mut carried_idset: Option<u32> = None;
-    let mut file_idset: Option<u32> = None;
-
-    if let Some(root) = carry_id_key_from {
-        let (hex, idset, construction, rounds) = read_carried_identity(root)?;
-        if construction != IDENTITY_CONSTRUCTION || rounds != IDENTITY_ROUNDS {
-            return Err(format!(
-                "--carry-id-key-from {}: identity construction/rounds ({construction}, {rounds}) \
-                 differ from this binary's ({IDENTITY_CONSTRUCTION}, {IDENTITY_ROUNDS}); refusing \
-                 rather than silently deriving every identifier under a different construction \
-                 while the key looks unchanged",
-                root.display()
-            ));
-        }
-        sources.push(("--carry-id-key-from".to_string(), hex));
-        carried_idset = Some(idset);
-    }
-    if let Some(path) = identity_file {
-        let (hex, idset) = read_identity_file(path)?;
-        sources.push(("--identity-file".to_string(), hex));
-        file_idset = idset;
-    }
-    // The environment is a *source*, not a fallback: if it disagrees with a carried lineage the
-    // build refuses, exactly as two flags disagreeing would. A key that silently lost to another
-    // source would be the one shape of this flow that produces a bundle nobody chose.
-    let from_environment_hex = from_environment.as_ref().map(|(hex, _)| hex.clone());
-    if let Some((hex, label)) = from_environment {
-        sources.push((label, hex));
-    }
-
-    if sources.is_empty() && !mint_id_key {
-        return Err(no_key_decision_message(env_name));
-    }
-
-    if mint_id_key {
-        if !sources.is_empty() {
-            return Err(format!(
-                "--mint-id-key cannot be combined with --carry-id-key-from, --identity-file or a \
-                 key in ${env_name}: minting starts a NEW lineage, it does not restore one. Unset \
-                 the variable for this invocation if a fresh lineage is what is wanted"
-            ));
-        }
-        let (key, hex) = mint_identity_key();
-        return Ok(ResolvedIdentity {
-            key,
-            hex,
-            idset: 1,
-            minted: true,
-        });
-    }
-
-    // Validate every source's hex up front (typed errors naming the source), before comparing.
-    let mut parsed: Vec<(String, String)> = Vec::with_capacity(sources.len());
-    for (label, hex) in sources {
-        IdentityKey::from_hex(&hex).map_err(|e| format!("{label}: {e}"))?;
-        parsed.push((label, hex));
-    }
-
-    let first_hex = parsed[0].1.clone();
-    let disagreement = parsed.iter().any(|(_, hex)| *hex != first_hex);
-    if disagreement && !rotate_id_key {
-        // Fingerprints, never the keys themselves. A key printed in full reaches shell history,
-        // process listings and CI logs — which is exactly why there is no flag that takes one —
-        // and a refusal path that printed both disagreeing keys would put them there anyway. A
-        // fingerprint is enough to tell an operator which source is the odd one out, which is all
-        // the message needs to do.
-        let described = parsed
-            .iter()
-            .map(|(label, hex)| format!("{label}={}", identity_key_fingerprint(hex)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!(
-            "identity key sources disagree ({described}); pass --rotate-id-key to confirm the \
-             rotation — this invalidates every tessera_id any client holds and reorders every \
-             row, since the key is now part of the storage sort key"
-        ));
-    }
-
-    // On a confirmed rotation, `--identity-file` (the source a person typed a path for) wins if
-    // given, then the environment, then the sole remaining source. Agreement makes this moot.
-    let final_hex = if disagreement {
-        parsed
-            .iter()
-            .find(|(l, _)| l == "--identity-file")
-            .map(|(_, hex)| hex.clone())
-            .or(from_environment_hex)
-            .unwrap_or(first_hex)
-    } else {
-        first_hex
-    };
-    let final_key = IdentityKey::from_hex(&final_hex).map_err(|e| format!("identity key: {e}"))?;
-
-    // Idset resolution, most explicit source first: `--idset`, then the key file's own
-    // `[identity].idset`, then the idset carried out of an existing bundle, then 1.
-    //
-    // The order matters for the reason a key has a home outside the bundle at all (contracts
-    // §2.2): a normal rebuild from that home must not silently republish
-    // idset 1 after the deployment advanced to 2 for a repartition — a stale pre-repartition
-    // `tessera_id` would then compare equal and be accepted, which is precisely the failure the
-    // idset prevents. Two *recorded* idsets that disagree are refused rather than silently
-    // ranked: whichever we picked, the other could be the true one, and getting it wrong is
-    // fail-open. `--idset` is how the operator resolves that.
-    let mut idset = if disagreement {
-        // A rotation resets the idset (contracts §2.2), unless the operator also supplied an
-        // explicit --idset to accompany the new key.
-        idset_flag.unwrap_or(1)
-    } else {
-        if let (None, Some(carried), Some(from_file)) = (idset_flag, carried_idset, file_idset) {
-            if carried != from_file {
-                return Err(format!(
-                    "idset sources disagree (--carry-id-key-from={carried}, \
-                     --identity-file={from_file}); pass --idset <n> to state which idset this \
-                     build publishes — guessing risks republishing a superseded idset, under \
-                     which a stale pre-repartition tessera_id compares equal and is accepted"
-                ));
-            }
-        }
-        idset_flag.or(file_idset).or(carried_idset).unwrap_or(1)
-    };
-    if bump_idset {
-        idset += 1;
-    }
-
-    // NOT IMPLEMENTED, deliberately, and flagged rather than built: contracts §2.2 also requires
-    // a build whose **partitioning or sharding differs** from the bundle it carried the key from
-    // to advance the idset *or refuse*. Nothing here checks that, because nothing here can
-    // differ: this build emits exactly one partition (`default`) and shard 0, both hard-coded in
-    // `tessera_build` (`PHASH`, `shard_id`). The refusal becomes reachable — and required — the
-    // moment either becomes a build input; it belongs next to this idset resolution, comparing
-    // this build's partition/shard plan against `--carry-id-key-from`'s manifest and refusing
-    // unless `--bump-idset` (or an explicit `--idset`) accompanies the change.
-
-    Ok(ResolvedIdentity {
-        key: final_key,
-        hex: final_hex,
-        idset,
-        minted: false,
-    })
-}
-
-/// Find and read this deployment's `tessera.toml`, returning the path it was found at beside the
-/// configuration itself (`configuration.md` §3).
-///
-/// The path comes back because two things are relative to it and to nothing else: the `.env` that
-/// may carry the identity key, and the paths inside the file.
-fn load_deployment(
-    explicit: Option<&Path>,
-) -> Result<(PathBuf, tessera_server::config::Config), String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let path = tessera_server::config::discover(explicit, &cwd).map_err(|e| e.to_string())?;
-    let config =
-        tessera_server::config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((path, config))
-}
-
 /// Everything `tessera build` and `tessera check` both resolve, before either does its own work.
 ///
 /// **One resolution, not two.** The deployment file found by walking up, the declaration it names,
 /// the `--file` overrides against it — a second copy of that in the check verb would be a copy
 /// free to drift, and the whole value of a check is that it saw what the build will see.
 struct Declaration {
-    deployment_path: PathBuf,
-    deployment: tessera_server::config::Config,
+    deployment: tessera_config::Config,
     config: tessera_build::config::Config,
 }
 
@@ -855,23 +575,15 @@ fn resolve_declaration(
     strictness: tessera_build::config::Strictness,
 ) -> Result<Declaration, String> {
     // **The deployment file first, because everything else is read through it**: where the
-    // declaration is, where the bundle goes, and which environment variable carries the key. A
-    // missing one is a refusal naming what to create (configuration.md §3) — never a silent set of
-    // defaults, since every path in it is a decision.
-    let (deployment_path, deployment) = load_deployment(deployment)?;
+    // declaration is and where the bundle goes. A missing one is a refusal naming what to create
+    // (configuration.md §3) — never a silent set of defaults, since every path in it is a decision.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (_, deployment) = tessera_config::open(deployment, &cwd)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
-    let config = match strictness {
-        tessera_build::config::Strictness::Build => {
-            tessera_build::config::Config::parse(&schema_path, &bindings)
-        }
-        tessera_build::config::Strictness::Declared => {
-            tessera_build::config::Config::parse_declared(&schema_path, &bindings)
-        }
-    }
-    .map_err(|e| e.to_string())?;
+    let config = tessera_build::config::Config::parse_with(&schema_path, &bindings, strictness)
+        .map_err(|e| e.to_string())?;
     Ok(Declaration {
-        deployment_path,
         deployment,
         config,
     })
@@ -1006,108 +718,8 @@ fn report_residency(schema: &tessera_build::config::Schema, limit: Option<u64>) 
     }
     eprintln!(
         "        every column materialises in EVERY view — including ones whose items carry no \
-         value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration"
+         value for it"
     );
-}
-
-/// The disclosure decisions a declaration makes, as a table an operator reads.
-///
-/// **The same values `reports/disclosure.json` carries**, and deliberately a second rendering of
-/// one source rather than a second derivation: the file is for a diff between builds and this is
-/// for a person deciding whether the declaration says what they meant. Neither reads the other's
-/// format well.
-fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
-    println!("views");
-    for view in &disclosure.views {
-        match &view.default {
-            Some(default) => println!(
-                "  {:<26} labels from {}, default '{default}'",
-                view.name, view.labels_from
-            ),
-            None => println!(
-                "  {:<26} labels from {}, no default: an unlabelled point is refused",
-                view.name, view.labels_from
-            ),
-        }
-    }
-    if !disclosure.vocabularies.is_empty() {
-        println!("\nvocabularies");
-        for vocabulary in &disclosure.vocabularies {
-            println!(
-                "  {:<26} {}, {}, {} declared value(s){}",
-                vocabulary.name,
-                vocabulary.visibility,
-                vocabulary.value_set,
-                vocabulary.declared_values,
-                if vocabulary.reserved.is_empty() {
-                    String::new()
-                } else {
-                    format!(", reserved {:?}", vocabulary.reserved)
-                }
-            );
-        }
-    }
-    if !disclosure.attributes.is_empty() {
-        println!("\nattributes (in declaration order, which is the stored column order)");
-        for attribute in &disclosure.attributes {
-            println!(
-                "  {:<26} {}{}, {}, from column '{}'{}",
-                attribute.name,
-                attribute.ty,
-                match &attribute.vocabulary {
-                    Some(v) => format!(" over vocabulary '{v}'"),
-                    None => String::new(),
-                },
-                attribute.placement,
-                attribute.field,
-                // A family is one column per view of the group, read from those views' own
-                // points and stored under `attrs/<column>/<group>/<key>/` (`views.md` §5).
-                match &attribute.scope {
-                    Some(group) => format!(", one column per view of '{group}'"),
-                    None => String::new(),
-                }
-            );
-        }
-    }
-    if !disclosure.layers.is_empty() {
-        println!("\nlayers (in declaration order, which is registration order)");
-        for layer in &disclosure.layers {
-            println!("  {}", layer.name);
-            if let Some(parent) = &layer.expanded_from {
-                println!("      written by `[layer.labels]` on '{parent}'");
-            }
-            println!(
-                "      gate '{}' | artifacts {} | members {}",
-                layer.visibility,
-                match &layer.artifact_visibility.field {
-                    Some(field) => format!(
-                        "carry their own in '{field}', else '{}'",
-                        layer.artifact_visibility.default
-                    ),
-                    None => format!("'{}'", layer.artifact_visibility.default),
-                },
-                match layer.require_member_visibility.as_str() {
-                    Some(word) => word.to_string(),
-                    None => layer.require_member_visibility.to_string(),
-                }
-            );
-            if !layer.depends_on.is_empty() {
-                println!(
-                    "      served only where {} is served (decision 0089)",
-                    layer.depends_on.join(", ")
-                );
-            }
-            if !layer.content.computed.is_empty() {
-                println!("      computed {}", layer.content.computed.join(", "));
-            }
-            for supplied in &layer.content.supplied {
-                println!(
-                    "      supplied {} '{}' requires {}",
-                    supplied.ty, supplied.name, supplied.require_member_visibility
-                );
-            }
-        }
-    }
 }
 
 /// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
@@ -1442,33 +1054,26 @@ fn main() -> ExitCode {
             deployment,
             out,
             limit,
+            strict,
             config,
             file,
-            mint_external_ids,
             no_oracle_pairs,
             batch_items,
             memory_budget,
             stage_timings,
             stage_timings_json,
-            carry_id_key_from,
-            identity_file,
-            mint_id_key,
-            rotate_id_key,
-            bump_idset,
-            idset,
         } => {
             // **The deployment file first, because everything else is read through it**: where the
-            // declaration is, where the bundle goes, and which environment variable carries the
-            // key. A missing one is a refusal naming what to create (configuration.md §3) —
-            // never a silent set of defaults, since every path in it is a decision.
+            // declaration is and where the bundle goes. A missing one is a refusal naming what to
+            // create (configuration.md §3) — never a silent set of defaults, since every path in
+            // it is a decision.
             //
-            // Parsed and refused before any work, for the identity key's reason: a declaration
-            // refusal is an operator's typo, and discovering it after a multi-minute build has
-            // written a bundle prefix costs the whole build. Every rule in `tessera_build::config`
+            // Parsed and refused before any work: a declaration refusal is an operator's typo, and
+            // discovering it after a multi-minute build has written a bundle prefix costs the
+            // whole build. Every rule in `tessera_build::config`
             // fires here, against no data at all — which is also the whole of what `tessera check`
             // does, through this same function.
             let Declaration {
-                deployment_path,
                 deployment,
                 config,
             } = match resolve_declaration(
@@ -1484,33 +1089,6 @@ fn main() -> ExitCode {
                 }
             };
             let out = out.unwrap_or_else(|| deployment.bundle_path.clone());
-
-            // CRITICAL N-1: resolved and refused, if it refuses, before any work — before `df`,
-            // before reading input, before creating the output directory.
-            let identity = match resolve_identity(
-                &carry_id_key_from,
-                &identity_file,
-                identity_from_environment(&deployment.identity_env, &deployment_path),
-                &deployment.identity_env,
-                mint_id_key,
-                rotate_id_key,
-                bump_idset,
-                idset,
-            ) {
-                Ok(identity) => identity,
-                Err(detail) => {
-                    eprintln!("build refused: {detail}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            if identity.minted {
-                eprintln!(
-                    "minted a new identity key (idset 1): {} — starts a NEW identity lineage; \
-                     every tessera_id any client holds becomes wrong. Record this key (e.g. via \
-                     ${} in a .env beside tessera.toml) so future rebuilds can carry it forward.",
-                    identity.hex, deployment.identity_env
-                );
-            }
 
             // **A build materialises every declared view and every view of every group**
             // (`views.md` §7). `--view` is withdrawn with the refusal it went with: there is
@@ -1528,6 +1106,15 @@ fn main() -> ExitCode {
             // rather than after a multi-minute build.
             let anchor = match config.anchor_view(&registry) {
                 Ok(anchor) => anchor,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // `--limit`'s attribute: the declaration's one unique integer attribute, refused
+            // before any file is read where there is not exactly one.
+            let limited = match tessera_build::ids::Limit::of(&config.schema, limit) {
+                Ok(found) => found.is_some(),
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
@@ -1562,7 +1149,10 @@ fn main() -> ExitCode {
             // nothing else, so `auto` is fitted over the union of their sources and a stated
             // extent is surveyed against every one of them. The views of a group are contiguous
             // in the registry, so the fold is a scan.
-            let mut frames: Vec<usize> = Vec::with_capacity(registry.len());
+            //
+            // Under `--limit` the build fits each frame once the identity pass has decided which
+            // rows it keeps, and each view holds a placeholder until then.
+            let mut framings: Vec<tessera_build::Framing> = Vec::new();
             let mut extents: Vec<tessera_spatial::Bounds> = Vec::with_capacity(registry.len());
             let mut frame_of: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
@@ -1573,7 +1163,6 @@ fn main() -> ExitCode {
                 };
                 match frame_of.get(owner) {
                     Some(&first) => {
-                        frames.push(first);
                         extents.push(extents[first]);
                         continue;
                     }
@@ -1588,24 +1177,39 @@ fn main() -> ExitCode {
                     })
                     .map(|(i, _)| i)
                     .collect();
+                let subject = match &view.group {
+                    Some(membership) => format!("view group '{}'", membership.group),
+                    None => format!("view '{}'", view.id),
+                };
+                if limited {
+                    framings.push(tessera_build::Framing {
+                        subject,
+                        projection: view.projection,
+                        extent: view.extent,
+                        views: members,
+                    });
+                    extents.push(tessera_spatial::Bounds {
+                        x_min: 0.0,
+                        x_max: 1.0,
+                        y_min: 0.0,
+                        y_max: 1.0,
+                    });
+                    continue;
+                }
                 let sources: Vec<tessera_build::config::FrameSource> = members
                     .iter()
                     .map(|&i| tessera_build::config::FrameSource {
                         points: &acquired_views[i].points,
                         fields: &acquired_views[i].point_fields,
                         select: acquired_views[i].select.as_ref(),
+                        kept: None,
                     })
                     .collect();
-                let subject = match &view.group {
-                    Some(membership) => format!("view group '{}'", membership.group),
-                    None => format!("view '{}'", view.id),
-                };
                 let frame = match tessera_build::config::frame_of(
                     &subject,
                     view.projection,
                     &view.extent,
                     &sources,
-                    limit,
                 ) {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -1614,13 +1218,9 @@ fn main() -> ExitCode {
                     }
                 };
                 eprintln!("{}", frame.report());
-                if let Some(detail) = frame.refusal() {
-                    eprintln!("build refused: {detail}");
-                    return ExitCode::FAILURE;
-                }
-                frames.push(index);
                 extents.push(frame.extent);
             }
+
             let view_args: Vec<tessera_build::ViewArgs> = registry
                 .iter()
                 .zip(acquired_views)
@@ -1732,46 +1332,6 @@ fn main() -> ExitCode {
                 report_residency(&schema, limit);
             }
 
-            // The carried bundle's recorded batch size is identity-bearing exactly like its
-            // key: replayed when this rebuild names no size of its own, refused loudly when a
-            // conflicting size is given — a different batch size is a different permanent
-            // assignment under the same identity key, which is the one silent state this flow
-            // must never produce.
-            let batch_items = match (&carry_id_key_from, batch_items) {
-                (Some(root), passed) => {
-                    let carried = match read_carried_batch_items(root) {
-                        Ok(carried) => carried,
-                        Err(detail) => {
-                            eprintln!("build refused: {detail}");
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    match (carried, passed) {
-                        (Some(recorded), Some(given)) if recorded != given => {
-                            eprintln!(
-                                "build refused: --carry-id-key-from {}: that bundle was built \
-                                 with --batch-items {recorded}, but {given} was given; an \
-                                 identity-preserving rebuild must replay the recorded value \
-                                 (drop --batch-items to do so)",
-                                root.display()
-                            );
-                            return ExitCode::FAILURE;
-                        }
-                        (Some(recorded), _) => Some(recorded),
-                        (None, Some(given)) => {
-                            eprintln!(
-                                "note: the carried bundle was built as a single batch; \
-                                 --batch-items {given} makes this build a DIFFERENT permanent \
-                                 assignment under the same identity key"
-                            );
-                            Some(given)
-                        }
-                        (None, None) => None,
-                    }
-                }
-                (None, passed) => passed,
-            };
-
             let args = tessera_build::BuildArgs {
                 views: view_args,
                 anchor,
@@ -1780,11 +1340,9 @@ fn main() -> ExitCode {
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),
                 limit,
-                identity_key: identity.key,
-                identity_key_hex: identity.hex,
-                idset: identity.idset,
+                strict,
+                identity_key: IdentityKey::generate(),
                 shard_id: 0,
-                mint_external_ids,
                 emit_oracle_pairs: !no_oracle_pairs,
                 batch_items,
                 memory_budget,
@@ -1801,9 +1359,9 @@ fn main() -> ExitCode {
                     .then(tessera_build::observer::JsonStageTimings::new),
             };
             let built = if stage_timings || stage_timings_json.is_some() {
-                tessera_build::build_observed(&args, &observer)
+                tessera_build::build_framed(&args, &framings, &observer)
             } else {
-                tessera_build::build(&args)
+                tessera_build::build_framed(&args, &framings, &tessera_build::NoopObserver)
             };
             // Written whether the build succeeded or failed: a build that died in `layers` is
             // exactly the one whose per-stage record is worth having, and the records collected
@@ -1841,9 +1399,19 @@ fn main() -> ExitCode {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
                         return ExitCode::FAILURE;
                     }
+                    // **The rows the identity rule refused**, counted by file and reason with a few
+                    // of the values they carried: the build went on without them, as an ingest
+                    // refusing rows one at a time would.
+                    for line in tessera_build::describe_refused(&report.refused) {
+                        eprintln!("refused: {line}");
+                    }
+                    if let Err(e) = tessera_build::write_refused_report(&out, &report.refused) {
+                        eprintln!("build FAILED: writing reports/refused.json: {e}");
+                        return ExitCode::FAILURE;
+                    }
                     println!(
                         "built {} ({}): {} items, {} terms, {} pairs, {} bytes on disk, {} \
-                         artifact(s) minted, {} unclustered member row(s)",
+                         artifact(s) minted, {} unclustered member row(s), {} row(s) refused",
                         out.display(),
                         report.prefix,
                         report.items,
@@ -1852,6 +1420,12 @@ fn main() -> ExitCode {
                         report.bundle_bytes,
                         report.minted_artifacts,
                         report.unclustered_member_rows,
+                        report
+                            .refused
+                            .iter()
+                            .filter(|entry| entry.is_refusal())
+                            .map(|entry| entry.rows)
+                            .sum::<u64>(),
                     );
                     // The per-view shapes, which is what a multi-view build has to say and a
                     // single total cannot: a view holds a subset of entity space (`views.md` §8).
@@ -1928,16 +1502,19 @@ fn main() -> ExitCode {
                         print_shallow(&report.shallow);
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
-                             record(s), {} external-id binding(s), {} record blob row(s), {} \
-                             scoped render lane(s), {} Morton cell(s)",
+                             record(s), {} record blob row(s), {} scoped render lane(s), {} \
+                             Morton cell(s), {} unique index entr(ies), {} edited item(s) over {} \
+                             row(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
                             report.dict_records,
-                            report.external_id_bindings,
                             report.record_rows,
                             report.scoped_render_lanes,
-                            report.cells
+                            report.cells,
+                            report.unique_entries,
+                            report.edited_pairs,
+                            report.edited_rows
                         );
                         ExitCode::SUCCESS
                     }
@@ -2004,90 +1581,16 @@ fn main() -> ExitCode {
             };
             let config = declaration.config;
             let report = tessera_build::check::check(&config);
-            for source in &report.sources {
-                match &source.path {
-                    Some(path) => eprintln!("  read schema  {:<34} {path}", source.object),
-                    None => eprintln!("  no source    {:<34} (declared and empty)", source.object),
-                }
-            }
-            for finding in &report.findings {
-                eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
-            }
-            // Warnings leave the check clean and the exit status untouched: an indexed keyword the
-            // source's footer says is unique per row is a cost to know about, not a mistake.
-            for warning in &report.warnings {
-                eprintln!("  WARNING      {}: {}", warning.object, warning.detail);
-            }
-            // **The frame a projected view will quantise against** (`projections.md` §4.2) —
-            // computed from the declaration alone, so the square and the resolution the snap costs
-            // are readable without a build. Reported, never a finding.
-            if !report.frames.is_empty() {
-                eprintln!("projected views, from the declaration alone:");
-                for frame in &report.frames {
-                    frame.print();
-                }
-            }
-            // **The declaration's view groups, and what is scoped to them** (`views.md` §3, §5)
-            // — the shape of a declaration nothing yet builds, so that `tessera check` is where
-            // an author reads back what they wrote. Reported, never a finding.
-            if !config.view_groups.is_empty() {
-                eprintln!("view groups, from the declaration alone:");
-                for group in &config.view_groups {
-                    let keys = group.declared_keys();
-                    let roster = match (&group.members, keys.len()) {
-                        (Some(owner), _) => format!("the views of '{owner}'"),
-                        (None, 0) => group.form().to_string(),
-                        (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
-                    };
-                    eprintln!("  {:<20} {roster}", group.name);
-                    if !group.metadata.is_empty() {
-                        eprintln!(
-                            "  {:<20} metadata: {}",
-                            "",
-                            group
-                                .metadata
-                                .iter()
-                                .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                    }
-                }
-                for (attribute, group) in &config.scopes.attributes {
-                    eprintln!("  {:<20} attribute '{attribute}'", format!("scope {group}"));
-                }
-                for (layer, group) in &config.scopes.layers {
-                    eprintln!("  {:<20} layer '{layer}'", format!("scope {group}"));
-                }
-            }
-            // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
-            // — the decomposition an operator sizing a boundary set reads before a build commits
-            // memory to it. Reported, never a finding: nothing here refuses.
-            if !report.shapes.is_empty() {
-                eprintln!("shape layers, from the geometry alone:");
-                for shape in &report.shapes {
-                    match shape {
-                        Ok(shape) => shape.print(),
-                        Err(why) => eprintln!("  not sized: {why}"),
-                    }
-                }
-            }
+            // The page is rendered where the report is, so the binary and the Python extension
+            // module print the same bytes. Stdout carries the payloads and nothing else, which is
+            // what a CI job pipes into `curl`.
+            eprint!("{}", tessera_build::check::page(&config, &report));
             if !report.is_clean() {
-                eprintln!(
-                    "check FAILED: {} finding(s) across {} source(s). Nothing was read but \
-                     Parquet schemas, so a clean check is not a clean build: it cannot see a \
-                     value against a closed vocabulary, a member id that resolves to nothing, or \
-                     where the data sits inside a view's extent",
-                    report.findings.len(),
-                    report.sources.len()
-                );
                 return ExitCode::FAILURE;
             }
             if payloads {
-                // **The declaration, minus its acquisition keys, is the payload**
-                // (`configuration.md` §2) — so this is a serialisation and not a translation, and
-                // there is no second authority to drift. On stdout alone, so the stream a CI job
-                // pipes into `curl` carries nothing else.
+                // The declaration, minus its acquisition keys, is the payload, so this is a
+                // serialisation and not a translation and there is no second authority to drift.
                 match serde_json::to_string_pretty(&tessera_build::config::control_payloads(
                     &config,
                 )) {
@@ -2097,38 +1600,53 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                 }
-            } else {
-                print_disclosure(&tessera_build::disclosure::Disclosure::of(&config));
             }
-            eprintln!(
-                "check OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), \
-                 {} vocabulary(ies), {} attribute(s), {} layer(s), {} warning(s)",
-                report.sources.len(),
-                config.views.len(),
-                config.view_groups.len(),
-                config
-                    .view_groups
-                    .iter()
-                    .map(|g| g.declared_keys().len())
-                    .sum::<usize>(),
-                config.schema.vocabularies.len(),
-                // Every declared column, the group-scoped families included: they are held apart
-                // from the schema because a family has no slot in the manifest's flat list
-                // (`views.md` §5), not because they are fewer columns.
-                config.schema.attributes.len() + config.scoped_attributes.len(),
-                config.layers.len(),
-                report.warnings.len()
-            );
             ExitCode::SUCCESS
+        }
+        Command::Items(args) => records::items(args),
+        Command::Artifacts(args) => records::artifacts(args),
+        Command::Health {
+            deployment,
+            timeout,
+        } => {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = match tessera_config::open(deployment.as_deref(), &cwd) {
+                Ok((_, config)) => config,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(viewer) = config.viewer_addr else {
+                eprintln!(
+                    "tessera health: this deployment declares no viewer address; add one under \
+                     `[serve]`, such as `viewer = \"127.0.0.1:8080\"`"
+                );
+                return ExitCode::FAILURE;
+            };
+            match readyz(viewer, std::time::Duration::from_secs(timeout)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tessera health: {e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Serve { deployment } => {
             // Diagnostics on stderr, because stdout carries one thing: the JSON line naming the
             // three bound addresses, which a supervisor reads as the process's first stdout line
             // (`tessera_server::serve_announcing`).
+            // Colour only for a terminal, so a container's or a supervisor's log is plain text.
             tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
+                .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
                 .init();
-            let deployment = match tessera_server::config::discover(
+            // SIGTERM or SIGINT ends the process at once, including while the bundle opens. A
+            // write is fsynced before it is acknowledged, so stopping loses no acknowledged write,
+            // and the next start replays the log. A deletion or suppression answered 500 because
+            // the log could not be written is applied but not logged, so stopping undoes it.
+            exit_on_termination();
+            let deployment = match tessera_config::discover(
                 deployment.as_deref(),
                 &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             ) {
@@ -2157,11 +1675,8 @@ fn main() -> ExitCode {
             //
             // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
             // plus a reserve, so there is no configuration in which an admitted request finds no
-            // thread. What `config::load` refuses is a pool the *machine* cannot carry
-            // (`SERVING_BLOCKING_THREAD_CEILING`), which is a different question and is already
-            // settled by the time this runs — `prepare` returned above.
-            let blocking_threads =
-                tessera_server::config::serving_blocking_threads(&prepared.config);
+            // thread.
+            let blocking_threads = tessera_config::serving_blocking_threads(&prepared.config);
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .max_blocking_threads(blocking_threads)
                 .enable_all()

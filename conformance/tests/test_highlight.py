@@ -18,6 +18,11 @@ What is asserted, and by which second reader:
   the oracle's over the fixture's own values.
 - **The artifacts frame's bit is decision 0104's under the conjunction**, `null` without a
   highlight, and it moves neither the served set nor any masked count.
+- **A dependent artifact inherits the two filter bits and not the count.** The count copy was
+  withdrawn by the owner's ruling of 2026-09-18; a label's row carries the count of the membership
+  it is served over. ⊘ The `target` column that replaced the client's join by count is not
+  asserted here: `reference/oracle/wire.py` does not decode it yet, and that file is outside this
+  track.
 - **`point_rows: "highlight"` serves the same rows in the same split** in a two-column frame, and
   answers as `"full"` does when the request carried no highlight.
 - **`highlighted` is a reserved column name** — a declaration naming it is refused at the build.
@@ -29,7 +34,7 @@ import subprocess
 
 import pytest
 
-from oracle.harness import CLI_BIN, REPO_ROOT, build_env, spawn_server, stop_server, write_deployment
+from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
 from oracle.wire import (
     FRAME_POINTS,
     decode_viewport,
@@ -40,14 +45,12 @@ from oracle.wire import (
 
 from test_region_leaf import gated_layer_toml
 from test_shape_membership import (
-    ID_KEY_HEX,
     PRINCIPALS,
     VIEW_ID,
     WHOLE_MAP,
     build_bundle,
     config_toml,
     fixture_points,
-    q,
     visible,
 )
 
@@ -98,9 +101,8 @@ def highlight_server(tmp_path_factory):
     bundle = work / "bundle-gated"
     deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
     subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         check=True,
     )
     server, proc = spawn_server(
@@ -247,9 +249,8 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
     config.write_text(config_toml().replace('name   = "fx_key"', 'name   = "highlighted"'))
     deployment = write_deployment(work / "tessera-reserved.toml", bundle=work / "bundle-reserved", schema=config)
     result = subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved"), "--mint-external-ids"],
+        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(work / "bundle-reserved")],
         cwd=REPO_ROOT,
-        env=build_env(ID_KEY_HEX),
         capture_output=True,
         text=True,
     )
@@ -260,7 +261,7 @@ def test_highlighted_is_a_reserved_column_name(tmp_path):
 
 #: A clustering and the labels attached to it — registered at runtime through the control plane,
 #: because no built fixture in this suite declares a dependent layer and the rule under test is
-#: about one layer hanging from another (decision 0089; `artifact-fetch-protocol.md` D13).
+#: about one layer hanging from another (decision 0089).
 #:
 #: **Named without a slash**, unlike the path-shaped layers a corpus declares:
 #: `PUT /control/layers/{name}/artifacts` matches one path segment, so a name carrying one is a
@@ -299,8 +300,8 @@ def _layer(name: str, *, depends_on: list[str], supplied: bool) -> dict:
 
 
 def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server):
-    """**A label's `highlighted` is its cluster's**, exactly as its `matched` and its
-    `masked_count` are (contracts §3.2 r74; D13's argument).
+    """**A label's `highlighted` is its cluster's**, exactly as its `matched` is (contracts §3.2
+    r74; decision 0104's argument) — and its `masked_count` is its own.
 
     The case is a label whose own membership would answer differently: the cluster holds the points
     whose `fx_key` is below the bound and the label holds ten that are not, so a bit computed over
@@ -311,7 +312,6 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     """
     server, _points = highlight_server
     token = server.authorise(["1", "2"])["token"]
-    idset = server.meta(token)["idset"]
     table = decode_viewport_points(body(server, token, 0, WHOLE_MAP))
     ids = table.column("tessera_id").to_pylist()
     keys = table.column("fx_key").to_pylist()
@@ -324,23 +324,21 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
         assert resp.status_code == 201, resp.text
     resp = server.publish_artifacts(
         CLUSTERS,
-        addressing="tessera",
-        idset=idset,
-        artifacts=[{"key": "c-hit", "members": inside}],
+        artifacts=[{"key": "c-hit", "members": {"tessera_id": inside}}],
+        strict=True,
     )
     assert resp.status_code in (200, 201, 202), resp.text
     resp = server.publish_artifacts(
         LABELS,
-        addressing="tessera",
-        idset=idset,
         artifacts=[
             {
                 "key": "label-hit",
-                "members": outside[:10],
+                "members": {"tessera_id": outside[:10]},
                 "content": [{"values": ["hit"]}],
                 "attached_to": {"layer": CLUSTERS, "level": 0, "key": "c-hit"},
             }
         ],
+        strict=True,
     )
     assert resp.status_code in (200, 201, 202), resp.text
 
@@ -355,9 +353,16 @@ def test_a_dependent_artifact_carries_its_targets_highlight_bit(highlight_server
     cluster = served[(CLUSTERS, "c-hit")]
     label = served[(LABELS, "label-hit")]
     assert cluster.matched is True and cluster.highlighted is True, cluster
-    assert label.matched == cluster.matched, "the label answers for its cluster (D13)"
+    assert label.matched == cluster.matched, "the label answers for its cluster (decision 0104)"
     assert label.highlighted == cluster.highlighted, (
         "and in the second field exactly as in the first — a label whose own members carry none "
         "of the value must still answer for its cluster"
     )
-    assert label.masked_count == cluster.masked_count, "the count rule agrees about which artifact"
+    # **And the count is the label's own** (owner ruling, 2026-09-18, which withdrew the copy).
+    # This label declares ten members of its own, so by decision 0145 it is served over its own
+    # generating set rather than borrowing its target's — and those ten are exactly the points the
+    # cluster does *not* hold, so the two counts are different numbers and a copy would show here.
+    assert label.masked_count == 10, label
+    assert label.masked_count != cluster.masked_count, (
+        "a label's row carries the count of the membership it is served over, never its cluster's"
+    )

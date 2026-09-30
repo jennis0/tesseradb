@@ -9,7 +9,7 @@ off the share. Answers the two questions that decide the rung: how much of the u
 import concurrent.futures as cf, glob, json, sys, time
 import pyarrow.parquet as pq
 
-PARTS = sorted(glob.glob('/mnt/nas/joe/tessera/datasets/gbif/2026-06-01/occurrence.parquet/*'))
+PARTS = sorted(glob.glob('/mnt/nas/tessera/datasets/gbif/2026-06-01/occurrence.parquet/*'))
 
 
 def one(path):

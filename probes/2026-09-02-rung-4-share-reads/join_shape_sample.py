@@ -17,10 +17,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 WORKS_PART = (
-    "/mnt/nas/joe/tessera/datasets/openalex/2026-08-27/parquet/works/"
+    "/mnt/nas/tessera/datasets/openalex/2026-08-27/parquet/works/"
     "updated_date=2026-06-26/part_0038.parquet"
 )
-PAPERSEEK_CHUNK = "/mnt/nas/joe/tessera/datasets/paperseek-openalex/2026-08-27/chunk_0.parquet"
+PAPERSEEK_CHUNK = "/mnt/nas/tessera/datasets/paperseek-openalex/2026-08-27/chunk_0.parquet"
 PROJECT_COLS = ["id", "publication_year", "type", "primary_topic", "open_access", "best_oa_location"]
 
 if __name__ == "__main__":

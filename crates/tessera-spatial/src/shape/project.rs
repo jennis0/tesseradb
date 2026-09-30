@@ -1,23 +1,17 @@
-//! A shape declared in longitude and latitude, placed in the view's frame
-//! (`polygon-membership.md` §4.3 and R10, `projections.md` §10).
+//! A shape declared in longitude and latitude, placed in the view's frame.
 //!
-//! **The space a shape is declared in defines the plane its edges are straight in** (R10). An edge
-//! written in longitude and latitude is straight in the longitude/latitude plane, so its image in
-//! the frame is a **curve**, and joining the projected endpoints with a straight chord would
-//! select a different set of rows — 21.5 km of midpoint apart on an edge spanning the United
-//! Kingdom, tens of cells. So an edge is **densified before it is projected**, to a tolerance of
-//! one depth-16 cell, which bounds the departure to the grid's own resolution and is the error
-//! R11 permits. A circle or an ellipse in longitude and latitude densifies to a polygon by the
-//! same rule, a projected circle no longer being one.
+//! An edge written in longitude and latitude is straight in the longitude/latitude plane, so its
+//! image in the frame is a curve, and a straight chord between the projected endpoints would
+//! select a different set of rows. So an edge is densified before it is projected, to a tolerance
+//! of one depth-16 cell. A circle or an ellipse densifies to a polygon by the same rule.
 //!
-//! **The view's own declared transform, and no other.** [`Space::Wgs84`] carries the projection
-//! the view's points went through, so a shape cannot be placed by a function the corpus was not —
-//! the mismatch R12 exists to forbid. `projection = "none"` is a view with one space and nothing
-//! to convert from, so it refuses.
+//! [`Space::Wgs84`] carries the projection the view's points went through, so a shape cannot be
+//! placed by a function the corpus was not. `projection = "none"` has one space and nothing to
+//! convert from, so it refuses.
 //!
 //! What leaves here is a [`ShapeF64`] in the frame's own coordinates, which
-//! [`ShapeF64::canonical`] then clips, quantises and tidies exactly as it does a shape that
-//! arrived in them.
+//! [`ShapeF64::canonical`] then clips, quantises and tidies as it does a shape that arrived in
+//! them.
 
 use crate::morton::Bounds;
 use crate::projection::Projection;
@@ -26,62 +20,45 @@ use super::canon::{CanonError, ShapeF64};
 
 /// The space a shape's coordinates are written in, with the transform that reaches the view's.
 ///
-/// The projection travels *inside* the `Wgs84` variant rather than beside it, so that placing a
-/// shape without naming the function that placed the points is not a thing a caller can write.
+/// The projection travels inside the `Wgs84` variant, so a shape cannot be placed without
+/// naming the function that placed the points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Space {
-    /// The view's own coordinates — the frame the points are quantised in, whatever produced it.
+    /// The view's own coordinates: the frame the points are quantised in, whatever produced it.
     View,
     /// Longitude and latitude in degrees, to be put through the view's own projection.
     Wgs84(Projection),
 }
 
-/// Cells per axis on the grid a position is stored against (contracts §2.5): 16 bits of cell.
+/// Cells per axis on the grid a position is stored against: 16 bits of cell.
 const CELLS_PER_AXIS: f64 = 65_536.0;
 
-/// **The densification tolerance is one depth-16 cell** (`polygon-membership.md` §4.3) — one cell
-/// of the grid the view's own points are stored on, whatever zoom offset that view's frame sits
-/// at, and not one cell of some fixed world grid. Expressed against the frame it is a constant
-/// `1 / 65536` of the extent on each axis, which is what makes the bound the same statement about
-/// resolution at every frame §4.1 permits.
+/// One depth-16 cell of the view's own grid, not a fixed world grid: `1 / 65536` of the extent.
 pub const DENSIFY_TOLERANCE_CELLS: f64 = 1.0;
 
-/// The criterion the subdivision actually stops at, in depth-16 cells.
-///
-/// Half the tolerance, because the test that decides whether to split *samples* the edge at
-/// [`SAMPLES`] interior parameters rather than maximising the departure in closed form: the
-/// sampled maximum is a lower bound on the true one, and stopping at half leaves the room that
-/// gap needs. Measured worst true departure over the fixtures in `tests/shape_wgs84.rs` is well
-/// inside one cell, which is the claim; the margin costs about 1.4× the vertices, edges being
-/// subdivided until a quadratic departure falls below the criterion.
+/// Half the tolerance, because the test samples the edge at [`SAMPLES`] parameters rather than
+/// maximising the departure in closed form, and half leaves the room that gap needs.
 const CRITERION_CELLS: f64 = DENSIFY_TOLERANCE_CELLS / 2.0;
 
 /// Interior parameters tested per candidate chord, at `k / SAMPLES` for `k` in `1..SAMPLES`.
 ///
-/// **Not one midpoint.** An edge symmetric about the equator has its projected midpoint exactly
-/// on the chord — Mercator's inflection is there — so a midpoint test would accept, at any
-/// tolerance, an edge whose quarter points are kilometres off. Seven interior samples see both
-/// lobes.
+/// Not one midpoint: an edge symmetric about the equator has its midpoint on the chord, so a
+/// midpoint test would accept an edge whose quarter points are far off.
 const SAMPLES: usize = 8;
 
-/// How far an edge may be halved. At the cap an edge is 2^16 chords, which no edge of a shape
-/// that survives the vertex cap reaches; a shape that did is refused by that cap, naming it.
+/// How far an edge may be halved.
 const MAX_SUBDIVISIONS: u32 = 16;
 
-/// Initial arcs a circle or an ellipse is cut into before subdivision — the eight the served ring
-/// already takes as its floor (`Conic::ring_guarded`), so a curve is never approximated by fewer.
+/// Initial arcs a circle or an ellipse is cut into before subdivision.
 const CONIC_ARCS: usize = 8;
 
 /// Place a shape in the frame `extent` is written in.
 ///
-/// [`Space::View`] is the identity — the shape is already there. [`Space::Wgs84`] projects, having
-/// first refused what is not a coordinate: a longitude outside ±180 or a latitude outside ±90
-/// (`projections.md` §2), and a view with no projection, which has one space and nothing to
-/// convert from.
+/// [`Space::View`] is the identity. [`Space::Wgs84`] projects, having first refused what is not a
+/// coordinate and a view with no projection.
 ///
-/// A **box** in longitude and latitude comes back a box: every projection in the set is
-/// cylindrical, so a meridian is a vertical line in the frame and a parallel a horizontal one, and
-/// the two readings of its four edges agree exactly. Everything else densifies.
+/// A box comes back a box, every projection in the set being cylindrical; everything else
+/// densifies.
 pub fn place(shape: &ShapeF64, space: Space, extent: &Bounds) -> Result<ShapeF64, CanonError> {
     let projection = match space {
         Space::View => return Ok(shape.clone()),
@@ -89,9 +66,7 @@ pub fn place(shape: &ShapeF64, space: Space, extent: &Bounds) -> Result<ShapeF64
         Space::Wgs84(p) => p,
     };
     check_degrees(shape)?;
-    // Frame units per depth-16 cell, per axis. An aligned square is square, so the two agree for
-    // every frame a projected view can take; taking them separately costs nothing and keeps the
-    // bound a statement about the grid rather than about the frame's shape.
+    // Frame units per depth-16 cell, per axis.
     let scale = (
         CELLS_PER_AXIS / (extent.x_max - extent.x_min),
         CELLS_PER_AXIS / (extent.y_max - extent.y_min),
@@ -103,7 +78,7 @@ pub fn place(shape: &ShapeF64, space: Space, extent: &Bounds) -> Result<ShapeF64
             max_x,
             max_y,
         } => {
-            // y runs south, so the box's minimum latitude is its maximum y (`projections.md` §4).
+            // y runs south, so the box's minimum latitude is its maximum y.
             let (x_min, y_max) = projection.forward(*min_x, *min_y);
             let (x_max, y_min) = projection.forward(*max_x, *max_y);
             ShapeF64::Bbox {
@@ -144,13 +119,10 @@ pub fn place(shape: &ShapeF64, space: Space, extent: &Bounds) -> Result<ShapeF64
     })
 }
 
-/// Refuse anything that is not a longitude and a latitude (`projections.md` §2), and the two
-/// degeneracies a closed form is refused for.
+/// Refuse anything that is not a longitude and a latitude, and the two degeneracies a closed
+/// form is refused for.
 ///
-/// The coordinate check is over the declared parameters rather than over the generated boundary:
-/// every point either kind generates lies inside the box checked here, so one pass at the front
-/// is the whole check. The degeneracies are checked here too because a curve leaves this module
-/// as a polygon, and [`ShapeF64::canonical`]'s own refusals for them would no longer be reached.
+/// Checked here too, since a curve leaves this module as a polygon.
 fn check_degrees(shape: &ShapeF64) -> Result<(), CanonError> {
     let ok = |lon: f64, lat: f64| -> Result<(), CanonError> {
         if !lon.is_finite() || !lat.is_finite() {
@@ -184,8 +156,7 @@ fn check_degrees(shape: &ShapeF64) -> Result<(), CanonError> {
             angle_degrees,
         } => {
             ok(*cx, *cy)?;
-            // The rotated ellipse's own half-extents, not the larger axis on both: a shape near a
-            // pole should be refused for where it reaches, not for how it is written.
+            // The rotated ellipse's own half-extents: refused for where it reaches, not written.
             let (s, c) = angle_degrees.to_radians().sin_cos();
             let hw = ((a * c).powi(2) + (b * s).powi(2)).sqrt();
             let hh = ((a * s).powi(2) + (b * c).powi(2)).sqrt();
@@ -214,7 +185,6 @@ fn check_degrees(shape: &ShapeF64) -> Result<(), CanonError> {
     }
 }
 
-/// One ring's vertices, each edge densified and projected.
 fn project_ring(
     ring: &[(f64, f64)],
     projection: Projection,
@@ -251,7 +221,6 @@ fn project_ring(
     out
 }
 
-/// A circle or an ellipse in longitude and latitude, as a projected ring.
 fn conic_ring(
     cx: f64,
     cy: f64,
@@ -280,14 +249,12 @@ fn conic_ring(
     out
 }
 
-/// The projected image of `curve` over `[t0, t1]`, as frame points **after** `t0` and including
-/// `t1`, subdivided until no sampled point of the true image departs from the chord by more than
-/// [`CRITERION_CELLS`].
+/// The projected image of `curve` over `[t0, t1]`, as frame points after `t0` and including `t1`,
+/// subdivided until no sampled point departs from the chord by more than [`CRITERION_CELLS`].
 ///
-/// The departure is measured **to the chord segment** and not between points at equal parameter:
-/// a meridian's image is the chord — the same set of frame points, walked at a different rate —
-/// and a parameter-wise measure would densify it for a difference no membership can see. That is
-/// what makes a meridional and an equatorial edge come back untouched.
+/// The departure is measured to the chord segment, not between points at equal parameter: a
+/// meridian's image is the chord walked at a different rate, which a parameter-wise measure
+/// would densify for a difference no membership can see.
 fn densify(
     curve: &dyn Fn(f64) -> (f64, f64),
     projection: Projection,
@@ -319,7 +286,6 @@ fn densify(
     out.push(p1);
 }
 
-/// Distance from a frame point to the chord `a`–`b`, in depth-16 cells.
 fn departure(p: (f64, f64), a: (f64, f64), b: (f64, f64), scale: (f64, f64)) -> f64 {
     let (px, py) = ((p.0 - a.0) * scale.0, (p.1 - a.1) * scale.1);
     let (bx, by) = ((b.0 - a.0) * scale.0, (b.1 - a.1) * scale.1);
@@ -336,8 +302,7 @@ fn departure(p: (f64, f64), a: (f64, f64), b: (f64, f64), scale: (f64, f64)) -> 
 mod tests {
     use super::*;
 
-    /// The whole Web Mercator world — the frame the United Kingdom takes, straddling the meridian
-    /// (`projections.md` §4.1).
+    /// The whole Web Mercator world: the frame the United Kingdom takes, straddling the meridian.
     const WORLD: Bounds = Bounds {
         x_min: 0.0,
         x_max: 1.0,
@@ -405,8 +370,7 @@ mod tests {
         .is_ok());
     }
 
-    /// A box in degrees is a box in the frame: a meridian is vertical and a parallel horizontal
-    /// under every projection in the set.
+    /// A box in degrees is a box in the frame under every projection in the set.
     #[test]
     fn a_degree_box_projects_to_a_box() {
         let uk = ShapeF64::Bbox {
@@ -431,8 +395,7 @@ mod tests {
         assert!(min_x < max_x && min_y < max_y);
     }
 
-    /// A meridional edge and an equatorial edge are straight in both planes, so densification
-    /// leaves them alone. These are the cases where the two readings of R10 agree.
+    /// A meridional and equatorial edge are straight in both planes, so densification skips them.
     #[test]
     fn a_meridian_and_a_parallel_are_not_densified() {
         let space = Space::Wgs84(Projection::WebMercator);
@@ -461,17 +424,17 @@ mod tests {
         );
     }
 
-    /// **The tolerance holds**: no point of the true projected image departs from the densified
-    /// boundary by more than one depth-16 cell, sampled far finer than the subdivision test does.
+    /// No point of the true image departs from the densified boundary by more than one cell,
+    /// sampled far finer than the subdivision test does.
     #[test]
     fn the_densified_boundary_holds_the_true_image_to_one_cell() {
         let wm = Projection::WebMercator;
         let edges = [
-            // The United Kingdom's diagonal — 21.5 km of midpoint between the two readings.
+            // The United Kingdom's diagonal.
             ((-8.0, 50.0), (2.0, 58.0)),
-            // Sixty degrees on both axes: 586 km.
+            // Sixty degrees on both axes.
             ((-30.0, -30.0), (30.0, 30.0)),
-            // Symmetric about the equator, where the projected midpoint is *on* the chord.
+            // Symmetric about the equator, where the projected midpoint is on the chord.
             ((-40.0, -55.0), (40.0, 55.0)),
             // Near the domain's cut, where the transform steepens fastest.
             ((-20.0, 70.0), (20.0, 84.9)),
@@ -510,13 +473,10 @@ mod tests {
             );
             worst_overall = worst_overall.max(worst);
         }
-        // Measured, not assumed: the worst departure over these four edges is far inside the
-        // stated cell, which is the room the sampled stopping criterion needs.
         assert!(worst_overall < 0.5, "worst departure {worst_overall} cells");
     }
 
-    /// A circle in degrees is not a circle in the frame, and comes back a polygon that holds the
-    /// true projected oval to the same tolerance.
+    /// A circle in degrees comes back a polygon holding the true projected oval to tolerance.
     #[test]
     fn a_degree_circle_densifies_to_a_polygon() {
         let wm = Projection::WebMercator;
@@ -545,15 +505,14 @@ mod tests {
         assert!(worst <= DENSIFY_TOLERANCE_CELLS, "{worst} cells");
     }
 
-    /// The tolerance is the *view's* grid, so a sub-square frame densifies further for the same
-    /// edge — a fixed world-grid tolerance would leave a zoom-offset frame with 2^k cells of
-    /// error and break R11.
+    /// The tolerance is the view's grid, so a sub-square frame densifies further for the same
+    /// edge: a fixed world-grid tolerance would leave it with 2^k cells of error.
     #[test]
     fn a_finer_frame_densifies_further() {
         let space = Space::Wgs84(Projection::WebMercator);
         let edge = ShapeF64::Polygon(vec![vec![vec![(0.5, 51.0), (1.5, 52.0), (1.5, 51.0)]]]);
         let world = ring(&place(&edge, space, &WORLD).unwrap()).len();
-        // The tile at z6 containing Greater London's east — a frame 2^6 finer per axis.
+        // The tile at z6 containing Greater London's east, a frame 2^6 finer per axis.
         let sub = Bounds {
             x_min: 0.5,
             x_max: 0.515_625,

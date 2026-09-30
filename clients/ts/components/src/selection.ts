@@ -1,24 +1,42 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
-import {TesseraElement, emit, idString} from './base.js';
+import {type RegionProjection} from '@tesseradb/client';
+import {TesseraElement, emit, idString, shapeDetail} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11), as the boards draw it
- * (`SelectionFlow.png`): *Shown inside · Matched inside · Visible inside* through
- * `<tessera-count>` — `matched` as `Masked`, exact for the shape unless the server answered a
- * cover (`x-tessera-region`) or the frame did not cover the shape; `visible` only while no other
- * filter narrows the frame; `served` as the held marks inside against `matched`, both figures
- * always — the shown items as a list (click picks), and the actions.
+ * The selected region: its counts, the held marks inside it as a list, and its actions. *Shown
+ * inside* counts the held marks against the served set. *Matched inside* is exact for the shape
+ * unless the server answered for a cover of it. *Visible inside* appears only while no other
+ * filter narrows the view. Clicking a listed mark picks it. *Outside* flips the selection to its
+ * complement, and *Clear* drops it.
  *
- * **The selection is the filter** (`selection-operand.md`): the map and every count narrowed to
- * it the moment it settled, so *filter to this* is not a button here. *Outside* flips it to the
- * complement. *Export* and *Save as artifact* are greyed with the reason on hover rather than
- * omitted: each is a server-side verb asked for in D11 and ⊘ neither is built.
+ * A selection is a filter: the map and every count narrow to it once it settles. Not built yet:
+ * *Export* and *Save as artifact*, which need server routes; their buttons are disabled with the
+ * reason on hover.
+ *
+ * @summary The selected region's counts, marks and actions.
+ * @tagname tessera-selection
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-selectchange']>} tessera-selectchange - Clear
+ *   (with `shape` null) or Outside and Inside (with the new shape and `status` `loading`) was
+ *   pressed.
+ * @csspart title - The heading, with the shape's kind.
+ * @csspart state - The state line, with `data-state`; its tooltip says whether the counts are
+ *   exact for the shape or for a cover.
+ * @csspart refusal - The words "Selection refused", with `data-code` set to the refusal's code.
+ * @csspart counts - The counts.
+ * @csspart count-served - The `<tessera-count>` of marks shown inside.
+ * @csspart count-matched - The `<tessera-count>` matched inside (or outside).
+ * @csspart count-visible - The `<tessera-count>` visible inside (or outside).
+ * @csspart label - The heading above the list.
+ * @csspart items - The list of held marks inside.
+ * @csspart item - One held mark, by `tessera_id`.
+ * @csspart actions - The action buttons.
+ * @csspart action - One action button.
  */
 export class TesseraSelection extends TesseraElement {
   static override styles = [
@@ -48,7 +66,8 @@ export class TesseraSelection extends TesseraElement {
         overflow-y: auto;
       }
       [part='item'] {
-        font-family: var(--tessera-font-mono);
+        min-height: 26px;
+        font-family: var(--_tessera-font-mono);
         font-size: 12px;
       }
       [part='actions'] {
@@ -60,14 +79,14 @@ export class TesseraSelection extends TesseraElement {
     `
   ];
 
-  /** By property, for a host with its own region. */
+  /** The region to show in place of the store's `region` projection. */
   @property({attribute: false}) accessor region: RegionProjection | null = null;
 
   private get shown(): RegionProjection | null {
     return this.region ?? this.resolvedStore?.get('region') ?? null;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const r = this.shown;
     const heading = (shape: string = '') => html`<h2 part="title">Selection<span class="summary">${shape}</span></h2>`;
     if (!r) return html`<div class="panel">${heading()}<span part="state" data-state="detached"></span></div>`;
@@ -84,12 +103,11 @@ export class TesseraSelection extends TesseraElement {
         : nothing;
     const stateRegion =
       r.status === 'loading'
-        ? html`<span part="state" data-state="loading"><span class="dot"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
+        ? html`<span part="state" data-state="loading"><span class="dot quiet"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
         : r.status === 'refused'
-          ? html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${r.refusal?.code}</span></span>`
-          : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'not yet answered' : r.verdict.exact ? 'exact for the shape' : `a cover of the shape at depth ${r.verdict.depth}`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
+          ? html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal" data-code=${r.refusal?.code ?? nothing}>Selection refused</span></span>`
+          : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'Not counted yet' : r.verdict.exact ? 'Exact for the shape' : 'Approximate: counted over cells around the shape'}>${stale ? html`<span class="dot warn"></span>Data updated` : nothing}</span>`;
     const ids = Array.from(r.held.ids, idString);
-    // Greyed with the reason on hover, never omitted: each waits on a server verb (D11).
     const waiting = (label: unknown, reason: string) => html`<button part="action" class="btn off" type="button" disabled title=${reason}>${label}</button>`;
     return html`<div class="panel">${heading(r.shape.outside ? `outside ${r.shape.kind}` : r.shape.kind)}${stateRegion}${counts}
       ${ids.length > 0
@@ -102,7 +120,7 @@ export class TesseraSelection extends TesseraElement {
                     if (e.key === 'Enter' || e.key === ' ') void this.resolvedStore?.pick(BigInt(id));
                   }}><span class="name">${id}</span></li>`
             )}
-            ${r.held.count > ids.length ? html`<li class="muted xs">and ${(r.held.count - ids.length).toLocaleString('en-GB')} more (the first ${REGION_HELD_LIMIT} listed)</li>` : nothing}
+            ${r.held.count > ids.length ? html`<li class="muted sm">${(r.held.count - ids.length).toLocaleString('en-GB')} more not listed</li>` : nothing}
           </ul>`
         : nothing}
       <div part="actions">
@@ -113,10 +131,10 @@ export class TesseraSelection extends TesseraElement {
         <button part="action" class="btn" type="button" title=${r.shape.outside ? 'Filter to the inside of the shape' : 'Filter to the outside of the shape'} @click=${() => {
           const next = {...r.shape, outside: !r.shape.outside};
           this.resolvedStore?.select(next);
-          emit(this, 'tessera-selectchange', {shape: next, status: 'loading'});
-        }}>${icon('filter', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
-        ${waiting('Export', 'Needs the export verb (not yet served)')}
-        ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}
+          emit(this, 'tessera-selectchange', {shape: shapeDetail(next), status: 'loading'});
+        }}>${icon(r.shape.outside ? 'filter' : 'outside', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
+        ${waiting('Export', 'Not available yet')}
+        ${waiting('Save as artifact', 'Not available yet')}
       </div>
     </div>`;
   }

@@ -1,0 +1,45 @@
+samples: drawn = 25 credentials x 8 passes; worst = 1 credential x 100 passes; single thread
+
+## Corpus C
+
+labels written 100000, distinct labels 100000, items 99999986, terms 100000, nodes 100000 (100000 leaves, 0 inner), edges 0
+build: add 0.02 s (244 ns per label written), freeze 0.001 s
+memory (accounted): graph 2200008 B (22.0 B/node, 22.0 B/label); term dictionary 3556090 B; label postings offsets 400004 B; hash-cons index 524288 B (5.2 B/node); scratch per worker 1200000 B
+memory (RSS): +8.4 MB after adding every label, before freezing
+nodes per label: p50 1 p90 1 p99 1 p99.9 1 max 1; histogram 1:100000 2-3:0 4-7:0 8-15:0 16-31:0 32-63:0 64-127:0 128-255:0 256+:0
+clause variant: 100000 clause postings, 99999986 entries (1.00 per item), 2317771 B (postings serialised, plus upward edges), built in 0.02 s; upward edges 0 of 0
+baseline postings: 100000 terms, 1517767 B serialised, built in 0.02 s
+memory (RSS): 53.9 MB in total with every structure built; peak so far 53.9 MB
+
+| corpus | credential | terms | design | propagate µs med / p99 | union µs med / p99 | total µs med / p99 | nodes visited | hits | authorised items |
+|---|---|---|---|---|---|---|---|---|---|
+| C | drawn | 10 | L | 0.41 / 0.91 | 11.4 / 24.9 | 11.9 / 25.8 | 10 | 10 | 12435905 |
+| C | drawn | 10 | LW | 0.42 / 5.02 | 11.0 / 31.9 | 11.7 / 32.3 | 10 | 10 | 12435905 |
+| C | drawn | 10 | C | 0.40 / 0.95 | 14.7 / 31.3 | 15.1 / 31.7 | 10 | 10 | 12435905 |
+| C | drawn | 10 | CW | 0.41 / 0.86 | 14.0 / 27.5 | 14.6 / 27.9 | 10 | 10 | 12435905 |
+| C | drawn | 10 | T | n/a | 14.1 / 25.2 | 14.1 / 25.2 | 0 | 10 | 12435905 |
+| C | worst | 10 | L | 0.52 / 1.25 | 22.7 / 37.0 | 23.1 / 37.6 | 10 | 10 | 24226079 |
+| C | worst | 10 | LW | 0.68 / 1.55 | 14.8 / 29.4 | 15.7 / 30.4 | 10 | 10 | 24226079 |
+| C | worst | 10 | C | 0.65 / 1.47 | 27.6 / 49.0 | 28.0 / 49.7 | 10 | 10 | 24226079 |
+| C | worst | 10 | CW | 0.52 / 1.40 | 30.7 / 55.5 | 31.2 / 56.0 | 10 | 10 | 24226079 |
+| C | worst | 10 | T | n/a | 30.5 / 57.9 | 30.5 / 57.9 | 0 | 10 | 24226079 |
+| C | drawn | 100 | L | 3.20 / 17.5 | 35.0 / 64.3 | 40.7 / 68.1 | 100 | 100 | 29419803 |
+| C | drawn | 100 | LW | 2.89 / 7.96 | 39.4 / 67.9 | 42.5 / 70.4 | 100 | 100 | 29419803 |
+| C | drawn | 100 | C | 2.57 / 8.61 | 75.2 / 119 | 77.9 / 122 | 100 | 100 | 29419803 |
+| C | drawn | 100 | CW | 3.29 / 18.2 | 67.2 / 108 | 72.0 / 111 | 100 | 100 | 29419803 |
+| C | drawn | 100 | T | n/a | 71.9 / 117 | 71.9 / 117 | 0 | 100 | 29419803 |
+| C | worst | 100 | L | 2.67 / 5.96 | 55.5 / 84.9 | 58.4 / 89.2 | 100 | 100 | 42905830 |
+| C | worst | 100 | LW | 2.86 / 6.10 | 51.6 / 78.8 | 54.6 / 83.5 | 100 | 100 | 42905830 |
+| C | worst | 100 | C | 2.56 / 5.24 | 103 / 131 | 105 / 133 | 100 | 100 | 42905830 |
+| C | worst | 100 | CW | 2.92 / 7.65 | 101 / 128 | 105 / 131 | 100 | 100 | 42905830 |
+| C | worst | 100 | T | n/a | 102 / 158 | 102 / 158 | 0 | 100 | 42905830 |
+| C | drawn | 1000 | L | 67.2 / 193 | 196 / 355 | 269 / 439 | 1000 | 1000 | 50721129 |
+| C | drawn | 1000 | LW | 75.9 / 162 | 171 / 443 | 252 / 521 | 1000 | 1000 | 50721129 |
+| C | drawn | 1000 | C | 66.2 / 185 | 1191 / 3317 | 1255 / 3376 | 1000 | 1000 | 50721129 |
+| C | drawn | 1000 | CW | 73.6 / 149 | 1201 / 3153 | 1279 / 3291 | 1000 | 1000 | 50721129 |
+| C | drawn | 1000 | T | n/a | 1294 / 3137 | 1294 / 3137 | 0 | 1000 | 50721129 |
+| C | worst | 1000 | L | 65.0 / 112 | 225 / 311 | 294 / 504 | 1000 | 1000 | 61913820 |
+| C | worst | 1000 | LW | 77.7 / 119 | 208 / 293 | 293 / 384 | 1000 | 1000 | 61913820 |
+| C | worst | 1000 | C | 62.8 / 145 | 1175 / 1681 | 1237 / 1746 | 1000 | 1000 | 61913820 |
+| C | worst | 1000 | CW | 77.8 / 146 | 1169 / 1677 | 1253 / 1823 | 1000 | 1000 | 61913820 |
+| C | worst | 1000 | T | n/a | 1222 / 2038 | 1222 / 2038 | 0 | 1000 | 61913820 |

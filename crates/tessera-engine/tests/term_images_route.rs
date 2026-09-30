@@ -5,7 +5,7 @@
 //! its grant covers the entity domain, by the split route, which unions the bundle's images of the
 //! terms it holds and then walks the residual and the extents, or by the complement route, a walk
 //! over the entities the grant does not hold subtracted from the base's row range
-//! (`tessera_engine::compose::RowProjection::new`). The chooser picks one from the principal's own
+//! (`tessera_engine::projection::RowProjection::new`). The chooser picks one from the principal's own
 //! grant before any of them runs. What that buys is first-viewport time; what it must never cost
 //! is a row.
 //!
@@ -50,6 +50,8 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, ProjectionRoute, ViewportRequest};
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::EntityId;
+
+const WAIT: Duration = Duration::from_secs(60);
 
 /// The one view the fixture builds. A second, created while the engine runs, appears in
 /// [`a_view_created_while_running_has_no_images_and_is_served_by_the_walk`].
@@ -237,6 +239,7 @@ fn write_pairs(path: &Path) {
 fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
     write_points(points);
     write_pairs(pairs);
+    let schema = id_schema();
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -251,22 +254,20 @@ fn build_fixture(out: &Path, points: &Path, pairs: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the fixture builds");
 }
@@ -388,14 +389,6 @@ fn drop_term_image_extents(root: &Path) {
     let mut found = 0;
     walk(root, &mut found);
     assert!(found > 0, "no segments manifest was found under {root:?}");
-}
-
-fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
 }
 
 fn whole_extent() -> ViewportRequest<'static> {
@@ -636,7 +629,7 @@ fn every_route_agrees_after_a_flush_under_a_kept_and_an_unkept_term() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 
@@ -662,13 +655,13 @@ fn every_route_agrees_after_a_merge() {
         }
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("a flush to publish", || {
+        wait_until("a flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
     engine.set_merge_for_test(true);
     engine.request_flush();
-    wait_until("the merge to publish", || {
+    wait_until("the merge to publish", WAIT, || {
         engine.write_executor_stats().merges >= 1
     });
 
@@ -717,7 +710,7 @@ fn every_route_agrees_across_a_delete_and_a_suppression() {
                 .expect("the identity is computable");
             assert!(
                 engine
-                    .item(&session, id, None)
+                    .item(&session, id)
                     .expect("the drill-down answers")
                     .is_none(),
                 "{entity:?} is still visible under {force:?}"
@@ -753,12 +746,14 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
     ingest(&engine, "refreshed", &[MOST], 250.0);
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
-    wait_until("the background refresh to produce every entry", || {
-        engine.refreshes() >= before_refreshes + sessions.len() as u64
-    });
+    wait_until(
+        "the background refresh to produce every entry",
+        WAIT,
+        || engine.refreshes() >= before_refreshes + sessions.len() as u64,
+    );
 
     // A flush leaves rung 1 available, so the pass patches rather than builds and no route is
     // chosen. What must hold is that whatever it produced is still the walk's set.
@@ -797,7 +792,7 @@ fn the_background_refresh_builds_by_a_chosen_route_and_equals_the_walk() {
         assert!(Instant::now() < deadline, "the fold never published");
         std::thread::sleep(Duration::from_millis(10));
     }
-    wait_until("the post-fold refresh to produce every entry", || {
+    wait_until("the post-fold refresh to produce every entry", WAIT, || {
         engine.refreshes() >= before_refreshes + sessions.len() as u64
     });
     let after_routes = engine.projection_builds_by_route();
@@ -963,9 +958,8 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     for n in 0..64u32 {
         let descriptors = vec![label(MOST), label(SCATTERED)];
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
                     join: None,
                     x: (n * 13 % 1000) as f64,
@@ -982,7 +976,7 @@ fn a_view_created_while_running_has_no_images_and_is_served_by_the_walk() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 
@@ -1103,9 +1097,8 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     for n in 0..512u32 {
         let descriptors = vec![label(MOST)];
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(format!("runtime-{n}").into_bytes()),
                     view: runtime_view.to_string(),
                     join: None,
                     x: (n * 13 % 1000) as f64,
@@ -1122,7 +1115,7 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
     }
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 
@@ -1184,10 +1177,9 @@ fn a_view_created_while_running_gains_images_at_its_first_fold() {
 // Ingest
 // -------------------------------------------------------------------------------------------
 
-fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
+fn ingest(engine: &Engine, batch: &str, terms: &[u32], x: f64) {
     let descriptors: Vec<Vec<u8>> = terms.iter().copied().map(label).collect();
     let row = UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
         view: VIEW.to_string(),
         join: None,
         x,
@@ -1198,6 +1190,6 @@ fn ingest(engine: &Engine, external_id: &str, terms: &[u32], x: f64) {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
+        .ingest_rows(vec![row], batch.to_string(), [0u8; 32])
         .expect("the ingest is accepted");
 }

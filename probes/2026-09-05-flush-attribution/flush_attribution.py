@@ -11,7 +11,7 @@ Usage is the driver's, with the same flags:
     python3 probes/2026-09-05-flush-attribution/flush_attribution.py \\
         --rung-dir data/ladder/medcpt-1m --work <scratch> --binary <bench-timing tessera> \\
         --out <cell>.json --fraction 0.10 --concurrency 8 --port0 8171 \\
-        --stop-after-ingest --reuse-base --copy-base
+        --stop-after-ingest --reuse-base
 
 The figures are process totals differenced across the phase. A pool stage per flush divides by
 `executions` (returns of `execute_flush` on the pool) and per row by `rows_executed`; a

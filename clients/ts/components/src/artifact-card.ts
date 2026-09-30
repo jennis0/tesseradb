@@ -1,40 +1,78 @@
-import {css, html, nothing} from 'lit';
+import {css, html, nothing, type TemplateResult} from 'lit';
 import {property} from 'lit/decorators.js';
-import {isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
-import {attachedTopics, displayName} from '@tesseradb/deck';
+import {artifactName, isFilterLayer, withMember, withoutMember, type Artifact, type ArtifactDetail, type ClauseVerb, type Masked, type Refusal} from '@tesseradb/client';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
-import {renderState} from './states.js';
+import {refusalText, renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
-/**
- * `<tessera-artifact-card>` — the selected artifact (design §5.3 tier 2, §6), as the boards draw
- * it: the name, its `Masked` count as *members visible to you*, its supplied description, layer
- * and key, the kind of shape its layer draws, its **parents** and *Children in this view* from the
- * served set, *Fit to cluster*, and the two verbs on each of *this artifact* and *outside this
- * artifact* — **`member_of` clauses** (`highlight-and-hierarchy.md` §3, §5.5), which replace the
- * `region`-by-published-artifact spelling this card used to send. The drawn-region spelling stays
- * for a region drawn by hand; `region` asks about a shape and `member_of` about a membership, and
- * for an artifact whose members are spread across the map the two are not the same question — the
- * shape is the map's own outline. *Fit* is absent on a layer that draws nothing (§5.4). **Steady during a
- * pan by construction**: the count is the drill-down's, over the whole membership as this
- * principal sees it, and moves with the mask and never with the viewport. The children are a live
- * read of the served set — whatever the channel has answered for the view now.
- *
- * A cluster with no name — no supplied text and no topic attached — shows {@link UNNAMED} in the
- * headline and never its key, which is an id: the key has a field of its own that says so.
- *
- * One refusal covers every withheld case and nothing here tells them apart.
- */
-/** What each kind of drawn shape says on the card. */
-const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
-  derived: 'derived — the hull of the members you can see',
-  predicate: 'boundary — the same for every viewer',
-  authored: 'authored — the same for every viewer'
+/** A parent's or child's name, or {@link UNNAMED}. */
+const nameSpan = (name: string | null) => html`<span part="name" class="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>`;
+
+/** A `role="button"` row's keys: Enter and Space press it. */
+const onKeys = (press: () => void) => (e: KeyboardEvent) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  press();
 };
 
+/** What each kind of drawn shape says on the card. */
+const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
+  derived: 'Drawn around the members you can see',
+  predicate: 'The same for everyone',
+  authored: 'The same for everyone'
+};
+
+/**
+ * The opened artifact: its name, its masked count, its description, layer and key, the kind of
+ * shape its layer draws, its parents and its children in this view, Fit to cluster, and buttons
+ * that put a `member_of` clause on it as a filter, as a highlight, or as a filter to what is
+ * outside it. A `member_of` clause selects by membership, where a drawn region selects by shape;
+ * they differ for an artifact whose members are spread across the map. Fit is absent on a filter
+ * layer, which draws nothing. Pressing a parent or child opens it.
+ *
+ * A host's buttons in the `actions` slot sit beside the close button.
+ *
+ * The count is over the artifact's whole membership as the viewer sees it and does not change with
+ * the view. An artifact with no name shows a dash in the headline and its key in its own field.
+ * The server gives the same refusal for every artifact it withholds. The artifact is the store's
+ * (`Store.openArtifact`), or the `artifact` property.
+ *
+ * @summary The opened artifact, with its lineage and its filter buttons.
+ * @tagname tessera-artifact-card
+ * @category Elements
+ * @slot actions - Buttons beside the close button, such as the explorer's Pin.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - Fit to
+ *   cluster was pressed. `<tessera-explorer>` fits its map to the artifact.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A clause
+ *   button put a `member_of` clause on or took it off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-close']>} tessera-close - The close button was
+ *   pressed, with `what` set to `artifact`.
+ * @csspart title - The heading: the level's or the layer's title, holding the close button while
+ *   the card shows an artifact or a refusal.
+ * @csspart close - The close button.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - The words "Not available", with `data-code` set to the refusal's code.
+ * @csspart headline - The artifact's name, with `data-unnamed` where it has none.
+ * @csspart count - The masked count.
+ * @csspart content - The artifact's description, or its attached topic.
+ * @csspart value - The layer and the key.
+ * @csspart shape - What the layer's shape is, with `data-kind` (`derived`, `predicate` or
+ *   `authored`).
+ * @csspart label - The headings above the parents and the children.
+ * @csspart parents - The list of parents.
+ * @csspart parent - One parent, with `data-id`.
+ * @csspart children - The list of children in this view.
+ * @csspart child - One child, with `data-id`.
+ * @csspart name - A parent's or a child's name, with `data-unnamed` where it has none.
+ * @csspart fit - The Fit to cluster button.
+ * @csspart verbs - The clause buttons.
+ * @csspart filter - The Filter to this button, with `aria-pressed` while its clause is on.
+ * @csspart highlight - The Highlight this button, with `aria-pressed` while its clause is on.
+ * @csspart outside - The Outside this button, with `aria-pressed` while its clause is on.
+ */
 export class TesseraArtifactCard extends TesseraElement {
   static override styles = [
     tokens,
@@ -42,6 +80,10 @@ export class TesseraArtifactCard extends TesseraElement {
     css`
       :host {
         display: block;
+      }
+      [part='title'] .what {
+        flex: 1;
+        min-width: 0;
       }
       [part='headline'] {
         margin-bottom: 6px;
@@ -54,21 +96,15 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='count'] tessera-count::part(count) {
         font-size: 20px;
-        font-weight: 500;
-        font-family: var(--tessera-font-mono);
+        font-weight: 600;
       }
       [part='count'] tessera-count::part(label) {
         font-size: 13px;
-        margin-left: 0;
       }
       [part='content'] {
         margin: 0 0 10px;
         font-size: 12px;
-        color: var(--tessera-ink-2);
-      }
-      .field .v {
-        font-family: var(--tessera-font-mono);
-        font-size: 12px;
+        color: var(--_tessera-ink-2);
       }
       .children-label {
         margin: 12px 0 4px;
@@ -80,7 +116,7 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='child'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
@@ -95,10 +131,11 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='verbs'] .btn[aria-pressed='true'] {
         border-color: currentColor;
+        background: var(--_tessera-surface-2);
       }
       [part='verbs'] [data-verb='highlight'][aria-pressed='true'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       .parents-label {
         margin: 12px 0 4px;
@@ -110,19 +147,31 @@ export class TesseraArtifactCard extends TesseraElement {
       }
       [part='parent'] tessera-count::part(count) {
         margin-left: auto;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
         font-size: 12px;
         font-weight: 400;
       }
       [part='close'] {
-        display: inline-flex;
-        color: var(--tessera-ink-3);
+        width: 24px;
+        height: 24px;
+        margin: -4px -4px -4px 0;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='close']:hover {
+        background: var(--_tessera-surface-2);
       }
     `
   ];
 
-  /** By property, for a host feeding the card from its own drill-down. */
+  /**
+   * The artifact to show, for a host that fetches the drill-down itself. Set with `refusal` or
+   * alone, it replaces the store's opened artifact.
+   */
   @property({attribute: false}) accessor artifact: {id: bigint; detail: ArtifactDetail} | null = null;
+  /** A refusal to show in place of an artifact, for a host that fetches the drill-down itself. */
   @property({attribute: false}) accessor refusal: Refusal | null = null;
 
   private get shown(): {artifact: {id: bigint; detail: ArtifactDetail} | null; refusal: Refusal | null} {
@@ -132,13 +181,10 @@ export class TesseraArtifactCard extends TesseraElement {
   }
 
   /**
-   * One of the card's clause buttons: a `member_of` clause on this artifact, in one position and
-   * one sense (`highlight-and-hierarchy.md` §3, §5.5).
-   *
-   * **Pressed is a state, and clicking a pressed button withdraws the clause** — so the card says
-   * what is on rather than adding a second clause each time it is used, and a viewer moves the
-   * clause between the two positions by pressing the other button, which is the same *without
-   * being re-entered* the chips give.
+   * One of the card's clause buttons: a `member_of` clause on this artifact, as a filter or a
+   * highlight, inside or outside. The button shows whether the clause is on; clicking a pressed
+   * button withdraws it. The artifact holds one clause in each position, so Filter to this and
+   * Outside this replace each other, and a highlight is kept beside either.
    */
   private verb(layer: string, artifact: bigint, outside: boolean, verb: ClauseVerb, label: string, name: string | null) {
     const s = this.resolvedStore;
@@ -160,78 +206,73 @@ export class TesseraArtifactCard extends TesseraElement {
       @click=${() => {
         if (!s) return;
         const members = on
-          ? withoutMember(s.get('filters').members, layer, artifact)
+          ? withoutMember(s.get('filters').members, layer, artifact, verb)
           : withMember(s.get('filters').members, {layer, artifact, outside, verb, ...(name === null ? {} : {label: name})});
         s.setMembers(members);
         emit(this, 'tessera-clausechange', {id: idString(artifact), layer, outside, verb, on: !on});
       }}
     >
-      ${icon(verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
+      ${icon(outside ? 'outside' : verb === 'filter' ? 'filter' : 'highlight', 14)}${label}
     </button>`;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const {artifact, refusal} = this.shown;
-    // The heading names what this is — the level's title on a levelled layer (a *County*, an
-    // *Admin 2*), the layer's title otherwise — read off the served row, whose `rung` is the wire's.
+    // The heading is the level's title on a levelled layer (County, Admin 2), else the layer's.
     const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];
     const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.tesseraId === artifact.id) : undefined;
-    // **The declaration comes from the artifact's own layer, not from a served row.** A filter
-    // layer is never named in a viewport request (§5.4), so its artifacts are never in the served
-    // set and a card resolving the layer through that row would find none — and would then offer
-    // *fit* on the one layer that has nothing to fit to. The served row is still preferred where
-    // there is one, because the card is also fed directly by a host with no store behind it.
+    // A filter layer's artifacts are never served, so the layer falls back to the drill-down's;
+    // otherwise the card would offer Fit on a layer with nothing drawn.
     const declaredLayer = row?.layer ?? artifact?.detail.layer;
     const decl = declaredLayer === undefined ? undefined : metaLayers.find((l) => l.name === declaredLayer);
-    const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || 'Artifact';
-    const heading = html`<h2 part="title">${what}<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button></h2>`;
+    const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || decl?.name || 'Selected';
+    // The close button appears only while the card shows something to close.
+    const heading = (closable: boolean) =>
+      html`<h2 part="title"><span class="what">${what}</span>${closable
+        ? html`<slot name="actions"></slot><button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button>`
+        : nothing}</h2>`;
     if (refusal) {
-      return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">${refusal.code}: ${refusal.detail}</span></span></div>`;
+      return html`<div class="panel">${heading(true)}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Not available', refusal.code)}</span></div>`;
     }
     if (!artifact) {
-      if (!this.resolvedStore) return html`<div class="panel">${heading}${renderState('detached', null)}</div>`;
-      return html`<div class="panel">${heading}<span part="state" data-state="empty">No cluster selected</span></div>`;
+      if (!this.resolvedStore) return html`<div class="panel">${heading(false)}${renderState('detached', null)}</div>`;
+      return html`<div class="panel">${heading(false)}<span part="state" data-state="empty">Nothing selected</span></div>`;
     }
     const s = this.resolvedStore;
     const artifacts = s?.get('artifacts');
     const served = artifacts?.served ?? [];
-    const topics = artifacts ? attachedTopics(artifacts, s?.get('meta') ?? null) : new Map<bigint, string>();
-    // A live projection read: the artifact's own row and its children are whatever the channel
-    // has served for the view *now*, and this renders again on every answer.
+    const attached = artifacts?.attached ?? new Map<bigint, string>();
+    // The artifact's row and children are read from the served set now, on every render.
     const here = served.find((a) => a.tesseraId === artifact.id);
-    // The children are the served artifacts naming this one among their parents — on a `dag`
-    // layer a child appears on the card of each served parent (decision 0117).
+    // On a `dag` layer a child appears on the card of each served parent.
     const children = served.filter((a) => a.parentIds.includes(artifact.id)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
-    // **The parents above the children** (§5.5). Read off the served set for now, which names a
-    // parent only where the response carried it — C29 per entry — and is every parent the map is
-    // drawing. `POST /v1/artifacts/browse` answers the rest, and the hierarchy panel asks it.
+    // Parents from the served set, which holds every parent the map draws. The hierarchy panel
+    // asks `POST /v1/artifacts/browse` for the rest.
     const parents = here ? served.filter((a) => here.parentIds.includes(a.tesseraId)).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0)) : [];
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
-    // Which kind the layer's drawn shape is (`polygon-membership.md` §7.1), so a reader knows
-    // whether the outline they see moves with the principal. `decl` is the served row's layer;
-    // an artifact opened with no served row (a host feeding the card directly) shows none.
+    // The kind of shape the layer draws, so a reader knows whether the outline depends on what
+    // they may see.
     const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
-    // What a clause made from this card calls the artifact: its drawn name, else its key. Carried
-    // on the clause because nothing downstream can resolve it — see `MemberClause.label`.
-    const clauseName = (here ? displayName(here, topics) : null) ?? artifact.detail.key;
-    return html`<div class="panel">${heading}
+    // A clause made here carries the drawn name as its label, since nothing downstream can resolve it.
+    const clauseName = here ? artifactName(here, attached) : null;
+    return html`<div class="panel">${heading(true)}
       <span part="state" data-state="shown"></span>
-      <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
-      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members visible to you"></tessera-count></div>
-      ${here && here.content.length > 0 && topics.has(here.tesseraId) ? html`<p part="content">${topics.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
+      <div part="headline" class="card-title" ?data-unnamed=${clauseName === null}>${clauseName ?? UNNAMED}</div>
+      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members"></tessera-count></div>
+      ${here && here.content.length > 0 && attached.has(here.tesseraId) ? html`<p part="content">${attached.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
-        <div class="k">layer</div><div part="value" class="v">${artifact.detail.layer}</div>
-        ${artifact.detail.key ? html`<div class="k">key</div><div part="value" class="v">${artifact.detail.key}</div>` : nothing}
-        ${shape ? html`<div class="k">shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
+        <div class="k">Layer</div><div part="value" class="v">${decl?.title || artifact.detail.layer}</div>
+        ${artifact.detail.key ? html`<div class="k">Key</div><div part="value" class="v mono">${artifact.detail.key}</div>` : nothing}
+        ${shape ? html`<div class="k">Shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
       </div>
       ${parents.length > 0
         ? html`<div part="label" class="xs muted parents-label">Parents</div>
             <ul part="parents" class="list">
               ${parents.map(
-                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)}>
-                  <span part="name" class="name">${displayName(pnt, topics) ?? UNNAMED}</span>
+                (pnt: Artifact) => html`<li part="parent" class="item child" role="button" tabindex="0" data-id=${idString(pnt.tesseraId)} @click=${() => void s?.openArtifact(pnt.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(pnt.tesseraId))}>
+                  ${nameSpan(artifactName(pnt, attached))}
                   <tessera-count .masked=${{value: Number(pnt.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}
@@ -241,16 +282,15 @@ export class TesseraArtifactCard extends TesseraElement {
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
             <ul part="children" class="list">
               ${children.map(
-                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
-                  <span part="name" class="name">${displayName(c, topics) ?? UNNAMED}</span>
+                (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)} @keydown=${onKeys(() => void s?.openArtifact(c.tesseraId))}>
+                  ${nameSpan(artifactName(c, attached))}
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}
             </ul>`
         : nothing}
       ${
-        // **No *fit* on a filter layer** (§5.4): its artifacts are spread across the frame and
-        // there is nothing to fit to. The declaration says so — a layer with no computed content.
+        // A filter layer draws nothing, so there is nothing to fit to.
         decl && isFilterLayer(decl)
           ? nothing
           : html`<button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>`

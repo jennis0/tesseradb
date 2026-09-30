@@ -7,9 +7,9 @@
 //! served as absent. Both look like a clustering that failed its existence criterion.
 //!
 //! The distinction these cases exist to hold is the one this corpus has caught twice: **a deletion
-//! retires at the fold that executes it, and a suppression retires only on unsuppress.** A pass that
-//! dropped a suppressed member's bit while it was at it would give a suppression a second
-//! retirement route, and the member would not come back at the unsuppress — fail-open, and
+//! retires at the fold that executes it, and a live member's suppression only on unsuppress.**
+//! A pass that dropped a suppressed member's bit while it was at it would give a suppression a
+//! second retirement route, and the member would not come back at the unsuppress — fail-open, and
 //! indistinguishable from a cluster that had always been that size.
 //!
 //! A test of decision 0107's rule for a generating set the fold emptied was removed with the
@@ -19,8 +19,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
+use tessera_engine::Engine;
 use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
@@ -28,8 +27,6 @@ use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
-
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
@@ -57,29 +54,6 @@ fn declaration(name: &str) -> LayerDeclaration {
         levels: Vec::new(),
         layout: None,
         shape: None,
-    }
-}
-
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
     }
 }
 
@@ -185,58 +159,16 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    artifacts_for(engine, &full_coverage_credential())
-}
-
-/// What one credential is served over the whole map.
-///
-/// **The discriminating form of [`artifacts_of`]**, which authorises with full coverage — and a
-/// full-coverage mask contains *every* generating set, an empty one included. A claim about which
-/// set a fold wrote can therefore only be made from a principal that fails one of them.
-fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
-    let session = engine.authorise(credential).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// The one artifact's masked count, for a principal who can see everything — so the number is the
 /// membership's own size and any movement in it is the pass's doing.
 fn count(engine: &Engine) -> u64 {
-    let artifacts = artifacts_of(engine);
+    let artifacts = artifacts_of(engine, &full_coverage_credential());
     assert_eq!(
         artifacts.len(),
         1,
         "the fixture publishes exactly one artifact"
     );
     artifacts[0].masked_count
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Wait until the executor has written the memberships of everything published so far.
@@ -270,14 +202,6 @@ fn publish(
         .unwrap();
     wait_for_publication(fx, engine, 1);
     ids[0]
-}
-
-/// Invert an artifact's identifier through the admin plane's own resolver — the route
-/// `/control/changes` takes, so a deletion here goes through the misdirection guard rather than
-/// round it.
-fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
-    let idset = engine.generation().bundle.manifest.identity.idset;
-    engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
 }
 
 /// **A node holding artifacts folds at all** — which it did not until the pass existed, because the
@@ -315,8 +239,8 @@ fn a_fold_rewrites_the_memberships_into_the_prefix_it_publishes() {
 ///
 /// Deleting a member and suppressing another moves the served count by two, both at the ack. What
 /// the fold changes is which of those is *structural*: the deletion is executed and its bit goes,
-/// so the count stays down; the suppression retires only on unsuppress, so its bit is still there
-/// and the member comes back.
+/// so the count stays down; the live member's suppression retires only on unsuppress, so its bit
+/// is still there and the member comes back.
 #[test]
 fn a_deleted_member_is_gone_after_the_fold_and_a_suppressed_one_comes_back() {
     let fx = fixture();
@@ -455,8 +379,8 @@ fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
     {
         let engine = fx.open();
         publish(&fx, &engine, 0..300);
-        // Resolved before the fold: the external-id map is read from the prefix the fold is about
-        // to reclaim.
+        // Resolved before the fold: the `id` index is read from the prefix the fold is about to
+        // reclaim.
         let joining = fx.members(300..320);
         fold(&engine);
         assert_eq!(fx.containment_files(&engine).len(), 1);
@@ -588,8 +512,8 @@ fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
     {
         let engine = fx.open();
         publish(&fx, &engine, 0..300);
-        // Resolved before the fold: the external-id map is read from the prefix the fold is about
-        // to reclaim.
+        // Resolved before the fold: the `id` index is read from the prefix the fold is about to
+        // reclaim.
         let joining = fx.members(300..320);
         fold(&engine);
         assert_eq!(fx.tile_index_files(&engine).len(), 1);
@@ -698,7 +622,7 @@ fn own_entity_retired_at(retired: usize) {
         .unwrap();
     wait_for_publication(&fx, &engine, 1);
     let served = |engine: &Engine| -> Vec<(Option<String>, u64)> {
-        let mut out: Vec<_> = artifacts_of(engine)
+        let mut out: Vec<_> = artifacts_of(engine, &full_coverage_credential())
             .into_iter()
             .map(|a| (a.key, a.masked_count))
             .collect();
@@ -776,18 +700,17 @@ fn a_second_fold_rewrites_what_the_first_one_wrote() {
 
 /// Ingest one item at the fixture's origin, carrying the term every principal here holds.
 ///
-/// **The batch name and the idempotency key are derived from `external_id`**, and that is not
+/// **The batch name and the idempotency key are derived from `name`**, and that is not
 /// tidiness: a second ingest under a batch key already seen is *replayed* rather than accepted, so
 /// a helper with a fixed key silently ingests nothing the second time it is called and every flush
 /// after the first has nothing to publish.
-fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+fn ingest(engine: &Engine, name: &[u8]) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(external_id) {
+    for (slot, byte) in key.iter_mut().zip(name) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -798,25 +721,12 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
-            String::from_utf8_lossy(external_id).into_owned(),
+            String::from_utf8_lossy(name).into_owned(),
             key,
         )
         .expect("the ingest is accepted")[0]
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never landed"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// **A member counts from its flush**, which is the first moment it has a row at all.
@@ -857,7 +767,7 @@ fn a_member_ingested_since_the_last_fold_counts_from_its_flush() {
         "buffered: the member has no row at all yet, so it is in no count"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         count(&engine),
         301,
@@ -888,7 +798,7 @@ fn a_flush_disturbs_no_artifacts_count() {
     assert_eq!(count(&engine), 300);
 
     ingest(&engine, b"unrelated");
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         count(&engine),
@@ -929,12 +839,12 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
         b"merge-d".as_slice(),
     ] {
         ingest(&engine, batch);
-        flush(&engine);
+        publish_buffered(&engine);
     }
 
     engine.set_merge_for_test(true);
     ingest(&engine, b"merge-e");
-    flush(&engine);
+    publish_buffered(&engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == 0 {
         assert!(
@@ -998,7 +908,7 @@ fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it()
         engine.register_layer(content_layer()).unwrap();
         publish_described(&fx, &engine);
         assert_eq!(
-            artifacts_of(&engine).len(),
+            artifacts_of(&engine, &full_coverage_credential()).len(),
             1,
             "served with its description"
         );
@@ -1008,13 +918,13 @@ fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it()
             .accept_change(fx.member(7), ChangeOp::Delete)
             .expect("the delete is accepted");
         assert!(
-            artifacts_of(&engine).is_empty(),
+            artifacts_of(&engine, &full_coverage_credential()).is_empty(),
             "withheld at the ack — emergent from containment, with nothing stored"
         );
 
         fold(&engine);
         assert!(
-            artifacts_of(&engine).is_empty(),
+            artifacts_of(&engine, &full_coverage_credential()).is_empty(),
             "and still withheld after the fold: the content was withdrawn, not re-based onto a \
              smaller set"
         );
@@ -1022,7 +932,7 @@ fn a_deleted_source_withdraws_the_content_at_the_fold_and_the_artifact_with_it()
 
     let engine = fx.open();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the withdrawal is what the prefix says, not something the process was remembering"
     );
 }
@@ -1078,7 +988,7 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
         .expect("two described artifacts publish");
     wait_for_publication(&fx, &engine, 1);
     assert_eq!(
-        artifacts_of(&engine).len(),
+        artifacts_of(&engine, &full_coverage_credential()).len(),
         2,
         "both serve before the deletion"
     );
@@ -1086,7 +996,7 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
         .expect("the delete is accepted");
-    let at_ack: Vec<Option<String>> = artifacts_of(&engine).into_iter().map(|a| a.key).collect();
+    let at_ack: Vec<Option<String>> = artifacts_of(&engine, &full_coverage_credential()).into_iter().map(|a| a.key).collect();
     assert_eq!(
         at_ack,
         vec![Some("c1".to_string())],
@@ -1095,7 +1005,7 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
 
     fold(&engine);
 
-    let served = artifacts_of(&engine);
+    let served = artifacts_of(&engine, &full_coverage_credential());
     let keys: Vec<Option<String>> = served.iter().map(|a| a.key.clone()).collect();
     assert_eq!(
         keys,
@@ -1114,7 +1024,7 @@ fn a_deleted_source_withdraws_only_the_content_whose_set_named_it() {
         "the deletion left the membership as it leaves any other"
     );
 
-    let narrow: Vec<Option<String>> = artifacts_for(&engine, &subset_credential())
+    let narrow: Vec<Option<String>> = artifacts_of(&engine, &subset_credential())
         .into_iter()
         .map(|a| a.key)
         .collect();
@@ -1429,7 +1339,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
         )
         .unwrap();
     wait_for_publication(&fx, &engine, 1);
-    assert_eq!(artifacts_of(&engine).len(), 3);
+    assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 3);
 
     // The middle one, so a level that packed around the gap would be caught by the survivor after
     // it rather than by a count alone.
@@ -1438,10 +1348,10 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     engine
         .accept_change(deleted, ChangeOp::Delete)
         .expect("an artifact takes a deletion like any other entity");
-    assert_eq!(artifacts_of(&engine).len(), 2, "hidden at the ack");
+    assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2, "hidden at the ack");
     fold(&engine);
 
-    assert_eq!(artifacts_of(&engine).len(), 2, "and still hidden after it");
+    assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2, "and still hidden after it");
     assert_eq!(
         engine.published_artifacts(),
         2,
@@ -1474,7 +1384,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
 #[test]
 fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_publication() {
     let fx = fixture();
-    // Resolved before the fold: `members` reads the built prefix's external-id run, and the fold
+    // Resolved before the fold: `members` reads the built prefix's `id` index, and the fold
     // reclaims that prefix. Entities are stable across it, so the set is still the right one.
     let later_members = fx.members(200..300);
     let deleted_entity = {
@@ -1540,14 +1450,14 @@ fn a_deleted_artifact_does_not_return_when_its_overlay_entry_retires() {
             .accept_change(entity, ChangeOp::Delete)
             .expect("the delete is accepted");
         fold(&engine);
-        assert!(artifacts_of(&engine).is_empty());
+        assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
     }
 
     // **Reopened, which is where a surviving slot would show.** The overlay entry is retired and
     // gone from the manifest; nothing but the absence of the record keeps the artifact away.
     let engine = fx.open();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the artifact stayed gone across the retirement of the entry that was hiding it"
     );
     assert_eq!(
@@ -1600,7 +1510,7 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
         .unwrap();
     wait_for_publication(&fx, &engine, 2);
     assert_eq!(
-        artifacts_of(&engine).len(),
+        artifacts_of(&engine, &full_coverage_credential()).len(),
         2,
         "the cluster and its label both serve to begin with"
     );
@@ -1610,14 +1520,14 @@ fn a_label_stays_withheld_after_the_fold_that_retired_its_cluster() {
         .accept_change(cluster, ChangeOp::Delete)
         .expect("the delete is accepted");
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "both go at the ack: the cluster on its own disposition, the label on its target's"
     );
 
     fold(&engine);
 
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "and the label does not come back when the entry that hid its target retires"
     );
 }
@@ -1658,7 +1568,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
         wait_for_publication(&fx, &engine, 1);
 
         fold(&engine);
-        let served = artifacts_of(&engine);
+        let served = artifacts_of(&engine, &full_coverage_credential());
         assert_eq!(served.len(), 1);
         assert_eq!(served[0].content, vec!["a label from the whole sample"]);
     }
@@ -1667,7 +1577,7 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     // a record restored from a packed extent does not, and the serving path reads them from the
     // blob the fold carried forward.
     let engine = fx.open();
-    let served = artifacts_of(&engine);
+    let served = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(
         served.len(),
         1,
@@ -1723,7 +1633,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
             )
             .unwrap();
         wait_for_publication(&fx, &engine, 2);
-        assert_eq!(artifacts_of(&engine).len(), 2);
+        assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
         assert_eq!(engine.published_artifacts(), 2);
 
         let cluster = artifact_entity(&engine, cluster_id);
@@ -1739,7 +1649,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
             2,
             "the label was deleted with its cluster rather than merely withheld behind it"
         );
-        assert!(artifacts_of(&engine).is_empty(), "both go at the ack");
+        assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty(), "both go at the ack");
 
         fold(&engine);
 
@@ -1757,7 +1667,7 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
     // keeps either artifact away.
     let engine = fx.open();
     assert!(
-        artifacts_of(&engine).is_empty(),
+        artifacts_of(&engine, &full_coverage_credential()).is_empty(),
         "the label stayed gone across the retirement of the entry that was hiding it"
     );
     assert_eq!(engine.published_artifacts(), 0);
@@ -1871,4 +1781,111 @@ fn remove_the_whole_log(fx: &Fixture) {
         }
     }
     let _ = std::fs::remove_file(&fx.wal);
+}
+
+// ---- a borrowed membership across a flush and a fold -------------------------------------------
+
+/// A label attached to `clusters/a`'s one artifact, declaring no members of its own. Its membership
+/// is the cluster's (decision 0145), so what these two cases read is whether the cluster's rows
+/// reach it at the publication that gives the cluster them.
+fn publish_borrowing_label(engine: &Engine) {
+    let mut label_layer = declaration(LABELS);
+    label_layer.depends_on = vec!["clusters/a".into()];
+    engine.register_layer(label_layer).unwrap();
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::attached(
+                Some("l0".into()),
+                Vec::new(),
+                Vec::new(),
+                tessera_lifecycle::membership::IncomingAttachment {
+                    layer: "clusters/a".into(),
+                    level: 0,
+                    key: "c0".into(),
+                },
+            )],
+        )
+        .unwrap();
+}
+
+const LABELS: &str = "topics/x";
+
+/// The masked count of one key, for a principal who can see everything.
+fn count_of(engine: &Engine, layer: &str, key: &str) -> u64 {
+    artifacts_of(engine, &full_coverage_credential())
+        .into_iter()
+        .find(|a| a.layer == layer && a.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("{layer}/{key} is served"))
+        .masked_count
+}
+
+/// A member ingested since the last fold counts for the label as it counts for the cluster, from
+/// the flush that gives it a row.
+///
+/// The form is warmed first, so what is read after the flush is a form that was already held. A
+/// flush extends each held form by the segment it published, and a borrowing artifact's membership
+/// is in no record of its own level, so such a form is dropped instead and the next request
+/// resolves the cluster's rows again (`ArtifactProjections::drop_borrowed`). Without that the label
+/// would stay at the count the cluster had when the label's form was built.
+#[test]
+fn a_borrowing_label_takes_its_targets_flushed_member() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+    let fresh = ingest(&engine, b"fresh-for-the-label");
+    let mut members = fx.members(0..300);
+    members.push(fresh);
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::from_entities(Some("c0".into()), members)],
+        )
+        .unwrap();
+    publish_borrowing_label(&engine);
+    wait_for_publication(&fx, &engine, 2);
+
+    // Warm: both forms are built and held, the ingested member having no row yet.
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        300,
+        "the label is counted over the cluster's members"
+    );
+
+    publish_buffered(&engine);
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 301);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        301,
+        "and over them after the flush that gave the new member a row"
+    );
+}
+
+/// The same membership across a fold, which renumbers every row and rewrites the level's files.
+///
+/// The fold writes a borrowing level's tile index and column over the membership the artifact is
+/// served on, and the engine rebuilds the form against the new prefix and resolves the cluster's
+/// rows again. A label counted over the cluster before the fold is counted over it after.
+#[test]
+fn a_borrowing_label_keeps_its_targets_membership_across_a_fold() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    publish_borrowing_label(&engine);
+    wait_for_publication(&fx, &engine, 2);
+    assert_eq!(count_of(&engine, LABELS, "l0"), 300);
+
+    ingest(&engine, b"folded-for-the-label");
+    publish_buffered(&engine);
+    fold(&engine);
+
+    assert_eq!(count_of(&engine, "clusters/a", "c0"), 300);
+    assert_eq!(
+        count_of(&engine, LABELS, "l0"),
+        300,
+        "the fold renumbered the rows the cluster holds, and the label still reads them"
+    );
 }

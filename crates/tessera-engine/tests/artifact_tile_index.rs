@@ -21,6 +21,9 @@
 //! are real, the overlay is live, a growth lands mid-sequence, and holes and empty projections sit
 //! among the artifacts rather than at the end.
 
+// A viewport is a list of row ranges, and several here hold one.
+#![allow(clippy::single_range_in_vec_init)]
+
 use std::sync::Arc;
 
 use croaring::Bitmap;
@@ -33,7 +36,8 @@ use tessera_authz::{write_postings, FragmentCache, PostingsReader};
 use tessera_engine::artifacts::{
     ArtifactProjections, ArtifactRows, ArtifactVerdict, ArtifactView, MembershipRows,
 };
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::denied_rows_of;
 use tessera_engine::row_column::RowColumn;
 use tessera_engine::tile_index::{Extent, TileIndex, Viewport};
@@ -174,10 +178,12 @@ fn build_fixture(shape: Shape) -> Fixture {
                 entity: EntityId::new(u64::from(u32::MAX - ordinal)),
                 key: None,
                 view: None,
+                incarnation: 0,
                 members: members.into(),
                 contents,
                 attached_to: None,
                 parents: parent.iter().copied().collect(),
+                access: Vec::new(),
             },
             None,
         );
@@ -280,19 +286,28 @@ impl Fixture {
         &self,
         granted: &[u32],
         overlay: &Overlay,
-    ) -> (EffectiveMask, FxHashSet<TermId>, Bitmap) {
+    ) -> (EffectiveMask, Bitmap) {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
         let cache = FragmentCache::new(&self._temp.path().join("frag"), [1u8; 32], [2u8; 32]);
         let fragment = cache
-            .get_or_build(&sorted, [3u8; 32], 0, &self.postings, &[], UNIVERSE as u64)
+            .get_or_build(&sorted, &self.postings, &[], UNIVERSE as u64)
             .unwrap();
         let base = Arc::new(RowProjection::walk(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
         let denied = denied_rows_of(overlay, &self.row_space);
-        let mask = compose(&satisfied, overlay, &buffer, base, &self.row_space, &denied);
-        (mask, satisfied, denied)
+        let buffered = tessera_engine::buffered_rows_of(&buffer, &self.row_space);
+        let mask = compose(
+            &satisfied,
+            overlay,
+            &buffer,
+            base,
+            &self.row_space,
+            &denied,
+            Some(&buffered),
+        );
+        (mask, denied)
     }
 }
 
@@ -383,7 +398,7 @@ fn sweep(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal, None) {
+        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
             out.push((ordinal, masked_count, rank));
         }
     }
@@ -416,7 +431,7 @@ fn walk(
         let Some(entity) = fx.entity_of(ordinal) else {
             continue;
         };
-        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal, None) {
+        if let ArtifactVerdict::Serve { masked_count, rank } = view.verdict(entity, ordinal) {
             out.push((ordinal, masked_count, rank));
         }
     }
@@ -470,11 +485,11 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
     let mut total = 0usize;
     for overlay in [&Overlay::new(), &denied_overlay] {
         for granted in principals() {
-            let (mask, satisfied, denied) = fx.mask(&granted, overlay);
+            let (mask, denied) = fx.mask(&granted, overlay);
             let view = ArtifactView {
                 declaration: &declaration,
                 overlay,
-                satisfied: &satisfied,
+                labels: open_labels(),
                 layer_reachable: true,
                 rows,
                 dependency_served: &always_served,
@@ -655,11 +670,11 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
     // zero count.
     let declaration = declaration();
     let overlay = Overlay::new();
-    let (mask, satisfied, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
+    let (mask, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
     let view = ArtifactView {
         declaration: &declaration,
         overlay: &overlay,
-        satisfied: &satisfied,
+        labels: open_labels(),
         layer_reachable: true,
         rows: &rows,
         dependency_served: &always_served,
@@ -671,7 +686,7 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
         matches!(
-            view.verdict(entity, empty, None),
+            view.verdict(entity, empty),
             ArtifactVerdict::Serve {
                 masked_count: 0,
                 ..
@@ -702,13 +717,14 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let mut store = fx.store.clone();
     store.seed_level_version(LAYER, 0, 11);
     let projected_at = store.level_version(LAYER, 0);
-    let entry = |view: &str, version: u64| tessera_store::manifest::TileIndexExtent {
-        incarnation: 0,
+    let entry = |view: &str, version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: rel.to_string(),
-        view: view.to_string(),
+        view: Some(view.to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        form: tessera_store::manifest::DerivedForm::TileIndex,
     };
 
     // The coordinate holds: claimed, and the level's first request derives nothing.
@@ -831,6 +847,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 entity: EntityId::new(u64::from(ordinal)),
                 key: None,
                 view: None,
+                incarnation: 0,
                 members: [fx.order[ordinal as usize].raw() as u32]
                     .into_iter()
                     .collect::<Bitmap>()
@@ -838,6 +855,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
+                access: Vec::new(),
             },
             None,
         );
@@ -871,7 +889,12 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
         let fx = build_fixture(shape);
         let derived = TileIndex::build(&fx.membership(), fx.row_space.base_rows());
         let ordinals = fx.store.level(LAYER, 0).count() as u32;
-        let projected = TileIndex::project(ordinals, || fx.store.level(LAYER, 0), &fx.row_space);
+        let projected = TileIndex::project(
+            ordinals,
+            || fx.store.level(LAYER, 0),
+            &fx.row_space,
+            &fx.store,
+        );
         assert_eq!(
             projected.as_bytes(),
             derived.as_bytes(),
@@ -916,22 +939,25 @@ fn an_entry_held_for_the_published_prefix_survives_a_claim_under_the_outgoing_on
     store.seed_level_version(LAYER, 0, 11);
     let mut later = fx.store.clone();
     later.seed_level_version(LAYER, 0, 12);
-    let index_entry = |version: u64| tessera_store::manifest::TileIndexExtent {
-        incarnation: 0,
+    let index_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: index_rel.to_string(),
-        view: "s0".to_string(),
+        view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
+        form: tessera_store::manifest::DerivedForm::TileIndex,
     };
-    let column_entry = |version: u64| tessera_store::manifest::RowColumnExtent {
-        incarnation: 0,
+    let column_entry = |version: u64| tessera_store::manifest::DerivedExtent {
+        incarnation: Some(0),
         path: column_rel.to_string(),
-        view: "s0".to_string(),
+        view: Some("s0".to_string()),
         layer: LAYER.to_string(),
         level: 0,
         level_version: version,
-        layout: ServingLayout::RowMajorLabel,
+        form: tessera_store::manifest::DerivedForm::RowColumn {
+            layout: ServingLayout::RowMajorLabel,
+        },
     };
     let build = |projections: &ArtifactProjections,
                  prefix: &str,
@@ -1035,14 +1061,12 @@ fn a_transposed_row_form_is_the_projected_one() {
         let projected = fx.rows();
         let mut composed = 0;
         for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
-            let Some(column) =
-                RowColumn::compose(
-                    projected.membership(),
-                    fx.row_space.base_rows(),
-                    layout,
-                    &std::env::temp_dir(),
-                )
-            else {
+            let Some(column) = RowColumn::compose(
+                projected.membership(),
+                fx.row_space.base_rows(),
+                layout,
+                &std::env::temp_dir(),
+            ) else {
                 continue;
             };
             composed += 1;
@@ -1107,14 +1131,13 @@ fn a_transposed_row_form_is_the_projected_one() {
             // The column composed from the transposed form is the column it was transposed from,
             // which is the round trip the serving path takes: the level is served from the very
             // bytes this membership was read out of.
-            let again =
-                RowColumn::compose(
-                    transposed.membership(),
-                    fx.row_space.base_rows(),
-                    layout,
-                    &std::env::temp_dir(),
-                )
-                    .expect("the same memberships compose the same form");
+            let again = RowColumn::compose(
+                transposed.membership(),
+                fx.row_space.base_rows(),
+                layout,
+                &std::env::temp_dir(),
+            )
+            .expect("the same memberships compose the same form");
             assert_eq!(again.as_bytes(), column.as_bytes());
             for ordinal in 0..column.len() as u32 {
                 assert_eq!(again.declared_size(ordinal), column.declared_size(ordinal));
@@ -1133,11 +1156,11 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
     let rows = fx.rows();
     let declaration = declaration();
     let overlay = Overlay::new();
-    let (mask, satisfied, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
+    let (mask, denied) = fx.mask(&(0..TERMS).collect::<Vec<_>>(), &overlay);
     let view = ArtifactView {
         declaration: &declaration,
         overlay: &overlay,
-        satisfied: &satisfied,
+        labels: open_labels(),
         layer_reachable: true,
         rows: &rows,
         dependency_served: &always_served,
@@ -1168,4 +1191,10 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         "the whole map visited {whole_nodes} nodes"
     );
     assert!(all.len() > served.len());
+}
+
+/// A label test admitting every artifact that carries no label: no artifact here carries one.
+fn open_labels() -> tessera_engine::artifacts::LabelGate<'static> {
+    static EMPTY: std::sync::OnceLock<rustc_hash::FxHashSet<Vec<u8>>> = std::sync::OnceLock::new();
+    tessera_engine::artifacts::LabelGate::new(EMPTY.get_or_init(Default::default), true)
 }

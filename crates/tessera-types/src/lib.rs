@@ -9,7 +9,9 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 /// they are one database; the repository's working method is why they are one implementation). It
 /// carries no feature gate: the calls are platform-gated inside the module, and a crate that never
 /// asks about its own memory never names it.
+pub mod label;
 pub mod process;
+pub mod scalar;
 
 /// The annotation layer declaration, shared by the WAL record that makes a registration durable,
 /// the manifest section that carries it, and the gate-filtered `/v1/meta` view.
@@ -60,6 +62,8 @@ macro_rules! define_id_newtype {
 define_id_newtype!(EntityId, u64);
 define_id_newtype!(RowId, u32);
 define_id_newtype!(TermId, u32);
+// A distinct access label after normalisation. Internal, as a term id is: no response carries one.
+define_id_newtype!(LabelId, u32);
 // An attribute index ordinal, local to one column (`docs/design/filter-index.md` §2.2).
 //
 // **Deliberately not convertible to `TermId`, and the reason is an authorisation one.** The two
@@ -74,7 +78,6 @@ define_id_newtype!(TermId, u32);
 // (`tessera_authz::PostingsReader::posting_at`): typing it in one crate's newtype would force the
 // other to convert at every call, reintroducing the crossing as boilerplate.
 define_id_newtype!(AttrLocalId, u32);
-define_id_newtype!(Handle, u32);
 define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
 
@@ -86,13 +89,14 @@ pub struct ViewId(pub String);
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SegId(pub String);
 
-/// Which geometry a response was answered from: `(prefix, segments_version)`.
+/// Which generation a response was answered from: `(prefix, segments_version)`.
 ///
-/// **A stamp, not a selector.** A client echoes the stamp of the response it is holding back on
-/// its next request, and the server answers from the **live** geometry regardless, reporting only
-/// whether anything has moved since (`geometry-pinning.md` §7). Presenting a superseded stamp is
-/// an ordinary request with an ordinary answer — never a `410`, never a refusal, and never a route
-/// to a superseded generation. Nothing is retained on its behalf.
+/// A response's stamp names the generation its session's projection was taken for. That is the
+/// live generation, or the one before it while the refresh after a flush has not yet reached the
+/// session. A client echoes the stamp it holds on its next request. The echoed stamp does not
+/// choose what the request is answered from; the server reports only whether it differs from the
+/// response's own stamp. Presenting a superseded stamp is an ordinary request with an ordinary
+/// answer: never a `410` and never a refusal. Nothing is retained on its behalf.
 ///
 /// **This is not I11.** I11 is the *within-request* rule — a request resolves its geometry once
 /// and uses it throughout, which an `Arc` held for the request's duration gives for free. The
@@ -177,9 +181,41 @@ pub struct GenerationStamp {
 // layer's offsets past the first block would be read as relative to a base they already include
 // and every list after the first 65,536 ranks would name the wrong ordinals. The number is what
 // stops a 13 layer opening.
+// 16: a partition's five lists of derived artifact files are one list, `derived_extents`, whose
+// entries name their form. A 15 side-manifest carries the five and is refused as malformed.
+// 17: a side-manifest's `deny` and `tombstones` are each one base64 string holding a portable
+// Roaring bitmap of entity ids, where a 16 manifest carries an array of objects and an array of
+// numbers. A 16 manifest's arrays do not deserialise as strings, so a stale bundle refuses.
+// 18: a packed artifact record carries its own access label after its parents. A 17 record read
+// at 18 takes the shape's marker for the label's count, so a stale bundle refuses.
+// 19: a side-manifest carries `layer_registry_version`, the layer registry's version counter. An
+// 18 manifest lacks the field and is refused as malformed.
+// 20: a packed artifact record of a group-scoped layer carries its view's incarnation after the
+// view. A 19 record read at 20 takes the content count and the membership's length for it.
+// 21: every access label and declared word is stored trimmed.
+// 22: the manifest's identity descriptor has no `idset`, and its key is generated at the build.
+// 23: a declared scalar carries `unique`, and a side-manifest `unique_indexes`. A 22 manifest
+// lacks both and is refused as malformed.
+// 24: a unique index's run files are key run format 2, which packs each page's keys as gaps from
+// its first key; a format 1 run is refused at open.
+// 25: a side-manifest carries `edited_items`, the runs mapping an edited item's number to its
+// entity and back, and a segment may carry `edited-rows.u32`. A 24 manifest lacks the field and is
+// refused as malformed. A group-scoped text column stores its prose beside its postings.
+// 26: a side-manifest carries `free_entities` and `held_entities`, the entity ids a fold freed; a
+// flush or merge segment may hold rows for entities below its descriptor's span, and a locator
+// extent carries `listed` pairs after its dense slots. A 25 manifest lacks the fields and is
+// refused as malformed.
+// 27: record blobs are cut into 32 KiB blocks rather than 256 KiB. A 26 bundle reads correctly
+// but is refused, so that every bundle carries the one block size.
+// 28: a side-manifest carries no `external_id_runs` or `locator_extents`, and a bundle holds no
+// external-id runs or locator; the build joins its files on `[defaults].join_field`. A 27 bundle
+// is refused.
+// 29: a build names each row's item by the identity rule over the attributes declared `unique`,
+// and numbers items in the order its files create them; a declaration has no `join_field`. A 28
+// bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 14;
+pub const BUNDLE_FORMAT: u32 = 29;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -203,7 +239,6 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 14);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

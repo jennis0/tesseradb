@@ -24,12 +24,18 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
+use rustc_hash::FxHashSet;
 use tessera_analyse::SuggestionField;
 use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
-use tessera_engine::{Engine, EngineError, SuggestPage};
+use tessera_engine::filter::{FilterExpr, FilterOperand, RegionLeaf};
+use tessera_engine::shapes::ShapeF64;
+use tessera_engine::{Engine, EngineError, SuggestPage, SuggestRequest};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::WalScalar;
+use tessera_spatial::fixed32;
+use tessera_spatial::shape::Space;
+use tessera_types::AttrLocalId;
 
 const N: u64 = 60;
 
@@ -192,6 +198,36 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
+/// The items of the second view, `s1`: every item but those carrying `legal`, so a value visible
+/// in `s0` is carried by no item of `s1`.
+fn in_second_view(e: u64) -> bool {
+    department_of(e) != Some("legal")
+}
+
+/// `s1`'s geometry: `entity_id`, `x` and `y` for the items [`in_second_view`] keeps.
+fn write_second_view(path: &Path) {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<u64> = (0..N).filter(|&e| in_second_view(e)).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 41) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 43) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
 /// `points.parquet` with `entity_id`, `x`, `y` and one utf8 column that is null for every row.
 fn write_points_with_absent_column(path: &Path, column: &str) {
     let schema = Arc::new(ArrowSchema::new(vec![
@@ -226,17 +262,24 @@ struct Fixture {
 }
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
+    let schema = with_id(schema);
+    let view = |view_id: &str, points: &Path| tessera_build::ViewArgs {
+        visibility: None,
+        view_id: view_id.to_string(),
+        projection: tessera_spatial::Projection::None,
+        extent: extent(),
+        points: points.to_path_buf(),
+        point_fields: Default::default(),
+        select: None,
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+    };
+    let second = points.with_file_name("second-view.parquet");
+    let mut views = vec![view("s0", points)];
+    if second.exists() {
+        views.push(view("s1", &second));
+    }
     BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
+        views,
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
@@ -246,14 +289,12 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -275,6 +316,7 @@ fn fixture() -> Fixture {
     let points = dir.path().join("points.parquet");
     let pairs = dir.path().join("pairs.parquet");
     write_points(&points);
+    write_second_view(&dir.path().join("second-view.parquet"));
     write_pairs_n(&pairs, N);
     write_vocabulary(&dir.path().join("departments.parquet"), DEPARTMENTS);
     write_vocabulary(&dir.path().join("archives.parquet"), ARCHIVES);
@@ -325,7 +367,7 @@ fn page_with(
     budget: u64,
 ) -> SuggestPage {
     let session = engine.authorise(credential).expect("the credential resolves");
-    suggest_with(engine, &session, column, q, limit, counts, budget, 0)
+    suggest_with(engine, &session, column, None, q, limit, counts, budget, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,6 +375,7 @@ fn suggest_with(
     engine: &Engine,
     session: &tessera_engine::Session,
     column: &str,
+    view: Option<&str>,
     q: &str,
     limit: usize,
     counts: bool,
@@ -342,12 +385,17 @@ fn suggest_with(
     engine
         .suggest(
             session,
-            column,
-            q,
-            limit,
-            counts,
-            budget,
-            max_suggest_set_entities,
+            SuggestRequest {
+                column,
+                view,
+                filter: None,
+                q,
+                limit,
+                counts,
+                walk_budget: budget,
+                max_suggest_set_entities,
+                cancel: None,
+            },
         )
         .expect("the column suggests")
         .expect("the column is a category")
@@ -460,7 +508,20 @@ fn a_name_that_is_not_a_category_is_no_answer_rather_than_a_refusal() {
     let session = engine.authorise(&full_coverage_credential()).unwrap();
     for column in ["nonesuch", "x", "entity_id"] {
         assert!(engine
-            .suggest(&session, column, "", 20, false, 100_000, 0)
+            .suggest(
+                &session,
+                SuggestRequest {
+                    column,
+                    view: None,
+                    filter: None,
+                    q: "",
+                    limit: 20,
+                    counts: false,
+                    walk_budget: 100_000,
+                    max_suggest_set_entities: 0,
+                    cancel: None,
+                },
+            )
             .unwrap()
             .is_none());
     }
@@ -604,22 +665,521 @@ fn more_is_true_on_a_filled_page_and_on_a_spent_budget() {
 fn a_count_is_the_number_of_items_this_viewer_may_see() {
     let fx = fixture();
     let engine = engine_for(&fx, "counts");
+    let carrying = |column: &str, e: u64| match column {
+        "department" => department_of(e),
+        _ => archive_of(e),
+    };
     for credential in [full_coverage_credential(), subset_credential()] {
         let visible = visible_to(&credential);
-        let got = page_with(&engine, &credential, "department", "", 20, true, 100_000);
-        assert!(!got.values.is_empty());
+        for column in ["department", "archive"] {
+            let got = page_with(&engine, &credential, column, "", 20, true, 100_000);
+            assert!(!got.values.is_empty());
+            for value in &got.values {
+                let expected = visible
+                    .iter()
+                    .filter(|&&e| carrying(column, e) == Some(value.key.as_str()))
+                    .count() as u64;
+                assert_eq!(value.count, Some(expected), "{column}: {}", value.key);
+            }
+            // Without the flag there is no number at all — never a `0` standing in for one.
+            let got = page_with(&engine, &credential, column, "", 20, false, 100_000);
+            assert!(got.values.iter().all(|v| v.count.is_none()));
+        }
+    }
+}
+
+/// **Under a view, a count is the viewer's items of that view**: the values offered are the ones
+/// offered without it, and a value this viewer sees in another view, carried by no item of this
+/// one, counts 0. A view the viewer cannot reach is refused.
+#[test]
+fn a_count_under_a_view_counts_that_views_items() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "view-counts");
+    let carrying = |column: &str, e: u64| match column {
+        "department" => department_of(e),
+        _ => archive_of(e),
+    };
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).expect("the credential resolves");
+        let visible = visible_to(&credential);
+        for column in ["department", "archive"] {
+            let everywhere = suggest_with(&engine, &session, column, None, "", 20, true, 100_000, 0);
+            let within =
+                suggest_with(&engine, &session, column, Some("s1"), "", 20, true, 100_000, 0);
+            assert_eq!(keys(&within), keys(&everywhere), "{column}: a view changes no value offered");
+            for value in &within.values {
+                let expected = visible
+                    .iter()
+                    .filter(|&&e| {
+                        in_second_view(e) && carrying(column, e) == Some(value.key.as_str())
+                    })
+                    .count() as u64;
+                assert_eq!(value.count, Some(expected), "{column}: {}", value.key);
+            }
+            // Every item carrying these is outside `s1`. The full principal sees one in `s0`.
+            let absent = if column == "department" { "legal" } else { "zz" };
+            let served = within.values.iter().find(|v| v.key == absent);
+            if credential == full_coverage_credential() {
+                assert!(served.is_some(), "{column}: {absent} is offered");
+            }
+            if let Some(served) = served {
+                assert_eq!(served.count, Some(0), "{column}: {absent} counts 0 in the view");
+            }
+        }
+    }
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    assert!(matches!(
+        engine.suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: Some("nowhere"),
+                filter: None,
+                q: "",
+                limit: 20,
+                counts: true,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        ),
+        Err(EngineError::UnknownView(_))
+    ));
+}
+
+/// **A count takes in an item ingested and not yet flushed**, as a filter's candidate does; under
+/// a view it does not until its flush, the item holding no row there before, and under a filter
+/// neither. After the flush it counts once without a view. Under a view it counts once the
+/// session's projection covers the flush, as the map shows it, and until then it does not, with
+/// a filter passing everything or without one. A suppressed buffered item counts nowhere.
+#[test]
+fn a_count_takes_in_an_item_buffered_before_its_flush() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "buffered-counts");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&subset_credential()).unwrap();
+    let count_of = |view: Option<&str>| {
+        suggest_with(&engine, &session, "department", view, "", 20, true, 100_000, 0)
+            .values
+            .iter()
+            .find(|v| v.key == "eng")
+            .and_then(|v| v.count)
+            .expect("eng is offered")
+    };
+    let everything = FilterExpr::AllOf(vec![]);
+    let filtered_count = || {
+        filtered(&engine, &session, "department", "s0", &everything)
+            .values
+            .iter()
+            .find(|v| v.key == "eng")
+            .and_then(|v| v.count)
+            .expect("eng is offered")
+    };
+    let (before, before_in_view) = (count_of(None), count_of(Some("s0")));
+    assert_eq!(filtered_count(), before_in_view);
+
+    let row = |key: &str| UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec(), b"1".to_vec()],
+        x: 1.0,
+        y: 1.0,
+        scalars: vec![
+            WalScalar::Utf8("eng".to_string()),
+            WalScalar::Utf8("xx".to_string()),
+            WalScalar::U64(key_id(key)),
+        ],
+        terms: engine.resolve_terms(&[b"0".to_vec(), b"1".to_vec()]),
+        scoped: Vec::new(),
+    };
+    let entities = engine
+        .ingest_rows(vec![row("kept"), row("suppressed")], "batch-1".to_string(), [0u8; 32])
+        .expect("the ingest is accepted");
+    engine
+        .accept_change(entities[1], tessera_lifecycle::wal::ChangeOp::Suppress)
+        .expect("a suppression is an ordinary change");
+
+    assert_eq!(count_of(None), before + 1, "the buffered item counts, the suppressed one does not");
+    assert_eq!(
+        count_of(Some("s0")),
+        before_in_view,
+        "the buffered item holds no row in the view before its flush"
+    );
+    assert_eq!(filtered_count(), before_in_view, "nor does it count under a filter");
+
+    let flushes = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().flushes <= flushes {
+        assert!(std::time::Instant::now() < deadline, "the flush never published");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(count_of(None), before + 1, "after the flush the item counts once");
+    // The session's projection has not been refreshed, so the map does not show the item yet.
+    assert_eq!(count_of(Some("s0")), before_in_view, "the view is counted as the map shows it");
+    assert_eq!(filtered_count(), before_in_view, "and so it is under a filter");
+
+    // With the refresh running, a second flush brings the session's projection forward over both.
+    engine.set_background_refresh_for_test(true);
+    engine
+        .ingest_rows(vec![row("second")], "batch-2".to_string(), [1u8; 32])
+        .expect("the ingest is accepted");
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while count_of(Some("s0")) != before_in_view + 2 {
+        assert!(std::time::Instant::now() < deadline, "the refresh never covered the flushes");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(filtered_count(), before_in_view + 2, "both forms count them once they are shown");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Counts under a filter
+// ---------------------------------------------------------------------------------------------
+
+fn category(column: &str, codes: &[u32]) -> FilterExpr {
+    FilterExpr::Leaf {
+        column: column.to_string(),
+        operand: FilterOperand::In(codes.iter().map(|&c| AttrLocalId::new(c)).collect()),
+    }
+}
+
+/// A square over the fixture's extent, in the frame of the view it is evaluated in.
+fn boxed(min: f64, max: f64) -> FilterExpr {
+    let shape = ShapeF64::Bbox {
+        min_x: min,
+        min_y: min,
+        max_x: max,
+        max_y: max,
+    }
+    .canonical(Space::View, &extent())
+    .expect("a well-formed box")
+    .0;
+    FilterExpr::Region(RegionLeaf::Shape(Arc::new(shape)))
+}
+
+/// Whether `boxed(min, max)` holds source item `e` in `view`, from each view's own positions
+/// quantised as the build quantises them.
+fn in_box(view: &str, e: u64, min: f64, max: f64) -> bool {
+    let (x, y) = match view {
+        "s0" => ((e * 37) % 1000, (e * 53) % 1000),
+        _ => ((e * 41) % 1000, (e * 43) % 1000),
+    };
+    let q = |v: f64| fixed32(v, 0.0, 1000.0);
+    let (lo, hi) = (q(min), q(max));
+    let inside = |v: u64| (lo..=hi).contains(&q(v as f64));
+    inside(x) && inside(y)
+}
+
+fn in_view(view: &str, e: u64) -> bool {
+    view == "s0" || in_second_view(e)
+}
+
+/// One counted page under `filter` in `view`, on the probe route.
+fn filtered(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    column: &str,
+    view: &str,
+    filter: &FilterExpr,
+) -> SuggestPage {
+    engine
+        .suggest(
+            session,
+            SuggestRequest {
+                column,
+                view: Some(view),
+                filter: Some(filter),
+                q: "",
+                limit: 20,
+                counts: true,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
+        .expect("the column suggests")
+        .expect("the column is a category")
+}
+
+fn code_of(engine: &Engine, column: &str, key: &str) -> u32 {
+    page(engine, &full_coverage_credential(), column, "")
+        .values
+        .iter()
+        .find(|v| v.key == key)
+        .map(|v| v.code)
+        .expect("the value is offered to the full principal")
+}
+
+/// **Under a filter, a count is the items this viewer may see in the view that pass the filter
+/// and carry the value**, for a principal who sees everything and one who sees a third, in both
+/// views, under a filter answered in entity space, one answered by rows, and the two combined.
+/// The values offered and their order are the unfiltered page's.
+#[test]
+fn a_filtered_count_is_the_visible_items_passing_the_filter() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "filtered-counts");
+    let carrying = |column: &str, e: u64| match column {
+        "department" => department_of(e),
+        _ => archive_of(e),
+    };
+    let (xx, yy) = (code_of(&engine, "archive", "xx"), code_of(&engine, "archive", "yy"));
+    for view in ["s0", "s1"] {
+        type Passes<'a> = Box<dyn Fn(u64) -> bool + 'a>;
+        let filters: Vec<(FilterExpr, Passes)> = vec![
+            (
+                category("archive", &[xx, yy]),
+                Box::new(|e| matches!(archive_of(e), Some("xx" | "yy"))),
+            ),
+            (boxed(200.5, 700.5), Box::new(move |e| in_box(view, e, 200.5, 700.5))),
+            (
+                FilterExpr::AllOf(vec![category("archive", &[yy]), boxed(0.5, 600.5)]),
+                Box::new(move |e| archive_of(e) == Some("yy") && in_box(view, e, 0.5, 600.5)),
+            ),
+        ];
+        for credential in [full_coverage_credential(), subset_credential()] {
+            let session = engine.authorise(&credential).expect("the credential resolves");
+            let visible = visible_to(&credential);
+            for column in ["department", "archive"] {
+                let unfiltered =
+                    suggest_with(&engine, &session, column, Some(view), "", 20, true, 100_000, 0);
+                for (i, (filter, passes)) in filters.iter().enumerate() {
+                    let got = filtered(&engine, &session, column, view, filter);
+                    assert_eq!(keys(&got), keys(&unfiltered), "{view} {column} filter {i}");
+                    for value in &got.values {
+                        let expected = visible
+                            .iter()
+                            .filter(|&&e| {
+                                in_view(view, e)
+                                    && passes(e)
+                                    && carrying(column, e) == Some(value.key.as_str())
+                            })
+                            .count() as u64;
+                        assert_eq!(
+                            value.count,
+                            Some(expected),
+                            "{view} {column} filter {i}: {}",
+                            value.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **A value the filter excludes is still offered, with count 0**, under a filter on the counted
+/// column itself too: the filter narrows the counts and never the values.
+#[test]
+fn a_value_the_filter_excludes_is_offered_with_zero() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "filtered-zero");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let visible = visible_to(&full_coverage_credential());
+    let eng = code_of(&engine, "department", "eng");
+    let xx = code_of(&engine, "archive", "xx");
+    let carrying_eng = visible
+        .iter()
+        .filter(|&&e| department_of(e) == Some("eng"))
+        .count() as u64;
+    for filter in [category("archive", &[xx]), category("department", &[eng])] {
+        let got = filtered(&engine, &session, "department", "s0", &filter);
+        let mut counts: Vec<(String, Option<u64>)> =
+            got.values.iter().map(|v| (v.key.clone(), v.count)).collect();
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            [
+                ("eng".to_string(), Some(carrying_eng)),
+                ("legal".to_string(), Some(0)),
+                ("sales".to_string(), Some(0)),
+            ]
+        );
+    }
+    // Without counts the filter is admitted and changes nothing.
+    let archive = category("archive", &[xx]);
+    let got = engine
+        .suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: Some("s0"),
+                filter: Some(&archive),
+                q: "",
+                limit: 20,
+                counts: false,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(keys(&got), keys(&page(&engine, &full_coverage_credential(), "department", "")));
+    assert!(got.values.iter().all(|v| v.count.is_none()));
+}
+
+/// **A suppression applies to the next filtered count**, and so does lifting it.
+#[test]
+fn a_suppression_between_two_requests_moves_the_filtered_count() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "filtered-suppress");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let filter = boxed(200.5, 700.5);
+    let count_of_eng = || {
+        filtered(&engine, &session, "department", "s0", &filter)
+            .values
+            .iter()
+            .find(|v| v.key == "eng")
+            .and_then(|v| v.count)
+            .expect("eng is offered")
+    };
+    let inside: Vec<u64> = (0..N)
+        .filter(|&e| department_of(e) == Some("eng") && in_box("s0", e, 200.5, 700.5))
+        .collect();
+    assert!(inside.len() > 1, "the fixture puts several eng items in the box");
+    let before = count_of_eng();
+    assert_eq!(before, inside.len() as u64);
+
+    let entity =
+        tessera_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
+    engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Suppress)
+        .expect("a suppression is an ordinary change");
+    assert_eq!(count_of_eng(), before - 1);
+    engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Unsuppress)
+        .expect("an unsuppress is an ordinary change");
+    assert_eq!(count_of_eng(), before);
+}
+
+/// **A deletion applies to the next filtered count.**
+#[test]
+fn a_deletion_between_two_requests_moves_the_filtered_count() {
+    let fx = fixture();
+    let mut engine = engine_for(&fx, "filtered-delete");
+    engine.start_write_executor(8).expect("the executor starts");
+    engine.set_background_refresh_for_test(false);
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let filter = boxed(200.5, 700.5);
+    let count_of_eng = || {
+        filtered(&engine, &session, "department", "s0", &filter)
+            .values
+            .iter()
+            .find(|v| v.key == "eng")
+            .and_then(|v| v.count)
+            .expect("eng is offered")
+    };
+    let inside: Vec<u64> = (0..N)
+        .filter(|&e| department_of(e) == Some("eng") && in_box("s0", e, 200.5, 700.5))
+        .collect();
+    let before = count_of_eng();
+    assert_eq!(before, inside.len() as u64);
+    let entity =
+        tessera_types::EntityId::new(source_to_new_map(&fx.bundle, &fx.prefix)[&inside[0]]);
+    engine
+        .accept_change(entity, tessera_lifecycle::wal::ChangeOp::Delete)
+        .expect("a deletion is an ordinary change");
+    assert_eq!(count_of_eng(), before - 1);
+}
+
+/// **A negated filter counts the visible items carrying a value in its column that match none of
+/// it**, and an item with no value in that column is not among them.
+#[test]
+fn a_negated_filter_counts_what_it_leaves() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "filtered-negated");
+    let xx = code_of(&engine, "archive", "xx");
+    let filter = FilterExpr::NoneOf(vec![category("archive", &[xx])]);
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let session = engine.authorise(&credential).unwrap();
+        let visible = visible_to(&credential);
+        let got = filtered(&engine, &session, "department", "s0", &filter);
         for value in &got.values {
             let expected = visible
                 .iter()
-                .filter(|&&e| department_of(e) == Some(value.key.as_str()))
+                .filter(|&&e| {
+                    matches!(archive_of(e), Some(a) if a != "xx")
+                        && department_of(e) == Some(value.key.as_str())
+                })
                 .count() as u64;
             assert_eq!(value.count, Some(expected), "{}", value.key);
-            assert!(expected > 0, "a value with no visible member was offered");
         }
-        // Without the flag there is no number at all — never a `0` standing in for one.
-        let got = page_with(&engine, &credential, "department", "", 20, false, 100_000);
-        assert!(got.values.iter().all(|v| v.count.is_none()));
     }
+}
+
+/// **A cancelled request stops before it evaluates the filter**, and ends as cancelled.
+#[test]
+fn a_cancelled_filtered_count_ends_as_cancelled() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "filtered-cancel");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let cancel = tessera_engine::CancelToken::new();
+    cancel.cancel();
+    let filter = boxed(200.5, 700.5);
+    let got = engine.suggest(
+        &session,
+        SuggestRequest {
+            column: "department",
+            view: Some("s0"),
+            filter: Some(&filter),
+            q: "",
+            limit: 20,
+            counts: true,
+            walk_budget: 100_000,
+            max_suggest_set_entities: 0,
+            cancel: Some(cancel),
+        },
+    );
+    assert!(matches!(got, Err(EngineError::Cancelled)), "{got:?}");
+}
+
+/// **A filter needs a view, and one naming no filterable column is refused**, as the viewport
+/// refuses it.
+#[test]
+fn a_filter_without_a_view_or_over_an_unknown_column_is_refused() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "filtered-refusals");
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let archive = category("archive", &[code_of(&engine, "archive", "xx")]);
+    assert!(matches!(
+        engine.suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: None,
+                filter: Some(&archive),
+                q: "",
+                limit: 20,
+                counts: true,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        ),
+        Err(EngineError::FilterMalformed(_))
+    ));
+    let unknown = category("nonesuch", &[1]);
+    assert!(matches!(
+        engine.suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: Some("s0"),
+                filter: Some(&unknown),
+                q: "",
+                limit: 20,
+                counts: true,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        ),
+        Err(EngineError::FilterMalformed(_) | EngineError::FilterRefused(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -678,9 +1238,8 @@ fn a_value_minted_at_ingest_is_suggested_before_any_flush() {
     );
 
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"row-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -727,12 +1286,38 @@ fn a_superseded_index_keeps_answering_after_its_files_are_unlinked() {
         .get("department")
         .expect("the fixture builds one");
     let before = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
+        .suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: None,
+                filter: None,
+                q: "eng",
+                limit: 20,
+                counts: false,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
         .unwrap()
         .unwrap();
     std::fs::remove_dir_all(index.base().dir()).expect("the directory is the engine's own");
     let after = engine
-        .suggest(&session, "department", "eng", 20, false, 100_000, 0)
+        .suggest(
+            &session,
+            SuggestRequest {
+                column: "department",
+                view: None,
+                filter: None,
+                q: "eng",
+                limit: 20,
+                counts: false,
+                walk_budget: 100_000,
+                max_suggest_set_entities: 0,
+                cancel: None,
+            },
+        )
         .expect("a mapped index outlives its directory entry")
         .unwrap();
     assert_eq!(keys(&before), keys(&after));
@@ -760,7 +1345,20 @@ fn a_column_with_no_index_refuses_rather_than_answering_empty() {
         "the hook must have published, or the refusal below is asserting nothing"
     );
 
-    let refused = engine.suggest(&session, "department", "eng", 20, false, 100_000, 0);
+    let refused = engine.suggest(
+        &session,
+        SuggestRequest {
+            column: "department",
+            view: None,
+            filter: None,
+            q: "eng",
+            limit: 20,
+            counts: false,
+            walk_budget: 100_000,
+            max_suggest_set_entities: 0,
+            cancel: None,
+        },
+    );
     match refused {
         Err(EngineError::SuggestionUnavailable { column, detail }) => {
             assert_eq!(column, "department");
@@ -807,19 +1405,6 @@ render     = true
 index      = true
 vocabulary = "team"
 "#;
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
 
 /// **A value whose last visible member is suppressed stops being offered, on the next request** —
 /// membership-derivation self-retiring, which is §3.3's whole argument for deriving per request
@@ -913,9 +1498,8 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
     let full = full_coverage_credential();
 
     let entity = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"row-1".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -947,7 +1531,7 @@ fn suppressing_a_minted_values_only_member_retires_it_from_the_side_map() {
         "…and the value must nonetheless be in the side map, or this proves nothing"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         keys(&page(&engine, &full, "team", "platform")),
         ["Platform Infrastructure"],
@@ -989,7 +1573,7 @@ fn wait_for_set(engine: &Engine, session: &tessera_engine::Session, column: &str
         // not at all. Each request re-dispatches if nothing is in flight and nothing is held, so an
         // abandoned sweep is retried rather than waited on for ever.
         let before = engine.suggest_set_stats().hits;
-        suggest_with(engine, session, column, "", 20, false, 100_000, WIDE_CEILING);
+        suggest_with(engine, session, column, None, "", 20, false, 100_000, WIDE_CEILING);
         let stats = engine.suggest_set_stats();
         if stats.hits > before {
             return stats.hits;
@@ -1023,7 +1607,7 @@ fn the_two_routes_answer_the_same_page() {
         let mut before = Vec::new();
         for q in ["", "e", "s", "l", "legal", "counsel", "zzz"] {
             before.push(suggest_with(
-                &engine, &session, "department", q, 20, true, 100_000, 0,
+                &engine, &session, "department", None, q, 20, true, 100_000, 0,
             ));
         }
         wait_for_set(&engine, &session, "department");
@@ -1035,6 +1619,7 @@ fn the_two_routes_answer_the_same_page() {
                 &engine,
                 &session,
                 "department",
+                None,
                 q,
                 20,
                 true,
@@ -1066,12 +1651,12 @@ fn more_goes_from_a_spent_budget_to_exact_once_the_set_lands() {
 
     // A principal who sees nothing, at a budget of one: the probe route examines one value and
     // stops.
-    let probed = suggest_with(&engine, &session, "department", "", 20, false, 1, 0);
+    let probed = suggest_with(&engine, &session, "department", None, "", 20, false, 1, 0);
     assert!(probed.values.is_empty());
     assert!(probed.more, "the budget was spent");
 
     wait_for_set(&engine, &session, "department");
-    let from_set = suggest_with(&engine, &session, "department", "", 20, false, 1, WIDE_CEILING);
+    let from_set = suggest_with(&engine, &session, "department", None, "", 20, false, 1, WIDE_CEILING);
     assert!(from_set.values.is_empty());
     assert!(
         !from_set.more,
@@ -1089,7 +1674,7 @@ fn a_burst_of_keystrokes_starts_one_sweep() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for q in ["e", "en", "eng", "s", "sa", "sal", "l", "le"] {
-        suggest_with(&engine, &session, "department", q, 20, false, 100_000, WIDE_CEILING);
+        suggest_with(&engine, &session, "department", None, q, 20, false, 100_000, WIDE_CEILING);
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.suggest_set_stats().in_flight > 0 {
@@ -1130,6 +1715,7 @@ fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
             &engine,
             &session,
             "department",
+            None,
             "eng",
             20,
             false,
@@ -1155,6 +1741,7 @@ fn a_suppression_between_the_sweep_and_the_read_retires_the_value() {
         &engine,
         &session,
         "department",
+        None,
         "eng",
         20,
         false,
@@ -1179,7 +1766,7 @@ fn a_viewer_wider_than_the_ceiling_never_gets_a_set() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for _ in 0..8 {
-        suggest_with(&engine, &session, "department", "", 20, false, 100_000, 0);
+        suggest_with(&engine, &session, "department", None, "", 20, false, 100_000, 0);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.suggest_set_stats();
@@ -1199,7 +1786,7 @@ fn a_public_column_never_gets_a_set() {
         .authorise(&full_coverage_credential())
         .expect("it resolves");
     for _ in 0..4 {
-        suggest_with(&engine, &session, "archive", "", 20, false, 100_000, WIDE_CEILING);
+        suggest_with(&engine, &session, "archive", None, "", 20, false, 100_000, WIDE_CEILING);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     let stats = engine.suggest_set_stats();
@@ -1247,9 +1834,8 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
 
     let mint = |engine: &Engine, key: &str, batch: &str| {
         engine
-            .accept_ingest(
+            .ingest_rows(
                 vec![UnallocatedRow {
-                    external_id: Some(batch.as_bytes().to_vec()),
                     view: "s0".to_string(),
                     join: None,
                     descriptors: vec![b"0".to_vec()],
@@ -1271,7 +1857,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     // until its flush (`filter-index.md` §5, in its vocabulary form).
     mint(&engine, "alpha", "batch-a");
     mint(&engine, "zulu", "batch-z");
-    flush(&engine);
+    publish_buffered(&engine);
     assert!(
         engine.rebuild_suggestion_index_for_test("team"),
         "the executor must publish the rebuild"
@@ -1299,7 +1885,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     // `aaa-first` is buffered, so it has no visible member yet and is not offered — the page is
     // unchanged, which is what makes a page read through the *stale* set (whose positions now name
     // other values) a visible failure rather than a coincidence.
-    let got = suggest_with(&engine, &session, "team", "", 20, false, 100_000, WIDE_CEILING);
+    let got = suggest_with(&engine, &session, "team", None, "", 20, false, 100_000, WIDE_CEILING);
     let mut served = keys(&got);
     served.sort_unstable();
     assert_eq!(served, ["alpha", "zulu"]);
@@ -1320,6 +1906,7 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
         &engine,
         &session,
         "team",
+        None,
         "",
         20,
         false,
@@ -1328,4 +1915,55 @@ fn a_rebuild_between_the_sweep_and_the_read_discards_the_set_and_resweeps() {
     ));
     served.sort_unstable();
     assert_eq!(served, ["alpha", "zulu"]);
+}
+
+/// **A prune drops the pruned session's visible-value set and nobody else's** — the set is held per
+/// `(session, column)` and is pinned by nothing once the session is revoked.
+///
+/// Both pruners, because the expiry sweep takes the batch form and a set left behind by one of them
+/// is memory no request can ever reach again.
+#[test]
+fn a_prune_drops_the_tokens_visible_value_set() {
+    let fx = fixture();
+    let engine = engine_for(&fx, "prune");
+
+    let doomed = engine
+        .authorise(&full_coverage_credential())
+        .expect("the credential resolves");
+    let survivor = engine
+        .authorise(&subset_credential())
+        .expect("the credential resolves");
+    wait_for_set(&engine, &doomed, "department");
+    wait_for_set(&engine, &survivor, "department");
+    assert_eq!(
+        engine.suggest_set_stats().entries,
+        2,
+        "one set each, or this proves nothing"
+    );
+
+    engine.prune_token(doomed.token_id());
+    assert_eq!(engine.suggest_set_stats().entries, 1);
+
+    // The survivor's own set is still there: a hit rather than a re-sweep.
+    let hits = engine.suggest_set_stats().hits;
+    let page = suggest_with(
+        &engine,
+        &survivor,
+        "department",
+        None,
+        "",
+        20,
+        false,
+        100_000,
+        WIDE_CEILING,
+    );
+    assert!(!keys(&page).is_empty(), "and it is still served");
+    assert_eq!(engine.suggest_set_stats().hits, hits + 1);
+
+    engine.prune_tokens(&FxHashSet::from_iter([survivor.token_id()]));
+    assert_eq!(
+        engine.suggest_set_stats().entries,
+        0,
+        "the batch form removes the same thing"
+    );
 }

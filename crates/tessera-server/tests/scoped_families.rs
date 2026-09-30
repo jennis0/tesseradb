@@ -20,7 +20,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -28,16 +28,11 @@ use arrow::array::{Float32Array, Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common::*;
-use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
-use tempfile::TempDir;
 use tessera_build::config::{
-    Attribute, Fields, Schema, ScopedAttributeFile, ValueSet, Visibility, Vocabulary,
+    Attribute, Schema, ScopedAttributeFile, ValueSet, Visibility, Vocabulary,
 };
-use tessera_build::{
-    build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
-    ViewArgs,
-};
+use tessera_build::{build, BuildArgs, GroupDescriptor, GroupViewDescriptor, ScopedColumnFamily};
 use tessera_engine::EngineConfig;
 use tessera_spatial::tiler::ScalarType;
 
@@ -97,7 +92,7 @@ const TONES: [&str; 4] = ["dawn", "noon", "dusk", "solitary"];
 /// of three by luck — which showed up here as a narrow list equal to the wide one rather than a
 /// proper subset of it.
 fn solitary_entity(slot: usize) -> u64 {
-    members(slot)
+    quarter_entities(slot)
         .find(|&e| !narrow_mask(e))
         .expect("every quarter holds an entity the narrow principal cannot see")
 }
@@ -166,28 +161,29 @@ fn score(slot: usize, entity: u64) -> Option<f32> {
 /// readily as the right one.
 const THRESHOLD: f64 = 0.5;
 
-fn members(slot: usize) -> std::ops::Range<u64> {
+/// The entities quarter `slot` holds.
+fn quarter_entities(slot: usize) -> std::ops::Range<u64> {
     QUARTERS[slot].1.clone()
 }
 
 /// The entities of a quarter whose `mood` is `value` — the expected answer, from the same function
 /// the parquet was written from.
 fn with_mood(slot: usize, value: &str) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| mood(slot, e) == Some(value))
         .collect()
 }
 
 /// The entities of a quarter whose prose carries `word`.
 fn with_word(slot: usize, word: &str) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| note(slot, e).is_some_and(|prose| prose.contains(word)))
         .collect()
 }
 
 /// The entities of a quarter whose `score` clears the threshold.
 fn over_threshold(slot: usize) -> BTreeSet<u64> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| score(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
         .collect()
 }
@@ -201,7 +197,7 @@ fn sectors_in(slot: usize) -> BTreeSet<&'static str> {
 /// The `sector` values a quarter's entities carry **that this principal can see** — §3.3's
 /// membership predicate, written from the fixture's own arrays.
 fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| visible(e))
         .filter_map(|e| sector(slot, e))
         .collect()
@@ -210,7 +206,7 @@ fn sectors_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'
 /// The `tone` values a quarter's entities carry **that this principal can see** —
 /// [`sectors_visible_to`]'s question of the render-only family.
 fn tones_visible_to(slot: usize, visible: &dyn Fn(u64) -> bool) -> BTreeSet<&'static str> {
-    members(slot)
+    quarter_entities(slot)
         .filter(|&e| visible(e))
         .filter_map(|e| tone(slot, e))
         .collect()
@@ -233,72 +229,30 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
-fn group_frame() -> Quantisation {
-    let e = extent();
-    Quantisation {
-        x_min: e.x_min,
-        x_max: e.x_max,
-        y_min: e.y_min,
-        y_max: e.y_max,
-    }
-}
-
 /// A points file. A view of the group carries the three columns its families read from it; the
 /// plain view carries none, which is what it means for the family to be the group's.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
-    let mut fields = vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ];
-    if slot.is_some() {
-        // Nullable throughout: a null and a row this view does not carry are the same state,
-        // absent (decision 0064).
-        fields.push(Field::new("mood", DataType::Utf8, true));
-        fields.push(Field::new("sector", DataType::Utf8, true));
-        fields.push(Field::new("note", DataType::Utf8, true));
-        fields.push(Field::new("tone", DataType::Utf8, true));
-    }
-    let schema = Arc::new(ArrowSchema::new(fields));
+fn write_view_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
     let ids: Vec<u64> = ids.collect();
-    let mut columns: Vec<arrow::array::ArrayRef> = vec![
-        Arc::new(UInt64Array::from(ids.clone())),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).0).collect::<Vec<_>>(),
-        )),
-        Arc::new(Float64Array::from(
-            ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
-        )),
-    ];
+    let mut extra = Vec::new();
     if let Some(slot) = slot {
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| mood(slot, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| sector(slot, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| note(slot, e)).collect::<Vec<_>>(),
-        )));
-        columns.push(Arc::new(StringArray::from(
-            ids.iter().map(|&e| tone(slot, e)).collect::<Vec<_>>(),
-        )));
+        // Nullable throughout: a null and a row this view does not carry are the same state,
+        // absent.
+        let mood = StringArray::from(ids.iter().map(|&e| mood(slot, e)).collect::<Vec<_>>());
+        let sector = StringArray::from(ids.iter().map(|&e| sector(slot, e)).collect::<Vec<_>>());
+        let note = StringArray::from(ids.iter().map(|&e| note(slot, e)).collect::<Vec<_>>());
+        let tone = StringArray::from(ids.iter().map(|&e| tone(slot, e)).collect::<Vec<_>>());
+        extra.push(column("mood", true, mood));
+        extra.push(column("sector", true, sector));
+        extra.push(column("note", true, note));
+        extra.push(column("tone", true, tone));
     }
-    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    write_points(path, &ids, |e| position(view, e), extra);
 }
 
 /// **`score`'s own source**: one row per `(entity, view)`, the view named by a `quarter` column.
 /// Rows for the four quarters are interleaved rather than grouped, so a reader that took the
 /// file's order for the discriminator would answer wrongly.
 fn write_score_source(path: &Path) {
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("quarter", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
     let mut ids = Vec::new();
     let mut keys: Vec<&str> = Vec::new();
     let mut values: Vec<Option<f32>> = Vec::new();
@@ -312,31 +266,14 @@ fn write_score_source(path: &Path) {
             values.push(score(slot, entity));
         }
     }
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+    write_parquet(
+        path,
         vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(StringArray::from(keys)),
-            Arc::new(Float32Array::from(values)),
+            column("entity_id", false, UInt64Array::from(ids)),
+            column("quarter", false, StringArray::from(keys)),
+            column("score", true, Float32Array::from(values)),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
-fn view_args(view: &str, points: &Path, pairs: &Path) -> ViewArgs {
-    ViewArgs {
-        visibility: None,
-        view_id: view.to_string(),
-        projection: tessera_spatial::Projection::None,
-        extent: extent(),
-        points: points.to_path_buf(),
-        point_fields: Fields::default(),
-        select: None,
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-    }
+    );
 }
 
 fn vocabulary(name: &str, values: &[&str], visibility: Visibility) -> Vocabulary {
@@ -344,15 +281,18 @@ fn vocabulary(name: &str, values: &[&str], visibility: Visibility) -> Vocabulary
         name: name.to_string(),
         title: None,
         value_set: ValueSet::Closed,
-        visibility,
         width: ScalarType::U8,
-        // Codes pinned from one, code 0 being the reserved *absent* one (§3.6).
-        codes: values
-            .iter()
-            .enumerate()
-            .map(|(i, key)| (key.to_string(), i as u32 + 1))
-            .collect(),
-        titles: BTreeMap::new(),
+        // Codes pinned from one, code 0 being the reserved absent one.
+        values: tessera_build::config::VocabularyMinter::declared(
+            name,
+            tessera_build::config::VocabularyKind::Declared,
+            visibility,
+            ScalarType::U8,
+            &[],
+            values.iter().zip(1..).map(|(key, code)| (*key, code)),
+            [],
+        )
+        .expect("distinct pinned codes"),
         reserved: Vec::new(),
     }
 }
@@ -381,31 +321,64 @@ fn category(name: &str) -> Attribute {
         value_set: Some(ValueSet::Closed),
         index: true,
         render: false,
+        unique: false,
     }
 }
 
 /// The bundle: one plain view and one group of four quarters carrying four scoped families — a
-/// `public` category, a `derived` category, a text column, and a numeric read from its own source.
+/// `public` category, a `derived` category, a text column, and a numeric read from its own source
+/// — and the unique `id` ([`id_schema`]), read from a file naming every entity, so a row names a
+/// built entity by its source id.
 fn build_families(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
+    let entities = dir.join("entities.parquet");
+    write_parquet(
+        &entities,
+        vec![column(
+            "entity_id",
+            false,
+            UInt64Array::from_iter_values(0..ENTITIES),
+        )],
+    );
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD, None);
+    write_view_points(&world_points, "world", WORLD, None);
     let score_source = dir.join("score.parquet");
     write_score_source(&score_source);
-    let mut views = vec![view_args("world", &world_points, &pairs)];
+    let mut views = vec![view_args(
+        "world",
+        &world_points,
+        AccessInput::relation(&pairs),
+    )];
     let mut family_views = Vec::new();
     for (slot, (key, range)) in QUARTERS.iter().enumerate() {
         let id = format!("quarter:{key}");
         let points = dir.join(format!("quarter-{key}.parquet"));
-        write_points(&points, &id, range.clone(), Some(slot));
+        write_view_points(&points, &id, range.clone(), Some(slot));
         family_views.push(views.len());
-        views.push(view_args(&id, &points, &pairs));
+        views.push(view_args(&id, &points, AccessInput::relation(&pairs)));
     }
+    let schema = Schema {
+        attributes: id_schema().attributes,
+        vocabularies: HashMap::from([
+            (
+                "mood".to_string(),
+                vocabulary("mood", &MOODS, Visibility::Public),
+            ),
+            (
+                "sector".to_string(),
+                vocabulary("sector", &SECTORS, Visibility::Derived),
+            ),
+            (
+                "tone".to_string(),
+                vocabulary("tone", &TONES, Visibility::Derived),
+            ),
+        ]),
+    };
     let out = dir.join("bundle");
     build(&BuildArgs {
-        views,
-        anchor: 0,
+        attribute_sources: tessera_build::config::AttributeSource::over(&entities, &schema),
+        schema,
         groups: vec![GroupDescriptor {
             title: None,
             point_default: Some("public".to_string()),
@@ -445,6 +418,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: Some(ValueSet::Closed),
                     index: false,
                     render: true,
+                    unique: false,
                 },
                 family_views.clone(),
                 None,
@@ -460,6 +434,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: None,
                     index: true,
                     render: false,
+                    unique: false,
                 },
                 family_views.clone(),
                 None,
@@ -478,95 +453,20 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     value_set: None,
                     index: true,
                     render: true,
+                    unique: false,
                 },
                 family_views.clone(),
                 Some(ScopedAttributeFile {
                     path: score_source.clone(),
-                    entity_id: "entity_id".to_string(),
+                    fields: tessera_build::config::Fields::canonical("the score source"),
                     view_field: "quarter".to_string(),
                 }),
             ),
         ],
-        attribute_sources: Vec::new(),
-        out: out.clone(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: false,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema: Schema {
-            attributes: Vec::new(),
-            vocabularies: HashMap::from([
-                (
-                    "mood".to_string(),
-                    vocabulary("mood", &MOODS, Visibility::Public),
-                ),
-                (
-                    "sector".to_string(),
-                    vocabulary("sector", &SECTORS, Visibility::Derived),
-                ),
-                (
-                    "tone".to_string(),
-                    vocabulary("tone", &TONES, Visibility::Derived),
-                ),
-            ]),
-        },
+        ..build_args(&out, views)
     })
     .expect("a five-view build with five scoped families succeeds");
     out
-}
-
-struct Served {
-    server: TestServer,
-    /// Every term, so the mask is the whole corpus and a count is the view's population rather
-    /// than a principal's slice of it.
-    token: String,
-    /// Held rather than dropped, because a restart reopens the same bundle, cache and log
-    /// ([`restart`]).
-    tmp: TempDir,
-}
-
-async fn serve() -> Served {
-    serve_with(default_engine_config()).await
-}
-
-/// The fixture built once and served under a caller-chosen configuration — the write cycle below
-/// narrows `coalesce_width` so the entity-space coalesce is reachable in a test.
-async fn serve_with(config: EngineConfig) -> Served {
-    let tmp = TempDir::new().unwrap();
-    build_families(tmp.path());
-    open(tmp, config).await
-}
-
-/// Open a server over an existing directory: the same bundle root, cache and WAL. Passing a
-/// directory a previous [`Served`] has released is exactly the restart case.
-async fn open(tmp: TempDir, config: EngineConfig) -> Served {
-    let server = spawn_server_with_config(
-        &tmp.path().join("bundle"),
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        config,
-    )
-    .await;
-    let auth = authorise(&server, &["0", "1"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
-    Served { server, token, tmp }
-}
-
-/// Reopen the same bundle and the same WAL. The old server is stopped and waited for first, so its
-/// executor has released the bundle root's write lock before the new one takes it.
-async fn restart(served: Served, config: EngineConfig) -> Served {
-    let Served { server, tmp, .. } = served;
-    server.shutdown().await;
-    open(tmp, config).await
 }
 
 async fn viewport(served: &Served, view: &str, filters: Option<Value>) -> reqwest::Response {
@@ -616,10 +516,7 @@ async fn categories_as(served: &Served, token: &str, path: &str) -> reqwest::Res
 
 /// A session holding exactly these label descriptors.
 async fn token(served: &Served, terms: &[&str]) -> String {
-    authorise(&served.server, terms).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    token_for(&served.server, terms).await
 }
 
 async fn post_changes(served: &Served, body: &Value) -> reqwest::Response {
@@ -661,7 +558,7 @@ async fn keys_as(served: &Served, token: &str, path: &str) -> Vec<String> {
 /// served answer is its own view's.
 #[tokio::test]
 async fn a_scoped_category_answers_from_the_requests_own_view() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     // The served answer is a set of `tessera_id`s and the expected one a set of entity numbers, so
     // the comparison is by **cardinality**, as every test in this directory compares them: the
     // identifier is a blinding permutation and never the entity id (I10, decision 0014).
@@ -674,7 +571,7 @@ async fn a_scoped_category_answers_from_the_requests_own_view() {
             "{view} must answer from its own `mood` column"
         );
         assert!(
-            !matched.is_empty() && matched.len() < members(slot).count(),
+            !matched.is_empty() && matched.len() < quarter_entities(slot).count(),
             "{view}'s predicate is a proper subset, or this test proves nothing"
         );
     }
@@ -691,7 +588,7 @@ async fn a_scoped_category_answers_from_the_requests_own_view() {
 /// entity-space bitmap composing with everything else.
 #[tokio::test]
 async fn a_pinned_category_leaf_answers_on_the_plain_map() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let pinned = ids(
         &served,
         "world",
@@ -723,7 +620,7 @@ async fn a_pinned_category_leaf_answers_on_the_plain_map() {
 /// a malformed request rather than a constraint.
 #[tokio::test]
 async fn a_bare_scoped_leaf_off_the_group_names_the_group() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     for filters in [
         json!({"mood": {"eq": "calm"}}),
         json!({"note": {"match": "alpha"}}),
@@ -731,8 +628,9 @@ async fn a_bare_scoped_leaf_off_the_group_names_the_group() {
     ] {
         let resp = viewport(&served, "world", Some(filters.clone())).await;
         assert_eq!(resp.status().as_u16(), 422, "{filters}");
-        let body = resp.text().await.unwrap();
-        assert!(body.contains("quarter"), "{body}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "contract", "{body}");
+        assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
     }
 }
 
@@ -741,7 +639,7 @@ async fn a_bare_scoped_leaf_off_the_group_names_the_group() {
 /// exactly what the cross-quarter case below asserts it does not.
 #[tokio::test]
 async fn a_scoped_text_column_matches_per_view() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let own = ids(
@@ -792,7 +690,7 @@ async fn a_scoped_text_column_matches_per_view() {
 /// view's key, and the per-view answers differ.
 #[tokio::test]
 async fn a_scoped_family_reads_its_own_source_per_view() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let matched = ids(
@@ -807,7 +705,7 @@ async fn a_scoped_family_reads_its_own_source_per_view() {
             "{view} must read its own rows of the shared source"
         );
         assert!(
-            !matched.is_empty() && matched.len() < members(slot).count(),
+            !matched.is_empty() && matched.len() < quarter_entities(slot).count(),
             "{view}'s predicate is a proper subset, or this test proves nothing"
         );
     }
@@ -825,7 +723,7 @@ async fn a_scoped_family_reads_its_own_source_per_view() {
 /// list under Q1 and the list under Q3 are different sets, and each is that view's.
 #[tokio::test]
 async fn the_value_list_is_the_views_own() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let listed: BTreeSet<String> = keys(&served, &format!("sector?view=quarter:{key}"))
             .await
@@ -844,6 +742,41 @@ async fn the_value_list_is_the_views_own() {
     );
 }
 
+/// **Suggest counts a scoped family under a filter on another scoped family**, both read from the
+/// request's own view: each count is that quarter's items carrying the `mood` value whose `sector`
+/// the filter names.
+#[tokio::test]
+async fn a_scoped_family_counts_under_a_scoped_filter() {
+    let served = Served::build(build_families).await;
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/categories/mood/suggest"))
+            .bearer_auth(&served.token)
+            .json(&json!({
+                "q": "", "counts": true, "view": format!("quarter:{key}"),
+                "filters": { "sector": { "in": ["north", "rare"] } },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: Value = resp.json().await.unwrap();
+        let values = body["values"].as_array().unwrap();
+        assert_eq!(values.len(), MOODS.len(), "{body}");
+        for value in values {
+            let mood_key = value["key"].as_str().unwrap();
+            let expected = quarter_entities(slot)
+                .filter(|&e| {
+                    matches!(sector(slot, e), Some("north" | "rare")) && mood(slot, e) == Some(mood_key)
+                })
+                .count() as u64;
+            assert_eq!(value["count"], expected, "quarter:{key} {mood_key}: {body}");
+        }
+    }
+}
+
 /// **A `derived` list narrows per principal *and* per view** — the C11 channel this change opens
 /// over a per-view column (per-point-attributes §3.3).
 ///
@@ -858,7 +791,7 @@ async fn the_value_list_is_the_views_own() {
 /// side, and only an exact expectation tells the two apart.
 #[tokio::test]
 async fn a_derived_value_list_narrows_per_principal_under_each_view() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let narrow = token(&served, &["1"]).await;
 
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
@@ -911,7 +844,7 @@ async fn a_derived_value_list_narrows_per_principal_under_each_view() {
 /// side, and only an exact expectation tells the two apart.
 #[tokio::test]
 async fn a_render_only_derived_value_list_narrows_per_principal_under_each_view() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let narrow = token(&served, &["1"]).await;
 
     for (slot, (key, _)) in QUARTERS.iter().enumerate() {
@@ -964,7 +897,7 @@ async fn a_render_only_derived_value_list_narrows_per_principal_under_each_view(
 /// membership set could have been cached.
 #[tokio::test]
 async fn a_suppression_reaches_both_scoped_routes() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let view = "quarter:2026-Q1";
 
     // The victim: the one entity carrying `rare` in Q1, which also carries Q1's prose. Named by
@@ -986,7 +919,7 @@ async fn a_suppression_reaches_both_scoped_routes() {
 
     let resp = post_changes(
         &served,
-        &json!([{ "tessera_id": victim.to_string(), "idset": FIXTURE_IDSET, "op": "suppress" }]),
+        &json!([{ "op": "suppress", "match": { "tessera_id": victim.to_string() } }]),
     )
     .await;
     assert_eq!(
@@ -1033,7 +966,7 @@ async fn a_suppression_reaches_both_scoped_routes() {
 /// column a derived one is derived from.
 #[tokio::test]
 async fn a_public_value_set_is_served_as_authored() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let listed = keys(&served, "mood?view=quarter:2026-Q1").await;
     assert_eq!(listed, MOODS.map(str::to_string).to_vec());
 }
@@ -1043,11 +976,12 @@ async fn a_public_value_set_is_served_as_authored() {
 /// an unknown view already gets, from the same rule.
 #[tokio::test]
 async fn a_value_list_with_no_view_names_the_group() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let resp = categories(&served, "sector").await;
     assert_eq!(resp.status().as_u16(), 422);
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("quarter"), "{body}");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "contract", "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("quarter"), "{body}");
 
     let resp = categories(&served, "sector@2027-Q9").await;
     assert_eq!(resp.status().as_u16(), 404);
@@ -1063,7 +997,7 @@ async fn a_value_list_with_no_view_names_the_group() {
 /// `/v1/meta`'s.
 #[tokio::test]
 async fn a_text_family_has_no_value_list() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let resp = categories(&served, "note?view=quarter:2026-Q1").await;
     assert_eq!(resp.status().as_u16(), 404);
 }
@@ -1075,7 +1009,7 @@ async fn a_text_family_has_no_value_list() {
 /// column arrives under, without inferring anything.
 #[tokio::test]
 async fn meta_publishes_every_family_with_its_scope() {
-    let served = serve().await;
+    let served = Served::build(build_families).await;
     let body: Value = served
         .server
         .client
@@ -1157,8 +1091,8 @@ async fn meta_publishes_every_family_with_its_scope() {
 // runtime acquires, and of the fold's per-view merge — and every one of those branches serves a
 // **value**, so the failure they have in common is a wrong answer rather than an error.
 
-/// New entities, allocated above the build's high-water, so nothing here collides with the
-/// fixture's own and every assertion below is about rows the write path made.
+/// The `id`s of new entities, above the build's, so nothing here collides with the fixture's own
+/// and every assertion below is about rows the write path made.
 const JOINED: u64 = 9_001;
 const Q3_ONLY: u64 = 9_002;
 const IN_MINTED: u64 = 9_003;
@@ -1208,15 +1142,16 @@ const FILLER: Written = Written {
     score: 0.1,
 };
 
-/// An ingest body carrying the reserved columns and all four scoped families **under their plain
-/// names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not qualified
-/// and the view decides which of each family's columns the value lands in. A category arrives as
-/// its **key**, never a code.
-fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
-    use arrow::array::BinaryArray;
+/// An ingest body carrying the reserved columns, each row's `id`, and the scoped families **under
+/// their plain names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not
+/// qualified and the view decides which of each family's columns the value lands in. A category
+/// arrives as its **key**, never a code. `tone`, and each string column `nulls` names, is null on
+/// every row.
+fn scoped_batch(rows: &[(u64, f64, f64, Written)], nulls: &[&str]) -> Vec<u8> {
     let access = access_column(rows.iter().map(|_| "0"));
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("external_id", DataType::Binary, true),
+    let nulls: Vec<&str> = std::iter::once("tone").chain(nulls.iter().copied()).collect();
+    let mut fields = vec![
+        Field::new("id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         access_field(&access),
@@ -1224,14 +1159,17 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
         Field::new("sector", DataType::Utf8, true),
         Field::new("note", DataType::Utf8, true),
         Field::new("score", DataType::Float32, true),
-    ]));
-    let ids: Vec<Vec<u8>> = rows.iter().map(|(e, ..)| external_id_of(*e)).collect();
+    ];
+    fields.extend(nulls.iter().map(|name| Field::new(*name, DataType::Utf8, true)));
+    let schema = Arc::new(ArrowSchema::new(fields));
+    let null_column = || -> arrow::array::ArrayRef {
+        Arc::new(StringArray::from(vec![None::<&str>; rows.len()]))
+    };
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![
-            Arc::new(BinaryArray::from_iter(
-                ids.iter().map(|id| Some(id.as_slice())),
-            )),
+        [
+            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|(e, ..)| *e)))
+                as arrow::array::ArrayRef,
             Arc::new(Float64Array::from_iter_values(
                 rows.iter().map(|(_, x, ..)| *x),
             )),
@@ -1251,7 +1189,10 @@ fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
             Arc::new(Float32Array::from_iter_values(
                 rows.iter().map(|(.., w)| w.score),
             )),
-        ],
+        ]
+        .into_iter()
+        .chain(nulls.iter().map(|_| null_column()))
+        .collect(),
     )
     .unwrap();
     let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
@@ -1267,6 +1208,17 @@ async fn ingest_scoped(
     view: &str,
     rows: &[(u64, f64, f64, Written)],
 ) -> Vec<u64> {
+    ingest_scoped_with_nulls(served, batch_id, view, rows, &[]).await
+}
+
+/// [`ingest_scoped`], carrying each column of `nulls`, declared while the service runs, as nulls.
+async fn ingest_scoped_with_nulls(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(u64, f64, f64, Written)],
+    nulls: &[&str],
+) -> Vec<u64> {
     let resp = served
         .server
         .client
@@ -1275,47 +1227,14 @@ async fn ingest_scoped(
         .header("x-tessera-batch-id", batch_id)
         .header("x-tessera-view", view)
         .header("content-type", "application/vnd.apache.arrow.stream")
-        .body(scoped_batch(rows))
+        .body(scoped_batch(rows, nulls))
         .send()
         .await
         .unwrap();
     let status = resp.status().as_u16();
     let body: Value = resp.json().await.unwrap();
     assert_eq!(status, 200, "{view} accepts the batch: {body}");
-    body["tessera_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_u64().unwrap())
-        .collect()
-}
-
-/// Flush until the buffer is empty — a flush unit is one view, so rows in two views need two
-/// ticks.
-async fn flush(served: &Served) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let before = served.server.state.engine.write_executor_stats().flushes;
-        let resp = served
-            .server
-            .client
-            .post(served.server.control_url("/control/flush"))
-            .bearer_auth(OPERATOR_CREDENTIAL)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-        while served.server.state.engine.write_executor_stats().flushes == before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the flush never published"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if served.server.state.engine.buffered_items() == 0 {
-            return;
-        }
-    }
+    ingested_ids(&body)
 }
 
 /// Request a compaction fold and block until it has published (`POST /control/compact`).
@@ -1344,35 +1263,6 @@ fn scoped_dir(partition: &std::path::Path, family: &str, key: &str) -> std::path
                 .is_some_and(|n| n.starts_with(&suffixed))
         })
         .unwrap_or(exact)
-}
-
-async fn fold(served: &Served) {
-    let before = served.server.state.engine.write_executor_stats().folds;
-    let resp = served
-        .server
-        .client
-        .post(served.server.control_url("/control/compact"))
-        .bearer_auth(OPERATOR_CREDENTIAL)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    loop {
-        let stats = served.server.state.engine.write_executor_stats();
-        assert_eq!(
-            stats.fold_failures, 0,
-            "the fold failed rather than publishing"
-        );
-        if stats.folds > before {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 /// The newest side-manifest of the live prefix's only partition.
@@ -1545,7 +1435,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         coalesce_width: Some(2),
         ..default_engine_config()
     };
-    let mut served = serve_with(config()).await;
+    let mut served = Served::build_with(build_families, config()).await;
 
     // ---- ingest: one entity into two views, with different values in each --------------------
     let q1 = ingest_scoped(
@@ -1571,7 +1461,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         q1, q3[0],
         "a join lands on the entity it names rather than allocating a second"
     );
-    flush(&served).await;
+    drain(&served.server).await;
 
     // ---- a view created while the service runs, and its first flush --------------------------
     let created = served
@@ -1596,7 +1486,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         &[(IN_MINTED, 280.0, 280.0, IN_Q9)],
     )
     .await[0];
-    flush(&served).await;
+    drain(&served.server).await;
 
     // The visible-view set is fixed per session (`views.md` §6), so reading the new view needs a
     // new one — exactly as a client would.
@@ -1640,6 +1530,9 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     // `coalesce::tests::a_scoped_familys_window_is_one_views_own` plans over a manifest carrying
     // two views' extents of one family and asserts one window per view, each holding only its own
     // view's layers and each under its own view's directory.
+    // Held still while the stack is built and read: this test's coalesce width is 2, so a pass
+    // landing between two of these flushes would collapse the layers the assertions count.
+    served.server.state.engine.set_coalesce_for_test(false);
     for round in 0..3 {
         ingest_scoped(
             &served,
@@ -1648,7 +1541,7 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
             &[(9_100 + round, 300.0 + round as f64, 300.0, FILLER)],
         )
         .await;
-        flush(&served).await;
+        drain(&served.server).await;
     }
     let manifest = side_manifest(&served);
     let layers = |column: &str, view: &str| {
@@ -1670,9 +1563,10 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
         "and on no other view's — a layer belongs to the `(column, view)` that wrote it"
     );
     assert_written_answers(&served, "over a stack of layers", &[q1, q3[0]], minted).await;
+    served.server.state.engine.set_coalesce_for_test(true);
 
     // ---- the fold -----------------------------------------------------------------------------
-    fold(&served).await;
+    fold(&served.server).await;
     let root = served.tmp.path().join("bundle");
     let current: Value =
         serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
@@ -1705,6 +1599,315 @@ async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
     assert_written_answers(&served, "after a fold", &[q1, q3[0]], minted).await;
 
     // ---- and a restart, which opens exactly what the fold wrote ------------------------------
-    let served = restart(served, config()).await;
+    let served = served.restart_with(config()).await;
     assert_written_answers(&served, "after a restart", &[q1, q3[0]], minted).await;
+}
+
+/// What one view answers for each family, asked for the values [`IN_Q9`] and [`IN_Q3`] carry.
+async fn family_answers(served: &Served, view: &str) -> Vec<BTreeSet<u64>> {
+    let mut answers = Vec::new();
+    for written in [IN_Q9, IN_Q3] {
+        for filter in [
+            json!({"mood": {"eq": written.mood}}),
+            json!({"sector": {"eq": written.sector}}),
+            json!({"note": {"match": written.word}}),
+        ] {
+            answers.push(ids(served, view, Some(filter)).await);
+        }
+    }
+    answers.push(ids(served, view, Some(json!({"score": {"range": {"gte": THRESHOLD}}}))).await);
+    answers
+}
+
+/// The recreated view against what it was given, and the untouched view against what it held.
+async fn check_recreated(
+    served: &Served,
+    stage: &str,
+    expected: &[BTreeSet<u64>],
+    untouched: &[BTreeSet<u64>],
+) {
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q4").await,
+        expected,
+        "{stage}: the recreated view answers from its own values"
+    );
+    assert_eq!(
+        family_answers(served, "quarter:2026-Q3").await,
+        untouched,
+        "{stage}: a view never dropped answers as it did"
+    );
+}
+
+/// A built view dropped and created again at a running service holds the scoped values ingested
+/// into it after the create, before a restart, after one, and after a fold and another; a view
+/// never dropped answers as it did throughout.
+#[tokio::test]
+async fn a_recreated_views_scoped_values_survive_a_restart_and_a_fold() {
+    let mut served = Served::build(build_families).await;
+    let untouched = family_answers(&served, "quarter:2026-Q3").await;
+
+    let dropped = served
+        .server
+        .client
+        .delete(served.server.control_url("/control/views/quarter/2026-Q4"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dropped.status().as_u16(), 200);
+    let created = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q4"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+
+    // Two of the build's Q4 entities joining the new view, and one new entity.
+    let rows = ingest_scoped(
+        &served,
+        "recreated-q4",
+        "quarter:2026-Q4",
+        &[
+            (8, 250.0, 250.0, IN_Q9),
+            (10, 260.0, 260.0, IN_Q3),
+            (9_301, 270.0, 270.0, IN_Q9),
+        ],
+    )
+    .await;
+    drain(&served.server).await;
+    served.token = token(&served, &["0", "1"]).await;
+
+    let q9 = BTreeSet::from([rows[0], rows[2]]);
+    let q3 = BTreeSet::from([rows[1]]);
+    let expected = vec![
+        q9.clone(),
+        q9.clone(),
+        q9.clone(),
+        q3.clone(),
+        q3.clone(),
+        q3,
+        q9,
+    ];
+    check_recreated(&served, "before a restart", &expected, &untouched).await;
+
+    // Any later change to the roster republishes it with the drop still on the list.
+    let other = served
+        .server
+        .client
+        .put(served.server.control_url("/control/views/quarter/2026-Q9"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status().as_u16(), 201);
+    served.token = token(&served, &["0", "1"]).await;
+    check_recreated(&served, "after another view is created", &expected, &untouched).await;
+
+    let served = served.restart().await;
+    check_recreated(&served, "after a restart", &expected, &untouched).await;
+
+    fold(&served.server).await;
+    let served = served.restart().await;
+    check_recreated(&served, "after a fold and a restart", &expected, &untouched).await;
+}
+
+/// An entity whose point lives in `2026-Q3` alone, for the edits below.
+const FILLED: u64 = 9_004;
+
+/// One `POST /control/ingest` JSON row without coordinates and naming no view, naming [`FILLED`]
+/// by its `id`.
+async fn row_without_view(
+    served: &Served,
+    batch_id: &str,
+    wait: bool,
+    cells: Value,
+) -> (u16, Value) {
+    let mut row = json!({
+        "id": FILLED,
+    });
+    for (name, value) in cells.as_object().unwrap() {
+        row[name] = value.clone();
+    }
+    let path = if wait {
+        "/control/ingest?wait=visible"
+    } else {
+        "/control/ingest"
+    };
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url(path))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .json(&json!([row]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Whether `2026-Q3` serves `id` under an `eq` on `column`, and the item card's value for it.
+async fn filled_answer(served: &Served, id: u64, column: &str, value: &str) -> (bool, Value) {
+    let matched = ids(
+        served,
+        "quarter:2026-Q3",
+        Some(json!({ column: { "eq": value } })),
+    )
+    .await;
+    let resp = post_item(&served.server, &served.token, id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = resp.json().await.unwrap();
+    (matched.contains(&id), card["fields"][column].clone())
+}
+
+/// **An entity-scoped cell needs no view header.** Its value is the entity's whichever view's
+/// flush writes it, so a row naming no view sets it on a deployment of five views, and
+/// the value is served under the one view the entity's point lives in: at once, after a restart
+/// that replays an unflushed edit from the log, and after a fold. A group-scoped column still
+/// needs the header, which is what says whose cell it is.
+#[tokio::test]
+async fn an_entity_scoped_cell_needs_no_view_header() {
+    let served = Served::build(build_families).await;
+    for name in ["grade", "tier"] {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url("/control/attributes"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&json!({ "name": name, "type": "keyword", "index": true }))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "{name} is declared");
+    }
+    let id = ingest_scoped_with_nulls(
+        &served,
+        "q3-only",
+        "quarter:2026-Q3",
+        &[(FILLED, 250.0, 250.0, IN_Q3)],
+        &["grade", "tier"],
+    )
+    .await[0];
+    drain(&served.server).await;
+
+    let (status, answer) =
+        row_without_view(&served, "grade", true, json!({ "grade": "gold" })).await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["visible"], json!(true), "{answer}");
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+
+    let (status, answer) =
+        row_without_view(&served, "mood", false, json!({ "mood": "calm" })).await;
+    assert_eq!(
+        status, 422,
+        "a group-scoped cell still needs a view: {answer}"
+    );
+
+    // Left unflushed, so the restart has to replay it from the log.
+    let (status, answer) =
+        row_without_view(&served, "tier", false, json!({ "tier": "upper" })).await;
+    assert_eq!(status, 200, "{answer}");
+    let served = served.restart().await;
+    drain(&served.server).await;
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+    assert_eq!(
+        filled_answer(&served, id, "tier", "upper").await,
+        (true, json!("upper"))
+    );
+
+    fold(&served.server).await;
+    assert_eq!(
+        filled_answer(&served, id, "grade", "gold").await,
+        (true, json!("gold"))
+    );
+    assert_eq!(
+        filled_answer(&served, id, "tier", "upper").await,
+        (true, json!("upper"))
+    );
+}
+
+/// **A group-scoped family's new key is minted by the row without coordinates that names it**, on an open
+/// vocabulary no ingest has used, and the cell is served under its view after a flush and after a
+/// restart.
+#[tokio::test]
+async fn a_row_without_coordinates_mints_a_new_key_for_a_group_scoped_family() {
+    let served = Served::build(build_families).await;
+    let declarations = [
+        (
+            "/control/vocabularies/grade",
+            json!({ "value_set": "open", "visibility": "public", "width": "u16" }),
+        ),
+        (
+            "/control/attributes",
+            json!({
+                "name": "grade", "type": "category", "vocabulary": "grade", "index": true,
+                "scope": { "group": "quarter" }
+            }),
+        ),
+    ];
+    for (path, body) in declarations {
+        let resp = served
+            .server
+            .client
+            .put(served.server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201, "{path}");
+    }
+    let id = ingest_scoped_with_nulls(
+        &served,
+        "q3-only",
+        "quarter:2026-Q3",
+        &[(FILLED, 250.0, 250.0, IN_Q3)],
+        &["grade"],
+    )
+    .await[0];
+    drain(&served.server).await;
+
+    let row = json!([{
+        "id": FILLED,
+        "grade": "g7",
+    }]);
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", "scoped-grade")
+        .header("x-tessera-view", "quarter:2026-Q3")
+        .json(&row)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{}", resp.text().await.unwrap_or_default());
+    drain(&served.server).await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+
+    let served = served.restart().await;
+    assert_eq!(scoped_grade(&served, id).await, (true, json!("g7")));
+}
+
+/// Whether `2026-Q3` serves `id` under `grade = g7`, and the item card's `2026-Q3` grade.
+async fn scoped_grade(served: &Served, id: u64) -> (bool, Value) {
+    let filter = json!({ "grade": { "eq": "g7" } });
+    let matched = ids(served, "quarter:2026-Q3", Some(filter)).await;
+    let resp = post_item(&served.server, &served.token, id).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = resp.json().await.unwrap();
+    (matched.contains(&id), card["scoped"]["grade"]["2026-Q3"].clone())
 }

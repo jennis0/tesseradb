@@ -1,61 +1,154 @@
-import {WORLD_SIZE, tileXY, type ComposedTile} from '@tesseradb/client';
+import {WORLD_SIZE, type ComposedTile} from '@tesseradb/client';
+import {tileXY} from '@tesseradb/client/internal';
+import {RAMPS, rampAt, type Rgb} from './colour.js';
 
 /**
- * The density wash: the number channel as one texture (design client-components §5.10).
+ * Density: the tile counts drawn as a smooth wash, as hexagons, as a grid or as contour lines.
  *
- * **It reads counts, never marks.** A tile's `visible`/`matched` are exact masked aggregates from
- * the server; the marks are a per-tile-capped sample whose on-screen density says nothing about
- * the corpus. So the wash is binned from the `tiles` projection — one bin per exact tile at the
- * drawn depth — and a tile that is not exact (drawn from an ancestor or from held descendants)
- * contributes **nothing**: a superset read as density overstates (`delta-serving.md` §7), and the
- * honest wash has a hole there rather than a guess.
+ * Every mode reads counts, not marks. A tile's counts are exact masked aggregates from the server;
+ * the marks are a per-tile-capped sample and their density on screen says nothing about the
+ * corpus. The hexagons, grid and contours aggregate one point per exact tile at its centre,
+ * weighted by its count ({@link densityCells}).
  *
- * **Single hue.** Colouring a bin by its majority cluster would be a colour chosen from a sample,
- * which is the guess exact-only refuses (decision 0099). Intensity is histogram-equalised over the
- * bins on screen — datashader's `eq_hist`, the field's answer to counts spanning several decades —
- * which is a mapping computed from counts this principal was served, not a masked quantity.
+ * The smooth wash is one texture under the marks, with one bin per exact tile at the drawn depth.
+ * A tile that is not exact (drawn from an ancestor or from held descendants) contributes nothing to
+ * any mode, because its counts cover a superset and would overstate.
  *
- * Rebuilt at the settle, O(tiles); a full viewport at 10⁹ scale is ~10⁵ tiles, a millisecond or
- * two, and it is drawn as one `BitmapLayer` under the points.
+ * Density is coloured by count alone: a bin coloured by its majority cluster would take its colour
+ * from the sample. Intensity is histogram-equalised over the bins on screen (datashader's
+ * `eq_hist`), since the counts span several orders of magnitude; the hexagons and grid use a
+ * quantile scale, which is the same idea per bin.
  *
- * **The tile grid is never shown** (decision 0097). A bin per tile drawn nearest-neighbour is the
- * storage grid drawn — at a coarse depth under a sparse principal it read as hard-edged squares.
- * So the binned image is {@link filterDensity}'d: supersampled with the intensity interpolated
- * between tile centres, softened at the scale of one drawn cell, its alpha fading with density
- * so an isolated cell reads as a halo and never as a block, and sampled linearly on the GPU. No
- * texel column steps from nothing to full across one texel.
+ * Rebuilt at the settle in O(tiles). {@link filterDensity} smooths the binned image so the tile
+ * grid does not show as hard-edged squares.
  */
+
+/**
+ * How density is drawn: `none`; `smooth`, a soft wash; `hex`, hexagonal bins; `grid`, square bins
+ * one tile wide; or `contours`, lines of equal density.
+ *
+ * @category Colour
+ */
+export type DensityMode = 'none' | 'smooth' | 'hex' | 'grid' | 'contours';
+
+/**
+ * The colours density is drawn in: `warm-grey`, one neutral hue whose strength follows the count,
+ * or a ramp (`viridis`, `cividis`, `magma`, `greys`) whose dense end contrasts with the ground, so
+ * dense ground is dark on a light map and bright on a dark one.
+ *
+ * @category Colour
+ */
+export type DensityColours = 'warm-grey' | 'viridis' | 'cividis' | 'magma' | 'greys';
+
+/** The titles of the density colours, as a menu shows them. */
+export const DENSITY_COLOUR_TITLES: Readonly<Record<DensityColours, string>> = {
+  'warm-grey': 'Warm grey',
+  viridis: RAMPS.viridis.title,
+  cividis: RAMPS.cividis.title,
+  magma: RAMPS.magma.title,
+  greys: RAMPS.greys.title
+};
+
+/** Warm grey from nearly the ground to the wash's hue, per ground. */
+const WARM_GREY: Record<'light' | 'dark', readonly Rgb[]> = {
+  light: [
+    [233, 231, 227],
+    [110, 104, 96]
+  ],
+  dark: [
+    [42, 44, 48],
+    [200, 202, 206]
+  ]
+};
+
+/**
+ * The stops of `colours` from the sparse end to the dense end on `scheme`'s ground. A ramp whose
+ * light end is its high end ({@link RAMPS}) runs backwards on a light ground.
+ */
+export function densityStops(colours: DensityColours, scheme: 'light' | 'dark'): readonly Rgb[] {
+  if (colours === 'warm-grey') return WARM_GREY[scheme];
+  const stops = RAMPS[colours].stops;
+  const lightAtHigh = luminance(stops[stops.length - 1]!) > luminance(stops[0]!);
+  // Dense is dark on a light ground and light on a dark one.
+  const denseLight = scheme === 'dark';
+  return lightAtHigh === denseLight ? stops : [...stops].reverse();
+}
+
+function luminance(c: Rgb): number {
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+/**
+ * How the smooth wash is painted: one hue whose alpha is the intensity (warm grey), or a ramp the
+ * intensity picks a colour from, fading to nothing at the sparse end.
+ */
+export type DensityPaint = {kind: 'hue'; rgb: Rgb} | {kind: 'ramp'; stops: readonly Rgb[]};
+
+/** The paint for `colours` on `scheme`'s ground. */
+export function densityPaint(colours: DensityColours, scheme: 'light' | 'dark'): DensityPaint {
+  return colours === 'warm-grey' ? {kind: 'hue', rgb: WASH_HUE[scheme]} : {kind: 'ramp', stops: densityStops(colours, scheme)};
+}
+
+/** One exact tile as the hexagons, grid and contours aggregate it: its centre and its count. */
+export type DensityCell = {position: [number, number]; count: number};
+
+/**
+ * One cell per exact tile at `depth` whose `channel` count is not zero, at the tile's centre in
+ * world units. A tile that is not exact, or is at another depth, gives none.
+ */
+export function densityCells(tiles: readonly ComposedTile[], depth: number, channel: 'visible' | 'matched' | 'highlighted'): DensityCell[] {
+  const span = WORLD_SIZE / 2 ** depth;
+  const cells: DensityCell[] = [];
+  for (const tile of tiles) {
+    if (!tile.exact || !tile.counts || tile.depth !== depth) continue;
+    const count = Number(tile.counts[channel]);
+    if (count <= 0) continue;
+    const {x, y} = tileXY(tile.prefix, depth);
+    cells.push({position: [(x + 0.5) * span, (y + 0.5) * span], count});
+  }
+  return cells;
+}
+
+/**
+ * The counts contour lines are drawn at: up to four distinct counts at the 25th, 50th, 75th and
+ * 90th percentiles of the cells' counts, ascending. Empty where no cell has a count.
+ */
+export function contourThresholds(cells: readonly DensityCell[]): number[] {
+  const counts = cells.map((c) => c.count).sort((a, b) => a - b);
+  if (counts.length === 0) return [];
+  const at = [0.25, 0.5, 0.75, 0.9].map((q) => counts[Math.min(counts.length - 1, Math.floor(q * counts.length))]!);
+  return [...new Set(at)];
+}
 
 export type DensityImage = {
   width: number;
   height: number;
-  /** RGBA, row-major from the lowest tile row — `bounds` says where it sits. */
+  /** RGBA, row-major from the lowest tile row. */
   data: Uint8ClampedArray<ArrayBuffer>;
   /** World-space `[x0, y0, x1, y1]` the image covers, half-open on the far edges. */
   bounds: [number, number, number, number];
-  /** How many bins carry a count — zero means nothing exact is on screen and nothing is drawn. */
+  /** How many bins carry a count; zero means nothing exact is on screen. */
   filled: number;
 };
 
-/** The wash's one hue, RGB — a cool neutral that sits under every palette colour. */
-export const WASH_HUE: [number, number, number] = [96, 132, 190];
+/**
+ * The wash's hue per ground, RGB: a warm grey on a light ground and a light grey on a dark one,
+ * neutral so it does not read as a data colour.
+ */
+export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], dark: [200, 202, 206]};
+
+/** The most alpha {@link binDensity} writes, so an intensity is `alpha / BIN_ALPHA_MAX`. */
+const BIN_ALPHA_MAX = 178;
 
 /**
- * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span.
- *
- * `channel` chooses which count is washed; `matched` is the default because it is the filtered
- * answer — the wash narrows with a filter as the counts do, while `visible` would hold.
- *
- * **`highlighted` is the channel a highlight washes** (`highlight-and-hierarchy.md` §5.3), and it
- * is the only picture a spread artifact has: a highlight over 27 million articles draws 66,000 of
- * them, so the marks say almost nothing about where the rest are and the count says it exactly.
- * The caller labels the wash as the count it is; this function only bins what it is handed.
+ * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span. A texel's
+ * alpha is its intensity and its colour is unset; {@link filterDensity} paints it. `channel` chooses the count: `matched` narrows with a filter, `visible` does not, and
+ * `highlighted` shows where a highlight's members are when the marks are too sparse a sample to.
  */
 export function binDensity(
   tiles: readonly ComposedTile[],
   depth: number,
-  channel: 'visible' | 'matched' | 'highlighted' = 'matched',
-  hue: [number, number, number] = WASH_HUE
+  channel: 'visible' | 'matched' | 'highlighted' = 'matched'
 ): DensityImage | null {
   const cells: {x: number; y: number; count: number}[] = [];
   let x0 = Infinity;
@@ -87,12 +180,8 @@ export function binDensity(
     if (cell.count === 0) continue;
     const t = rank.get(cell.count) ?? 0;
     const i = ((cell.y - y0) * width + (cell.x - x0)) * 4;
-    data[i] = hue[0];
-    data[i + 1] = hue[1];
-    data[i + 2] = hue[2];
-    // Faint at the low end so a sparse principal's ground still reads as ground, never opaque so
-    // the points stay legible over the densest bin.
-    data[i + 3] = Math.round(28 + t * 150);
+    // Faint at the low end and never opaque, so the points stay legible over the densest bin.
+    data[i + 3] = Math.round(28 + t * (BIN_ALPHA_MAX - 28));
     filled++;
   }
 
@@ -106,15 +195,17 @@ export function binDensity(
   };
 }
 
-/** Texels per tile in the filtered image — four gives a ramp of four steps across a cell edge. */
+/** Texels per tile in the filtered image. */
 export const DENSITY_SUPERSAMPLE = 4;
 
 /**
  * The binned image as a soft field: one padding cell around it so a halo can extend past an
  * edge tile, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
- * centres and box-blurred by one texel, alpha proportional to intensity.
+ * centres and box-blurred by one texel. Under a hue, alpha is proportional to intensity. Under a
+ * ramp, the intensity picks the colour and the alpha rises from nothing to opaque over the lower
+ * part of the range.
  */
-export function filterDensity(image: DensityImage, depth: number, hue: [number, number, number] = WASH_HUE): DensityImage {
+export function filterDensity(image: DensityImage, depth: number, paint: DensityPaint = {kind: 'hue', rgb: WASH_HUE.light}): DensityImage {
   const S = DENSITY_SUPERSAMPLE;
   const W = image.width + 2;
   const H = image.height + 2;
@@ -175,10 +266,19 @@ export function filterDensity(image: DensityImage, depth: number, hue: [number, 
       }
       const a = Math.round(sum / n);
       const i = (py * width + px) * 4;
-      data[i] = hue[0];
-      data[i + 1] = hue[1];
-      data[i + 2] = hue[2];
-      data[i + 3] = a;
+      if (paint.kind === 'hue') {
+        data[i] = paint.rgb[0];
+        data[i + 1] = paint.rgb[1];
+        data[i + 2] = paint.rgb[2];
+        data[i + 3] = a;
+      } else {
+        const t = Math.min(1, a / BIN_ALPHA_MAX);
+        const c = rampAt(paint.stops, t);
+        data[i] = c[0];
+        data[i + 1] = c[1];
+        data[i + 2] = c[2];
+        data[i + 3] = Math.round(255 * Math.min(1, t * 1.6));
+      }
       if (a > 0) filled++;
     }
   }

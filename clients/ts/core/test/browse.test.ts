@@ -2,8 +2,8 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
 
 /**
- * `POST /v1/artifacts/browse` (`highlight-and-hierarchy.md` §4) as this client speaks it: the
- * three forms, the decimal-string identifiers, and the two counts.
+ * `POST /v1/artifacts/browse` as this client speaks it: the three forms, the decimal-string
+ * identifiers, and the two counts.
  */
 
 function client(): TesseraClient {
@@ -17,6 +17,7 @@ const row = (id: string, masked: number, extra: Record<string, unknown> = {}) =>
   masked_count: masked,
   rung: 0,
   parent_ids: [],
+  child_count: 0,
   ...extra
 });
 
@@ -39,20 +40,19 @@ describe('browse', () => {
     const page = await client().browse('tok', {view: 's0', layer: 'mesh/descriptors'});
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, {body: string}];
     expect(url).toBe('http://v/v1/artifacts/browse');
-    // **`view` is required**, for the drill-down's reason: a masked count is an intersection in
-    // row space and row space is per view.
+    // `view` is required: a masked count is an intersection in row space, which is per view.
     expect(JSON.parse(init.body)).toEqual({view: 's0', layer: 'mesh/descriptors'});
-    // A `u64` that a JSON number would have rounded: the wire spells it, and this keeps it.
+    // A `u64` that a JSON number would round; the wire sends it as a string, and it is kept.
     expect(page.artifacts[0]!.tesseraId).toBe(18_064_038_920_082_622_571n);
     expect(page.artifacts[0]!.maskedCount).toBe(393_741n);
-    // No filter was sent, so there is no matched count — *there was no question*, not zero.
+    // No filter was sent, so there is no matched count, rather than zero.
     expect(page.artifacts[0]!.matchedCount).toBeNull();
     expect(page.parents).toEqual([]);
     expect(page.next).toBeNull();
   });
 
   it('sends the children form with the parent as a decimal string, and reads its parents back', async () => {
-    const fetchMock = answering({artifacts: [row('7', 4)], parents: [row('3', 90)], next: 'c2'});
+    const fetchMock = answering({artifacts: [row('7', 4)], parents: [row('3', 90, {child_count: 5})], next: 'c2'});
     const page = await client().browse('tok', {view: 's0', layer: 'l', parent: 3n, limit: 50, cursor: 'c1'});
     expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, {body: string}])[1].body)).toEqual({
       view: 's0',
@@ -61,7 +61,8 @@ describe('browse', () => {
       limit: 50,
       cursor: 'c1'
     });
-    expect(page.parents.map((p) => p.tesseraId)).toEqual([3n]);
+    expect(page.parents.map((p) => [p.tesseraId, p.childCount])).toEqual([[3n, 5]]);
+    expect(page.artifacts[0]!.childCount).toBe(0);
     expect(page.next).toBe('c2');
   });
 
@@ -74,8 +75,8 @@ describe('browse', () => {
       q: 'lymph',
       filters: {archive: {in: ['cs']}}
     });
-    // Zero is a value: existence and the masked count never move with the filter, so a row the
-    // filter admits nothing of is still served and still says what it holds.
+    // Zero is a value: existence and the masked count do not move with the filter, so a row the
+    // filter admits nothing of is still served.
     expect(page.artifacts[0]!.matchedCount).toBe(0n);
     expect(page.artifacts[0]!.maskedCount).toBe(100n);
   });

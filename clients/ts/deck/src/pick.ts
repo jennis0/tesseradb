@@ -1,12 +1,15 @@
 import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@tesseradb/client';
 
 /**
- * What a deck.gl pick on a `TesseraLayer` resolved to.
+ * What {@link resolvePick} found under the pointer, by `kind`:
  *
- * A miss and a broken pick are different failures and the host shows which: `index < 0` is deck
- * reporting nothing under the cursor, the ordinary case; a hit whose sublayer carries no identity
- * array, or an index past the end of one, is a defect in the layer and says so rather than
- * reading as a miss for a whole session (found that way once in the instrument).
+ * - `mark`: an item's mark. `id` is the item's `tesseraId`. `worldXY` is the mark's position in
+ *   world units, or the pointer's where the sublayer holds no positions, or `null` with neither.
+ * - `artifact`: an artifact's name label. `id` is the artifact's `tesseraId`.
+ * - `miss`: nothing under the pointer.
+ * - `broken`: a hit on a sublayer with no id array, or at an `index` past its end. This is a defect
+ *   in the layer, reported apart from a miss so the host can show it. `layer` is the sublayer's
+ *   id, `hasIds` whether it has an id array and `idCount` that array's length.
  */
 export type Picked =
   | {kind: 'mark'; id: bigint; worldXY: [number, number] | null}
@@ -14,25 +17,29 @@ export type Picked =
   | {kind: 'miss'}
   | {kind: 'broken'; index: number; layer: string | null; hasIds: boolean; idCount: number};
 
-/** The slice of deck's `PickingInfo` this needs — typed narrowly so a test can build one. */
+/** The fields of deck.gl's `PickingInfo` that {@link resolvePick} reads. A `PickingInfo` can be passed as it is. */
 export type PickInfo = {
+  /** The index of the hit within the sublayer's data, or -1 for no hit. */
   index: number;
+  /** The layer deck reports, read when `sourceLayer` is absent. */
   layer?: {id: string; props: object} | null;
+  /** The sublayer that drew the hit. */
   sourceLayer?: {id: string; props: object} | null;
+  /** The pointer's position in world units, used as a mark's `worldXY` when the sublayer holds no positions. */
   coordinate?: number[] | null;
 };
 
+/**
+ * Resolves a deck.gl pick on a {@link TesseraLayer} to the item's mark or the artifact's name under
+ * the pointer. Pass the pick info deck gives `onClick` or `onHover`. Only marks and artifact names
+ * are pickable, so a pointer over an outline, a count or the wash away from any mark is a `miss`.
+ */
 export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
   const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; tesseraPositions?: Float32Array; artifactIds?: bigint[]};
-  // An artifact's label answered — a different kind of thing, on its own route. `artifactIds` is a
-  // **row-to-artifact map**, not an index into the served set: a wrapped name is several text rows
-  // of one label, and every one of them carries the artifact's own identifier.
-  //
-  // **A contour does not come through here.** The outline layer draws the hovered and the opened
-  // artifact and is not pickable; what the pointer is over is resolved against the frontier's
-  // served shapes in JS (`hoverAt`), for a click as for a hover.
+  // A label hit. `artifactIds` maps each text row to its artifact. Contours are not pickable;
+  // `hoverAt` resolves them in JS.
   if (props.artifactIds) {
     const id = props.artifactIds[info.index];
     if (id === undefined) {
@@ -44,10 +51,8 @@ export function resolvePick(info: PickInfo): Picked {
   if (!ids || info.index >= ids.length) {
     return {kind: 'broken', index: info.index, layer: layer?.id ?? null, hasIds: ids !== undefined, idCount: ids?.length ?? 0};
   }
-  // **The mark's own position, not the pointer's.** `info.coordinate` is where the cursor was,
-  // which is up to a pick radius from the mark it hit — a fixed *world* offset, so a marker drawn
-  // there separates from its point by that offset times every further zoom. The positions ride
-  // with the ids on the same sublayer and are the buffer deck drew from, so index `i` is exact.
+  // The mark's own position from the buffer deck drew. `info.coordinate` is the cursor, up to a
+  // pick radius away, and a marker placed there drifts from its point as the camera zooms in.
   const pos = props.tesseraPositions;
   const worldXY: [number, number] | null =
     pos && info.index * 2 + 1 < pos.length
@@ -59,10 +64,10 @@ export function resolvePick(info: PickInfo): Picked {
 }
 
 /**
- * The served artifact a mark is a member of, for a hover: the mark's ordinal for the first layer
- * on, resolved up the session table to the served set at `level` (the deepest served when
- * undefined). Null where the band carries no column for the layer, the mark is under no
- * artifact, or the walk fails — exactly the marks that draw neutral under cluster colour.
+ * The served artifact mark `i` belongs to, for a hover: its ordinal on the first layer on,
+ * resolved up the session table to the served set at `level` (the deepest served when undefined).
+ * Null for the marks that draw neutral under cluster colour: no column for the layer, no
+ * artifact, or no served ancestor.
  */
 export function artifactOfMark(band: Band, i: number, artifacts: ArtifactsProjection, level?: number): bigint | null {
   const layer = artifacts.layers[0];

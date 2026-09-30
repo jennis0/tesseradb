@@ -2,6 +2,7 @@
 name = "tessera-engine"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [features]
 default = []
@@ -23,6 +24,9 @@ fault-injection = ["tessera-lifecycle/fault-injection"]
 [dependencies]
 tessera-types = { path = "../tessera-types" }
 tessera-authz = { path = "../tessera-authz" }
+# The single-flight cache behind the row-projection, region and occupancy caches. Shared with
+# tessera-authz, which sits below this crate.
+tessera-cache = { path = "../tessera-cache" }
 tessera-store = { path = "../tessera-store" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
@@ -61,6 +65,8 @@ rand = { workspace = true }
 # overlay grows at runtime — so the log line has to be emitted from this crate. `tessera-store`
 # already carries the same workspace-pinned dependency for the same reason.
 tracing = { workspace = true }
+chacha20poly1305 = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency: the only way this crate's integration tests can enable a feature of the
@@ -85,11 +91,15 @@ tessera-build = { path = "../tessera-build" }
 # dependency graph. It is a test-only edge, exactly as `tessera-build` above is.
 tessera-corpus = { path = "../tessera-corpus" }
 parquet = { workspace = true }
+proptest = { workspace = true }
 criterion = "0.5"
-delaunator = "1.1.0"
 
 [[bench]]
 name = "viewport"
+harness = false
+
+[[bench]]
+name = "render_gather"
 harness = false
 
 # The two-axis sweep drives `Engine::set_serial_fallback_max_rows_for_test`, which does not exist

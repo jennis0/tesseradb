@@ -88,7 +88,7 @@
 //! [`Wal::is_poisoned`], because until the repair succeeds nothing above the last durable offset
 //! may be treated as written.
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -96,51 +96,9 @@ use serde::{Deserialize, Serialize};
 use tessera_types::layer::{EntityRun, LayerDeclaration, ReservedRuns};
 use tessera_types::EntityId;
 
-/// One declared-scalar value carried by a WAL row.
-///
-/// Mirrors `tessera_spatial::tiler::ScalarValue`'s three kinds. **Duplicated deliberately** — a
-/// reader would otherwise "fix" it: this crate's dependencies are `tessera-types`, `postcard` and
-/// `crc32fast` alone (no `tessera-spatial`), so the WAL carries its own copy of the tiny, stable
-/// shape. Keep the two enums in lockstep if either changes.
-///
-/// On-disk format: postcard encodes enum variants by declaration index, so reordering this enum
-/// changes what every stored record means. That is a `WAL_VERSION` bump and a recreated log, not
-/// a reason to keep a bad order: no deployment holds a WAL (decision 0048), so the order is chosen
-/// for the reader and the version check turns a stale local log into a refusal.
-///
-/// **In width order, matching `tessera_spatial::ScalarValue` variant for variant.** An earlier
-/// revision appended the four narrow widths after `Utf8` to preserve the existing discriminants —
-/// a compatibility cost paid to nobody, which left the two mirrored enums agreeing on the set and
-/// disagreeing on the order, and a `to_scalar_value` whose correctness depended on a reader
-/// noticing that.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum WalScalar {
-    Bool(bool),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    /// Microseconds since the Unix epoch — an `i64` whose unit the declaration fixes.
-    TimestampUs(i64),
-    Utf8(String),
-    /// **No value at all** — `tessera_spatial::ScalarValue::Null`'s mirror, and the reason this
-    /// enum has one is that the ingest plane needs to say what the build's source file can already
-    /// say.
-    ///
-    /// A category never travels as this: its absence is the reserved code 0, in band, because a
-    /// vocabulary keeps 0 out of its value space. Every other family has no spare value to spend —
-    /// every bit pattern of a number is a legal number, and the empty string is one a corpus may
-    /// hold — so absence has to travel beside the value rather than inside it. Without this variant
-    /// an item ingested with no score is stored as `0` and marked present, and then matches a range
-    /// containing zero ([decision 0064](../../../docs/decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md)).
-    Null,
-}
+/// One declared-scalar value carried by a WAL row: the value type a build writes, under the name the
+/// log's records use.
+pub use tessera_types::scalar::ScalarValue as WalScalar;
 
 /// One item within an `IngestBatch` record.
 ///
@@ -152,12 +110,6 @@ pub enum WalScalar {
 /// ordinals fixed by the bundle's (immutable) dictionary extents, so a term coined between
 /// builds has no durable ID yet. Descriptors resolve through the bundle dictionary plus a
 /// deterministic in-memory extension interned in replay order at load time.
-///
-/// `external_id` is **optional** (contracts §3.4 r6): a caller may ingest an item with no
-/// external id at all, in which case it gets no sidecar entry and is addressable only by its
-/// `tessera_id` — a pure function of `(key, shard_id, entity_id)`, so nothing needs to be stored
-/// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
-/// never be treated as "an external id happens to be empty".
 ///
 /// `view` names the row space the row's future row belongs to. It is durable rather than
 /// re-derived because a flush segment covers a contiguous entity range only *within one view*:
@@ -186,7 +138,6 @@ pub enum WalScalar {
 /// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
-    pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
     /// **This row joined an existing entity to a second view** (`views.md` §4): geometry, and
@@ -220,10 +171,11 @@ pub struct WalRow {
     pub scoped: Vec<WalScalar>,
 }
 
-/// The disposition change carried by a [`WalRecord::ChangeByEntity`] record. The two removal rules
-/// (write-path §5.4; ruled 2026-08-03) are distinct and must not be conflated: suppressions retire
-/// only on `Unsuppress` (never touching postings — Rule S); deletions retire at the compaction fold
-/// that executes them (Rule F).
+/// The disposition change carried by each entry of a [`WalRecord::ChangeBatch`] record. The two
+/// removal rules (write-path §5.4) are distinct and must not be conflated: a suppression retires on
+/// `Unsuppress`, or with an entity an edit moved its item away from at the fold that removes its
+/// rows, and never touches postings (Rule S); a deletion retires at the compaction fold that
+/// executes it (Rule F). A fold logs the suppressions it retires as `Unsuppress` entries.
 ///
 /// A fourth variant, `Predicate`, was deleted with `WAL_VERSION` 5: decision 0047 withdrew the op
 /// at the boundary (an edit is a delete plus a re-ingest) and decision 0048 deleted the machinery
@@ -242,11 +194,11 @@ pub enum ChangeOp {
 ///
 /// Two shape decisions here are not free choices, and both are load-bearing for rotation.
 ///
-/// **Keyed by [`EntityId`], never by external id.** An external-id-keyed snapshot would re-resolve
-/// each id at replay, and an entity deleted before it was ever flushed has no row and may have no
-/// extent entry — so replay could not resolve it and the node would refuse to open. A snapshot is
-/// state that was already resolved once; resolving it again can only lose. It is the same reason
-/// [`WalRecord::ChangeByEntity`] is keyed by entity, arrived at from the other end.
+/// **Keyed by [`EntityId`], never by an identifier a caller holds.** A snapshot keyed by one would
+/// re-resolve it at replay, and an entity deleted before it was ever flushed may resolve to
+/// nothing — so the node would refuse to open. A snapshot is state that was already resolved once;
+/// resolving it again can only lose. It is the same reason [`WalRecord::ChangeBatch`] is keyed by
+/// entity, arrived at from the other end.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -292,10 +244,18 @@ pub enum WalRecord {
     /// An accepted `/control/ingest` batch. `body_hash` is the SHA-256 of the raw request body
     /// (idempotency key material — a retried `batch_id` must match it, or the request is a
     /// contract violation, never a silent overwrite).
+    ///
+    /// `rows` holds the rows the batch wrote: each item it created and each view it added an
+    /// item to in place. `edits` holds each item the batch moved to a new entity, with everything
+    /// the item carries, so replay reads nothing from stored files. `receipt` holds one entry per
+    /// row of the request, in request order, including the rows that changed nothing and wrote no
+    /// row, so a replay of the batch id answers the `tessera_id`s the first acceptance did.
     IngestBatch {
         batch_id: String,
         body_hash: [u8; 32],
         rows: Vec<WalRow>,
+        edits: Vec<WalEdit>,
+        receipt: Vec<RowReceipt>,
     },
     /// The whole live overlay, written so that the change records it was accumulated from can be
     /// deleted.
@@ -312,24 +272,16 @@ pub enum WalRecord {
     /// fails closed only if every earlier link survives.
     ///
     /// Under replay it is an ordinary record in position: it is applied where it occurs, and a
-    /// `ChangeByEntity` earlier in the same file still applies before it. See [`crate::replay`].
+    /// `ChangeBatch` earlier in the same file still applies before it. See [`crate::Replay`].
     OverlaySnapshot { entries: Vec<OverlaySnapshotEntry> },
-    /// An accepted `/control/changes` entry, addressed by **entity id**.
+    /// An accepted `/control/changes` request: every change it carries, in request order,
+    /// addressed by entity id. One record per request, so the request is durable whole or not at
+    /// all.
     ///
-    /// **Why the entity and not the identifier the caller supplied.** A `tessera_id` is a keyed
-    /// permutation of entity space, so a record carrying one would resolve under whatever key the
-    /// bundle holds at replay — a rotation would silently redirect every such deny to a different
-    /// entity. Inverting once, at admission, and persisting the result is what makes replay
-    /// identical across a rotation. It is the same reason [`OverlaySnapshotEntry`] is keyed by
-    /// entity, arrived at from the other end.
-    ///
-    /// It also closes a hole an external-id-keyed record cannot: contracts §3.4 r6 makes an
-    /// external id optional at ingest, and an item that arrived without one would be addressable by
-    /// nothing — not deletable, not suppressible, at all. The external-id-keyed `Change` variant
-    /// this one was added alongside was deleted with `WAL_VERSION` 5 (decision 0048), and replay
-    /// stopped resolving external ids at all: the resolution now happens once, in the handler, at
-    /// admission.
-    ChangeByEntity { entity_id: EntityId, op: ChangeOp },
+    /// Keyed by entity rather than by the identifier the caller supplied: the handler resolves a
+    /// `tessera_id` or a unique value once, at admission, and replay applies what was decided
+    /// without resolving anything.
+    ChangeBatch { changes: Vec<(EntityId, ChangeOp)> },
     /// An accepted annotation-layer registration.
     ///
     /// **This record is what makes the row-less mark durable**, and that is not incidental to it.
@@ -357,6 +309,9 @@ pub enum WalRecord {
         /// The reserved runs backing each level, in level order. A layer declaring no levels has
         /// exactly one entry — its level 0.
         runs: Vec<ReservedRuns>,
+        /// The registry version this registration was given. Replay raises the counter to it
+        /// rather than adding one, so a record the manifest already counts is not counted twice.
+        version: u64,
     },
     /// A view of a group **created while the service runs** (`views.md` §3.2), carrying the whole
     /// roster record: the key, the ordinal it was given, its gate and its typed metadata.
@@ -386,22 +341,24 @@ pub enum WalRecord {
     /// rotation: a death that did not say which incarnation died could not be told apart from a
     /// death of the one created after it.
     ///
-    /// **This record removes no entity.** An entity whose only view was dropped still exists, with
-    /// its label, its attributes and its memberships, in no view; `delete_dangling` submits
-    /// ordinary deletions through the deny lane and is not a second retirement route
-    /// (`views.md` §3.4, write-path §5.4).
+    /// **It deletes the items it leaves in no view**, in the same record as the drop, so the log
+    /// never holds a drop without its deletions. Each is an ordinary deletion: replay applies it to
+    /// the overlay as a `ChangeBatch` delete would be, and the fold that executes it retires it.
     ViewDrop {
         view: tessera_types::view::DeadIncarnation,
+        /// The entities the drop left with a row in no view, flushed or buffered.
+        deleted: Vec<EntityId>,
     },
     /// An accepted layer drop. **The name is tombstoned, not freed**: it is refused on recreation
     /// for ever, because bookmarks, edges and suppressions all travel by it and a name that once
     /// meant something must not come to mean something else.
     ///
-    /// The ids do not come back either — the allocator is monotone with no free list
-    /// ([decision 0072](../../../docs/decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)
-    /// is settled and unbuilt). Reclaiming them is that decision's work, and its condition is that
-    /// the membership-reconciliation clause ships with it.
-    LayerDrop { name: String },
+    /// The ids do not come back either: the allocator frees no row-less id.
+    LayerDrop {
+        name: String,
+        /// The registry version this drop moved the counter to, on `LayerCreate::version`'s rule.
+        version: u64,
+    },
     /// A batch of artifacts published into one level of one layer.
     ///
     /// **The WAL is currently the only durable home for a membership**, which makes this record
@@ -470,25 +427,6 @@ pub enum WalRecord {
         ordinal: u32,
         part: ArtifactPart,
     },
-    /// An accepted `POST /control/values` batch (`ingest.md` §1.4): attribute values for entities
-    /// that exist, one row per entity, applied per cell under the fill rule. `batch_id` and
-    /// `body_hash` are the idempotency key, as [`WalRecord::IngestBatch`]'s are. A layer column on
-    /// a values row is not carried here: it is a membership join and travels as an
-    /// [`WalRecord::ArtifactGrow`] in the same commit.
-    ValuesBatch {
-        batch_id: String,
-        body_hash: [u8; 32],
-        /// The view the batch's fills belong to: the `x-tessera-view` header where the caller
-        /// gave one, and the deployment's only view otherwise. It decides which flush pass writes
-        /// the fills and which view's column of a group-scoped family a scoped cell addresses, so
-        /// it is recorded for every batch and not only for one carrying a scoped column
-        /// (`ingest.md` §1.4). `None` is a record no writer produces.
-        view: Option<String>,
-        /// The columns the batch carries, by declared name, in the batch's own order. Every row's
-        /// values are positional to this list, so a batch may carry any subset of the schema.
-        columns: Vec<String>,
-        rows: Vec<ValuesRow>,
-    },
     /// An attribute column declared while the service runs (`PUT /control/attributes`,
     /// `ingest.md` §1.3, §6.3). The segments manifest is the declaration's durable home; this
     /// record is what puts it back between a publication and a restart. Replay appends the column
@@ -526,6 +464,34 @@ pub enum WalRecord {
     PlainViewCreate {
         declaration: Box<PlainViewDeclaration>,
     },
+    /// `unique` declared or removed on a column that exists (`PUT /control/attributes`). A
+    /// declaration lists the index runs built over the values flushed when it was checked, which
+    /// are durable before this record is; replay adopts them, each checked against its digest,
+    /// and derives the index's entries for rows not yet flushed from the buffer. A removal lists
+    /// none, and replay drops the index.
+    UniqueDeclare {
+        attribute: String,
+        unique: bool,
+        /// Written by one sort, so their key ranges are disjoint.
+        base: Vec<DeclaredRun>,
+        /// Written by later rounds over values flushed while the first ran.
+        live: Vec<DeclaredRun>,
+    },
+}
+
+/// One index run a [`WalRecord::UniqueDeclare`] adopts.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredRun {
+    /// Prefix-relative.
+    pub path: String,
+    /// In lower-case hex, as a manifest's file digest records it.
+    pub sha256: String,
+    pub size: u64,
+    /// The run's smallest and largest key, zero-extended, in lower-case hex.
+    pub first_key: String,
+    pub last_key: String,
 }
 
 /// A plain view as `PUT /control/views/{name}` declares it (`ingest.md` §1.3): the fields a
@@ -566,18 +532,116 @@ pub fn unbuilt_track(record: &WalRecord) -> Option<(&'static str, &'static str)>
         // Listed rather than caught by a wildcard, so that a variant added later is a decision
         // here and not a default to "built".
         WalRecord::AttributeDeclare { .. }
-        | WalRecord::ValuesBatch { .. }
         | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ViewGroupCreate { .. }
         | WalRecord::PlainViewCreate { .. }
         | WalRecord::VocabularyMint { .. }
         | WalRecord::IngestBatch { .. }
         | WalRecord::OverlaySnapshot { .. }
-        | WalRecord::ChangeByEntity { .. }
+        | WalRecord::ChangeBatch { .. }
         | WalRecord::LayerCreate { .. }
         | WalRecord::ViewCreate { .. }
         | WalRecord::ViewDrop { .. }
         | WalRecord::LayerDrop { .. }
+        | WalRecord::ArtifactPublish { .. }
+        | WalRecord::ArtifactGrow { .. }
+        | WalRecord::ArtifactFill { .. }
+        | WalRecord::UniqueDeclare { .. } => None,
+    }
+}
+
+/// What a record carries of the request that produced it: the id the client chose, the hash of the
+/// bytes it sent, and what the request did to each of its rows.
+///
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchIdentity<'a> {
+    pub batch_id: &'a str,
+    pub body_hash: [u8; 32],
+    pub receipt: &'a [RowReceipt],
+}
+
+/// What an accepted ingest batch did with one of its rows, and the `tessera_id` of the item the
+/// row named or created: none for a refused row.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowReceipt {
+    pub outcome: RowOutcome,
+    pub tessera_id: Option<u64>,
+    /// The row created an item whose label resolves to more terms than the plugin declares an
+    /// item carries. It is stored all the same.
+    pub over_bound: bool,
+}
+
+/// What an accepted ingest row did to the item it named.
+///
+/// On-disk format: variants are positional under postcard — see [`WalRecord`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RowOutcome {
+    /// The row named no item and created one.
+    Created,
+    /// The row added an existing item to the batch's view, and changed nothing else.
+    Added,
+    /// The row named an item and every value it carried was the one stored.
+    Unchanged,
+    /// The row changed an item it named, which moved to a new entity.
+    Edited,
+    /// The identity rule refused the row, and the batch applied its other rows.
+    Refused(crate::resolve::Reason),
+}
+
+/// One item an ingest batch moved to a new entity: the old entity is deleted and the new one
+/// holds everything the item carries, in the one record.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WalEdit {
+    /// The entity the item leaves. This record deletes it.
+    pub old: EntityId,
+    /// The item's number: the entity it was first given, which its `tessera_id` is taken from.
+    pub number: EntityId,
+    /// The old entity was suppressed, so the new one is.
+    pub suppressed: bool,
+    /// The item's rows on its new entity, every one carrying that entity: the first carries its
+    /// label and every declared value, and each other is a join placing it in one more view.
+    pub rows: Vec<WalRow>,
+}
+
+/// The batch a record was written for, if it was written for one — **the one rule the accepted-batch
+/// index is built by**, at restart and at every accept.
+///
+/// The index that answers `x-tessera-batch-id` is a cache of this log: what it holds after a
+/// restart is whatever the retained members say, so anything that decides "does this record carry
+/// a batch id" twice can forget a kind of batch on one of the two paths and not the other.
+///
+/// **A `match` with no wildcard arm**, on [`unbuilt_track`]'s rule: a record kind added later is a
+/// decision taken here, and the compiler asks for it rather than a default answering "carries no
+/// batch" for something that does.
+pub fn batch_identity(record: &WalRecord) -> Option<BatchIdentity<'_>> {
+    match record {
+        WalRecord::IngestBatch {
+            batch_id,
+            body_hash,
+            receipt,
+            ..
+        } => Some(BatchIdentity {
+            batch_id,
+            body_hash: *body_hash,
+            receipt,
+        }),
+        // Listed rather than caught by a wildcard, for this function's whole reason.
+        WalRecord::VocabularyMint { .. }
+        | WalRecord::OverlaySnapshot { .. }
+        | WalRecord::ChangeBatch { .. }
+        | WalRecord::LayerCreate { .. }
+        | WalRecord::LayerDrop { .. }
+        | WalRecord::ViewCreate { .. }
+        | WalRecord::ViewDrop { .. }
+        | WalRecord::PlainViewCreate { .. }
+        | WalRecord::ViewGroupCreate { .. }
+        | WalRecord::AttributeDeclare { .. }
+        | WalRecord::UniqueDeclare { .. }
+        | WalRecord::VocabularyDeclare { .. }
         | WalRecord::ArtifactPublish { .. }
         | WalRecord::ArtifactGrow { .. }
         | WalRecord::ArtifactFill { .. } => None,
@@ -648,17 +712,8 @@ pub enum ArtifactPart {
         values: Vec<String>,
         digest: [u8; 32],
     },
-}
-
-/// One row of a [`WalRecord::ValuesBatch`]: the entity the values fill, resolved at admission from
-/// the external id or the `tessera_id` the caller named (I10), and its values positional to the
-/// batch's `columns`.
-///
-/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValuesRow {
-    pub entity_id: EntityId,
-    pub values: Vec<WalScalar>,
+    /// The access label, as descriptors in [`crate::membership::canonical_access`]'s order.
+    Access(Vec<Vec<u8>>),
 }
 
 /// An attribute column as `PUT /control/attributes` declares it: the `[[attribute]]` block minus
@@ -670,10 +725,9 @@ pub struct ValuesRow {
 pub struct AttributeDeclaration {
     pub name: String,
     pub title: Option<String>,
-    /// The declared type by its contracts §2.2 name (`u32`, `f64`, `keyword`, `text`, …). Carried
-    /// as the name because the engine's type lives in `tessera-spatial`, which this crate does
-    /// not see; the door parses it and refuses a name outside the set before a record is
-    /// prepared, so a record never carries one.
+    /// The declared type by its contracts §2.2 name (`u32`, `f64`, `keyword`, `text`, …). The door
+    /// parses it and refuses a name outside the set before a record is prepared, so a record never
+    /// carries one.
     pub ty: String,
     /// The vocabulary a category column draws its codes from; `None` for a plain column.
     pub vocabulary: Option<String>,
@@ -684,6 +738,8 @@ pub struct AttributeDeclaration {
     pub render: bool,
     /// Entity-scoped, or a family per view of a group (`views.md` §5).
     pub scope: tessera_types::layer::LayerScope,
+    /// A column declared `unique` starts with an empty index: it holds no value yet.
+    pub unique: bool,
 }
 
 /// A vocabulary as `PUT /control/vocabularies/{name}` declares it: the `[[vocabulary]]` block minus
@@ -770,6 +826,9 @@ pub struct PublishedArtifact {
     /// artifact in the view its publication was acked in, which is what makes the identity
     /// survive a restart.
     pub view: Option<String>,
+    /// The incarnation of `view` the artifact was published under, and `DECLARED_INCARNATION`
+    /// where there is no view. A drop of the view retires the artifact.
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
@@ -809,6 +868,9 @@ pub struct PublishedArtifact {
     /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
     /// node's verdict is its own (decision 0080) — so there is no target entity to test.
     pub parents: Vec<ParentRef>,
+    /// The artifact's own access label, as descriptors in
+    /// [`crate::membership::canonical_access`]'s order. Empty is no label.
+    pub access: Vec<Vec<u8>>,
 }
 
 /// One resolved parent of an artifact, inside its own layer.
@@ -929,7 +991,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
 /// own reclaim bound), and deleting them shifts every later discriminant, which is exactly what
 /// this version check exists to refuse. Version 5 deleted the `Change` variant, `ChangeOp`'s
-/// `Predicate` and the `descriptors` field of `ChangeByEntity` and `OverlaySnapshotEntry`
+/// `Predicate` and the `descriptors` field of the per-item change record and `OverlaySnapshotEntry`
 /// (decision 0048): `Change` was written by nothing — every accepted change is admitted against an
 /// entity — and the descriptors had no consumer once the evaluate store went. That shifts a variant
 /// index, drops an enum discriminant and drops a struct field, each of which postcard would decode
@@ -983,7 +1045,24 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // is positional, so a 20 growth read at 21 takes the next record's leading bytes for the leaving
 // set it does not carry, and a 20 publication takes the members' length for the view's; a log at
 // 20 is refused.
-const WAL_VERSION: u16 = 21;
+// **22**: `PublishedArtifact` gained `access`, an artifact's own access label, and `ArtifactPart`
+// gained `Access`. A log at 21 is refused.
+// **23**: `LayerCreate` and `LayerDrop` carry the registry version each was given. A log at 22 is
+// refused.
+// **24**: `PublishedArtifact` gained `incarnation`, the incarnation of its view it was published
+// under. A log at 23 is refused.
+// **25**: every access label and declared word is stored trimmed. A log at 24 is refused.
+// **26**: `AttributeDeclaration` gained `unique`, and the variant table gained `UniqueDeclare`. A
+// log at 25 is refused.
+// **27**: `IngestBatch` gained `receipt`, what each request row became, and `ChangeBatch`, one
+// request's changes whole, replaced `ChangeByEntity`. A log at 26 is refused.
+// **28**: `IngestBatch` gained `edits`, the items it moved to new entities, `RowOutcome` gained
+// `Edited`, and `ValuesBatch` left the variant table. A log at 27 is refused.
+// **29**: `ViewDrop` gained `deleted`, the items the drop left in no view. A log at 28 is refused.
+// **30**: `WalRow` lost `external_id`. A log at 29 is refused.
+// **31**: `RowOutcome` gained `Refused`, and `RowReceipt::tessera_id` is optional, absent for a
+// refused row. A log at 30 is refused.
+const WAL_VERSION: u16 = 31;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1150,6 +1229,10 @@ impl WalFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SealedSpan {
     number: u64,
+    /// The sequence-global position of this member's first record. Carried so that the log can say
+    /// where its retained records begin ([`Wal::retained_from`]), which is what an in-memory index
+    /// of the log's contents is trimmed against.
+    start_pos: u64,
     end_pos: u64,
 }
 
@@ -1167,8 +1250,6 @@ pub struct Wal {
     /// immediately (I3) rather than risk `len` disagreeing with the file, or building on bytes
     /// that may not exist.
     state: WalState,
-    /// Where each record `open` replayed sits in the sequence — see [`Wal::replayed_positions`].
-    replayed_positions: Vec<u64>,
     /// The pause sites armed on this handle. **The one `#[cfg]` inside the durability primitive**,
     /// and it is here because the ordering it holds is decided here: see
     /// [`Wal::sync_data`] and [`crate::faults::PauseSite::BeforeSyncData`]. Every other fault
@@ -1258,10 +1339,10 @@ fn resolve_sync_point(sync_path: &Path, wal_len: u64) -> Result<u64> {
 
 /// Reads up to `buf.len()` bytes, stopping at EOF. Returns the number of bytes actually read,
 /// which is less than `buf.len()` iff EOF was reached before the buffer was filled.
-fn read_up_to(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
-        let n = file.read(&mut buf[total..])?;
+        let n = reader.read(&mut buf[total..])?;
         if n == 0 {
             break;
         }
@@ -1306,75 +1387,198 @@ fn check_header(file: &mut File, expected_number: u64) -> Result<(u64, u64)> {
     Ok((number, base_pos))
 }
 
-/// Replays the log's **durable prefix** — the records lying wholly below `sync_point` — and
-/// discards whatever follows it. Returns the records collected and the offset replay stopped at,
-/// which is the file's logical length once the tail has been truncated away.
+/// Reads the frame starting at file offset `offset`, whose durable region ends at `end`, into
+/// `body`, checking its length and checksum. Returns the frame's length.
 ///
-/// Every failure inside the prefix is corruption of acknowledged state and returns
-/// [`WalError::WalCorruption`]; see the module doc for why the answer is uniform here and uniform
-/// the other way past the boundary.
-fn replay(file: &mut File, sync_point: u64) -> Result<(Vec<(u64, WalRecord)>, u64)> {
+/// Every failure is [`WalError::WalCorruption`]: the frame lies below a durable boundary, so bytes
+/// that will not read are damage to acknowledged state. See the module doc for why the answer is
+/// uniform here and uniform the other way past the boundary.
+fn read_frame(reader: &mut impl Read, offset: u64, end: u64, body: &mut Vec<u8>) -> Result<u64> {
+    let mut len_buf = [0u8; 4];
+    if read_up_to(reader, &mut len_buf)? < 4 {
+        // End of file before the durable offset was reached: the log is *shorter* than what
+        // the sidecar says was made durable (C1). No record is damaged, and that is exactly
+        // what makes it dangerous — the acked bytes are simply gone.
+        return Err(WalError::WalCorruption);
+    }
+    let body_len = u32::from_le_bytes(len_buf) as u64;
+
+    // Bound the claimed frame against what the durable prefix can actually hold, before
+    // allocating for it. Two things at once: a corrupted length prefix (e.g. a stray
+    // 0xFFFFFFFF) never becomes a multi-gigabyte allocation attempt (I1), and a record that
+    // would straddle the boundary — starting inside the prefix, ending past it — is refused
+    // here rather than being read out of the undurable region. Both are failures below the
+    // sync point, so both fail closed.
+    let framed = 4 + body_len + 4;
+    if framed > end.saturating_sub(offset) {
+        return Err(WalError::WalCorruption);
+    }
+
+    body.clear();
+    body.resize(body_len as usize, 0);
+    if (read_up_to(reader, body)? as u64) < body_len {
+        return Err(WalError::WalCorruption);
+    }
+
+    let mut crc_buf = [0u8; 4];
+    if read_up_to(reader, &mut crc_buf)? < 4 {
+        return Err(WalError::WalCorruption);
+    }
+    if crc32fast::hash(body) != u32::from_le_bytes(crc_buf) {
+        return Err(WalError::WalCorruption);
+    }
+    Ok(framed)
+}
+
+/// Decodes a frame's body.
+///
+/// Framing + CRC alone cannot catch every corruption: an all-zero region (e.g. sparse-file
+/// zero-fill, or a hole left by a crash mid-write with no CRC ever written) has `body_len == 0`
+/// and `crc32fast::hash(&[]) == 0`, which passes both checks trivially. `postcard::from_bytes` is
+/// the backstop — an empty (or otherwise all-zero) byte string cannot select any `WalRecord`
+/// variant, so the decode fails and the record fails closed like any other damaged one.
+fn decode(body: &[u8]) -> Result<WalRecord> {
+    postcard::from_bytes(body).map_err(|_| WalError::WalCorruption)
+}
+
+/// The variant index postcard writes at the head of every `IngestBatch` body, read off an encoded
+/// one so it follows the enum's order.
+fn ingest_batch_tag() -> u32 {
+    static TAG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *TAG.get_or_init(|| {
+        let empty = WalRecord::IngestBatch {
+            batch_id: String::new(),
+            body_hash: [0; 32],
+            rows: Vec::new(),
+            edits: Vec::new(),
+            receipt: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&empty).expect("a record encodes");
+        postcard::take_from_bytes::<u32>(&bytes)
+            .expect("a body starts with its variant index")
+            .0
+    })
+}
+
+/// The read buffer for a member's records: a pass over the log costs a read call per megabyte,
+/// where an unbuffered one costs three per record.
+const READ_BUFFER: usize = 1 << 20;
+
+/// Checks the member's **durable prefix** — every record lying wholly below `sync_point` frames,
+/// checksums and decodes — and discards whatever follows it. Returns the offset the prefix ends
+/// at, which is the file's logical length once the tail has been truncated away. Each record is
+/// dropped as soon as it has decoded.
+fn check_prefix(file: &mut File, sync_point: u64) -> Result<u64> {
     let total_len = file.metadata()?.len();
     file.seek(SeekFrom::Start(HEADER_LEN))?;
-    let mut records = Vec::new();
-    let mut pos: u64 = HEADER_LEN;
-
-    while pos < sync_point {
-        let mut len_buf = [0u8; 4];
-        if read_up_to(file, &mut len_buf)? < 4 {
-            // End of file before the durable offset was reached: the log is *shorter* than what
-            // the sidecar says was made durable (C1). No record is damaged, and that is exactly
-            // what makes it dangerous — the acked bytes are simply gone.
-            return Err(WalError::WalCorruption);
+    let mut offset: u64 = HEADER_LEN;
+    {
+        let mut reader = BufReader::with_capacity(READ_BUFFER, &mut *file);
+        let mut body = Vec::new();
+        while offset < sync_point {
+            offset += read_frame(&mut reader, offset, sync_point, &mut body)?;
+            decode(&body)?;
         }
-        let body_len = u32::from_le_bytes(len_buf) as u64;
-
-        // Bound the claimed frame against what the durable prefix can actually hold, before
-        // allocating for it. Two things at once: a corrupted length prefix (e.g. a stray
-        // 0xFFFFFFFF) never becomes a multi-gigabyte allocation attempt (I1), and a record that
-        // would straddle the boundary — starting inside the prefix, ending past it — is refused
-        // here rather than being read out of the undurable region. Both are failures below the
-        // sync point, so both fail closed.
-        let framed = 4 + body_len + 4;
-        if framed > sync_point.saturating_sub(pos) {
-            return Err(WalError::WalCorruption);
-        }
-
-        let mut body = vec![0u8; body_len as usize];
-        if (read_up_to(file, &mut body)? as u64) < body_len {
-            return Err(WalError::WalCorruption);
-        }
-
-        let mut crc_buf = [0u8; 4];
-        if read_up_to(file, &mut crc_buf)? < 4 {
-            return Err(WalError::WalCorruption);
-        }
-        if crc32fast::hash(&body) != u32::from_le_bytes(crc_buf) {
-            return Err(WalError::WalCorruption);
-        }
-
-        // Framing + CRC alone cannot catch every corruption: an all-zero region (e.g. sparse-file
-        // zero-fill, or a hole left by a crash mid-write with no CRC ever written) has
-        // `body_len == 0` and `crc32fast::hash(&[]) == 0`, which passes both checks trivially.
-        // `postcard::from_bytes` is the backstop — an empty (or otherwise all-zero) byte string
-        // cannot select any `WalRecord` variant, so the decode fails and the record fails closed
-        // like any other damaged one.
-        let record: WalRecord = postcard::from_bytes(&body).map_err(|_| WalError::WalCorruption)?;
-
-        records.push((pos, record));
-        pos += framed;
     }
 
     // Nothing past here was ever acknowledged. Discard it on disk rather than in memory alone, and
     // fsync the truncation before returning, so a crash before the next `Wal::fsync` cannot let the
     // filesystem resurrect the tail just dropped. A failure propagates: a handle that cannot
     // establish where its log ends must not be handed out.
-    if total_len > pos {
-        file.set_len(pos)?;
+    if total_len > offset {
+        file.set_len(offset)?;
         file.sync_data()?;
     }
 
-    Ok((records, pos))
+    Ok(offset)
+}
+
+/// The durable records a log retains, oldest first, each with its sequence-global position: read
+/// from disc and decoded one record at a time. See [`Wal::records`].
+pub struct Records<'a> {
+    base: &'a SequenceBase,
+    spans: std::vec::IntoIter<SealedSpan>,
+    member: Option<MemberReader>,
+    body: Vec<u8>,
+    /// Leave `IngestBatch` records out, unread past their variant index.
+    skip_ingest: bool,
+}
+
+/// The member [`Records`] is reading: where it is in the file, and where the member's durable
+/// records end.
+struct MemberReader {
+    reader: BufReader<File>,
+    base_pos: u64,
+    offset: u64,
+    end: u64,
+}
+
+impl Records<'_> {
+    /// Opens `span`'s member, refusing a file whose header does not name the member and position
+    /// the handle recorded for it.
+    fn open_member(&self, span: SealedSpan) -> Result<MemberReader> {
+        let mut file = File::open(self.base.member(span.number))?;
+        let (_, base_pos) = check_header(&mut file, span.number)?;
+        if base_pos != span.start_pos {
+            return Err(WalError::WalCorruption);
+        }
+        Ok(MemberReader {
+            reader: BufReader::with_capacity(READ_BUFFER, file),
+            base_pos,
+            offset: HEADER_LEN,
+            end: HEADER_LEN + (span.end_pos - span.start_pos),
+        })
+    }
+
+    /// The next record of the open member, or `None` where it has no more.
+    fn next_in_member(&mut self) -> Option<Result<(u64, WalRecord)>> {
+        let member = self.member.as_mut()?;
+        while member.offset < member.end {
+            let at = member.offset;
+            let framed = match read_frame(&mut member.reader, at, member.end, &mut self.body) {
+                Ok(framed) => framed,
+                Err(e) => return Some(Err(e)),
+            };
+            member.offset += framed;
+            if self.skip_ingest
+                && postcard::take_from_bytes::<u32>(&self.body)
+                    .is_ok_and(|(tag, _)| tag == ingest_batch_tag())
+            {
+                continue;
+            }
+            let position = member.base_pos + (at - HEADER_LEN);
+            return Some(decode(&self.body).map(|record| (position, record)));
+        }
+        None
+    }
+}
+
+impl Iterator for Records<'_> {
+    type Item = Result<(u64, WalRecord)>;
+
+    /// The next record, or the error that ends the walk: nothing is read after one.
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = match self.next_in_member() {
+                Some(next) => next,
+                None => {
+                    let span = self.spans.next()?;
+                    match self.open_member(span) {
+                        Ok(member) => {
+                            self.member = Some(member);
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            if next.is_err() {
+                self.member = None;
+                self.spans = Vec::new().into_iter();
+            }
+            return Some(next);
+        }
+    }
 }
 
 /// Creates member `number` of `base`, headered, sidecarred and durable — including its directory
@@ -1412,8 +1616,9 @@ fn create_member(base: &SequenceBase, number: u64, base_pos: u64) -> Result<WalF
 }
 
 impl Wal {
-    /// Opens (creating if absent) the WAL sequence based at `path`, replays every surviving member
-    /// under the positional CRC rule, and returns the live handle plus every record recovered.
+    /// Opens (creating if absent) the WAL sequence based at `path`, checks every surviving member
+    /// under the positional CRC rule, and returns the live handle. [`Wal::records`] reads what it
+    /// recovered.
     ///
     /// **Recovery walks every surviving file in sequence order.** It does not start *at* the
     /// newest overlay snapshot and resume: an older member can still carry `Change` records above
@@ -1430,24 +1635,20 @@ impl Wal {
     /// first. A **broken position chain** — a member whose header base position does not continue
     /// its predecessor's durable end — means a stale or foreign file has taken a member's place,
     /// and every position derived from it afterwards would name the wrong bytes.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<(Wal, Vec<WalRecord>)> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Wal> {
         let base = SequenceBase::of(path.as_ref());
         let members = base.members()?;
 
         if members.is_empty() {
             let active = create_member(&base, 1, 0)?;
-            return Ok((
-                Wal {
-                    base,
-                    sealed: Vec::new(),
-                    active,
-                    state: WalState::Healthy,
-                    replayed_positions: Vec::new(),
-                    #[cfg(feature = "fault-injection")]
-                    faults: None,
-                },
-                Vec::new(),
-            ));
+            return Ok(Wal {
+                base,
+                sealed: Vec::new(),
+                active,
+                state: WalState::Healthy,
+                #[cfg(feature = "fault-injection")]
+                faults: None,
+            });
         }
 
         let first = members[0];
@@ -1456,7 +1657,6 @@ impl Wal {
             return Err(WalError::WalCorruption);
         }
 
-        let mut records = Vec::new();
         let mut sealed = Vec::new();
         let mut active = None;
         // `None` for the oldest surviving member: reclamation has removed whatever preceded it, so
@@ -1493,14 +1693,7 @@ impl Wal {
             }
 
             let sync_point = resolve_sync_point(&sync_path, file_len)?;
-            let (member_records, len) = replay(&mut file, sync_point)?;
-            // File offsets become sequence-global positions here, at the one place both terms are
-            // in hand: a member's records are `base_pos + (offset - HEADER_LEN)` into the sequence.
-            records.extend(
-                member_records
-                    .into_iter()
-                    .map(|(offset, record)| (base_pos + (offset - HEADER_LEN), record)),
-            );
+            let len = check_prefix(&mut file, sync_point)?;
             expected_base = Some(base_pos + (len - HEADER_LEN));
 
             if is_last {
@@ -1519,37 +1712,55 @@ impl Wal {
             } else {
                 sealed.push(SealedSpan {
                     number,
+                    start_pos: base_pos,
                     end_pos: base_pos + (len - HEADER_LEN),
                 });
             }
         }
 
-        let (replayed_positions, records): (Vec<u64>, Vec<WalRecord>) = records.into_iter().unzip();
-
-        Ok((
-            Wal {
-                base,
-                sealed,
-                active: active.expect("the last member is always the active one"),
-                state: WalState::Healthy,
-                replayed_positions,
-                #[cfg(feature = "fault-injection")]
-                faults: None,
-            },
-            records,
-        ))
+        Ok(Wal {
+            base,
+            sealed,
+            active: active.expect("the last member is always the active one"),
+            state: WalState::Healthy,
+            #[cfg(feature = "fault-injection")]
+            faults: None,
+        })
     }
 
-    /// The sequence-global position of each record `open` replayed, in the same order as the
-    /// records it returned.
+    /// Every durable record the log retains, oldest first, each with its sequence-global
+    /// position: what a restart replays.
     ///
-    /// Parallel to the records rather than zipped into them because every other consumer of a
-    /// replayed record — `overlay::replay`, `high_water_from` — wants the record alone, and a tuple
-    /// would put a position into six signatures to serve one caller. That caller is
-    /// `WritePath::reconstruct`, which stamps each buffered row with the position it arrived at so a
-    /// later rotation knows what it may reclaim below.
-    pub fn replayed_positions(&self) -> &[u64] {
-        &self.replayed_positions
+    /// Read from disc and decoded one record at a time, so a caller holds one record and not the
+    /// log. A caller that needs to see later records before applying earlier ones walks this
+    /// twice, at the cost of a second read.
+    ///
+    /// [`Wal::open`] has already checked every record this yields, so an error here means a file
+    /// changed underneath the handle, and it is the last item.
+    pub fn records(&self) -> Records<'_> {
+        self.walk(false)
+    }
+
+    /// [`Wal::records`] without the `IngestBatch` records, which are left undecoded: for a walk
+    /// that reads none of them, since they are most of a log's bytes.
+    pub fn records_but_ingest(&self) -> Records<'_> {
+        self.walk(true)
+    }
+
+    fn walk(&self, skip_ingest: bool) -> Records<'_> {
+        let active = SealedSpan {
+            number: self.active.number,
+            start_pos: self.active.base_pos,
+            end_pos: self.active.end_pos(),
+        };
+        let spans: Vec<SealedSpan> = self.sealed.iter().copied().chain([active]).collect();
+        Records {
+            base: &self.base,
+            spans: spans.into_iter(),
+            member: None,
+            body: Vec::new(),
+            skip_ingest,
+        }
     }
 
     /// The sequence-global position the next record will be written at.
@@ -1565,6 +1776,20 @@ impl Wal {
     /// The sequence-global position below which everything is durable and acknowledged.
     pub fn durable_position(&self) -> u64 {
         self.active.end_pos()
+    }
+
+    /// The sequence-global position of the oldest record the log still holds: everything below it
+    /// lived in a member reclamation has deleted.
+    ///
+    /// **What a restart would find, said while the process is still running.** A replay-derived
+    /// index — the accepted-batch index of `/control/ingest` — knows only
+    /// what the surviving members carry, so a live process holding entries below this figure
+    /// answers a replay one a restart would not. `Executor::rotate_wal` reads this after every
+    /// rotation and forgets what fell below it, which is what makes the two agree.
+    pub fn retained_from(&self) -> u64 {
+        self.sealed
+            .first()
+            .map_or(self.active.base_pos, |span| span.start_pos)
     }
 
     /// Every surviving member's number, ascending — the active one last.
@@ -1590,11 +1815,9 @@ impl Wal {
 
     /// What the surviving members and their sidecars occupy on disc, in bytes.
     ///
-    /// **A gauge, and not the runtime ceiling `wal_hard_limit_bytes` reads as.** That key bounds a
-    /// startup relation and nothing compares the live log against it; what a node should do at a
-    /// limit is undecided, and refusing a *deny* for space would be fail-open. This reports the
-    /// size to `/control/status` and decides nothing. Enforcement still needs the ruling, not the
-    /// accessor.
+    /// **A gauge, and not a ceiling.** Nothing bounds the live log's size; what a node should do
+    /// at a limit is undecided, and refusing a *deny* for space would be fail-open. This reports
+    /// the size to `/control/status` and decides nothing.
     ///
     /// **Allocated blocks, not apparent length.** `st_blocks` answers the question a capacity
     /// gauge is asked — what the device cannot use for anything else — and it comes from the same
@@ -1635,8 +1858,9 @@ impl Wal {
     ///
     /// **The snapshot is durable before anything is deleted**, because the overlay's only durable
     /// home is the WAL: the `Change` records inside the members about to go are the sole record
-    /// that an item was suppressed, and a suppression retires only on unsuppress. Deleting first
-    /// and snapshotting after would re-expose every denied item on the next restart.
+    /// that an item was suppressed, and a live item's suppression retires only on unsuppress.
+    /// Deleting first and snapshotting after would re-expose every denied item on the next
+    /// restart.
     ///
     /// **Deletion is oldest-first**, because a crash midway through an unordered deletion leaves a
     /// *gap* in the sequence, and [`Wal::open`] fails closed on a gap — turning a benign crash into
@@ -1670,6 +1894,7 @@ impl Wal {
         let previous = std::mem::replace(&mut self.active, next);
         self.sealed.push(SealedSpan {
             number: previous.number,
+            start_pos: previous.base_pos,
             end_pos: sealed_end,
         });
         drop(previous);
@@ -2087,6 +2312,11 @@ impl ExecutorWal {
         self.wal.position()
     }
 
+    /// The oldest record position the log still holds — see [`Wal::retained_from`].
+    pub fn retained_from(&self) -> u64 {
+        self.wal.retained_from()
+    }
+
     /// Seal the active member, carry `snapshot` forward and reclaim below `reclaim_below` — see
     /// [`Wal::rotate`]. Not metered: a rotation makes nothing newly durable that an `fsync` did not
     /// already count.
@@ -2243,9 +2473,8 @@ mod tests {
     use super::*;
 
     fn record(tag: u8) -> WalRecord {
-        WalRecord::ChangeByEntity {
-            entity_id: EntityId::new(tag as u64),
-            op: ChangeOp::Delete,
+        WalRecord::ChangeBatch {
+            changes: vec![(EntityId::new(tag as u64), ChangeOp::Delete)],
         }
     }
 
@@ -2267,10 +2496,11 @@ mod tests {
             code: 31_337,
         };
         let batch = WalRecord::IngestBatch {
+            edits: Vec::new(),
+            receipt: Vec::new(),
             batch_id: "b1".to_string(),
             body_hash: [7u8; 32],
             rows: vec![WalRow {
-                external_id: None,
                 entity_id: EntityId::new(1),
                 view: "s0".to_string(),
                 join: false,
@@ -2284,14 +2514,16 @@ mod tests {
             }],
         };
 
-        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&mint).unwrap();
         wal.append(&batch).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(
             replayed,
             vec![mint, batch],
@@ -2365,19 +2597,23 @@ mod tests {
                     end: 4_294_836_224,
                 }]),
             ],
+            version: 1,
         };
         let dropped = WalRecord::LayerDrop {
             name: "clusters/old".into(),
+            version: 2,
         };
 
-        let (mut wal, replayed) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert!(replayed.is_empty());
         wal.append(&create).unwrap();
         wal.append(&dropped).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, vec![create, dropped]);
     }
 
@@ -2407,11 +2643,13 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                     key: Some("c-0017".into()),
                     view: None,
+                    incarnation: 0,
                     members: serialise_members(&first),
                     contents: Vec::new(),
                     attached_to: None,
                     parents: Vec::new(),
                     shape: None,
+                    access: Vec::new(),
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `key` is the other optional field — both under postcard, which
@@ -2424,6 +2662,7 @@ mod tests {
                     // here so a record naming one round-trips and a reader that lost it would
                     // read the members' length as the view's.
                     view: Some("s0".into()),
+                    incarnation: 3,
                     members: serialise_members(&second),
                     contents: vec![PublishedContent {
                         values: vec!["a label".into()],
@@ -2465,16 +2704,18 @@ mod tests {
                         "s0".into(),
                         vec![1, 2, 3],
                     )]),
+                    access: vec![b"team-a".to_vec(), b"team-b".to_vec()],
                 },
             ],
         };
 
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&publish).unwrap();
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, vec![publish]);
         let WalRecord::ArtifactPublish { artifacts, .. } = &replayed[0] else {
             unreachable!()
@@ -2555,14 +2796,41 @@ mod tests {
                     entity: EntityId::new(4_294_836_223),
                 }),
             },
-            WalRecord::ValuesBatch {
+            WalRecord::IngestBatch {
                 batch_id: "sentiment-0".into(),
                 body_hash: [9u8; 32],
-                view: Some("quarter:2026-Q1".into()),
-                columns: vec!["sentiment".into(), "reviewed".into()],
-                rows: vec![ValuesRow {
-                    entity_id: EntityId::new(41),
-                    values: vec![WalScalar::F32(0.25), WalScalar::Null],
+                rows: Vec::new(),
+                edits: vec![WalEdit {
+                    old: EntityId::new(41),
+                    number: EntityId::new(7),
+                    suppressed: true,
+                    rows: vec![
+                        WalRow {
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q1".into(),
+                            join: false,
+                            descriptors: vec![b"dept:eng".to_vec()],
+                            x: 0.5,
+                            y: 0.25,
+                            scalars: vec![WalScalar::F32(0.25), WalScalar::Null],
+                            scoped: Vec::new(),
+                        },
+                        WalRow {
+                            entity_id: EntityId::new(90),
+                            view: "quarter:2026-Q2".into(),
+                            join: true,
+                            descriptors: Vec::new(),
+                            x: 0.75,
+                            y: 0.5,
+                            scalars: Vec::new(),
+                            scoped: vec![WalScalar::Utf8("prose".into())],
+                        },
+                    ],
+                }],
+                receipt: vec![RowReceipt {
+                    outcome: RowOutcome::Edited,
+                    tessera_id: Some(12_345),
+                    over_bound: false,
                 }],
             },
             WalRecord::AttributeDeclare {
@@ -2575,7 +2843,20 @@ mod tests {
                     index: true,
                     render: true,
                     scope: tessera_types::layer::LayerScope::Group("quarter".into()),
+                    unique: false,
                 }),
+            },
+            WalRecord::UniqueDeclare {
+                attribute: "doi".into(),
+                unique: true,
+                base: vec![DeclaredRun {
+                    path: "partitions/p/entities/unique/doi/declared-1-base-0.keys".into(),
+                    sha256: "03".repeat(32),
+                    size: 8192,
+                    first_key: "1f".into(),
+                    last_key: "ffe0".into(),
+                }],
+                live: Vec::new(),
             },
             WalRecord::VocabularyDeclare {
                 declaration: Box::new(VocabularyDeclaration {
@@ -2631,10 +2912,10 @@ mod tests {
         ];
         // The growth's rank and leaving set are applied by `ArtifactStore::grow_set`, the four
         // fills by `ArtifactStore::fill`, the attribute declaration by
-        // `Executor::declare_attribute`, the values batch by `Executor::commit_values`, the
-        // vocabulary declaration by `Executor::commit_vocabulary_declare` and the two view
-        // declarations by `Executor::commit_view_group_create` and `commit_plain_view_create`.
-        // **Every record of the ingest design is applied now**, so no arm names a track.
+        // `Executor::declare_attribute`, the vocabulary declaration by
+        // `Executor::commit_vocabulary_declare` and the two view declarations by
+        // `Executor::commit_view_group_create` and `commit_plain_view_create`. **Every record of
+        // the ingest design is applied now**, so no arm names a track.
         let tracks: Vec<Option<&str>> = records
             .iter()
             .map(|record| unbuilt_track(record).map(|(_, track)| track))
@@ -2651,18 +2932,20 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 None
             ]
         );
 
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         for record in &records {
             wal.append(record).unwrap();
         }
         wal.fsync().unwrap();
         drop(wal);
 
-        let (_wal, replayed) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let replayed = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(replayed, records);
 
         // The membership route's own growth is what every reader applies today.
@@ -2695,7 +2978,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
         {
-            let (mut wal, _) = Wal::open(&path).unwrap();
+            let mut wal = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
             let durable = wal.active.durable_len;
@@ -2713,7 +2996,8 @@ mod tests {
             assert!(!wal.is_poisoned());
         }
 
-        let (_wal, records) = Wal::open(&path).unwrap();
+        let wal = Wal::open(&path).unwrap();
+        let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
         assert_eq!(
             records,
             vec![record(0), record(1), record(2)],
@@ -2734,7 +3018,7 @@ mod tests {
     fn a_torn_handle_recovers_by_neither_route() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
-        let (mut wal, _) = Wal::open(&path).unwrap();
+        let mut wal = Wal::open(&path).unwrap();
         wal.append(&record(0)).unwrap();
         wal.fsync().unwrap();
         wal.append(&record(1)).unwrap();
@@ -2766,7 +3050,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal.log");
         {
-            let (mut wal, _) = Wal::open(&path).unwrap();
+            let mut wal = Wal::open(&path).unwrap();
             wal.append(&record(0)).unwrap();
             wal.fsync().unwrap();
             let durable = wal.active.durable_len;

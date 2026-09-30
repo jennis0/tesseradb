@@ -8,13 +8,12 @@ body {
   font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* The explorer takes the window right of the instruments column, so its map corners — the
-   status strip bottom-left, the mode controls top-left — are never under the column. */
+/* The explorer takes the window right of the instruments column, so the map's corner controls
+   are not under it. */
 #explorer {
   position: absolute;
   inset: 0 0 0 300px;
   --tessera-explorer-height: 100%;
-  --tessera-sidebar-width: 300px;
 }
 
 /* The instruments: what you change and what came back, in one column beside the explorer. */
@@ -69,9 +68,7 @@ body {
   color: #7d8794;
 }
 
-/* A served artifact's depth in the served tree. The indent is the whole of the nesting cue: guide
-   lines were tried and, three levels deep in a 260px column, read as a table's rules rather than as
-   containment. */
+/* A served artifact's depth in the served tree, shown by indent alone. */
 .row .nest {
   padding-left: min(calc(var(--depth, 0) * 11px), 44px);
 }
@@ -80,8 +77,7 @@ body {
   color: #ff8f7a;
 }
 
-/* A legend swatch. Squared off rather than round so that two adjacent hues meet along an edge,
-   which is where a small colour difference is easiest to see. */
+/* A legend swatch, square so adjacent hues meet along an edge. */
 .swatch {
   width: 11px;
   height: 11px;

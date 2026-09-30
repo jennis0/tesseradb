@@ -115,16 +115,14 @@ pub(crate) struct LadderTask {
 
 /// The engine handles one fill runs against, taken once at [`crate::Engine::open`].
 pub(crate) struct StageDeps {
-    /// [`crate::Engine::occupancy_walks`]' counter, shared rather than duplicated: a walk this
-    /// fill makes is a walk of the same mask and the same column as a request's.
-    pub(crate) walks: Arc<std::sync::atomic::AtomicU64>,
+    /// `occupancy_walks`, shared rather than duplicated: a walk this fill makes is a walk of the
+    /// same mask and the same column as a request's.
+    pub(crate) counters: Arc<crate::status::ServeCounters>,
     pub(crate) occupancy:
-        Arc<crate::single_flight::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
+        Arc<tessera_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>>,
     pub(crate) pool: Arc<rayon::ThreadPool>,
-    /// Whether the fill runs at all. Always `true` in a shipped build; a test turns it off so an
-    /// assertion about what a *request* computed is not answered by work a background task did
-    /// first.
-    pub(crate) enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// `occupancy_stage_enabled`, whether the fill runs at all.
+    pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// One cancellation token per session with a fill in flight, flipped and dropped by
     /// [`crate::Engine::prune_token`]. Bounded by the number of fills running at once, not by the
     /// number of sessions: a fill removes its own entry when it ends.
@@ -143,7 +141,11 @@ impl StageDeps {
     /// in flight — the common case for every request after the first — pays a lock and a hash
     /// lookup and does not clone a term set or a view name.
     pub(crate) fn spawn(&self, token_id: u64, make: impl FnOnce() -> LadderTask) {
-        if !self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        if !self
+            .switches
+            .occupancy_stage_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         let cancel = CancelToken::new();
@@ -158,9 +160,9 @@ impl StageDeps {
         debug_assert_eq!(task.token_id, token_id, "the task must be this session's");
         let occupancy = Arc::clone(&self.occupancy);
         let in_flight = Arc::clone(&self.in_flight);
-        let walks = Arc::clone(&self.walks);
+        let counters = Arc::clone(&self.counters);
         self.pool.spawn(move || {
-            run(&occupancy, &walks, &task, &cancel);
+            run(&occupancy, &counters, &task, &cancel);
             // However it ended — completion, cancellation, a view that could not be resolved —
             // this session is no longer filling and the entry must go, or the map grows by one per
             // session for the process's life.
@@ -186,8 +188,8 @@ impl StageDeps {
 
 /// Fill `0..=`[`BACKGROUND_DEPTH`] for one `(session, view, generation)`.
 fn run(
-    occupancy: &crate::single_flight::SingleFlightCache<OccupancyKey, OccupiedTiles>,
-    walks: &std::sync::atomic::AtomicU64,
+    occupancy: &tessera_cache::SingleFlightCache<OccupancyKey, OccupiedTiles>,
+    counters: &crate::status::ServeCounters,
     task: &LadderTask,
     cancel: &CancelToken,
 ) {
@@ -204,7 +206,7 @@ fn run(
     // **The memo first, before anything is composed.** A session already served at this depth has
     // every rung below it too, so there is nothing here to do and no mask worth building.
     if cancel.is_cancelled()
-        || matches!(occupancy.peek(&key), crate::single_flight::Peek::Ready(_))
+        || matches!(occupancy.peek(&key), tessera_cache::Peek::Ready(_))
     {
         return;
     }
@@ -217,7 +219,7 @@ fn run(
     else {
         return;
     };
-    let Some(denied) = generation.denied.get(&task.view) else {
+    let Some(denied) = generation.denied().get(&task.view) else {
         return;
     };
     let Ok(segments) = crate::viewport::segments_with_row_bases(&task.view, view_data) else {
@@ -234,11 +236,14 @@ fn run(
         Arc::clone(&task.geometry.projection),
         &view_data.row_space,
         denied,
+        generation.buffered_rows(&task.view),
     );
     if cancel.is_cancelled() {
         return;
     }
-    walks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    counters
+        .occupancy_walks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ladder = crate::occupancy::occupied_tiles_ladder(&mask, &segments, BACKGROUND_DEPTH);
     for rung in 0..=BACKGROUND_DEPTH {
         key.depth = rung;

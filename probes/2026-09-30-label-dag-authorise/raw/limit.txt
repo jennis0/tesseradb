@@ -1,0 +1,17 @@
+
+## Cost of one label by size
+
+| shape | operands | nodes | bytes | add µs med / max (empty DAG) | add µs med / max (DAG of 100k labels) | evaluate µs med |
+|---|---|---|---|---|---|---|
+| OR of terms | 16 | 17 | 101 | 43.1 / 155 | 3.09 / 24.8 | 0.04 |
+| OR of 3-term ANDs sharing two terms | 16 | 35 | 341 | 12.7 / 27.6 | 13.1 / 23.4 | 0.24 |
+| OR of terms | 64 | 65 | 437 | 20.0 / 51.5 | 5.67 / 16.1 | 0.04 |
+| OR of 3-term ANDs sharing two terms | 64 | 131 | 1397 | 111 / 184 | 77.9 / 95.1 | 0.70 |
+| OR of terms | 256 | 257 | 1937 | 37.2 / 89.1 | 20.7 / 49.0 | 0.04 |
+| OR of 3-term ANDs sharing two terms | 256 | 515 | 5777 | 875 / 988 | 792 / 874 | 2.37 |
+| OR of terms | 1024 | 1025 | 8105 | 249 / 366 | 91.0 / 272 | 0.12 |
+| OR of 3-term ANDs sharing two terms | 1024 | 2051 | 23465 | 12821 / 16177 | 15727 / 22051 | 8.76 |
+| OR of terms | 4096 | 4097 | 35753 | 907 / 1118 | 826 / 1442 | 0.28 |
+| OR of 3-term ANDs sharing two terms | 4096 | 8195 | 97193 | 312555 / 457344 | 320713 / 390450 | 35.7 |
+| OR of terms | 16384 | 16385 | 152729 | 2971 / 3451 | 3003 / 6629 | 0.32 |
+| OR of 3-term ANDs sharing two terms | 16384 | 32771 | 398489 | 7990752 / 8626811 | 8088774 / 8459042 | 142 |

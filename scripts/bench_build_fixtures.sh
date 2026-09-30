@@ -13,8 +13,8 @@
 #
 # Fixtures outlive the code that wrote them. A bundle built before a manifest field was added or
 # renamed still has its `CURRENT`, still looks complete, and fails to load with a bare serde
-# complaint — `missing field 'idset'` — from whichever tool next opens it, hours into a campaign
-# and nowhere near this script.
+# complaint about a missing field from whichever tool next opens it, hours into a campaign and
+# nowhere near this script.
 #
 # So "already built" is decided by asking the reader, not by looking for `CURRENT`: `tessera
 # verify` opens the bundle exactly as the engine and the bench harness do. A bundle it refuses is
@@ -53,7 +53,7 @@ Usage: ${BASH_SOURCE[0]##*/} [options]
 Each existing bundle is opened with \`tessera verify\` before being skipped. One the current
 reader refuses — a fixture older than a change to the bundle format — is reported as STALE and
 rebuilt. \`--list\` names them without rebuilding, so this doubles as the answer to a loader
-error like "missing field \`idset\`" from any tool that reads a fixture.
+error like "missing field" from any tool that reads a fixture.
 
 Examples:
   ${BASH_SOURCE[0]##*/} --scales 2422486 --label-sets categories-archive,hash-flat
@@ -91,13 +91,6 @@ for s in "${SCALES[@]}"; do
   [[ "$s" =~ ^[0-9]+$ ]] || { echo "--scales: '$s' is not a number" >&2; exit 2; }
 done
 
-# The same fixed non-degenerate key the engine/build fixture tests use, so a bundle built here is
-# comparable with one built by the test suite. It reaches the build through the environment, which
-# is the only route there is — a key on a command line reaches shell history, process listings and
-# CI logs (contracts §2.2). A fixed one is fine for a throwaway benchmark fixture and never for a
-# deployment.
-export TESSERA_IDENTITY_KEY="000102030405060708090a0b0c0d0e0f"
-
 # Entity cap per label set; 0 means uncapped. A build past the cap would produce a corpus whose
 # tail carries NO terms at all — invisible to every principal — which is the silent hole
 # probes/dataset.md §5 rule 3 warns about, so those combinations are skipped rather than built.
@@ -106,7 +99,8 @@ declare -A CAP=( [hiterms]=10000000 [hiterms-ov0.5]=10000000 [hiterms-ov0.9]=100
 mkdir -p "$FIXTURES" "$LOG_DIR"
 
 # One declaration for every fixture: one view over the scaled geometry, its points' labels in the
-# exploded relation each label set supplies, and the identity extent the Morton branch requires.
+# exploded relation each label set supplies, the identity extent the Morton branch requires, and
+# the unique `id` the relation names each point by and `--limit` keeps a prefix of.
 # The label set differs per build, so that source is overridden on the command line by its own
 # name (`--file labels=…`, configuration.md §8); the geometry is the same file every time and its
 # path is written here.
@@ -115,6 +109,16 @@ cat > "$CONFIG" <<'TOML'
 [sources]
 geometry = "geometry.parquet"
 labels   = "pairs/categories-subclass.pairs.parquet"
+
+[defaults]
+source     = "geometry"
+
+# The dense `entity_id` the geometry and every label relation name each point by.
+[[attribute]]
+name   = "id"
+type   = "u32"
+unique = true
+field  = "entity_id"
 
 [[view]]
 name             = "s0"
@@ -199,13 +203,10 @@ for scale in "${SCALES[@]}"; do
     echo "BUILD scale=$scale set=$set_name -> $out"
     rm -rf "$out"; mkdir -p "$out"
     started=$(date +%s)
-    # --mint-external-ids: fixtures keep carrying the external-ID family's cost realistically
-    # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
         --deployment "$DEPLOYMENT" \
         --file "labels=$pairs" --out "$out" \
-        --limit "$scale" \
-        --mint-external-ids --idset 1 >"$log" 2>&1; then
+        --limit "$scale" >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)
       echo "  ok  ${elapsed}s  $(numfmt --to=iec "$bytes")"
@@ -217,8 +218,8 @@ for scale in "${SCALES[@]}"; do
   done
 done
 
-# Alias the 2.4M categories-subclass bundle to the path `benches/viewport.rs` and the ignored
-# `latency_sanity_at_2_4m_p99_under_50ms` test both hardcode, so existing tooling keeps working
+# Alias the 2.4M categories-subclass bundle to the path `benches/viewport.rs` and
+# `tessera-bench`'s `viewport_latency` binary both default to, so existing tooling keeps working
 # against the same bytes rather than building a second copy.
 canonical="$FIXTURES/2422486/categories-subclass"
 if [[ -f "$canonical/CURRENT" && ! -e /tmp/tessera-2m4 ]]; then

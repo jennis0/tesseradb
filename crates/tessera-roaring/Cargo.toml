@@ -2,6 +2,10 @@
 name = "tessera-roaring"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 croaring.workspace = true
+
+[dev-dependencies]
+rand = { workspace = true }

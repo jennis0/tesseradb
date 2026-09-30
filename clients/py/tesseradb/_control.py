@@ -1,18 +1,19 @@
-"""The control plane as the SDK calls it (contracts §3.4, ingest.md §1).
+"""The control plane as the SDK calls it.
 
 `Control` is the routes and nothing else: the SDK keeps no record of what it sent, so what a
-database holds is asked of the database (§6.4).
+database holds is asked of the database.
 
-**A retry resends identical bytes.** A batch id maps to the SHA-256 of the raw request body, so a
-retry that re-serialised its table would be a new batch rather than a replay (contracts §3.4). The
-bodies are therefore built once, by the plan, and this module sends the bytes it was given. The id
-is derived from the page rather than remembered, so the `429` retry and the resend of a lost
-acknowledgement within one `commit()` carry the id the first attempt carried.
+**A batch id is a fresh id per request, and a retry resends both the id and the bytes.** The id is
+the client's choice and says which request this is; the server holds it against the SHA-256 of the
+body, so a retry that re-serialised its table would be refused as a different body under a held
+id. The bodies are therefore built once, by the plan, and this module sends the bytes it was
+given. Two requests carrying the same rows are two requests: nothing derives an id from what
+a page contains, so a frame inserted and committed twice lands twice.
 
 **A `429` is backpressure.** The buffer-occupancy refusal carries `Retry-After`, and the caller
 waits that long and sends the same bytes again. Every other status is an answer: a `409` on a
-differing part is reported and not retried, since an edit is a delete and a re-ingest
-(decision 0047) and the SDK does not do that on the user's behalf.
+differing part is reported and not retried, since an edit is a delete and a re-ingest, and the
+SDK does not do that on the user's behalf.
 
 The transport is `urllib`, so the SDK's only dependency outside the standard library stays
 pyarrow.
@@ -20,14 +21,12 @@ pyarrow.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
-import numbers
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,43 +45,31 @@ MAX_ATTEMPTS = 600
 UNANSWERED = 0
 
 
-def external_id(value: Any) -> bytes:
-    """The external id of a row: the bytes its id column holds (§3, configuration.md §8).
+def batch_id(source: str, index: int) -> str:
+    """A page's batch id: a fresh random id, made once when the request is built.
 
-    A string's UTF-8, an integer's eight little-endian bytes, binary as it stands. The build reads
-    the same column and takes the same bytes, so one row is one address at both doors.
+    The id is never derived from the request's content. Retries of one attempt inside one
+    `commit()`, after a `429`, a timeout or a lost answer, reuse it, and nothing else does.
+    Nothing is kept across commits, so the same table inserted and committed five times is
+    loaded five times.
 
-    Any integer, not only Python's: a frame's own ids arrive as numpy or pyarrow scalars, and one
-    of those spelled as text would address a row nobody wrote. A boolean is not an integer here,
-    having no id space of its own.
+    The source name and the page index ride in front of the random half so that an operator
+    reading a server log can tell which page a line is about; nothing reads them.
     """
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
-        return str(value).encode()
-    number = int(value)
-    return number.to_bytes(8, "little", signed=number < 0)
-
-
-def addressed(value: Any) -> str:
-    """The same id where a JSON route carries it: base64, external ids being bytes and not text."""
-    return base64.b64encode(external_id(value)).decode()
-
-
-def batch_id(source: str, index: int, body: bytes) -> str:
-    """A page's batch id: the source name, the page index and a hash of the bytes (§6.4).
-
-    Stable across runs, so a page re-sent after a `429` or a lost acknowledgement carries the id
-    the first attempt carried and the server answers it as a replay. The hash is of the body that
-    is sent, so two pages that differ in one row differ here.
-    """
-    digest = hashlib.sha256(body).hexdigest()[:16]
-    return f"{source}-{index}-{digest}"
+    return f"{source}-{index}-{uuid.uuid4().hex}"
 
 
 @dataclass
 class Answer:
-    """One request's answer: the status, the decoded body where there was one, and the detail."""
+    """One request's answer. `Control` returns one for every request, refused or unanswered.
+
+    - `status`: the HTTP status, or 0 where no server answered.
+    - `body`: the answer's JSON object. A JSON value that is not an object is under `"value"`,
+      and a body that is not JSON gives `{}`.
+    - `detail`: the answer's text, or why no answer came.
+    - `attempts`: how many times the request was sent. It is more than 1 after a `429`.
+    - `seconds`: how long the request took, from the first attempt to the answer.
+    """
 
     status: int
     body: dict = field(default_factory=dict)
@@ -92,11 +79,23 @@ class Answer:
 
     @property
     def ok(self) -> bool:
+        """`True` when the status is in the 200s."""
         return 200 <= self.status < 300
 
 
 class Control:
-    """The operator plane of one served database."""
+    """A client for the control plane of one served database, where the operator writes.
+
+    `Database.control` returns one. Each route method sends one request with the operator
+    credential and returns its `Answer`. `status()` and `limits()` return dictionaries, and
+    `limits()` sends its request once and keeps the answer. A `429` is sent again after the wait
+    it names, at most 30 seconds, up to 600 attempts in all. Every other status is returned as
+    it came.
+
+    - `base`: the control plane's address, such as `http://127.0.0.1:41234`.
+    - `credential`: the operator credential.
+    - `timeout`: how long to wait for one answer, in seconds. The default is 300.
+    """
 
     def __init__(self, base: str, credential: str, timeout: float = 300.0) -> None:
         self.base = base.rstrip("/")
@@ -143,7 +142,9 @@ class Control:
             except (urllib.error.URLError, OSError) as unreachable:
                 # A connection that never answered is a refusal the report carries, not an
                 # exception out of `commit()`: the pages already acknowledged stay acknowledged,
-                # and an unanswered request is resent with identical bytes at the next commit.
+                # and the report names the one that was not. **A commit after it is a new
+                # request**, under a new id: whether the unanswered page landed is the database's
+                # to say, and a client that needs to ask carries an id column.
                 return Answer(
                     UNANSWERED,
                     {},
@@ -155,43 +156,75 @@ class Control:
     # ------------------------------------------------------------------ the routes
 
     def status(self) -> dict:
-        answer = self._send("GET", "/control/status")
-        return answer.body
+        """`GET /control/status`: the server's status report.
+
+        A refusal gives the server's error body, `{"error": ..., "detail": ...}`, and `{}` comes
+        only where no server answered.
+        """
+        return self.status_answer().body
+
+    def status_answer(self) -> Answer:
+        """`GET /control/status`, as its `Answer`, so a refusal's status and detail can be read."""
+        return self._send("GET", "/control/status")
 
     def limits(self) -> dict:
-        """The pagination units every route publishes, read once and sized from (ingest §2.1)."""
+        """The `limits` block of `status()`, read once and kept.
+
+        It says, per write route, the most rows, bytes, annotations, members or changes one
+        request may carry.
+        """
         if self._limits is None:
             self._limits = self.status().get("limits", {})
         return self._limits
 
     def ingest(
-        self, body: bytes, batch: str, view: str | None = None
+        self, body: bytes, batch: str, view: str | None = None, strict: bool = False
     ) -> Answer:
-        headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
-        if view is not None:
-            headers["x-tessera-view"] = view
-        return self._send("POST", "/control/ingest", body, headers)
+        """`POST /control/ingest`: create items, edit them, or add them to a view.
 
-    def values(
-        self, body: bytes, batch: str, view: str | None = None
-    ) -> Answer:
+        A row names items by its `tessera_id` and its values of the unique columns. A row naming
+        none creates an item at its position; one carrying what the item stores changes nothing;
+        one naming an item with no row in the view adds it there; any other edits the item,
+        which keeps its `tessera_id`. A row naming two items, or an item or a unique value an
+        earlier row of the batch names, is refused, and the rest are applied. A row without
+        coordinates changes only what it carries. Any column may be left out, keeping what the
+        item stores, and a null clears it. The answer counts the rows `created`, `edited`,
+        `added` and `unchanged`, and in `joined` the annotation memberships the rows added; it
+        gives each row's `tessera_id`, `None` for a refused row, and lists the refused rows in
+        `refused` by position and reason. A row that only places its item in an annotation
+        changes the annotation, not the item, and is counted unchanged.
+
+        - `body`: the rows, as an Arrow IPC stream.
+        - `batch`: the request's batch id. A retry sends the same id with the same bytes, and the
+          server answers it as a replay; the same id with other bytes is refused.
+        - `view`: the view the rows are for. It may be left out where the database has one view.
+        - `strict`: `True` refuses the whole batch at its first refused row, with `409`.
+        """
         headers = {"content-type": ARROW, "x-tessera-batch-id": batch}
         if view is not None:
             headers["x-tessera-view"] = view
-        return self._send("POST", "/control/values", body, headers)
+        return self._send("POST", "/control/ingest" + _query(strict=strict), body, headers)
 
     def declare_layer(self, payload: dict) -> Answer:
+        """`PUT /control/layers`: declare one annotation layer.
+
+        `payload` is the layer's block as `tessera check --payloads` prints it. The answer carries
+        the layer's `tessera_id`.
+        """
         return self._send(
             "PUT", "/control/layers", json.dumps(payload).encode(), {"content-type": JSON}
         )
 
     def declare_view_group(self, name: str, body: dict) -> Answer:
-        """`PUT /control/view_groups/{name}`: the group, with an empty roster (contracts §3.4)."""
+        """`PUT /control/view_groups/{name}`: the group, with an empty roster."""
         return self._send("PUT", f"/control/view_groups/{_segment(name)}", _json(body),
                           {"content-type": JSON})
 
     def declare_attribute(self, body: dict) -> Answer:
-        """`PUT /control/attributes`: one column, named in the body rather than in the path."""
+        """`PUT /control/attributes`: declare one column, named in the body.
+
+        A column declared here cannot be rendered.
+        """
         return self._send("PUT", "/control/attributes", _json(body), {"content-type": JSON})
 
     def declare_vocabulary(self, name: str, body: dict) -> Answer:
@@ -209,12 +242,15 @@ class Control:
         )
 
     def declare_view(self, name: str, body: dict) -> Answer:
-        """`PUT /control/views/{name}`: one plain view while the service runs."""
+        """`PUT /control/views/{name}`: declare one view that is not in a view group."""
         return self._send("PUT", f"/control/views/{_segment(name)}", _json(body),
                           {"content-type": JSON})
 
     def create_view(self, group: str, key: str, body: dict) -> Answer:
-        """`PUT /control/views/{group}/{key}`: the roster record, which creates the view."""
+        """`PUT /control/views/{group}/{key}`: add one view to a view group.
+
+        `body` is the view's roster record: its metadata, and its `visibility` where it has one.
+        """
         return self._send(
             "PUT",
             f"/control/views/{_segment(group)}/{_segment(key)}",
@@ -222,28 +258,89 @@ class Control:
             {"content-type": JSON},
         )
 
-    def publish(self, layer: str, body: bytes) -> Answer:
-        return self._send("PUT", _artifacts(layer), body, {"content-type": JSON})
+    def publish(self, layer: str, body: bytes, strict: bool = False) -> Answer:
+        """`PUT /control/layers/{layer}/artifacts`: publish annotations into one level of a layer.
 
-    def grow(self, layer: str, body: bytes) -> Answer:
-        return self._send("PATCH", _artifacts(layer), body, {"content-type": JSON})
-
-    def changes(self, items: list[dict]) -> Answer:
+        `body` is the request's JSON, as bytes, each membership a member table. A member naming no
+        item, or two, is left out and listed in the answer's `refused`, and the request is
+        otherwise applied whole or not at all. `strict=True` refuses the request at its first
+        refused member instead, with `404` or `409`. The answer gives each annotation's
+        `tessera_id`.
+        """
         return self._send(
-            "POST", "/control/changes", json.dumps(items).encode(), {"content-type": JSON}
+            "PUT", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
         )
 
-    def flush(self, wait: bool = False) -> Answer:
-        """Arm a publication cycle, and with `wait` hold until it has completed.
+    def grow(self, layer: str, body: bytes, strict: bool = False) -> Answer:
+        """`PATCH /control/layers/{layer}/artifacts`: change annotations a level already holds.
 
-        The flush's own `?wait=visible` waits on the number the cycle it arms will carry, so it
-        covers every page sent before it: this is the commit's one wait (decision 0144).
+        It adds members, fills parts an annotation lacks, and takes items out of a label's
+        generating set. `body` is the request's JSON, as bytes. A member is refused as on
+        `publish`, and `strict` is as there. A part that differs from the one held is refused
+        with `409`.
+        """
+        return self._send(
+            "PATCH", _artifacts(layer) + _query(strict=strict), body, {"content-type": JSON}
+        )
+
+    def changes(self, items: list[dict], strict: bool = False) -> Answer:
+        """`POST /control/changes`: delete, suppress or unsuppress items.
+
+        `items` is one record per change, `{"op": ..., "match": {column: value, ...}}`: `op` is
+        `"delete"`, `"suppress"` or `"unsuppress"`, and `match` names the item by its
+        `tessera_id` and its values of unique columns, as `Database.addresses` gives it. A change
+        naming no item, or two, is listed in the answer's `refused` and the others are applied;
+        `strict=True` refuses the request at its first such change instead, with `404` or `409`.
+        A deletion or suppression applies to every request from the moment it is accepted. This
+        route never answers `429`.
+        """
+        return self._send(
+            "POST",
+            "/control/changes" + _query(strict=strict),
+            json.dumps(items).encode(),
+            {"content-type": JSON},
+        )
+
+    def drop_layer(self, name: str, wait: bool = False) -> Answer:
+        """`DELETE /control/layers/{name}`: remove an annotation layer.
+
+        The name cannot be declared again. `wait` holds the answer until readers no longer see
+        the layer, as for `flush`.
+        """
+        return self._send("DELETE", f"/control/layers/{_segment(name)}" + _wait(wait))
+
+    def drop_view(self, group: str, key: str, wait: bool = False) -> Answer:
+        """`DELETE /control/views/{group}/{key}`: remove one view of a view group.
+
+        The items it leaves in no view are deleted, and the answer's `deleted` counts them.
+        `wait` is as for `flush`.
+        """
+        return self._send(
+            "DELETE", f"/control/views/{_segment(group)}/{_segment(key)}" + _wait(wait)
+        )
+
+    def compact(self) -> Answer:
+        """`POST /control/compact`: ask for a compaction, which removes deleted items' rows.
+
+        The server answers `202` at once and compacts at its next cycle. A request made while a
+        compaction runs is dropped, and the answer cannot say so. The `compaction` block of
+        `status()` shows what happened.
+        """
+        return self._send("POST", "/control/compact", b"")
+
+    def flush(self, wait: bool = False) -> Answer:
+        """`POST /control/flush`: bring the next publication forward.
+
+        A publication is the point at which writes become visible to readers. The answer's
+        `publication` names the first one certain to include every request sent before this one.
+        With `wait`, the answer comes once readers see that publication, or after the server's
+        `serve.visible_wait_max_secs` with `visible` set to `false`.
         """
         return self._send("POST", "/control/flush" + _wait(wait), b"")
 
 
 def _wait(wait: bool) -> str:
-    """`?wait=visible` (contracts §3.4, decision 0144), where the caller asked for it.
+    """`?wait=visible`, where the caller asked for it.
 
     The route holds its answer until the publication its acknowledgement names has happened, and
     pulls the tick forward to get there. One request of a commit carries it, the closing flush: a
@@ -251,6 +348,11 @@ def _wait(wait: bool) -> str:
     per page.
     """
     return "?wait=visible" if wait else ""
+
+
+def _query(strict: bool = False) -> str:
+    """`?strict=true`, where the caller asked for it; the routes default to `false`."""
+    return "?strict=true" if strict else ""
 
 
 def _json(body: dict) -> bytes:
@@ -280,7 +382,7 @@ def _decoded(text: str) -> dict:
 
 
 def _retry_after(headers, body: dict) -> float:
-    """How long a `429` asks the caller to wait. The header and the body agree (contracts §3.4)."""
+    """How long a `429` asks the caller to wait. The header and the body agree."""
     named = headers.get("retry-after") if headers is not None else None
     if named is None:
         named = body.get("retry_after_s")
@@ -292,7 +394,7 @@ def _retry_after(headers, body: dict) -> float:
 
 
 def arrow_body(table: Any) -> bytes:
-    """One Arrow IPC stream carrying a table, which is what a row route takes (ingest §1.2)."""
+    """One Arrow IPC stream carrying a table, which is what a row route takes."""
     import pyarrow as pa
     import pyarrow.ipc as ipc
 

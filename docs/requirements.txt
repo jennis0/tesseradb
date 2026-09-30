@@ -1,0 +1,11 @@
+# The documentation site's build: `mkdocs build --strict` from the repository root.
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocstrings[python]==1.0.6
+mkdocstrings-python==2.0.9
+# Lays out the long signatures mkdocstrings shows in the Python reference.
+ruff==0.16.8
+neoteroi-mkdocs==1.2.0
+# Runs the Python blocks in docs/start and docs/guides.
+pytest==9.1.1
+pytest-markdown-docs==0.9.2

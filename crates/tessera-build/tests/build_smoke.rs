@@ -3,15 +3,14 @@
 //! Synthesises a tiny `points.parquet` + `pairs.parquet`, runs `build`, then re-reads the
 //! bundle through the bundle read protocol and checks the properties the build is *for*:
 //! digest-verified manifests, signature-grouped entity IDs (I9/§11.1), postings that agree
-//! with the input relation, the `(term, entity)`-sorted `pairs.parquet`, and the external-ids
-//! extent.
+//! with the input relation, and the `(term, entity)`-sorted `pairs.parquet`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float64Array, LargeBinaryArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -22,8 +21,7 @@ use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
+mod common;
 
 /// A fixed, non-degenerate test key shared by every fixture in this file.
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -164,8 +162,10 @@ fn posting_entities(path: &Path, term: TermId) -> BTreeSet<u64> {
         .expect("the term is present in this file")
     {
         PostingRef::Array(bytes) => bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c) as u64)
             .collect(),
         PostingRef::Roaring(view) => view.iter().map(|v| v as u64).collect(),
     };
@@ -184,6 +184,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -199,22 +200,20 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     let report = build(&args).expect("build should succeed");
     assert_eq!(report.items, N_ITEMS);
@@ -246,14 +245,13 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert_eq!(part.manifest.segments[0].entity_lo, 0);
     assert_eq!(part.manifest.segments[0].entity_hi, N_ITEMS - 1);
     assert!(part.manifest.deltas.is_empty());
-    assert!(part.manifest.tombstones.is_empty());
-    assert!(part.manifest.deny.is_empty());
+    assert!(!part.manifest.tombstones.carries());
+    assert!(!part.manifest.deny.carries());
     assert_eq!(part.manifest.dict_extents.len(), 1);
     assert_eq!(
         part.manifest.dict_extents[0].path,
         "dictionary/terms-0.dict"
     );
-    assert_eq!(part.manifest.external_id_runs.len(), 1);
 
     // Contracts §2.2/§2.3: `MANIFEST.files` covers every file present at build time;
     // `SEGMENTS-<n>.files` covers only what was added *since* — which at build is nothing.
@@ -269,8 +267,11 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         "dictionary/terms-0.dict",
         "partitions/default/terms/postings.arrow",
         "partitions/default/terms/pairs.parquet",
-        "partitions/default/entities/external-ids-0.arrow",
-        "partitions/default/entities/ext-locator.u32",
+        // The unique `id` column's index, and the record blob that holds its values.
+        "partitions/default/entities/unique/id/base-0.keys",
+        "partitions/default/attrs/record/blocks.bin",
+        "partitions/default/attrs/record/directory.arrow",
+        "partitions/default/attrs/record/hasrow.roaring",
         // The entity→term transpose (contracts §2.4), unconditional: every entity has a label
         // set, so a build always writes one, and a bundle without it refuses at open.
         "partitions/default/entities/terms/hasrow.roaring",
@@ -297,50 +298,23 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        15,
+        17,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 
     let prefix = &report.prefix;
     let pdir = partition_dir(&out, prefix);
 
-    // ---- (f) external-ids extent: source id (8-byte LE) -> new entity id ------------------
-    let ext_path = out.join(prefix).join(&part.manifest.external_id_runs[0]);
-    let ext_batches = read_arrow_ipc(&ext_path);
-    let mut source_to_new: BTreeMap<u64, u64> = BTreeMap::new();
-    let mut prev_key: Option<Vec<u8>> = None;
-    for batch in &ext_batches {
-        let ext = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .expect("external_id must be Binary");
-        let ent = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .expect("entity_id must be UInt32 (contracts §2.4 r6)");
-        for i in 0..batch.num_rows() {
-            let key = ext.value(i).to_vec();
-            assert_eq!(key.len(), 8, "external_id is the source id as 8-byte LE");
-            if let Some(p) = &prev_key {
-                assert!(
-                    p.as_slice() < key.as_slice(),
-                    "external-ids must be sorted by bytes"
-                );
-            }
-            prev_key = Some(key.clone());
-            let source = u64::from_le_bytes(key.try_into().unwrap());
-            source_to_new.insert(source, ent.value(i) as u64);
-        }
-    }
-    assert_eq!(source_to_new.len(), N_ITEMS as usize);
-    for e in 0..N_ITEMS {
-        assert!(
-            source_to_new.contains_key(&e),
-            "source id {e} must be mapped"
-        );
-    }
+    // ---- source id -> new entity id, through the unique `id` column ----------------------
+    let source_to_new: BTreeMap<u64, u64> = common::entities_of(&out, "id", 0..N_ITEMS)
+        .into_iter()
+        .map(|(source, entity)| (source, u64::from(entity)))
+        .collect();
+    assert_eq!(
+        source_to_new.len(),
+        N_ITEMS as usize,
+        "every source id names an item"
+    );
 
     // ---- (b) entity IDs are dense 0..n and grouped by signature --------------------------
     let mut new_ids: Vec<u64> = source_to_new.values().copied().collect();
@@ -502,6 +476,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -516,22 +491,20 @@ fn build_refuses_to_clobber_an_existing_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).unwrap();
     // A second build into the same root would leave the first bundle's files half-overwritten
@@ -553,6 +526,7 @@ fn an_empty_selection_builds_an_empty_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let out = tmp.path().join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -567,22 +541,20 @@ fn an_empty_selection_builds_an_empty_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: Some(0),
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a build that selects no rows writes a bundle with no items");
 
@@ -603,6 +575,7 @@ fn morton_input_requires_the_identity_extent() {
     let pairs = tmp.path().join("pairs.parquet");
     write_morton_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let args = |extent| BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -618,24 +591,22 @@ fn morton_input_requires_the_identity_extent() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: attribute_sources.clone(),
         out: tmp
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema: schema.clone(),
     };
 
     // The caller's own extent, which the x/y branch would happily accept, must be rejected here.
@@ -661,6 +632,7 @@ fn morton_input_requires_the_identity_extent() {
         y_max: 65536.0,
     };
     let out = tmp.path().join("bundle-ok");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -675,30 +647,30 @@ fn morton_input_requires_the_identity_extent() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
     let bundle = open_bundle(&out).unwrap();
     let mut got: Vec<u64> =
         std::fs::read(out.join("v00000/partitions/default/views/s0/segments/seg-0/morton.u32"))
             .unwrap()
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c) as u64)
             .collect();
     got.sort_unstable();
     let mut want: Vec<u64> = (0..N_ITEMS).map(source_morton).collect();
@@ -717,6 +689,7 @@ fn build_rejects_an_unsafe_view_id() {
     let pairs = tmp.path().join("pairs.parquet");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     assert!(build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -731,22 +704,20 @@ fn build_rejects_an_unsafe_view_id() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: tmp.path().join("bundle"),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .is_err());
 }
@@ -771,6 +742,7 @@ fn limit_filters_the_source_entity_id_prefix() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -786,27 +758,91 @@ fn limit_filters_the_source_entity_id_prefix() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: Some(100),
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
     assert_eq!(report.items, 100);
     let bundle = open_bundle(&out).unwrap();
     assert_eq!(bundle.manifest.entity_id_high_water, 100);
+}
+
+/// **A row group whose signed ids run from negative to small positive keeps every row `--limit`
+/// selects.** A negative id's bytes read as at least 2^63, so the group's `int32` minimum says
+/// nothing about its smallest id, and pruning on it would drop the whole group.
+#[test]
+fn limit_keeps_a_row_group_whose_signed_ids_start_below_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("points.parquet");
+    let pairs = tmp.path().join("pairs.parquet");
+    let out = tmp.path().join("bundle");
+    write_pairs(&pairs);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::Int32, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let ids: Vec<i32> = (-5..N_ITEMS as i32 - 5).collect();
+    let xs: Vec<f64> = (0..N_ITEMS).map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = (0..N_ITEMS).map(|e| ((e * 53) % 1000) as f64).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(arrow::array::Int32Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    let (mut schema, attribute_sources) = common::id_attributes(&points);
+    schema.attributes[0].ty = tessera_spatial::tiler::ScalarType::I64;
+
+    let report = build(&BuildArgs {
+        views: vec![tessera_build::ViewArgs {
+            visibility: None,
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            select: None,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        scoped_attributes: Vec::new(),
+        attribute_sources,
+        out: out.clone(),
+        limit: Some(100),
+        strict: false,
+        identity_key: test_key(),
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema,
+    })
+    .unwrap();
+    assert_eq!(report.items, 100, "ids 0 to 99 are below the limit");
 }
 
 /// `tessera verify` re-derives every row's `tessera_id` from `(identity.key, identity.shard_id,
@@ -820,6 +856,7 @@ fn verify_accepts_a_freshly_built_bundle() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -835,22 +872,20 @@ fn verify_accepts_a_freshly_built_bundle() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
 
@@ -872,6 +907,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     let out = tmp.path().join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
 
     let report = build(&BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -887,22 +923,20 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .unwrap();
 
@@ -1040,7 +1074,7 @@ fn morton_plus_residual_recovers_sub_cell_position() {
 
     let fields = Default::default();
     let mut rows = read_points(
-        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
+        tessera_build::input::Source::every_row(&points, &fields),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
@@ -1076,7 +1110,7 @@ fn bare_morton_widens_with_a_zero_residual() {
 
     let fields = Default::default();
     let rows = read_points(
-        tessera_build::input::Source::new(&points, &fields, &INTEGER_IDS),
+        tessera_build::input::Source::every_row(&points, &fields),
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
     )
@@ -1185,6 +1219,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         let pairs = tmp.path().join("pairs.parquet");
         let out = tmp.path().join("bundle");
         write_fixture(&points, &pairs);
+        let (schema, attribute_sources) = common::id_attributes(&points);
 
         let args = BuildArgs {
             views: vec![tessera_build::ViewArgs {
@@ -1200,22 +1235,20 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
             anchor: 0,
             groups: Vec::new(),
             scoped_attributes: Vec::new(),
-            attribute_sources: Vec::new(),
+            attribute_sources,
             out: out.clone(),
             limit: None,
+            strict: false,
             identity_key: test_key(),
-            identity_key_hex: TEST_KEY_HEX.to_string(),
-            idset: 1,
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
             scoped_layers: Default::default(),
-            mint_external_ids: true,
             emit_oracle_pairs: false,
             batch_items: None,
             memory_budget: None,
             band_rows: None,
-            schema: Default::default(),
+            schema,
         };
         let report = if linear {
             tessera_build::build_in_memory(&args)
@@ -1224,28 +1257,11 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         }
         .unwrap_or_else(|e| panic!("{label} build failed: {e}"));
 
-        let bundle = open_bundle(&out).expect("the bundle must open");
-        let part = &bundle.partitions["default"];
-        let ext_path = out
-            .join(&report.prefix)
-            .join(&part.manifest.external_id_runs[0]);
-        let mut source_to_new: BTreeMap<u64, u64> = BTreeMap::new();
-        for batch in read_arrow_ipc(&ext_path) {
-            let ext = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("external_id is binary");
-            let ent = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .expect("entity_id is u32");
-            for i in 0..batch.num_rows() {
-                let source = u64::from_le_bytes(ext.value(i).try_into().unwrap());
-                source_to_new.insert(source, ent.value(i) as u64);
-            }
-        }
+        let _ = report;
+        let source_to_new: BTreeMap<u64, u64> = common::entities_of(&out, "id", 0..N)
+            .into_iter()
+            .map(|(source, entity)| (source, u64::from(entity)))
+            .collect();
 
         assert_eq!(
             source_to_new, expected,

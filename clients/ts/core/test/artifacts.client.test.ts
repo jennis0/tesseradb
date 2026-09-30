@@ -1,57 +1,28 @@
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import {tableFromIPC} from 'apache-arrow';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {TesseraClient, TesseraError} from '../src/client.js';
-import {decodeViewport} from '../src/decode.js';
-import {liftGolden, liftTilesHighlighted} from './old-shape-columns.js';
-import type {ViewportResult} from '../src/types.js';
-
-/** `body` with its kind-5 payload replaced: `u8 kind, u32 LE length, payload`, frame by frame. */
-function reframe(body: Uint8Array, artifacts: Uint8Array): Uint8Array {
-  const frames: {kind: number; payload: Uint8Array}[] = [];
-  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  let at = 0;
-  while (at < body.length) {
-    const kind = body[at]!;
-    const length = view.getUint32(at + 1, true);
-    frames.push({kind, payload: kind === FRAME_ARTIFACTS ? artifacts : body.subarray(at + 5, at + 5 + length)});
-    at += 5 + length;
-  }
-  const out = new Uint8Array(frames.reduce((n, f) => n + 5 + f.payload.length, 0));
-  const outView = new DataView(out.buffer);
-  at = 0;
-  for (const {kind, payload} of frames) {
-    out[at] = kind;
-    outView.setUint32(at + 1, payload.length, true);
-    out.set(payload, at + 5);
-    at += 5 + payload.length;
-  }
-  return out;
-}
+import {decodeArtifactsFrame, decodeViewport} from '../src/decode.js';
+import {splitFramedStreams} from '../src/frame.js';
+import type {Decoder} from '../src/decoder.js';
+import {refused, rejectsAsRefused, result} from './support.js';
 
 /**
- * What the artifact channel puts on the wire, and what it makes of what comes back.
- *
- * The transport is stubbed rather than live: every assertion here is about the *shape* of the
- * request the client composes and the mapping of the reply, which is precisely the part a live
- * test cannot pin — a server that ignored `layers` would pass the live test on a bundle with one
- * layer.
+ * What the client puts on the wire for artifacts, and how it maps the reply. The transport is
+ * stubbed: a live server that ignored `layers` would pass on a bundle with one layer.
  */
 
-const empty: ViewportResult = {
-  tiles: [],
-  ids: new BigUint64Array(),
-  codes: new BigUint64Array(),
-  positions: new Float64Array(),
-  world: new Float32Array(),
-  scalars: {},
-  subCells: null,
-  membership: {},
-  artifacts: [],
-  artifactsIdentity: null
+/** Answers every whole response with an empty result; these tests read the request, not the body. */
+const empty: Decoder = {
+  decode: async () => result(),
+  decodeHead: () => Promise.reject(new Error('a response without a part sink decodes whole')),
+  decodePoints: () => Promise.reject(new Error('a response without a part sink decodes whole')),
+  lastWorkerMs: null,
+  close: () => {}
 };
 
-/** Capture every request the client makes, and answer each with the body given. */
+/** Captures every request the client makes, and answers each with the body given. */
 function stubFetch(answer: (url: string) => Response) {
   const seen: {url: string; body: Record<string, unknown>}[] = [];
   vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
@@ -65,7 +36,7 @@ const client = () =>
   new TesseraClient({
     viewerUrl: 'http://viewer',
     sessionUrl: 'http://session',
-    decoder: {decode: async () => empty, close: () => {}}
+    decoder: empty
   });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -78,8 +49,8 @@ describe('the viewport request', () => {
     await c.viewport('tok', {view: 's0', zoom: 4, layers: []});
     await c.viewport('tok', {view: 's0', zoom: 4});
 
-    // The wire is `string[] | 'all'`: `[]` and absent both mean *none* now, so a point-fetching
-    // client sends `[]` (or omits) and pays nothing for artifacts.
+    // `layers` is `string[] | 'all'`: `[]` and absent both mean none, so a client fetching points
+    // pays nothing for artifacts.
     expect(seen[0]!.body.layers).toEqual([]);
     expect('layers' in seen[1]!.body).toBe(false);
   });
@@ -89,8 +60,7 @@ describe('the viewport request', () => {
     const c = client();
     await c.viewport('tok', {view: 's0', zoom: 4, layers: 'all'});
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
-    // `'all'` is every reachable layer; an array is those ∩ reachable. Each reaches the wire as
-    // exactly what the caller gave — the store must name the on layers, never rely on a default.
+    // `'all'` is every reachable layer and an array those reachable; each is sent as given.
     expect(seen[0]!.body.layers).toBe('all');
     expect(seen[1]!.body.layers).toEqual(['clusters/x']);
   });
@@ -116,119 +86,173 @@ describe('the viewport request', () => {
     const c = client();
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x'], artifactRows: 'identity'});
     await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
-    // `"identity"` is the same rows in four columns (contracts §3.2 r44); absent leaves the
-    // server's own default, `"full"`, and the request shape a caller who never asks always sent.
+    // `"identity"` is the same rows in fewer columns; absent leaves the server's default, `"full"`.
     expect(seen[0]!.body.artifact_rows).toBe('identity');
     expect('artifact_rows' in seen[1]!.body).toBe(false);
   });
 });
 
 describe('/v1/meta', () => {
-  it('maps the layers this principal reaches, and reads an absent list as none', async () => {
-    const base = {
-      api_version: 1,
-      idset: 7,
-      views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, ordinal: null, metadata: null}],
-      groups: [],
-      declared_scalars: [],
-      selection: {
-        k_min: 1,
-        k_max_marks: 5000,
-        max_k: 5000,
-        theta_target_marks: 16,
-        max_underlay_offset: 3
+  const selection = {
+    k_min: 1,
+    k_max_marks: 5000,
+    max_k: 5000,
+    theta_target_marks: 16,
+    max_underlay_offset: 3,
+    max_tiles_per_request: 4096,
+    max_category_values: 1000,
+    max_shape_vertices: 50_000,
+    max_region_vertices: 10_000,
+    max_region_cells: 262_144,
+    max_suggestions: 20,
+    max_suggestion_walk: 100_000,
+    max_suggest_set_entities: 10_000_000,
+    max_browse_rows: 200,
+    max_page_rows: 65_536,
+    max_page_bytes: 16_777_216,
+    max_aggregate_groupings: 16,
+    max_aggregate_top: 1000,
+    max_aggregate_named: 1000,
+    max_aggregate_cells: 1_048_576
+  };
+  const body = {
+    api_version: 1,
+    bundle_format: 9,
+    views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null, group: null, key: null, metadata: null}],
+    groups: [{name: 'quarter', title: null, members_of: null, views: []}],
+    declared_scalars: [{name: 'abstract', arrow_type: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],
+    scoped_scalars: [
+      {name: 'mood', arrow_type: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
+    ],
+    filter_operands: [
+      {column: 'abstract', family: 'text', operands: ['match', 'phrase']},
+      {column: 'mood', family: 'category', operands: ['eq', 'in'], scope: {group: 'quarter'}}
+    ],
+    selection,
+    layers: [
+      {
+        name: 'clusters/hdbscan-2026-08',
+        title: null,
+        views: ['s0'],
+        membership: 'enumerated',
+        hierarchy: {kind: 'flat', prune_children: false},
+        levels: [{level: 0, title: null, zoom: [0, 4]}],
+        computed_content: ['centroid'],
+        shape: 'derived',
+        supplied_content: [],
+        depends_on: [],
+        version: 3
       }
-    };
-    const withLayer = {
-      ...base,
+    ]
+  };
+
+  it('decodes every field the contract publishes', async () => {
+    stubFetch(() => new Response(JSON.stringify(body), {status: 200}));
+    expect(await client().meta('tok')).toEqual({
+      apiVersion: 1,
+      bundleFormat: 9,
+      views: [{id: 's0', displayName: 'S0', quantisation: {xMin: 0, xMax: 65536, yMin: 0, yMax: 65536}, projection: 'none', worldAspect: null, tileScheme: null, tile: null, roster: null}],
+      groups: [{name: 'quarter', title: null, membersOf: null, views: []}],
+      declaredScalars: [{name: 'abstract', arrowType: 'text', category: null, analyser: 'unicode/1', render: false, index: true, unique: false, homes: ['record']}],
+      scopedScalars: [
+        {name: 'mood', arrowType: 'u8', scope: {group: 'quarter'}, category: {vocabulary: 'moods', kind: 'declared', visibility: 'public'}, analyser: null, render: true, index: true, views: ['quarter:q1']}
+      ],
+      filterOperands: [
+        {column: 'abstract', family: 'text', operands: ['match', 'phrase']},
+        {column: 'mood', family: 'category', operands: ['eq', 'in'], scope: {group: 'quarter'}}
+      ],
+      selection: {
+        kMin: 1,
+        kMaxMarks: 5000,
+        maxK: 5000,
+        thetaTargetMarks: 16,
+        maxUnderlayOffset: 3,
+        maxCategoryValues: 1000,
+        maxShapeVertices: 50_000,
+        maxRegionVertices: 10_000,
+        maxRegionCells: 262_144,
+        maxSuggestions: 20,
+        maxSuggestionWalk: 100_000,
+        maxSuggestSetEntities: 10_000_000,
+        maxBrowseRows: 200,
+        maxPageRows: 65_536,
+        maxPageBytes: 16_777_216,
+        maxAggregateGroupings: 16,
+        maxAggregateTop: 1000,
+        maxAggregateNamed: 1000,
+        maxAggregateCells: 1_048_576
+      },
+      maxTilesPerRequest: 4096,
       layers: [
         {
           name: 'clusters/hdbscan-2026-08',
-          title: 'HDBSCAN clusters',
+          title: null,
           views: ['s0'],
           membership: 'enumerated',
-          hierarchy: {kind: 'flat', prune_children: false},
-          levels: [{level: 0, title: 'clusters', zoom: null}],
-          computed_content: [],
-          supplied_content: [],
-          depends_on: [],
+          hierarchy: {kind: 'flat', pruneChildren: false},
+          levels: [{level: 0, title: null, zoom: [0, 4]}],
+          computedContent: ['centroid'],
+          shape: 'derived',
+          suppliedContent: [],
+          depsOn: [],
           version: 3
         }
       ]
-    };
+    });
+  });
 
-    let body = withLayer;
-    stubFetch(() => new Response(JSON.stringify(body), {status: 200}));
-    const c = client();
-
-    const reached = await c.meta('tok');
-    expect(reached.layers).toEqual([
-      {
-        name: 'clusters/hdbscan-2026-08',
-        title: 'HDBSCAN clusters',
-        views: ['s0'],
-        membership: 'enumerated',
-        hierarchy: {kind: 'flat', pruneChildren: false},
-        levels: [{level: 0, title: 'clusters', zoom: null}],
-        computedContent: [],
-        shape: null,
-        suppliedContent: [],
-        depsOn: [],
-        version: 3
+  it('refuses a body missing any field the contract requires, at the top, in selection or in any list element', async () => {
+    type Json = Record<string, unknown>;
+    const at = (root: Json, path: (string | number)[]): Json => path.reduce<Json>((node, step) => node[step] as Json, root);
+    const blocks: (string | number)[][] = [[], ['selection'], ['views', 0], ['groups', 0], ['declared_scalars', 0], ['scoped_scalars', 0], ['filter_operands', 0], ['layers', 0], ['layers', 0, 'levels', 0]];
+    const missing: Json[] = [];
+    for (const path of blocks) {
+      for (const field of Object.keys(at(body, path))) {
+        // `scope` is present only on a group-scoped operand.
+        if (path[0] === 'filter_operands' && field === 'scope') continue;
+        const copy = structuredClone(body) as Json;
+        delete at(copy, path)[field];
+        missing.push(copy);
       }
-    ]);
-
-    body = base as typeof withLayer;
-    // No layers reached and no layers registered are one answer, and neither is a failure.
-    expect((await c.meta('tok')).layers).toEqual([]);
+    }
+    let answer: Record<string, unknown> = body;
+    stubFetch(() => new Response(JSON.stringify(answer), {status: 200}));
+    const c = client();
+    for (const without of missing) {
+      answer = without;
+      await rejectsAsRefused(c.meta('tok'));
+    }
   });
 });
 
 /**
- * **The two artifact goldens are r44 captures** (2026-08-28) — taken against a `tessera serve`
- * built from this tree over the notebook corpus's `clusters/hdbscan` (`./run_demo.sh --scale
- * notebook --no-viewer`, then `scripts/capture-golden.mjs --artifacts-only` as the corpus's
- * *medium* preset principal, whose terms are arXiv categories; `--terms 0` sees nothing there), so
- * `layer` is dictionary-encoded, `rung` stands where `level` did, and `hull_x`/`hull_y` trail the
- * fixed prefix as the nested list of rings contracts §3.2 r44 specified.
- *
- * **Both goldens are now bodies from before the shape columns** (contracts §3.2 r45 renamed the
- * pair `shape_x`/`shape_y` and deepened it to parts of rings), and the decoder refuses them by
- * name rather than reading them as shapeless: read as *no drawn geometry*, an r44 body draws
- * every cluster as its box and looks like a layer that declares none. So the two fixture tests
- * below are the refusal, and the geometry and row-set claims are made against a hand-assembled
- * r45 body in `artifacts-frame.test.ts` and `shape.test.ts`. ⊘ The goldens are due a recapture
- * against a served corpus (`scripts/capture-golden.mjs --artifacts-only`), which restores the
- * captured-body claims here; `clients/ts/README.md`'s fixture rule applies.
+ * The artifacts frame as a server sent it: the k-means layer of the notebook corpus, which declares
+ * centroid, box and hull over clusters in different parts of the map, captured at `k = 0` by
+ * `scripts/capture-golden.mjs`.
  */
 describe('the artifacts frame, decoded from a captured response', () => {
   const fixture = (name: string) =>
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
-  it('refuses a body captured before the shape columns, whichever nesting its hull carried', () => {
-    // Two real bodies, not hand-assembled ones: the pre-r40 flat hull and the r44 list of rings.
-    // Neither is read as shapeless — the old column names are the refusal.
-    // Lifted for the tiles frame's `highlighted` column first, so what is being refused is the
-    // shape columns' old names and not the newer column these captures also predate.
-    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts-pre-r40.bin')))).toThrow(/hull_x.*shape_x/s);
-    expect(() => decodeViewport(liftTilesHighlighted(fixture('viewport-artifacts.bin')))).toThrow(/hull_x.*shape_x/s);
+  it('refuses an artifacts frame captured before the shape columns', () => {
+    // A captured body from an older server, with `hull_x`/`hull_y` and no `rung` column. Its tile
+    // frame is older too, so the artifacts frame is decoded alone.
+    refused(() => decodeArtifactsFrame(splitFramedStreams(fixture('viewport-artifacts-pre-r40.bin')).artifacts!));
   });
 
   it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
     expect(result.artifacts.length).toBeGreaterThan(0);
-    // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
-    // frame and no points frame at all is the case a decoder is most likely to get wrong.
+    // Captured at `k = 0`: an artifacts frame and no points frame.
     expect(result.ids.length).toBe(0);
     expect(result.membership).toEqual({});
 
     for (const artifact of result.artifacts) {
       expect(artifact.layer.length).toBeGreaterThan(0);
-      // u64 on the wire and kept as one: a `tessera_id` does not survive a double.
+      // Kept as a u64: a `tessera_id` does not survive a double.
       expect(artifact.tesseraId).toBeTypeOf('bigint');
       expect(artifact.maskedCount).toBeTypeOf('bigint');
-      // Served at all means it cleared its layer's criterion, so nothing here is a zero-count row
-      // this principal cannot see any of.
+      // Served means it met its layer's criterion, so no row has a zero count.
       expect(artifact.maskedCount).toBeGreaterThan(0n);
     }
 
@@ -238,37 +262,66 @@ describe('the artifacts frame, decoded from a captured response', () => {
   });
 
   it('reads a response with no artifacts frame as no artifacts, not as a failure', () => {
-    expect(decodeViewport(liftTilesHighlighted(fixture('viewport-plain.bin'))).artifacts).toEqual([]);
+    expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
   });
 
   it('carries the derived geometry in the same grid units as the points', () => {
-    const result = decodeViewport(liftGolden(fixture('viewport-artifacts.bin')));
-    // The captured layer declares all three; the centroid and the box are read here, and the
-    // shape — under its r44 name in this capture — is what `liftGolden` took out. A null
-    // centroid or box would be *the layer declares none* and never *withheld* — content is never
-    // withheld from a served artifact — so a null on a layer that declares the property is a
-    // decoder or a server bug.
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
+    // The layer declares all three and the request narrowed none. A null would mean the layer
+    // declares none.
     for (const a of result.artifacts) {
       expect(a.centroid).not.toBeNull();
       expect(a.box).not.toBeNull();
-      expect(a.shape).toBeNull();
+      expect(a.shape).not.toBeNull();
 
       const [cx, cy] = a.centroid!;
       const [minX, minY, maxX, maxY] = a.box!;
-      // The centroid is a mean of the members' positions, so it lies inside their bounds. This
-      // catches the axis transposition a two-column-per-shape wire invites.
+      // The centroid is a mean of the members' positions, so it lies inside their bounds; this
+      // catches transposed axes.
       expect(cx).toBeGreaterThanOrEqual(minX);
       expect(cx).toBeLessThanOrEqual(maxX);
       expect(cy).toBeGreaterThanOrEqual(minY);
       expect(cy).toBeLessThanOrEqual(maxY);
 
-      // Grid units, not data coordinates: the axes span 2^32, exactly as `codes` does.
+      // Grid units: the axes span 2^32, as `codes` does.
       expect(maxX).toBeLessThanOrEqual(2 ** 32);
+      // Parts, then rings, then vertices, each vertex a member's position and so inside the box.
+      // A group of one or two members is served as that point or that segment.
+      expect(a.shape!.length).toBeGreaterThan(0);
+      for (const part of a.shape!) {
+        for (const ring of part) {
+          expect(ring.length).toBeGreaterThan(0);
+          for (const [x, y] of ring) {
+            expect(x).toBeGreaterThanOrEqual(minX);
+            expect(x).toBeLessThanOrEqual(maxX);
+            expect(y).toBeGreaterThanOrEqual(minY);
+            expect(y).toBeLessThanOrEqual(maxY);
+          }
+        }
+      }
     }
-    // Different clusters, different shapes — one geometry repeated across rows would mean the
-    // decoder read row 0 for everybody.
+    // Different clusters, different shapes; one geometry on every row would mean row 0 was read for
+    // all.
     const centroids = new Set(result.artifacts.map((a) => a.centroid!.join(',')));
     expect(centroids.size).toBe(result.artifacts.length);
+  });
+
+  it('reads every shape part, ring and vertex as Arrow reads the nested lists', () => {
+    const body = fixture('viewport-artifacts.bin');
+    const result = decodeViewport(body);
+    const table = tableFromIPC(splitFramedStreams(body).artifacts!);
+    const nested = (name: string, i: number) =>
+      Array.from(table.getChild(name)!.get(i) as Iterable<Iterable<Iterable<number>>>, (rings) => Array.from(rings, (ring) => Array.from(ring)));
+    expect(result.artifacts.length).toBe(table.numRows);
+    result.artifacts.forEach((a, i) => {
+      const xs = nested('shape_x', i);
+      const ys = nested('shape_y', i);
+      expect(a.shape, `artifact ${i}`).toEqual(xs.map((rings, p) => rings.map((ring, r) => ring.map((x, v) => [x, ys[p]![r]![v]]))));
+    });
+    // The capture holds a shape of several parts and a ring of several vertices, so reading only
+    // the first of either is caught.
+    expect(result.artifacts.some((a) => a.shape!.length > 1)).toBe(true);
+    expect(result.artifacts.some((a) => a.shape!.some((part) => part.some((ring) => ring.length > 1)))).toBe(true);
   });
 });
 
@@ -289,8 +342,8 @@ describe('the drill-down', () => {
   });
 
   it('carries the geometry, which is what the viewport is no longer asked for', async () => {
-    // The route the drawn shape now comes from: the viewport asks for centroids and boxes and this
-    // answers with the one shape that draws (`artifact-shapes.md` §9).
+    // The route the drawn shape comes from: the viewport serves centroids and boxes, and this
+    // answers with the one shape drawn.
     const seen = stubFetch(
       () =>
         new Response(
@@ -310,7 +363,7 @@ describe('the drill-down', () => {
     // Parts of rings, not a list of vertices: a membership that is two clouds is two parts.
     expect(detail.shape?.length).toBe(2);
     expect(detail.shape?.[1]?.[0]?.[0]).toEqual([100, 100]);
-    // The zoom travels as the whole depth the server's vertex rule reads (§7.2).
+    // The zoom is sent as the whole depth the server's vertex rule reads.
     expect(seen[0]!.body).toEqual({view: 's0', zoom: 5});
   });
 
@@ -325,9 +378,8 @@ describe('the drill-down', () => {
         new Response(JSON.stringify({error: 'unknown', detail: 'unknown artifact'}), {status: 404})
     );
 
-    // Every withheld case arrives here identically — an identifier naming nothing, one naming a
-    // point, one gated, one suppressed, one below its layer's criterion. A caller that branched on
-    // the detail string would be inventing a distinction the server refuses to make.
+    // Every withheld case arrives alike: an id naming nothing, one naming a point, one gated, one
+    // suppressed, one below its layer's criterion.
     await expect(client().artifact('tok', 1n, {view: 's0'})).rejects.toThrow(TesseraError);
   });
 });

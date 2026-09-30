@@ -1,23 +1,17 @@
 #!/usr/bin/env node
-// The hover over a cluster under real pointer input (design client-components §5.10), and the
-// before/after shots of the contour line.
+// The hover over a cluster under real pointer input, and screenshots of the contour line.
 //
-// The owner, on the built map: the hover "is very unstable when moving the mouse, flipping between
-// categories and subcategories within it". That is not something a synthetic event finds. A
-// response carries a frontier **and its ancestors**; every one of them used to sit in the outline
-// layer at zero alpha so that it still answered a pick, so the pointer crossed a parent's
-// invisible ring on its way across a child's and deck answered with whichever the picking pass
-// found. The claims below drive the mouse through Playwright's input pipeline at a human pace —
-// small steps, hover events between — and read the map's own `hoveredArtifact` after each one.
+// A response carries the frontier and its ancestors, and only the frontier is drawn. The claims
+// below check that the hover answers only with drawn shapes and changes only where the pointer
+// crosses a drawn boundary. The mouse moves through Playwright's input pipeline at a human pace,
+// in small steps with hover events between, and the map's `hoveredArtifact` is read after each.
 //
 //   node clients/ts/harness/hover.mjs [--url http://localhost:5173/?dataset=notebook-2m4]
 //                                     [--shots DIR] [--tag before|after] [--executable PATH]
 //                                     [--headless]
 //
-// Headed by default, for the same reason `modes.mjs` is: the pick pass runs on the GPU and the
-// display is where it is measured rather than emulated. `--shots DIR` writes the contour shots the
-// delivery record carries — one of a wide single-ring cluster, one of a multi-ring one — zoomed to
-// the artifact's own extent so the line is legible.
+// Headed by default, so the GPU draws as it would for a user. `--shots DIR` writes contour
+// screenshots of a wide single-ring cluster and a multi-ring one, each zoomed to its own extent.
 import {mkdirSync} from 'node:fs';
 import {chromium} from 'playwright';
 
@@ -29,9 +23,8 @@ const shots = args.shots ?? null;
 const tag = args.tag ?? 'now';
 if (shots) mkdirSync(shots, {recursive: true});
 
-// A page served from an origin the demo server does not enumerate in `serve.dev_cors_origins`
-// cannot reach it, and the owner's own viewer holds :5173. The browser's origin check is switched
-// off rather than the server's: this is a measuring browser, and the server is not touched.
+// The demo's `serve.dev_cors_origins` allows only port 5173. For a page on another port the
+// browser's origin check is switched off, leaving the server's configuration alone.
 const sameOrigin = new URL(url).port === '5173';
 const flags = ['--disable-gpu-sandbox', ...(sameOrigin ? [] : ['--disable-web-security'])];
 const browser = await chromium.launch(
@@ -64,8 +57,7 @@ const servedArtifacts = () =>
     const G = 2 ** 32 / 512;
     return a.served.map((x) => ({
       id: String(x.tesseraId),
-      // The first served parent: the wire orders them ascending by id (contracts §3.2 r71), so a
-      // tree's one entry and a `dag` layer's lowest read the same way.
+      // The first served parent; the server orders parents by ascending id.
       parent: x.parentIds.length === 0 ? null : String(x.parentIds[0]),
       parents: x.parentIds.map((p) => String(p)),
       layer: x.layer,
@@ -101,7 +93,7 @@ const glide = async (x, y, n = 24, ms = 8) => {
   return seen;
 };
 
-/** The observed sequence as runs of one answer — `[[id, length], …]`. */
+/** The observed sequence as runs of one answer, `[[id, length], …]`. */
 const runs = (samples) => {
   const out = [];
   for (const v of samples.map((s) => (typeof s === 'object' && s !== null && 'id' in s ? s.id : s))) {
@@ -115,12 +107,9 @@ const show = (samples) =>
     .map(([v, n]) => `${v === null ? '—' : v.slice(0, 6)}×${n}`)
     .join(' → ');
 
-// Wait for a drawn map with a served set, not merely for a loaded page. `?dataset=` opens the
-// demo's default corpus and then switches, so marks arriving is not the same event as the corpus
-// under test being ready, and the absorb that follows the switch holds the main thread long enough
-// that an evaluate against it times out.
-// The wait goes through the locator, not `document.querySelector`: the map is inside the
-// explorer's shadow root, where a page-level query does not reach it.
+// Wait for a drawn map with a served set. `?dataset=` opens the default corpus and then switches,
+// so the first marks are not the corpus under test. The map is inside the explorer's shadow root,
+// so the wait goes through the locator.
 page.setDefaultTimeout(180_000);
 {
   const started = Date.now();
@@ -139,7 +128,7 @@ if (!served) {
   await browser.close();
   process.exit(1);
 }
-/** The frontier oracle: a served artifact with no served child. Computed here, not read off the map. */
+/** The frontier, computed here independently of the client: a served artifact with no served child. */
 const parents = new Set(served.flatMap((x) => x.parents));
 const frontier = new Set(served.filter((x) => !parents.has(x.id)).map((x) => x.id));
 const shaped = served.filter((x) => x.rings.length > 0);
@@ -147,21 +136,16 @@ console.log(`--- [${elapsed()}] ${served.length} served, ${frontier.size} on the
 
 /** The subjects the shots are taken of: the widest single-ring frontier cluster, and the multi-ring one. */
 const onFrontier = shaped.filter((x) => frontier.has(x.id));
-// A shape whose whole extent fits a viewport and has corners to look at: the widest single ring
-// among the middling clusters. The corpus's largest cluster is half the map and its contour runs
-// off every edge, which shows nothing about the line.
+// The widest single ring among mid-sized clusters, so the whole contour fits on screen.
 const single = onFrontier.filter((x) => x.rings.length === 1 && x.count >= 4_000 && x.count <= 80_000);
 const wide = [...(single.length > 0 ? single : onFrontier)].sort((a, b) => b.vertices - a.vertices || b.count - a.count)[0];
 const many = [...onFrontier].sort((a, b) => b.rings.length - a.rings.length || b.vertices - a.vertices)[0];
-/** A frontier cluster with a served ancestor — the nested case the hover used to flip across. */
+/** A frontier cluster with a served ancestor: the nested case. */
 const nested = onFrontier.filter((x) => x.parent && served.some((y) => y.id === x.parent)).sort((a, b) => b.vertices - a.vertices)[0];
 
 /**
- * Put the camera on one artifact's own extent, so the contour is drawn large.
- *
- * Through the whole extent first: `fitTo` reads the store's `extentOf`, which knows only what is
- * served for the view it is standing in, so fitting one cluster and then another fits the second
- * against a served set that no longer holds it and the camera stays where it was.
+ * Put the camera on one artifact's extent, so the contour is drawn large. Fits the whole extent
+ * first, since `extentOf` knows only the artifacts served for the current view.
  */
 const focus = async (subject) => {
   await map.evaluate((el) => /** @type {any} */ (el).fit());
@@ -172,7 +156,7 @@ const focus = async (subject) => {
   return ok;
 };
 
-/** Whether a point is inside a closed ring — an even-odd crossing count, as the client's is. */
+/** Whether a point is inside a closed ring, by an even-odd crossing count. */
 const inRing = (p, ring) => {
   let odd = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -184,11 +168,8 @@ const inRing = (p, ring) => {
 };
 
 /**
- * A world point genuinely inside one of a shape's rings, found by sampling its own bounding box.
- *
- * Not the ring's centroid: a cluster's arm is a crescent, and its centroid is outside it. Not a
- * vertex pulled inward either, for the same reason. The grid is the honest way to a point that is
- * in the shape, and it costs nothing — the containment is arithmetic here, not a pick pass.
+ * A world point inside one of a shape's rings, found by sampling a grid over its bounding box. A
+ * crescent's centroid lies outside it, so the centroid will not do.
  */
 const insidePoint = (rings) => {
   for (const ring of [...rings].sort((a, b) => b.length - a.length)) {
@@ -200,7 +181,7 @@ const insidePoint = (rings) => {
       for (let j = 1; j < 24; j++) {
         const p = [x0 + ((x1 - x0) * i) / 24, y0 + ((y1 - y0) * j) / 24];
         if (!inRing(p, ring)) continue;
-        // The deepest point of the lot: furthest from the boundary, so a 3 px jitter stays in.
+        // The point furthest from the boundary, so a 3 px jitter stays inside.
         const d = Math.min(...ring.map((q, k) => {
           const r = ring[(k + 1) % ring.length];
           const dx = r[0] - q[0];
@@ -218,9 +199,8 @@ const insidePoint = (rings) => {
 };
 
 /**
- * The canvas point the pointer is put at for a subject: a world point inside its **live** shape,
- * projected. The rings are re-read after the camera has settled — a response carries the shape of
- * what is served for the view it answered, so the overview's ring is not the one on screen now.
+ * The page point to put the pointer at for a subject: a world point inside its current shape,
+ * projected. The rings are re-read after the camera settles, since shapes are served per view.
  */
 const interior = async (subject) => {
   const live = (await servedArtifacts()).find((x) => x.id === subject.id);
@@ -229,8 +209,7 @@ const interior = async (subject) => {
   if (!world) return null;
   const [[x, y]] = await project([world]);
   const box = await map.boundingBox();
-  // The projection is canvas-relative; the mouse is driven in page coordinates. The bounds are
-  // the canvas's own, which is not the viewport's — the map sits beside the demo's panels.
+  // The projection is canvas-relative and the mouse is in page coordinates.
   if (!(x > 8 && y > 8 && x < box.width - 8 && y < box.height - 8)) return null;
   const at = [box.x + x, box.y + y];
   await page.mouse.move(at[0], at[1]);
@@ -240,10 +219,7 @@ const interior = async (subject) => {
   return at;
 };
 
-/**
- * Every drawn shape's rings in **canvas pixels**, projected in one pass, so a sampled pointer
- * position can be tested against them without another round trip.
- */
+/** Every drawn shape's rings in canvas pixels, projected in one pass. */
 const drawnInScreen = async (shapes) => {
   const rings = shapes.flatMap((s) => s.rings.map((ring) => ({id: s.id, ring})));
   const projected = await map.evaluate(
@@ -254,7 +230,7 @@ const drawnInScreen = async (shapes) => {
   return rings.map((r, i) => ({id: r.id, ring: projected[i].map(([x, y]) => [x + box.x, y + box.y])}));
 };
 
-/** The set of drawn shapes a page point is inside — the answer the hover is allowed to give. */
+/** The drawn shapes a page point is inside, which bound what the hover may answer. */
 const idsAt = (drawn, p) => new Set(drawn.filter((d) => inRing(p, d.ring)).map((d) => d.id));
 const same = (a, b) => a.size === b.size && [...a].every((v) => b.has(v));
 
@@ -276,22 +252,16 @@ const toLine = (drawn, p) => {
 };
 
 /**
- * **A hover that holds still**, measured: the answer may change only where the pointer crosses a
- * drawn boundary.
- *
- * Counting flips in the sequence alone is the wrong measure on a real map — a straight glide can
- * leave one cluster's arm and re-enter it, and the answer honestly changes twice. What must never
- * happen is the answer changing between two positions that lie inside exactly the same drawn
- * shapes, which is what the pointer crossing an *invisible* ancestor produced.
+ * The steps where the hover changed without the pointer crossing a drawn boundary: the answer
+ * changed between two positions inside the same drawn shapes. A glide may leave a shape and
+ * re-enter it, so counting changes alone would not do.
  */
 const unprovoked = (samples, drawn, near = 6) => {
   const out = [];
   for (let i = 1; i < samples.length; i++) {
     if (samples[i].id === samples[i - 1].id) continue;
     if (!same(idsAt(drawn, samples[i].at), idsAt(drawn, samples[i - 1].at))) continue;
-    // A step that straddles a line has the line between its ends whatever the two containment
-    // sets say — a four-pixel step lands within a pixel or two of the edge it just crossed, and
-    // the projection this harness does is not the client's to the pixel.
+    // A step near a line is skipped, since this projection is not the client's to the pixel.
     if (Math.min(toLine(drawn, samples[i].at), toLine(drawn, samples[i - 1].at)) <= near) continue;
     out.push(`${String(samples[i - 1].id).slice(0, 6)}→${String(samples[i].id).slice(0, 6)} at ${samples[i].at.map(Math.round).join(',')}`);
   }
@@ -299,11 +269,8 @@ const unprovoked = (samples, drawn, near = 6) => {
 };
 
 /**
- * The served set as it stands **now**, with the frontier computed over it.
- *
- * The frontier moves with the camera: zoom into a cluster and its children are served, which makes
- * it an ancestor and takes it off the map. So every claim below reads the set it is standing in
- * rather than the overview's, and names the artifact it ran against.
+ * The served set now, with its frontier. Zooming into a cluster serves its children and takes it
+ * off the frontier, so each claim reads the current set.
  */
 const live = async () => {
   const now = await servedArtifacts();
@@ -321,9 +288,7 @@ for (const [name, camera, rank] of [
 ]) {
   if (!camera) continue;
   await focus(camera);
-  // The frontier moves with the camera, so the shape to hover is chosen from what is drawn now,
-  // not from the overview's list — otherwise the shot is of a hover that did not take. Among
-  // those, the largest on screen: the complaint is about the line, so the line has to be big.
+  // Choose from what is drawn now, the largest on screen.
   const {shapes} = await live();
   const onScreen = await drawnInScreen(shapes);
   const bounds = await map.boundingBox();
@@ -337,12 +302,9 @@ for (const [name, camera, rank] of [
     const inside = x0 > bounds.x + 4 && y0 > bounds.y + 4 && x1 < bounds.x + bounds.width - 4 && y1 < bounds.y + bounds.height - 4;
     whole.set(d.id, (whole.get(d.id) ?? true) && inside);
   }
-  // Whole on screen first, then the biggest of those: a contour running off the edge shows less of
-  // the line than a smaller one that is all there.
+  // Prefer shapes wholly on screen, then the biggest.
   const choose = (xs) => [...xs].sort((a, b) => rank(a, b) || Number(whole.get(b.id) ?? false) - Number(whole.get(a.id) ?? false) || (areaOf.get(b.id) ?? 0) - (areaOf.get(a.id) ?? 0));
-  // In preference order, the first candidate that is actually on screen and actually answers: a
-  // shape chosen off the list alone may be one the camera has left behind, and the shot would be
-  // of a hover that did not take.
+  // The first candidate, in preference order, that is on screen and answers the hover.
   let subject = null;
   let at = null;
   let answer = null;
@@ -354,9 +316,7 @@ for (const [name, camera, rank] of [
     answer = await hovered();
     if (answer === candidate.id) break;
   }
-  // Then in close, on the subject's own extent, because the complaint is about the line: a
-  // contour eighty pixels across says nothing about whether its corners are square. Kept only if
-  // the same artifact still answers there — zooming in serves its children and moves the frontier.
+  // Then zoomed to the subject's extent, kept only if the same artifact still answers there.
   let close = null;
   if (subject) {
     const moved = await map.evaluate((el, id) => /** @type {any} */ (el).fitTo(BigInt(id)), subject.id);
@@ -369,14 +329,13 @@ for (const [name, camera, rank] of [
   console.log(
     `  [${elapsed()}] ${name}: ${subject ? subject.id.slice(0, 8) : 'none'} — ${subject ? subject.rings.length : 0} ring(s), ${subject ? subject.vertices : 0} vertices, ${subject ? subject.count.toLocaleString('en-GB') : 0} members; hovered ${answer === null ? 'nothing' : answer.slice(0, 8)} at ${at ? at.map(Math.round).join(',') : 'nowhere'}${close ? `, and again on its own extent at ${close.map(Math.round).join(',')}` : ''}`
   );
-  // The map element alone: the complaint is about the line, and the demo's panels are not it.
+  // The map element alone, without the panels.
   if (shots && (close || at)) await map.screenshot({path: `${shots}/contour-${tag}-${name}.png`});
 }
 
 console.log('--- the hover ---');
 
-// 1. Only what is drawn answers a hover. An ancestor is served alongside its children and nothing
-//    is drawn for it, so pointing at one must not reach it.
+// 1. Only what is drawn answers a hover; a served ancestor is not drawn and must not answer.
 await focus(nested ?? wide);
 const wander = [];
 {
@@ -393,9 +352,7 @@ const wander = [];
   );
 }
 
-// 2. A boundary crossed at four pixels a step: the answer changes where the line is and nowhere
-//    else. The flip the owner saw was the answer changing where nothing was crossed at all —
-//    the pointer moving inside one cluster, over its parent's invisible ring.
+// 2. A boundary crossed at four pixels a step: the answer changes at the line and nowhere else.
 {
   const {shapes} = await live();
   const subject = [...shapes].sort((a, b) => b.vertices - a.vertices)[0];
@@ -427,7 +384,7 @@ const wander = [];
       : 'no frontier shape in view'
   );
 
-  // 3. A few pixels never change the answer. A hand does not hold still, and the hover must.
+  // 3. A jitter of a few pixels inside a shape does not change the answer.
   const at = subject ? await interior(subject) : null;
   const jitter = [];
   for (let i = 0; i < 16 && at; i++) {
@@ -447,7 +404,7 @@ const wander = [];
 }
 
 // 4. The nested case: a frontier cluster with a served ancestor, entered and left over its own
-//    edge. The ancestor must never answer, and the crossing must be one change each way.
+//    edge. The ancestor must not answer, and each crossing is one change.
 {
   const {now, shapes} = await live();
   const under = shapes.filter((x) => x.parent && now.some((y) => y.id === x.parent)).sort((a, b) => b.vertices - a.vertices)[0];

@@ -371,7 +371,7 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
         ("first", cat.SUBMITTER_FIRST_ID, cat.SUBMITTER_FIRST),
         ("last", cat.SUBMITTER_LAST_ID, cat.SUBMITTER_LAST),
     ]:
-        entity = catalogue_bundle.entity_of_source(source)
+        entity = cat.entity_of_source(catalogue_bundle, source)
         assert entity in m_auth, f"{label}: this principal cannot see the anchor at all"
         for operator in ("eq", "prefix"):
             expr = {"submitter": {operator: value}}
@@ -435,7 +435,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
     raw = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
     )
-    carrier = catalogue_bundle.entity_of_source(SINGLE_CARRIER_ID)
+    carrier = cat.entity_of_source(catalogue_bundle, SINGLE_CARRIER_ID)
     assert _served_entities(raw, entity_of_fx) == {carrier}, (
         "the control failed — a value one visible entity holds was not served, so the four empty "
         "answers above may be a column that matches nothing at all"

@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
-    CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
+    CurrentPointer, EntitySet, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -109,26 +109,6 @@ fn build_bundle(root: &Path) {
     let segments_manifest = SegmentsManifest {
         watermark: n,
         entity_id_high_water: n,
-        entity_id_low_water: tessera_types::layer::ROWLESS_CEILING,
-        layers: Vec::new(),
-        layer_tombstones: Vec::new(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
-        membership_extents: Vec::new(),
-        level_versions: Vec::new(),
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
-        shape_rows_extents: Vec::new(),
-        shape_held_extents: Vec::new(),
-        term_image_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             incarnation: 0,
             view: "main".to_string(),
@@ -139,16 +119,10 @@ fn build_bundle(root: &Path) {
         }],
         deltas: vec![],
         dict_extents: vec![],
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
-        external_id_runs: vec![],
-        locator_extents: vec![],
-        tombstones: vec![],
-        deny: vec![],
-        vocabulary_extensions: Vec::new(),
+        tombstones: EntitySet::default(),
+        deny: EntitySet::default(),
         files: segments_files,
+        ..SegmentsManifest::empty()
     };
     let segments_bytes = serde_json::to_vec_pretty(&segments_manifest).expect("serialise");
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
@@ -167,7 +141,6 @@ fn build_bundle(root: &Path) {
             rounds: IDENTITY_ROUNDS,
             key: "0123456789abcdef0123456789abcdef".to_string(),
             shard_id: 0,
-            idset: 1,
         },
         groups: Vec::new(),
         views: vec![ViewDescriptor {

@@ -8,20 +8,11 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_lifecycle::ChangeOp;
 use tessera_types::EntityId;
-
-/// Poll until `cond` holds, rather than sleeping on a guess about how long a tick takes.
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
 
 /// [`engine_with_tick`] with the row trigger set too — `flush_max_items`, §4.1's second trigger.
 fn engine_with_triggers(
@@ -72,6 +63,8 @@ fn engine_with_tick(
 
 use tessera_engine::{Engine, EngineConfig};
 
+const WAIT: Duration = Duration::from_secs(10);
+
 /// The tick fires on its own, with no traffic at all. A cadence that only advanced when something
 /// else woke the executor would make visibility latency a function of load rather than of
 /// `flush_max_age_secs`.
@@ -85,7 +78,7 @@ fn the_tick_fires_on_an_idle_node() {
         &tmp.path().join("pairs.parquet"),
     );
     let engine = engine_with_tick(&tmp, &root, 1);
-    wait_until("two ticks on an idle node", || {
+    wait_until("two ticks on an idle node", WAIT, || {
         engine.write_executor_stats().ticks >= 2
     });
 }
@@ -94,7 +87,9 @@ fn the_tick_fires_on_an_idle_node() {
 /// flag pulls the tick's deadline forward and the doorbell wakes an idle executor, so the flush
 /// runs at the next loop iteration — through the one tick path, never around it. With nothing
 /// buffered the triggered tick plans nothing and the request is consumed; with a buffered row it
-/// publishes long before the 3600 s deadline this test sets.
+/// publishes long before the 3600 s deadline this test sets. The second half needs the other ring
+/// too: nothing else wakes the executor before the deadline, so the row is served only because the
+/// finished flush rang the doorbell itself.
 #[test]
 fn a_requested_flush_executes_promptly_through_the_tick_path() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -110,12 +105,14 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Empty buffer: the triggered tick fires, plans nothing, and consumes the request.
     engine.request_flush();
-    wait_until("the requested tick fires on an empty buffer", || {
+    wait_until("the requested tick fires on an empty buffer", WAIT, || {
         engine.write_executor_stats().ticks > ticks_at_start
     });
-    wait_until("the request is consumed by the tick it triggered", || {
-        !engine.write_executor_stats().flush_requested
-    });
+    wait_until(
+        "the request is consumed by the tick it triggered",
+        WAIT,
+        || !engine.write_executor_stats().flush_requested,
+    );
     assert_eq!(
         engine.generation().segments_version,
         0,
@@ -124,7 +121,6 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
 
     // Buffered row: a second request publishes it without waiting out the deadline.
     let row = tessera_lifecycle::UnallocatedRow {
-        external_id: Some(b"prompt-flush".to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -135,11 +131,12 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
+        .ingest_rows(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])
         .expect("the row is accepted");
     engine.request_flush();
     wait_until(
         "the buffered row is published by the requested flush",
+        WAIT,
         || engine.generation().segments_version > 0,
     );
 }
@@ -214,11 +211,12 @@ fn a_deny_only_node_rotates_at_the_tick_and_the_suppression_survives_restart() {
         .accept_change(EntityId::new(entity), ChangeOp::Suppress)
         .expect("a suppression is accepted");
 
-    // The tick fires within a second; growth (the ChangeByEntity record) triggers a rotation,
+    // The tick fires within a second; growth (the ChangeBatch record) triggers a rotation,
     // whose reclaim deletes the original member — the buffer is empty, so the whole durable
     // prefix below the snapshot is reclaimable.
     wait_until(
         "the original WAL member is reclaimed by a tick rotation",
+        WAIT,
         || {
             let now = wal_members();
             now != before && !now.is_empty()
@@ -271,7 +269,6 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
 
     for i in 0..4u8 {
         let row = tessera_lifecycle::UnallocatedRow {
-            external_id: Some(format!("rows-trigger-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -282,12 +279,181 @@ fn the_row_trigger_publishes_ahead_of_the_period() {
             scoped: Vec::new(),
         };
         engine
-            .accept_ingest(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
+            .ingest_rows(vec![row], format!("rows-trigger-batch-{i}"), [i; 32])
             .expect("the row is accepted");
     }
 
     wait_until(
         "the buffered rows are published by the row trigger, with no request and no elapsed tick",
+        WAIT,
         || engine.generation().segments_version > 0,
     );
+}
+
+/// **A request made while a cycle's second view waits is honoured by a prompt cycle.** A cycle
+/// holding rows in two views plans both, dispatches one and defers the other, and stays open
+/// until the deferred view publishes. A request made meanwhile is answered with the cycle after
+/// it; the tick that takes the deferred view consumes the request's flag, so that later cycle
+/// comes only because closing the open one arms it again. The period here is an hour, so the
+/// number arriving at all is the re-armed request's doing.
+#[test]
+fn a_request_made_while_a_view_is_deferred_is_honoured_without_the_period() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    engine
+        .create_plain_view(tessera_engine::PlainViewDeclaration {
+            name: "s1".to_string(),
+            title: None,
+            projection: "none".to_string(),
+            frame: tessera_engine::DeclaredFrame {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            visibility: None,
+            point_default: None,
+        })
+        .expect("the second view is created");
+    let mut ingested = Vec::new();
+    for (i, view) in ["s0", "s1"].into_iter().enumerate() {
+        let row = tessera_lifecycle::UnallocatedRow {
+            view: view.to_string(),
+            join: None,
+            descriptors: vec![b"0".to_vec()],
+            x: 0.5,
+            y: 0.5,
+            scalars: Vec::new(),
+            terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
+        };
+        let entity = engine
+            .ingest_rows(vec![row], format!("open-cycle-{view}"), [i as u8 + 1; 32])
+            .expect("the row is accepted")[0];
+        ingested.push((view, entity));
+    }
+
+    // The first view's flush is held, so the cycle is open and the second view deferred.
+    engine.set_flush_paused_for_test(true);
+    let first = engine.request_flush_publication();
+    wait_until("the first view's flush is held", WAIT, || {
+        engine.flush_is_holding_for_test()
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine.set_flush_paused_for_test(false);
+    wait_until("the open cycle publishes both views", WAIT, || {
+        engine.publication() >= first
+    });
+    for (view, entity) in &ingested {
+        assert!(
+            serves(&engine, view, *entity),
+            "the row in {view} is served at the number the first request was answered with"
+        );
+    }
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+}
+
+/// **A retry that finds nothing to flush still reaches the number a request was promised.** A
+/// flush that fails holds its cycle open and retries. A request made meanwhile is answered with the
+/// cycle after it. The row is deleted before the retry, so the retry plans nothing and closes the
+/// open cycle inside the tick, with no publication to wake the executor again: only the re-armed
+/// request brings the promised cycle before the hour-long period.
+///
+/// The flush is made to fail by a read-only segments directory. No fault switch fails a flush and
+/// lets it recover: a WAL fault leaves the overlay diverged and a step-down stays, and both refuse
+/// every later flush until a restart.
+#[test]
+fn a_retry_that_finds_nothing_to_flush_still_reaches_the_promised_number() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = engine_with_tick(&tmp, &root, 3600);
+    let entity = ingest(&engine, "failed-cycle");
+
+    let segments = segments_dir(&root, "s0");
+    let writable = std::fs::metadata(&segments).unwrap().permissions();
+    std::fs::set_permissions(&segments, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let first = engine.request_flush_publication();
+    wait_until("the flush fails", WAIT, || {
+        engine.write_executor_stats().flush_failures >= 1
+    });
+    let second = engine.request_flush_publication();
+    assert_eq!(
+        second,
+        first + 1,
+        "a request during an open cycle names the cycle after it"
+    );
+
+    engine
+        .accept_change(entity, ChangeOp::Delete)
+        .expect("the deletion is accepted");
+    std::fs::set_permissions(&segments, writable).unwrap();
+
+    wait_until("the retry closes the failed cycle", WAIT, || {
+        engine.publication() >= first
+    });
+    wait_until(
+        "the cycle the second request was answered with publishes, well inside the period",
+        WAIT,
+        || engine.publication() >= second,
+    );
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "the deleted row was never flushed, so no cycle published a segment"
+    );
+}
+
+/// The directory `view`'s flushed segments are written into.
+fn segments_dir(root: &std::path::Path, view: &str) -> std::path::PathBuf {
+    let current: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("CURRENT")).unwrap()).unwrap();
+    let partitions = root
+        .join(current["prefix"].as_str().unwrap())
+        .join("partitions");
+    let partition = std::fs::read_dir(&partitions)
+        .unwrap()
+        .next()
+        .expect("the bundle has a partition")
+        .unwrap()
+        .path();
+    tessera_store::view_path(&partition, view).join("segments")
+}
+
+/// Whether a full-coverage viewer is served `entity`, ingested at (0.5, 0.5), in `view`.
+fn serves(engine: &Engine, view: &str, entity: EntityId) -> bool {
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let wanted = engine.tessera_id_of(entity).unwrap();
+    engine
+        .viewport(
+            &session,
+            tessera_engine::ViewportRequest::new(view, 10, [0.4, 0.4, 0.6, 0.6], 200),
+        )
+        .unwrap()
+        .points
+        .iter()
+        .any(|(id, _)| id == wanted)
 }

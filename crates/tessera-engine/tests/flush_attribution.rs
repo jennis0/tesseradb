@@ -13,23 +13,16 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use tessera_engine::{Engine, EngineConfig, FlushStage};
 
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
+const WAIT: Duration = Duration::from_secs(30);
 
 fn ingest_rows(engine: &Engine, batch: &str, n: usize) {
     let rows: Vec<tessera_lifecycle::UnallocatedRow> = (0..n)
         .map(|i| tessera_lifecycle::UnallocatedRow {
-            external_id: Some(format!("{batch}-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -43,7 +36,7 @@ fn ingest_rows(engine: &Engine, batch: &str, n: usize) {
     let mut key = [0u8; 32];
     key[..batch.len().min(32)].copy_from_slice(&batch.as_bytes()[..batch.len().min(32)]);
     engine
-        .accept_ingest(rows, batch.to_string(), key)
+        .ingest_rows(rows, batch.to_string(), key)
         .expect("the batch is accepted");
 }
 
@@ -102,9 +95,11 @@ fn the_flush_stages_partition_both_walls_and_accumulate_across_flushes() {
     engine.request_flush();
     // `PublishWall` is lapped after `publish_flush` returns, so it moving is what says every
     // publication stage has been charged; `flushes` moves before the last two.
-    wait_until("the first flush publishes and its wall is lapped", || {
-        engine.write_executor_stats().flush_stage_nanos[FlushStage::PublishWall as usize] > 0
-    });
+    wait_until(
+        "the first flush publishes and its wall is lapped",
+        WAIT,
+        || engine.write_executor_stats().flush_stage_nanos[FlushStage::PublishWall as usize] > 0,
+    );
 
     let stats = engine.write_executor_stats();
     assert_eq!(stats.flushes, 1);
@@ -148,7 +143,7 @@ fn the_flush_stages_partition_both_walls_and_accumulate_across_flushes() {
     // over the accumulated figures too.
     ingest_rows(&engine, "d", 20);
     engine.request_flush();
-    wait_until("the second flush publishes", || {
+    wait_until("the second flush publishes", WAIT, || {
         engine.write_executor_stats().flushes >= 2
             && engine.write_executor_stats().flush_stage_nanos[FlushStage::PublishWall as usize]
                 > nanos[FlushStage::PublishWall as usize]

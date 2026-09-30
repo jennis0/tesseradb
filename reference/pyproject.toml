@@ -2,6 +2,7 @@
 name = "tessera-reference-oracle"
 version = "0.1.0"
 description = "Independent Python differential oracle for Tessera (Task 14) — test-only, never a component."
+license = "Apache-2.0"
 requires-python = ">=3.12"
 # The package imports all three at module scope. Declared because `reference/.venv` has to be
 # reproducible from a fresh clone for a track that stands across every stage — an undeclared

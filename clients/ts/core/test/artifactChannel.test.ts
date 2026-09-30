@@ -10,69 +10,16 @@ import {
 import {SessionArtifactTable} from '../src/artifactTable.js';
 import {TesseraClient} from '../src/client.js';
 import {rectToRequestBbox} from '../src/coords.js';
-import type {Artifact, ArtifactIdentity, FilterExpr, Layer, Quantisation, ViewportRequest, ViewportResponse, ViewportResult} from '../src/types.js';
+import type {Artifact, ArtifactIdentity, FilterExpr, Layer, Quantisation, ViewportRequest, ViewportResponse} from '../src/types.js';
+import {artifact, layer, manualClock, response, result, settle} from './support.js';
 
 const Q: Quantisation = {xMin: 0, xMax: 100, yMin: 0, yMax: 100};
 
-const artifact = (id: bigint, parent: bigint | null = null, matched: boolean | null = null): Artifact => ({
-  layer: 'clusters/x',
-  tesseraId: id,
-  key: `c-${id}`,
-  maskedCount: 10n,
-  centroid: null,
-  box: null,
-  shape: null,
-  content: [],
-  parentIds: parent === null ? [] : [parent],
-  rung: 0,
-  matched
-});
+const clusterX = (id: bigint, parent: bigint | null = null, matched: boolean | null = null): Artifact =>
+  artifact(id, {layer: 'clusters/x', key: `c-${id}`, maskedCount: 10n, parentIds: parent === null ? [] : [parent], matched});
 
 function responseWith(artifacts: Artifact[], keys?: {identityKey?: string; contentKey?: string}, identity: ArtifactIdentity[] | null = null): ViewportResponse {
-  const result: ViewportResult = {
-    tiles: [],
-    ids: new BigUint64Array(0),
-    codes: new BigUint64Array(0),
-    positions: new Float64Array(0),
-    world: new Float32Array(0),
-    scalars: {},
-    membership: {},
-    subCells: null,
-    artifacts,
-    artifactsIdentity: identity
-  };
-  return {
-    result,
-    timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: keys?.identityKey ?? 'ik',
-    contentKey: keys?.contentKey ?? 'ck',
-    pin: 'ck',
-    stale: false,
-    bytes: 0
-  };
-}
-
-function manualClock(): ArtifactChannelClock & {fire(): void; pending: number} {
-  const timers = new Map<number, () => void>();
-  let seq = 0;
-  return {
-    after(_ms, fire) {
-      const id = ++seq;
-      timers.set(id, fire);
-      return id;
-    },
-    cancel(handle) {
-      timers.delete(handle as number);
-    },
-    fire() {
-      const fires = [...timers.values()];
-      timers.clear();
-      for (const f of fires) f();
-    },
-    get pending() {
-      return timers.size;
-    }
-  };
+  return response(result({artifacts, artifactsIdentity: identity}), {...keys, pin: 'ck'});
 }
 
 function fakeClient(behaviour: (req: ViewportRequest) => ViewportResponse | Promise<ViewportResponse>) {
@@ -87,7 +34,7 @@ function channel(client: TesseraClient, clock: ArtifactChannelClock, table?: Ses
   const ch = new ArtifactChannel(client, {
     view: 's0',
     quantisation: Q,
-    token: () => 'tok',
+    token: async () => 'tok',
     depth: () => 5, // a drawn frame exists
     clock,
     table,
@@ -99,49 +46,47 @@ function channel(client: TesseraClient, clock: ArtifactChannelClock, table?: Ses
 describe('the artifact channel', () => {
   it('debounces: a request goes out once the view settles, not per schedule', async () => {
     const clock = manualClock();
-    const {client, viewport} = fakeClient(() => responseWith([artifact(1n)]));
+    const {client, viewport} = fakeClient(() => responseWith([clusterX(1n)]));
     const {ch} = channel(client, clock);
     ch.setLayer('clusters/x');
     ch.schedule(view, 400, 300);
     ch.schedule(view, 400, 300);
     ch.schedule(view, 400, 300);
     expect(viewport).not.toHaveBeenCalled(); // still settling
-    expect(clock.pending).toBe(1); // one timer, the latest — the earlier ones were cancelled
+    expect(clock.pending).toBe(1); // the earlier timers were cancelled
     clock.fire();
-    await Promise.resolve();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
   });
 
-  it('asks with k = 0 and exactly the on layer named — the artifact channel’s own request shape', async () => {
+  it('asks with k = 0 and exactly the on layer named: the artifact channel’s own request shape', async () => {
     const clock = manualClock();
-    const {client, viewport} = fakeClient(() => responseWith([artifact(1n)]));
+    const {client, viewport} = fakeClient(() => responseWith([clusterX(1n)]));
     const {ch} = channel(client, clock);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
+    await settle();
     const body = viewport.mock.calls[0]![1] as {k?: number; layers?: string[]};
     expect(body.k).toBe(0);
     expect(body.layers).toEqual(['clusters/x']);
   });
 
-  it('clears the held set on a refusal — a refusal is not an empty view', async () => {
+  it('clears the held set on a refusal: a refusal is not an empty view', async () => {
     const clock = manualClock();
     let fail = false;
     const {client} = fakeClient(() => {
       if (fail) throw Object.assign(new Error('gone'), {code: 'refused', detail: 'gone'});
-      return responseWith([artifact(1n), artifact(2n)]);
+      return responseWith([clusterX(1n), clusterX(2n)]);
     });
     const {ch, states} = channel(client, clock);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.artifacts).toHaveLength(2);
 
     fail = true;
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.status).toBe('refused');
     expect(ch.current.artifacts).toHaveLength(0);
     expect(states.at(-1)!.refusal?.code).toBe('refused');
@@ -150,56 +95,50 @@ describe('the artifact channel', () => {
   it('replaces the served set wholesale and holds the payloads beside it', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
-    let served = [artifact(1n), artifact(2n)];
+    let served = [clusterX(1n), clusterX(2n)];
     const {client} = fakeClient(() => responseWith(served));
     const {ch} = channel(client, clock, table);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(table.live).toBe(2);
     const ordinalOfOne = table.ordinalOf('clusters/x', 1n);
 
-    // Panned onto disjoint ground. **The served set is only what is in view** — merging it would
-    // draw clusters for ground the user has left — and the payloads of what was left are held.
-    served = [artifact(3n)];
+    // Panned onto disjoint ground: the served set is only what is in view, and the payloads of what
+    // was left are held.
+    served = [clusterX(3n)];
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([3n]);
     expect(ch.current.held).toBe(3);
     expect(table.live).toBe(3);
-    // And the ordinal an artifact was named under survives the pan, which is what stops the
-    // colours and the lookup texture being rebuilt for ground already seen.
+    // The ordinal an artifact was named under survives the pan, so its colour is not rebuilt.
     expect(table.ordinalOf('clusters/x', 1n)).toBe(ordinalOfOne);
   });
 
-  it('names a held artifact once — a pan back to it moves nothing in the session table', async () => {
+  it('names a held artifact once: a pan back to it moves nothing in the session table', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
-    let served = [artifact(1n), artifact(2n)];
+    let served = [clusterX(1n), clusterX(2n)];
     const {client} = fakeClient(() => responseWith(served));
     const {ch} = channel(client, clock, table);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     const first = ch.current.artifacts[0]!;
 
-    served = [artifact(3n)];
+    served = [clusterX(3n)];
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     const settled = table.version;
 
-    // Back over the original ground: the table does not move, so nothing downstream of its version
-    // — the colour map, the lookup texture — is rebuilt.
-    served = [artifact(1n), artifact(2n)];
+    // Back over the original ground: the table does not move, so nothing derived from its version
+    // is rebuilt.
+    served = [clusterX(1n), clusterX(2n)];
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(table.version).toBe(settled);
-    // The payload is the *same object*, so a consumer memoising on identity does no work either.
+    // The payload is the same object, so a consumer memoising on identity does no work.
     expect(ch.current.artifacts[0]).toBe(first);
   });
 
@@ -207,22 +146,20 @@ describe('the artifact channel', () => {
     for (const rotate of [{contentKey: 'ck2'}, {identityKey: 'ik2'}]) {
       const clock = manualClock();
       const table = new SessionArtifactTable();
-      let served = [artifact(1n), artifact(2n)];
+      let served = [clusterX(1n), clusterX(2n)];
       let keys: {identityKey?: string; contentKey?: string} | undefined;
       const {client} = fakeClient(() => responseWith(served, keys));
       const {ch} = channel(client, clock, table);
       ch.setLayer('clusters/x');
       ch.refresh(view, 400, 300);
-      await Promise.resolve();
-      await Promise.resolve();
+      await settle();
       expect(ch.current.held).toBe(2);
 
       // What is held answered a question about a generation, or a principal, that has moved.
       keys = rotate;
-      served = [artifact(3n)];
+      served = [clusterX(3n)];
       ch.refresh(view, 400, 300);
-      await Promise.resolve();
-      await Promise.resolve();
+      await settle();
       expect(ch.current.held).toBe(1);
       expect(table.live).toBe(1);
       expect(table.ordinalOf('clusters/x', 1n)).toBe(0);
@@ -232,21 +169,18 @@ describe('the artifact channel', () => {
   it('takes the filter bit from the response and never from what it holds', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
-    let served = [artifact(1n, null, true), artifact(2n, null, false)];
+    let served = [clusterX(1n, null, true), clusterX(2n, null, false)];
     const {client} = fakeClient(() => responseWith(served));
     const {ch} = channel(client, clock, table);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.artifacts.map((a) => a.matched)).toEqual([true, false]);
 
-    // The filter changed; the payloads did not (decision 0104), and the bit is the one thing that
-    // must not be answered from the store.
-    served = [artifact(1n, null, false), artifact(2n, null, true)];
+    // The filter changed and the payloads did not; `matched` is not answered from the store.
+    served = [clusterX(1n, null, false), clusterX(2n, null, true)];
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.artifacts.map((a) => a.matched)).toEqual([false, true]);
     expect(ch.current.held).toBe(2);
     expect(table.version).toBeGreaterThan(0);
@@ -254,24 +188,22 @@ describe('the artifact channel', () => {
     expect(table.live).toBe(2);
   });
 
-  it('keeps the store when a layer is switched off — a question not asked is not an answer gone stale', async () => {
+  it('keeps the store when a layer is switched off: a question not asked is not an answer gone stale', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
-    const {client} = fakeClient(() => responseWith([artifact(1n), artifact(2n)]));
+    const {client} = fakeClient(() => responseWith([clusterX(1n), clusterX(2n)]));
     const {ch} = channel(client, clock, table);
     ch.setLayer('clusters/x');
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
 
     ch.setLayer(null);
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(ch.current.artifacts).toHaveLength(0);
     expect(ch.current.held).toBe(2);
 
-    // A reset is the other half of rule 7: a new principal, and nothing held may be named again.
+    // A reset drops the store: a new principal.
     ch.reset();
     expect(ch.current.held).toBe(0);
     expect(table.live).toBe(0);
@@ -279,24 +211,24 @@ describe('the artifact channel', () => {
 
   it('does not ask, and clears, when no layer is selected', async () => {
     const clock = manualClock();
-    const {client, viewport} = fakeClient(() => responseWith([artifact(1n)]));
+    const {client, viewport} = fakeClient(() => responseWith([clusterX(1n)]));
     const {ch} = channel(client, clock);
     ch.setLayer(null);
     ch.refresh(view, 400, 300);
-    await Promise.resolve();
+    await settle();
     expect(viewport).not.toHaveBeenCalled();
     expect(ch.current.artifacts).toHaveLength(0);
   });
 });
 
-// ---------------------------------------------------------------- the fetch model (design §6)
+// ---------------------------------------------------------------- the fetch model
 
 /** One depth-5 tile in wire grid units: the world is 2^32 per axis, 32 tiles across at depth 5. */
 const S = 2 ** 27;
 
-/** The partial view: bbox [37.5, 40.625, 62.5, 59.375] world units → tiles 2..3 × 2..3 at depth 5. */
+/** The partial view: bbox [37.5, 40.625, 62.5, 59.375] world units, tiles 2..3 x 2..3 at depth 5. */
 const partialView = {target: [50, 50, 0] as [number, number, number], zoom: 4};
-/** The whole-extent view: bbox [0, 0, 512, 512] — every tile at any depth. */
+/** The whole-extent view: bbox [0, 0, 512, 512], every tile at any depth. */
 const wholeView = {target: [256, 256, 0] as [number, number, number], zoom: 0};
 
 const geo = (
@@ -308,43 +240,34 @@ const geo = (
     layer?: string;
     matched?: boolean | null;
   } = {}
-): Artifact => ({
-  layer: g.layer ?? 'clusters/x',
-  tesseraId: id,
-  key: `c-${id}`,
-  maskedCount: 10n,
-  centroid: g.centroid ?? null,
-  box: g.box ?? null,
-  shape: null,
-  content: [],
-  parentIds: [],
-  rung: g.rung ?? 0,
-  matched: g.matched ?? null
-});
+): Artifact =>
+  artifact(id, {
+    layer: g.layer ?? 'clusters/x',
+    key: `c-${id}`,
+    maskedCount: 10n,
+    centroid: g.centroid ?? null,
+    box: g.box ?? null,
+    rung: g.rung ?? 0,
+    matched: g.matched ?? null
+  });
 
 // The partial view's grid box is [2S, 2S, 4S, 4S]. Four fixtures against it:
 /** Wholly inside the viewport. */
 const inside = () => geo(1n, {box: [3 * S, 3 * S, 3.5 * S, 3.5 * S], centroid: [3.2 * S, 3.2 * S]});
 /** Wholly outside it. */
 const outside = () => geo(2n, {box: [6 * S, 6 * S, 7 * S, 7 * S], centroid: [6.5 * S, 6.5 * S]});
-/** Its edge crosses the viewport while its centroid sits outside — it is drawn, by its box. */
+/** Its edge crosses the viewport while its centroid is outside; drawn, by its box. */
 const edge = () => geo(3n, {box: [0.5 * S, 0.5 * S, 2.5 * S, 2.5 * S], centroid: [S, S]});
-/** No geometry at all — always in view. */
+/** No geometry at all; always in view. */
 const bare = () => geo(4n);
 
-const decl = (over: Partial<Layer> = {}): Layer => ({
-  name: 'clusters/x',
-  title: 'X',
-  views: ['s0'],
-  membership: 'enumerated',
-  hierarchy: {kind: 'tiered', pruneChildren: false},
-  levels: [{level: 0, title: 'coarse', zoom: null}],
-  computedContent: [],
-  suppliedContent: [],
-  depsOn: [],
-  version: 1,
-  ...over
-});
+const decl = (over: Partial<Layer> = {}): Layer =>
+  layer('clusters/x', {
+    title: 'X',
+    hierarchy: {kind: 'tiered', pruneChildren: false},
+    levels: [{level: 0, title: 'coarse', zoom: null}],
+    ...over
+  });
 
 function holdingChannel(
   client: TesseraClient,
@@ -359,18 +282,13 @@ function holdingChannel(
   const ch = new ArtifactChannel(client, {
     view: 's0',
     quantisation: Q,
-    token: () => 'tok',
+    token: async () => 'tok',
     depth: () => 5,
     clock,
     onChange: (s) => states.push(s),
     ...opts
   });
   return {ch, states};
-}
-
-/** Enough microtask turns for a mocked response to land and its state to settle. */
-async function settled(): Promise<void> {
-  for (let i = 0; i < 4; i++) await Promise.resolve();
 }
 
 describe('held-whole tracking and the local serve', () => {
@@ -381,16 +299,16 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
     // Every scope the view touches is held whole, so there is nothing left to promote.
     expect(clock.pending).toBe(0);
 
     ch.refresh(partialView, 400, 300);
-    await settled();
-    // No request: the pick is local, and it is the set the server would have named — the artifact
-    // whose edge crosses the viewport with its centroid outside is drawn, the bare one always is.
+    await settle();
+    // No request: the pick is local and matches what the server would name, including the artifact
+    // whose edge crosses the viewport and the one with no geometry.
     expect(viewport).toHaveBeenCalledTimes(1);
     expect(ch.current.status).toBe('shown');
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 3n, 4n]);
@@ -404,16 +322,16 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     const fromServer = ch.current.artifacts.map((a) => a.tesseraId);
 
     served = [inside(), outside(), edge(), bare()]; // the whole extent
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     const asked = viewport.mock.calls.length;
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport.mock.calls.length).toBe(asked);
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual(fromServer);
   });
@@ -425,11 +343,11 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [flat]});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 4n]);
   });
@@ -440,11 +358,11 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2); // still asking per view
   });
 
@@ -455,12 +373,12 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [treed]});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
-    expect(clock.pending).toBe(0); // and it is never a promotion candidate either
+    expect(clock.pending).toBe(0); // not a promotion candidate either
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2); // per view always
   });
 
@@ -470,9 +388,9 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: []});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
   });
 
@@ -483,18 +401,18 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
 
     filter = {archive: {eq: 'x'}};
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
     expect((viewport.mock.calls.at(-1)![1] as {filters?: FilterExpr}).filters).toEqual({archive: {eq: 'x'}});
 
     filter = null;
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2); // the unfiltered question is answered from the hold
   });
 
@@ -506,21 +424,20 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
 
-    // A filtered ask reaches the network and comes back under a new generation: rule 7 drops the
-    // store, and a mark must never outlive it.
+    // A filtered ask comes back under a new generation, which drops the store and its marks.
     filter = {archive: {eq: 'x'}};
     keys = {contentKey: 'ck2'};
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
 
     filter = null;
     ch.refresh(partialView, 400, 300);
-    await settled();
-    expect(viewport).toHaveBeenCalledTimes(3); // back to the network — nothing is held whole
+    await settle();
+    expect(viewport).toHaveBeenCalledTimes(3); // back to the network: nothing is held whole
   });
 
   it('drops the marks when another channel observes a rotation, and re-asks for the noted view', async () => {
@@ -529,18 +446,18 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1); // the partial view was local
 
     ch.observeContentKey('ck2'); // the point path saw the content move
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
     expect(viewport).toHaveBeenCalledTimes(2); // the drawn view was re-asked, not left stale
 
     ch.observeContentKey('ck'); // the store's own key is not a rotation
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
   });
 
@@ -550,7 +467,7 @@ describe('held-whole tracking and the local serve', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
     ch.reset();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
@@ -565,15 +482,15 @@ describe('the idle promotion ratchet', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(clock.pending).toBe(1); // the idle timer is armed, nothing has been fetched
 
     served = [inside(), outside(), edge(), bare()];
     clock.fire();
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
     const req = viewport.mock.calls.at(-1)![1] as Record<string, unknown>;
-    // The whole-extent bbox, the level named, no budget and no filter — the promotion's shape.
+    // The promotion's shape: whole-extent bbox, the level named, no budget and no filter.
     expect(req.bbox).toEqual(rectToRequestBbox({x0: 0, y0: 0, x1: 0, y1: 0}, 0, Q));
     expect(req.zoom).toBe(0);
     expect(req.k).toBe(0);
@@ -582,11 +499,11 @@ describe('the idle promotion ratchet', () => {
     expect(req.artifactBudget).toBeUndefined();
     expect(req.filters).toBeUndefined();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
-    // The served set never moves on a promotion — it fed the store and the marks alone.
+    // A promotion leaves the served set alone.
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n]);
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2); // local from here
   });
 
@@ -598,44 +515,44 @@ describe('the idle promotion ratchet', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [flat]});
     ch.setLayer('clusters/x');
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
 
     served = [inside(), outside(), bare()];
     clock.fire();
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
     const req = viewport.mock.calls.at(-1)![1] as Record<string, unknown>;
     expect(req.levels).toBeUndefined(); // inert on a flat layer, so it is not named
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
   });
 
-  it('never promotes during interaction — a gesture disarms the idle timer', async () => {
+  it('never promotes during interaction: a gesture disarms the idle timer', async () => {
     const clock = manualClock();
     const {client, viewport} = fakeClient(() => responseWith([inside()]));
     const {ch} = holdingChannel(client, clock, {declarations: [decl()]});
     ch.setLayer('clusters/x');
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(clock.pending).toBe(1); // the promotion, armed
 
     ch.schedule(partialView, 400, 300); // the user moves
-    expect(clock.pending).toBe(1); // the settle timer alone — the promotion was disarmed
+    expect(clock.pending).toBe(1); // the settle timer alone; the promotion was disarmed
     clock.fire();
-    await settled();
+    await settle();
     // One per-view request and no promotion: had both timers been live, this would be 3.
     expect(viewport).toHaveBeenCalledTimes(2);
     const req = viewport.mock.calls.at(-1)![1] as Record<string, unknown>;
     expect(req.artifactBudget).toBeDefined(); // the per-view shape, not the promotion's
 
-    await settled();
-    expect(clock.pending).toBe(1); // and the ratchet re-arms once the view is served
+    await settle();
+    expect(clock.pending).toBe(1); // the promotion re-arms once the view is served
   });
 });
 
-describe('the identity projection over a held scope (protocol §5.2)', () => {
+describe('the identity projection over a held scope', () => {
   /** The rows the server answers a filtered view with, in the identity projection. */
   const identity = (rows: {id: bigint; matched: boolean | null; rung?: number}[]): ArtifactIdentity[] =>
-    rows.map((r) => ({layer: 'clusters/x', tesseraId: r.id, rung: r.rung ?? 0, matched: r.matched}));
+    rows.map((r) => ({layer: 'clusters/x', tesseraId: r.id, rung: r.rung ?? 0, matched: r.matched, highlighted: null}));
 
   /** A client that answers an identity ask with identity rows and a full ask with full rows. */
   function server(full: () => Artifact[], rows: () => ArtifactIdentity[], keys?: {identityKey?: string; contentKey?: string}) {
@@ -652,24 +569,24 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(true);
     const heldOne = ch.current.artifacts.find((a) => a.tesseraId === 1n)!;
 
     filter = {archive: {eq: 'x'}};
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(2);
     const req = viewport.mock.calls.at(-1)![1] as ViewportRequest;
     expect(req.artifactRows).toBe('identity');
     expect(req.filters).toEqual({archive: {eq: 'x'}});
-    // The served set is the response's rows, wholesale — not the local pick, not the whole hold.
+    // The served set is the response's rows, not the local pick or the whole store.
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 3n, 4n]);
     // The bit is the response's; the payload is the store's.
     expect(ch.current.artifacts.map((a) => a.matched)).toEqual([true, false, true]);
     expect(ch.current.artifacts[0]!.key).toBe(heldOne.key);
     expect(ch.current.artifacts[0]!.box).toEqual(heldOne.box);
-    // Nothing entered the store — an identity row carries no payload to hold.
+    // Nothing entered the store: an identity row carries no payload.
     expect(ch.current.held).toBe(4);
   });
 
@@ -680,39 +597,39 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     const held = ch.current.artifacts;
 
     filter = {archive: {eq: 'x'}};
     ch.refresh(partialView, 400, 300);
-    await settled();
-    // A row whose bit and rung agree with the held payload IS the held object — a consumer
-    // memoising on identity does no work for it; a row whose bit moved is a copy wearing it.
+    await settle();
+    // A row whose bit and rung agree with the held payload is the held object; a row whose bit moved
+    // is a copy.
     expect(ch.current.artifacts[1]).toBe(held[1]);
     expect(ch.current.artifacts[0]).not.toBe(held[0]);
     expect(ch.current.artifacts[0]!.matched).toBe(true);
     expect(ch.current.artifacts[0]!.rung).toBe(0);
   });
 
-  it('re-asks once with full rows when an identity row cannot be resolved — one round trip, never a wrong map', async () => {
+  it('re-asks once with full rows when an identity row cannot be resolved: one round trip, never a wrong map', async () => {
     const clock = manualClock();
     let filter: FilterExpr | null = null;
     let full = [inside(), bare()];
     const {client, viewport} = server(
       () => full,
-      // The server names an artifact the store never held: a payload the hold did not cover.
+      // The server names an artifact the store never held.
       () => identity([{id: 1n, matched: true}, {id: 9n, matched: true}])
     );
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
 
     filter = {archive: {eq: 'x'}};
     full = [geo(1n, {box: inside().box!, matched: true}), geo(9n, {box: inside().box!, matched: true})];
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     // Two asks for the one view: the identity one, then the full one it fell back to.
     expect(viewport).toHaveBeenCalledTimes(3);
     const asks = viewport.mock.calls.slice(1).map((c) => (c[1] as ViewportRequest).artifactRows);
@@ -733,14 +650,14 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const {ch} = holdingChannel(rotating.client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
 
     filter = {archive: {eq: 'x'}};
     keys = {contentKey: 'ck2'};
     ch.refresh(partialView, 400, 300);
-    await settled();
-    // A held payload under a rotated key is another generation's answer: the identity rows are
-    // not dressed in it, the full ask follows, and rule 7 rotates the store on its answer.
+    await settle();
+    // A held payload under another content key is another generation's answer, so the full ask
+    // follows and its answer replaces the store.
     expect(rotating.viewport).toHaveBeenCalledTimes(3);
     expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([1n, 4n]);
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
@@ -752,29 +669,36 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
     const {client, viewport} = server(() => [inside(), outside(), edge(), bare()], () => identity([]));
     const {ch} = holdingChannel(client, clock, {declarations: [decl()], filters: () => filter});
     ch.setLayer('clusters/x');
-    // A whole-extent view, filtered from the start: full rows are asked for, and the answer —
-    // whole extent or not — marks nothing, its row set having answered a narrower question.
+    // A whole-extent view, filtered from the start, asks for full rows, and the answer marks
+    // nothing held whole.
     ch.refresh(wholeView, 512, 512);
-    await settled();
+    await settle();
     expect((viewport.mock.calls[0]![1] as ViewportRequest).artifactRows).toBeUndefined();
     expect(ch.isHeldWhole('clusters/x', 0)).toBe(false);
 
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect((viewport.mock.calls.at(-1)![1] as ViewportRequest).artifactRows).toBeUndefined();
 
     // Dropping the filter still goes to the network: nothing was ever held whole.
     filter = null;
     ch.refresh(partialView, 400, 300);
-    await settled();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(3);
   });
 });
 
 describe('the declared-map mirror and the in-view test', () => {
   it('requestLevels names the union of the levelled layers’ maps at the camera zoom, floored, and nothing for flat ones', () => {
-    const admin = {name: 'admin', hierarchy: {kind: 'tiered', pruneChildren: true}, levels: [{level: 0, title: '', zoom: [0, 4] as [number, number]}, {level: 1, title: '', zoom: [3, 7] as [number, number]}, {level: 2, title: '', zoom: [6, 10] as [number, number]}]} as never;
-    const flat = {name: 'k', hierarchy: {kind: 'flat', pruneChildren: false}, levels: []} as never;
+    const admin = layer('admin', {
+      hierarchy: {kind: 'tiered', pruneChildren: true},
+      levels: [
+        {level: 0, title: '', zoom: [0, 4]},
+        {level: 1, title: '', zoom: [3, 7]},
+        {level: 2, title: '', zoom: [6, 10]}
+      ]
+    });
+    const flat = layer('k');
     // A zoom-6.9 view the budget sent to depth 11 still asks for what zoom 6 declares.
     expect(requestLevels([admin, flat], ['admin', 'k'], 6.9)).toEqual([1, 2]);
     expect(requestLevels([admin, flat], ['k'], 6.9)).toBeUndefined();
@@ -817,14 +741,14 @@ describe('the declared-map mirror and the in-view test', () => {
 describe('the depth clamp', () => {
   it('asks no deeper than max_tiles_per_request allows for the view it was handed', async () => {
     const clock = manualClock();
-    const {client, viewport} = fakeClient(() => responseWith([artifact(1n)]));
+    const {client, viewport} = fakeClient(() => responseWith([clusterX(1n)]));
     const states: ArtifactChannelState[] = [];
     const ch = new ArtifactChannel(client, {
       view: 's0',
       quantisation: Q,
-      token: () => 'tok',
-      // A frame drawn at depth 10 while the camera sits at the full extent — the pairing the
-      // harness produced on a principal switch, which asked for 2^20 tiles and was refused (422).
+      token: async () => 'tok',
+      // A frame drawn at depth 10 while the camera sits at the full extent would ask for 2^20 tiles,
+      // which the server refuses.
       depth: () => 10,
       maxTiles: 4096,
       clock,
@@ -832,7 +756,7 @@ describe('the depth clamp', () => {
     });
     ch.setLayer('clusters/x');
     ch.refresh({target: [256, 256, 0], zoom: 0}, 512, 512);
-    await Promise.resolve();
+    await settle();
     expect(viewport).toHaveBeenCalledTimes(1);
     const req = viewport.mock.calls[0]![1] as {zoom: number};
     // 4^6 = 4096 tiles over the whole world fits; 4^7 does not.

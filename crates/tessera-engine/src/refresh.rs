@@ -103,7 +103,8 @@ fn carry_for(key: &RowProjectionKey, generation: &Generation) -> Carry {
     }
 }
 
-/// Refresh every resident entry to `generation`, returning how many were produced.
+/// Refresh each session's newest resident entry per view to `generation`, returning how many
+/// were produced.
 ///
 /// **Most-recently-used first** (`SingleFlightCache::ready_entries`). This is a serial loop over a
 /// rebuild that costs a *measured* 1 277 ms at 10⁹, so across a compaction it runs for minutes and
@@ -119,7 +120,7 @@ pub(crate) fn refresh_resident(
     cache: &RowProjectionCache,
     pool: &rayon::ThreadPool,
     generation: &Generation,
-    projection_routes: &crate::compose::ProjectionRoutes,
+    projection_routes: &crate::projection::ProjectionRoutes,
 ) -> usize {
     let mut produced = 0usize;
     for (key, previous) in cache.resident() {
@@ -141,17 +142,12 @@ pub(crate) fn refresh_resident(
         // value would cache it (I13a).
         let fragment = match generation.fragments.get_or_build(
             &previous.satisfied_sorted,
-            previous.auth_data_hash,
-            // The generation that term set was resolved against, never this one — see
-            // `SessionGeometry::satisfied_at`, and `Engine::fragment_for` for the same rule at the
-            // request-path call site.
-            previous.satisfied_at,
             &generation.postings,
             &generation.delta_postings,
             generation.watermark,
         ) {
             Ok(fragment) => fragment,
-            Err(FragmentCacheError::Building) => continue,
+            Err(FragmentCacheError::Building | FragmentCacheError::Cancelled) => continue,
             Err(FragmentCacheError::Io(e)) => {
                 tracing::warn!(
                     error = %e,
@@ -206,7 +202,7 @@ pub(crate) fn refresh_resident(
                 } else {
                     // Rung 3, the only rung that chooses a route: rungs 1 and 2 derive from the
                     // projection this session already holds and read no image.
-                    let inputs = crate::compose::ProjectionInputs {
+                    let inputs = crate::projection::ProjectionInputs {
                         fragment: &fragment,
                         satisfied: &previous.satisfied_sorted,
                         postings: &generation.postings,
@@ -222,7 +218,6 @@ pub(crate) fn refresh_resident(
                 projection: Arc::new(projection),
                 satisfied_sorted: Arc::clone(&previous.satisfied_sorted),
                 auth_data_hash: previous.auth_data_hash,
-                satisfied_at: previous.satisfied_at,
             }
         });
         if built.is_ok() {
@@ -266,7 +261,7 @@ pub(crate) struct RefreshDeps {
     ///
     /// A fold inverts the rule by two orders (a ~180 s pass against a 1.3 s build), so arming this would refuse
     /// every session for minutes to avoid a burst that clears in seconds — and the burst is already
-    /// bounded by `ComputeGate`, by `single_flight`, and by `RowProjection::new` fanning out across
+    /// bounded by `ComputeGate`, by the single-flight cache, and by `RowProjection::new` fanning out across
     /// the whole pool so concurrent rebuilds contend rather than multiply. After a fold, a missing
     /// projection is an ordinary cache miss.
     ///
@@ -280,19 +275,18 @@ pub(crate) struct RefreshDeps {
     /// inline-rebuild herd decision 0044's D2 withdrew the pre-swap refresh to avoid, arriving
     /// through duration instead of through omission.
     pub(crate) in_flight: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) refreshes: Arc<std::sync::atomic::AtomicU64>,
-    /// Whether the pass runs at all. Always `true` in a shipped build; a test disables it to model
-    /// a refresh that **produces nothing and finishes** — the degraded case, where the in-flight
-    /// flag clears and the ladder's rung 3 becomes a build rather than a 429.
-    pub(crate) enabled: Arc<std::sync::atomic::AtomicBool>,
-    /// Whether the pass **holds**. Always `false` in a shipped build; a test sets it to model a
-    /// refresh that is merely *slow* — the in-flight flag stays set for as long as it is held,
-    /// which is the window rung 3 sheds a racer in. The two hooks are different states and a test
-    /// that used one for the other would assert the wrong thing.
-    pub(crate) paused: Arc<std::sync::atomic::AtomicBool>,
+    /// `refreshes`, the entries this pass has produced.
+    pub(crate) counters: Arc<crate::status::ServeCounters>,
+    /// `refresh_enabled`, whether the pass runs at all, and `refresh_paused`, whether it **holds**.
+    /// A test disables it to model a refresh that **produces nothing and finishes** — the degraded
+    /// case, where the in-flight flag clears and the ladder's rung 3 becomes a build rather than a
+    /// 429 — and pauses it to model one that is merely *slow*, the in-flight flag staying set for
+    /// as long as it is held, which is the window rung 3 sheds a racer in. The two hooks are
+    /// different states and a test that used one for the other would assert the wrong thing.
+    pub(crate) switches: Arc<crate::switches::TestSwitches>,
     /// The engine's projection-route counters and forced route, shared so that rung 3's builds
     /// are counted where the request path's are and a forced route reaches both.
-    pub(crate) projection_routes: Arc<crate::compose::ProjectionRoutes>,
+    pub(crate) projection_routes: Arc<crate::projection::ProjectionRoutes>,
 }
 
 impl RefreshDeps {
@@ -305,25 +299,25 @@ impl RefreshDeps {
         let cache = Arc::clone(&self.cache);
         let pool = Arc::clone(&self.pool);
         let in_flight = Arc::clone(&self.in_flight);
-        let refreshes = Arc::clone(&self.refreshes);
+        let counters = Arc::clone(&self.counters);
         // The generation this pass is for. Taken before the early return so both exit paths
         // release only their own claim — see [`clear_if_current`].
         let mine = generation.segments_version;
-        if !self.enabled.load(Ordering::SeqCst) {
+        if !self.switches.refresh_enabled.load(Ordering::SeqCst) {
             // Nothing will produce the live key, so the flag must not stay set: rung 3 of the
             // ladder would 429 for ever instead of building.
             clear_if_current(&in_flight, mine);
             return;
         }
         let spawn_on = Arc::clone(&self.pool);
-        let paused = Arc::clone(&self.paused);
+        let switches = Arc::clone(&self.switches);
         let projection_routes = Arc::clone(&self.projection_routes);
         spawn_on.spawn(move || {
-            while paused.load(Ordering::SeqCst) {
+            while switches.refresh_paused.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             let produced = refresh_resident(&cache, &pool, &generation, &projection_routes);
-            refreshes.fetch_add(produced as u64, Ordering::Relaxed);
+            counters.refreshes.fetch_add(produced as u64, Ordering::Relaxed);
             clear_if_current(&in_flight, mine);
         });
     }
@@ -331,71 +325,23 @@ impl RefreshDeps {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    
 
-    use tessera_lifecycle::{IngestBuffer, Overlay};
-    use tessera_plugin::Plugin;
-    use tessera_store::manifest::{IdentityDescriptor, Manifest};
-    use tessera_store::Bundle;
+    
+    
+    
+    
 
     use super::*;
 
-    fn empty_postings() -> tessera_authz::PostingsReader {
-        let dir = tempfile::TempDir::new().expect("a temp dir");
-        let path = dir.path().join("postings.arrow");
-        tessera_authz::write_postings(&path, &[], 32).expect("an empty postings file");
-        tessera_authz::PostingsReader::open(&path, false).expect("it opens")
-    }
-
-    /// A `Generation` over an empty synthetic bundle — [`carry_for`] reads two scalars off it, so a
-    /// real one would make this a test about the fixture. Same shape as `geometry::tests`'.
     fn generation_at(prefix: &str, segments_version: u64) -> Generation {
-        let manifest = Manifest {
-            bundle_format: 3,
-            created_at: "2026-07-31T00:00:00Z".to_string(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
-            declared_scalars: vec![],
-            vocabularies: vec![],
-            small_term_threshold: 32,
-            entity_id_high_water: 0,
-            identity: IdentityDescriptor {
-                construction: "siphash-2-4".to_string(),
-                rounds: 1,
-                key: "0123456789abcdef0123456789abcdef".to_string(),
-                shard_id: 0,
-                idset: 1,
-            },
-            groups: Vec::new(),
-            views: vec![],
-            partitions: vec![],
-            provenance: serde_json::json!({}),
-            files: BTreeMap::new(),
-        };
-        let (fragments, external_index) = crate::synthetic_generation_parts();
-        Generation {
-            // A test fixture's schema declares nothing filterable, so there is nothing to open.
-            filter_columns: Arc::new(crate::filter::FilterColumns::default()),
-            // And nothing categorical, so no vocabulary has an index.
-            suggest: Arc::new(crate::suggest::SuggestIndexes::default()),
-            prefix: prefix.to_string(),
-            vocabularies: Arc::new(tessera_store::vocabulary::Vocabularies::default()),
+        Generation::synthetic(
+            prefix,
             segments_version,
-            watermark: 0,
-            bundle: Arc::new(Bundle {
-                manifest,
-                partitions: HashMap::new(),
-            }),
-            dict: Arc::new(tessera_authz::Dict::load(&[]).expect("an empty dict needs no file")),
-            postings: Arc::new(empty_postings()),
-            fragments,
-            external_index,
-            delta_postings: Vec::new(),
-            overlay_version: 0,
-            overlay: Arc::new(Overlay::new()),
-            buffer: Arc::new(IngestBuffer::new()),
-            denied: Arc::new(crate::DenyMask::default()),
-        }
+            0,
+            tessera_lifecycle::Overlay::new(),
+            tessera_lifecycle::IngestBuffer::new(),
+        )
     }
 
     fn key_at(prefix: &str, segments_version: u64) -> RowProjectionKey {

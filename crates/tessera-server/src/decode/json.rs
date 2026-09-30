@@ -1,0 +1,526 @@
+//! The JSON encoding of a record-bearing body: an array of objects or one object per line,
+//! coerced against the declared column types into one Arrow `RecordBatch`, which the Arrow decode
+//! then reads. This module owns only the coercion of one JSON value into one cell.
+//!
+//! An integer is parsed exactly from its digits (a JSON number or a string), never through a
+//! double. A key a record leaves out and a key it sends as null are both a null cell; which
+//! declared columns a record leaves out is answered beside the batch, since a null there clears a
+//! value and a left-out key keeps it. `access` is read by the Arrow decode's access-column
+//! reader, as the Arrow form's is.
+
+use std::sync::Arc;
+
+use arrow::array::{
+    Array, ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int16Builder,
+    Int32Builder, Int64Builder, Int8Builder, ListBuilder, StringBuilder,
+    TimestampMicrosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+};
+use arrow::datatypes::{Field, Schema};
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use serde_json::{Map, Value};
+use tessera_engine::{member_key, scalar_column, DeclaredScalar, ScalarType, ScopedScalar};
+use tessera_types::layer::LayerDeclaration;
+
+use super::{DecodeError, Fixed};
+
+/// What the batch's columns may be, resolved by the caller in the order the Arrow decode uses.
+pub(crate) struct JsonColumns<'a> {
+    /// The route's own columns, in the order the batch carries them.
+    pub fixed: &'a [Fixed<'a>],
+    /// The declared and scoped columns whose omission matters: which of them each record leaves
+    /// out is answered beside the batch, since a left-out value keeps what is stored.
+    pub required: &'a [&'a str],
+    pub declared: &'a [DeclaredScalar],
+    pub scoped: &'a [ScopedScalar],
+    pub layer_of: &'a dyn Fn(&str) -> Option<LayerDeclaration>,
+}
+
+/// One JSON body as one record batch: the route's fixed columns any row names, in the route's
+/// order, then declared scalars, the scoped families any row names, and layer columns in
+/// first-appearance order. Beside it, for each record, the positions in `columns.required` of the
+/// keys it leaves out.
+pub(crate) fn record_batch(
+    body_name: &str,
+    body: &[u8],
+    columns: &JsonColumns<'_>,
+) -> Result<(RecordBatch, Vec<Vec<usize>>), DecodeError> {
+    let rows = records(body_name, body)?;
+    let omitted = rows
+        .iter()
+        .map(|record| {
+            (0..columns.required.len())
+                .filter(|&at| !record.contains_key(columns.required[at]))
+                .collect()
+        })
+        .collect();
+    let mut fields: Vec<Field> = Vec::new();
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+
+    let has = |name: &str| rows.iter().any(|row| row.contains_key(name));
+
+    // A fixed column no row names is left out, as the Arrow form leaves it out.
+    for fixed in columns.fixed {
+        let name = fixed.name();
+        if !has(name) {
+            continue;
+        }
+        let column = fixed_column(body_name, &rows, *fixed)?;
+        fields.push(Field::new(name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+
+    // A column some row names is carried on every row, null where a row leaves it out; one no row
+    // names is left out.
+    for declared in columns.declared {
+        if !has(&declared.name) {
+            continue;
+        }
+        let column = scalar_column(body_name, &rows, &declared.name, declared.wire_type())?;
+        fields.push(Field::new(&declared.name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+    for family in columns.scoped {
+        if !has(&family.name) {
+            continue;
+        }
+        let wire = super::scoped_wire_type(family);
+        let column = scalar_column(body_name, &rows, &family.name, wire)?;
+        fields.push(Field::new(&family.name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+
+    // Every other name is `level`, a layer's or refused, on the Arrow decode's rule.
+    let known = |name: &str| {
+        columns.fixed.iter().any(|f| f.name() == name)
+            || columns.declared.iter().any(|d| d.name == name)
+            || columns.scoped.iter().any(|f| f.name == name)
+    };
+    let mut layers: Vec<String> = Vec::new();
+    let mut levels = false;
+    for (row, record) in rows.iter().enumerate() {
+        for name in record.keys() {
+            if known(name) || layers.iter().any(|l| l == name) {
+                continue;
+            }
+            if name == member_key::LEVEL {
+                levels = true;
+                continue;
+            }
+            if (columns.layer_of)(name).is_none() {
+                return Err(DecodeError(format!(
+                    "{body_name}: row {row}, column '{name}' is not a declared scalar, a \
+                     registered layer or a group-scoped attribute of this batch's view; declare \
+                     it or leave it out"
+                )));
+            }
+            layers.push(name.clone());
+        }
+    }
+    for name in &layers {
+        let column = membership_column(body_name, &rows, name)?;
+        fields.push(Field::new(name, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+    if levels {
+        let column = u32_column(body_name, &rows, member_key::LEVEL)?;
+        fields.push(Field::new(member_key::LEVEL, column.data_type().clone(), true));
+        arrays.push(column);
+    }
+
+    let options = RecordBatchOptions::new().with_row_count(Some(rows.len()));
+    let batch = RecordBatch::try_new_with_options(Arc::new(Schema::new(fields)), arrays, &options)
+        .map_err(|e| DecodeError(format!("{body_name}: {e}")))?;
+    Ok((batch, omitted))
+}
+
+/// One of a route's fixed columns, over every row.
+fn fixed_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    fixed: Fixed<'_>,
+) -> Result<ArrayRef, DecodeError> {
+    Ok(match fixed {
+        Fixed::Coordinate(name) => {
+            let mut builder = Float64Builder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get(name) {
+                    Some(Value::Number(number)) => {
+                        builder.append_value(number.as_f64().ok_or_else(|| {
+                            refusal(body_name, row, name, "is not a finite number")
+                        })?)
+                    }
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(_) => return Err(refusal(body_name, row, name, "is not a number")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::Access => {
+            // Built as the Arrow form's list column, so the Arrow decode's one reader applies the
+            // label rule to both.
+            let mut builder = ListBuilder::new(StringBuilder::new());
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("access") {
+                    // A null list: the row leaves its label out.
+                    None | Some(Value::Null) => builder.append(false),
+                    Some(Value::String(text)) => {
+                        builder.values().append_value(text);
+                        builder.append(true);
+                    }
+                    Some(Value::Array(labels)) => {
+                        for label in labels {
+                            match label {
+                                Value::String(text) => builder.values().append_value(text),
+                                Value::Null => builder.values().append_null(),
+                                _ => {
+                                    return Err(refusal(
+                                        body_name,
+                                        row,
+                                        "access",
+                                        "has an element that is not a string; send each label \
+                                         as a string",
+                                    ))
+                                }
+                            }
+                        }
+                        builder.append(true);
+                    }
+                    Some(_) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            "access",
+                            "is not a label or a list of labels; send a string or a list of \
+                             strings",
+                        ))
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        Fixed::NodeId => {
+            let mut builder = StringBuilder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("node_id") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(Value::String(text)) => builder.append_value(text),
+                    Some(_) => return Err(refusal(body_name, row, "node_id", "is not a string")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        // A string, as on `/control/changes`: a JSON number loses a `u64` past 2^53 in JavaScript.
+        Fixed::TesseraId => {
+            let mut builder = StringBuilder::new();
+            for (row, record) in rows.iter().enumerate() {
+                match record.get("tessera_id") {
+                    None | Some(Value::Null) => builder.append_null(),
+                    Some(Value::String(text)) => builder.append_value(text),
+                    Some(_) => {
+                        return Err(refusal(
+                            body_name,
+                            row,
+                            "tessera_id",
+                            "is not a string; send the tessera_id as decimal digits in a string",
+                        ))
+                    }
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    })
+}
+
+/// A column of `uint32`, null where a row omits it.
+fn u32_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+) -> Result<ArrayRef, DecodeError> {
+    let mut builder = UInt32Builder::new();
+    for (row, record) in rows.iter().enumerate() {
+        match record.get(name) {
+            None | Some(Value::Null) => builder.append_null(),
+            Some(value) => match integer(body_name, value, row, name)? {
+                None => builder.append_null(),
+                Some(value) => builder.append_value(u32::try_from(value).map_err(|_| {
+                    refusal(body_name, row, name, "is out of range; send a uint32")
+                })?),
+            },
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+/// The body's records: a JSON array of objects, or one object per line.
+fn records(body_name: &str, body: &[u8]) -> Result<Vec<Map<String, Value>>, DecodeError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| DecodeError(format!("{body_name} is not UTF-8 JSON")))?;
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        let values: Vec<Value> = serde_json::from_str(trimmed)
+            .map_err(|e| DecodeError(format!("{body_name} is not a JSON array of objects: {e}")))?;
+        return values
+            .into_iter()
+            .enumerate()
+            .map(|(row, value)| match value {
+                Value::Object(record) => Ok(record),
+                _ => Err(DecodeError(format!(
+                    "{body_name}: row {row} is not an object; send each record as one object \
+                     keyed by column name"
+                ))),
+            })
+            .collect();
+    }
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row = rows.len();
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(record)) => rows.push(record),
+            Ok(_) => {
+                return Err(DecodeError(format!(
+                    "{body_name}: row {row} is not an object; send one object per line, keyed by \
+                     column name"
+                )))
+            }
+            Err(e) => {
+                return Err(DecodeError(format!(
+                    "{body_name}: row {row} is not JSON ({e}); send an array of objects or one \
+                     object per line"
+                )))
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn refusal(body_name: &str, row: usize, column: &str, what: &str) -> DecodeError {
+    DecodeError(format!("{body_name}: row {row}, column '{column}' {what}"))
+}
+
+/// One scalar column at its wire type, null where a row omits the name.
+fn scalar_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+    wire: ScalarType,
+) -> Result<ArrayRef, DecodeError> {
+    let cell = |row: usize| rows[row].get(name).unwrap_or(&Value::Null);
+    // An integer outside the declared type's range is refused; inside it, the cast is exact.
+    let in_range = |row: usize, value: i128| {
+        let (min, max) = wire
+            .integer_range()
+            .expect("only an integer declaration is read as integers");
+        if (min..=max).contains(&value) {
+            return Ok(value);
+        }
+        Err(refusal(
+            body_name,
+            row,
+            name,
+            &format!(
+                "is {value}, outside {}'s {min}..={max}; send a value that fits",
+                wire.arrow_type_name()
+            ),
+        ))
+    };
+    macro_rules! integers {
+        ($builder:ty, $ty:ty) => {{
+            let mut builder = <$builder>::new();
+            for row in 0..rows.len() {
+                match integer(body_name, cell(row), row, name)? {
+                    None => builder.append_null(),
+                    Some(value) => builder.append_value(in_range(row, value)? as $ty),
+                }
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        }};
+    }
+    Ok(match wire {
+        ScalarType::Bool => {
+            let mut builder = BooleanBuilder::new();
+            for row in 0..rows.len() {
+                match cell(row) {
+                    Value::Null => builder.append_null(),
+                    Value::Bool(value) => builder.append_value(*value),
+                    _ => return Err(refusal(body_name, row, name, "is not a boolean")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        ScalarType::U8 => integers!(UInt8Builder, u8),
+        ScalarType::U16 => integers!(UInt16Builder, u16),
+        ScalarType::U32 => integers!(UInt32Builder, u32),
+        ScalarType::U64 => integers!(UInt64Builder, u64),
+        ScalarType::I8 => integers!(Int8Builder, i8),
+        ScalarType::I16 => integers!(Int16Builder, i16),
+        ScalarType::I32 => integers!(Int32Builder, i32),
+        ScalarType::I64 => integers!(Int64Builder, i64),
+        ScalarType::TimestampUs => integers!(TimestampMicrosecondBuilder, i64),
+        ScalarType::F32 => {
+            let mut builder = Float32Builder::new();
+            for row in 0..rows.len() {
+                match float(body_name, cell(row), row, name)? {
+                    None => builder.append_null(),
+                    Some(value) => builder.append_value(
+                        scalar_column::narrow_to_f32(value).ok_or_else(|| {
+                            refusal(
+                                body_name,
+                                row,
+                                name,
+                                &format!(
+                                    "carries {value:?}, past f32's finite range; send a smaller \
+                                     value or declare the column f64"
+                                ),
+                            )
+                        })?,
+                    ),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        ScalarType::F64 => {
+            let mut builder = Float64Builder::new();
+            for row in 0..rows.len() {
+                match float(body_name, cell(row), row, name)? {
+                    None => builder.append_null(),
+                    Some(value) => builder.append_value(value),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+            let mut builder = StringBuilder::new();
+            for row in 0..rows.len() {
+                match cell(row) {
+                    Value::Null => builder.append_null(),
+                    Value::String(text) => builder.append_value(text),
+                    _ => return Err(refusal(body_name, row, name, "is not a string")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    })
+}
+
+/// An integer, exactly: a number with a fraction or exponent is refused rather than rounded.
+fn integer(
+    body_name: &str,
+    value: &Value,
+    row: usize,
+    name: &str,
+) -> Result<Option<i128>, DecodeError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(number) => {
+            if let Some(v) = number.as_u64() {
+                Ok(Some(v as i128))
+            } else if let Some(v) = number.as_i64() {
+                Ok(Some(v as i128))
+            } else {
+                Err(refusal(
+                    body_name,
+                    row,
+                    name,
+                    "has a fraction or an exponent; send the integer as plain digits",
+                ))
+            }
+        }
+        Value::String(text) => text.parse::<i128>().map(Some).map_err(|_| {
+            refusal(
+                body_name,
+                row,
+                name,
+                "is a string that is not an integer; send a JSON integer or a string of digits",
+            )
+        }),
+        _ => Err(refusal(body_name, row, name, "is not an integer")),
+    }
+}
+
+fn float(
+    body_name: &str,
+    value: &Value,
+    row: usize,
+    name: &str,
+) -> Result<Option<f64>, DecodeError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(number) => number
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| refusal(body_name, row, name, "is not a finite number")),
+        _ => Err(refusal(body_name, row, name, "is not a number")),
+    }
+}
+
+/// A column named for a layer: a key or a list of keys per row. An integer key is its decimal
+/// spelling, as at the build, and `-1` names no artifact. Every row is a key or null, or every
+/// row a list or null; a row of the other shape is refused rather than guessed.
+fn membership_column(
+    body_name: &str,
+    rows: &[Map<String, Value>],
+    name: &str,
+) -> Result<ArrayRef, DecodeError> {
+    let is_list = rows
+        .iter()
+        .any(|record| matches!(record.get(name), Some(Value::Array(_))));
+    let key = |value: &Value, row: usize| -> Result<Option<String>, DecodeError> {
+        match value {
+            Value::Null => Ok(None),
+            Value::String(text) => Ok(Some(text.clone())),
+            Value::Number(_) => {
+                Ok(integer(body_name, value, row, name)?
+                    .and_then(tessera_types::layer::integer_key))
+            }
+            _ => Err(refusal(
+                body_name,
+                row,
+                name,
+                "is not a member key; send text or an integer, or `null` or `-1` for no artifact \
+                 of that layer",
+            )),
+        }
+    };
+    if is_list {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        for (row, record) in rows.iter().enumerate() {
+            match record.get(name) {
+                None | Some(Value::Null) => builder.append_null(),
+                Some(Value::Array(entries)) => {
+                    for entry in entries {
+                        match key(entry, row)? {
+                            Some(text) => builder.values().append_value(text),
+                            None => builder.values().append_null(),
+                        }
+                    }
+                    builder.append(true);
+                }
+                Some(_) => {
+                    return Err(refusal(
+                        body_name,
+                        row,
+                        name,
+                        "is a single key where other rows of this column carry a list; send a \
+                         list on every row",
+                    ))
+                }
+            }
+        }
+        return Ok(Arc::new(builder.finish()));
+    }
+    let mut builder = StringBuilder::new();
+    for (row, record) in rows.iter().enumerate() {
+        match record.get(name) {
+            None => builder.append_null(),
+            Some(value) => match key(value, row)? {
+                Some(text) => builder.append_value(text),
+                None => builder.append_null(),
+            },
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}

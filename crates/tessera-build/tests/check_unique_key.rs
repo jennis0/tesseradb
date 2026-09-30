@@ -33,6 +33,12 @@ points = "points.parquet"
 [defaults]
 source = "points"
 
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
+field  = "entity_id"
+
 [[view]]
 name             = "s0"
 extent           = "auto"
@@ -170,7 +176,8 @@ fn a_footer_recording_a_unique_key_warns_and_the_check_stays_clean() {
     assert!(report.is_clean(), "{:?}", report.findings);
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
     let warning = &report.warnings[0];
-    assert_eq!(warning.object, "attribute 'key'");
+    assert_eq!(warning.object.block, "attribute");
+    assert_eq!(warning.object.name, "key");
     assert!(
         warning
             .detail

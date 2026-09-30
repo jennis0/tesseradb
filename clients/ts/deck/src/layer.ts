@@ -2,8 +2,9 @@ import {CompositeLayer, type BinaryAttribute as DeckBinaryAttribute, type Compos
 import {BitmapLayer, LineLayer, PolygonLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
 import {
   CLUSTER_PREFIX,
-  NEUTRAL,
   NO_ORDINAL,
+  artifactName,
+  WORLD_SIZE,
   gridToWorld,
   gridToWorldXY,
   type Artifact,
@@ -18,135 +19,197 @@ import {
   type Store,
   type TilesProjection
 } from '@tesseradb/client';
+import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
-import {buildColourAttribute, type Encoding} from './colour.js';
+import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {binDensity, filterDensity} from './density.js';
-import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {binDensity, contourThresholds, densityCells, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityMode} from './density.js';
+import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
-import {MarksLayer, type HighlightPass} from './marks-layer.js';
+import {DULL_COLOUR, MarksLayer, type HighlightPass} from './marks-layer.js';
 import {deckOpacity, markStyle} from './marks-style.js';
+import {DEFAULT_SIZING, buildSizeAttribute, drawnSizing, sizeEncodingOf, sizeSignature, sizingRadius, type SizeEncoding, type Sizing} from './size.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
- * `TesseraLayer` — a deck.gl `CompositeLayer` over the store's `marks`, `tiles` and `artifacts`
- * (design client-components §4, §5.10). What the instrument's layer construction and GPU slab
- * were, given a class boundary: for the customer who owns a `Deck` already, and for
- * `<tessera-map>`.
- *
- * **It never fetches.** Every projection arrives by property — or, with the `store` convenience,
- * is read off the store the host hands in, which the layer subscribes to and nothing more. Hover
- * and pick are the host's: the mark sublayers carry `tesseraIds` and the label sublayers
- * `artifactIds`, and `resolvePick` turns deck's pick info into a mark, an artifact, a miss or a
- * broken pick. **A contour is not in that pass**: what the pointer is over is resolved in JS
- * against the frontier's shapes ({@link contourShapes}, then `hoverAt`), for a hover and for a
- * click alike.
- *
- * **Every served mark is drawn.** The length handed to deck is the resident count, unconditionally
- * — no budget, no cap, no filter applies here. Colour is presentation and never decides what is
- * drawn: an unresolvable value is grey, never absent.
- *
- * **The slab is the host's**, because it outlives every frame and every response and is
- * GPU-facing storage rather than view state; the layer syncs it with the exact bands once per
- * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
- * its identity, since the pieces survive most frames by reference.
- *
- * The drawing, in order (§5.10): the hovered and the opened artifact's served `shape` — a hull,
- * a membership shape or an authored one, drawn through one path as parts with holes — or its
- * `box` where its layer draws no shape — **and nothing else**, since only those two draw
- * ({@link focusOutlines}); the single-hue
- * density wash from the exact tiles' counts,
- * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
- * retained slab partition, addressed by slot, plus the stand-ins — in their membership colour
- * through the lookup texture when colouring by cluster, else the column's colour; names and
- * counts at the frontier's centroids — sized by masked count — placed by priority into a spatial hash
- * with leader lines; the picked mark; and the selected region as the shape drawn — a box or a lasso, never
- * its cells.
- *
- * **Colour by cluster is exact only** (decision 0099): a point wears an artifact's colour only
- * because the wire named the point a member, through the ordinal it carries; the lookup texture
- * resolves the ordinal up the table to what is served now, and neutral where that fails. The
- * host owns the {@link LookupTexture} beside the slab; every colouring interaction — palette,
- * level, highlight, the cluster/column switch — is a rewrite of it or a uniform, never a pass
- * over the points (decision 0100).
+ * The props of a {@link TesseraLayer}: deck.gl's `CompositeLayerProps` and the props below, all
+ * optional. `pickable` defaults to true. Set `store`, or set the projection props (`marks`,
+ * `tiles`, `depth`, `artifacts`, `meta`, `legend`, `status`) yourself. A projection prop set beside
+ * `store` is drawn in place of the store's.
  */
-
 export type TesseraLayerProps = CompositeLayerProps & {
-  /** A store to read every projection below from, for a host that would otherwise wire each. */
+  /** The store to read projections from. The layer subscribes to it and redraws on each change. Defaults to `null`. */
   store?: Store | null;
+  /** The marks to draw, in place of the store's `marks`. Defaults to `null`. */
   marks?: MarksProjection | null;
+  /** The tiles whose counts density is built from, in place of the store's `tiles`. Defaults to `null`. */
   tiles?: TilesProjection | null;
-  /** The depth the frame is drawn at — the slab's partition key and the wash's bin depth. */
+  /**
+   * The depth of the frame's bands, which chooses the mark buffers drawn and the grid density is
+   * binned at. Defaults to 0, which with `store` reads the store's `view.depth`.
+   */
   depth?: number;
+  /** The served artifacts to name, outline and colour by, in place of the store's `artifacts`. Defaults to `null`. */
   artifacts?: ArtifactsProjection | null;
+  /**
+   * The `/v1/meta` answer, in place of the store's `meta`. Column colour reads its columns and the
+   * labels and outlines read its layers; without it the marks draw in one colour. Defaults to
+   * `null`.
+   */
   meta?: Meta | null;
+  /**
+   * The colouring and sizing, in place of the store's `legend`. Its `colourBy` names a column, or
+   * `cluster:<layer>` to colour each mark by the artifact it belongs to, and its `sizeBy` a number
+   * column to size each mark by. Defaults to `null`, which draws every mark in one colour and one
+   * size.
+   */
   legend?: LegendProjection | null;
+  /**
+   * The display status, in place of the store's `status`. Under `refused` no marks are drawn.
+   * Defaults to `idle`, which with `store` reads the store's.
+   */
   status?: PresentedStatus;
-  /** The persistent mark buffers, owned by the host. */
-  slab: MarkSlab;
-  /** The lookup texture, owned by the host beside the slab; made here when the host has none. */
-  lut?: LookupTexture | null;
-  /** The level to colour at for a nested layer; undefined colours at the deepest served. */
+  /**
+   * The level of a nested layer to colour, name and outline artifacts at. Defaults to `undefined`,
+   * the deepest level served.
+   */
   clusterLevel?: number;
-  /** Whether names and counts are drawn at the centroids. */
+  /** Whether the artifacts' names are drawn at their centroids, with the hovered one's count. Defaults to true. */
   labels?: boolean;
-  /** The ground the map is drawn on; the ink, halo and outline weights follow it (the boards). */
+  /**
+   * The ground under the map, `light` or `dark`. The ink and halo of names, the hovered outline's
+   * fill and the colours of the picked mark's ring and the selected region follow it. Defaults to
+   * `dark`.
+   */
   scheme?: 'light' | 'dark';
-  /** The picked mark's world position, for its marker. */
+  /**
+   * The picked mark's position in world units, where a ring is drawn. {@link resolvePick} gives it
+   * as `worldXY`. Defaults to `null`, which draws no ring.
+   */
   selectedWorldXY?: [number, number] | null;
+  /**
+   * The `tesseraId` of the opened artifact, whose outline is drawn. Under cluster colour, the marks
+   * coloured by any other artifact, or by none, draw dimmed. Defaults to `null`.
+   */
   openedArtifact?: bigint | null;
-  /** The artifact under the pointer — its outline or label, or a mark it holds. */
+  /** The `tesseraId` of the artifact under the pointer, whose outline is drawn. Defaults to `null`. */
   hoveredArtifact?: bigint | null;
-  /** The selected region's world shape, and the live shape while it is being drawn. */
+  /** The selected region as a box `[x0, y0, x1, y1]` in world units. Defaults to `null`. */
   region?: [number, number, number, number] | null;
+  /**
+   * The selected region as a polygon of world points. With two or more points it is drawn in place
+   * of `region` and of `drag`. Defaults to `null`.
+   */
   regionPolygon?: [number, number][] | null;
+  /**
+   * The box being dragged, `[x0, y0, x1, y1]` in world units, drawn in place of `region` with a
+   * fainter fill and an opaque line. Defaults to `null`.
+   */
   drag?: [number, number, number, number] | null;
+  /**
+   * The lasso being drawn, as world points, drawn in place of `regionPolygon` and `drag` with a
+   * fainter fill and an opaque line. Defaults to `null`.
+   */
   dragPolygon?: [number, number][] | null;
   /**
-   * Whether a highlight is set — the marks that satisfy it draw lit and the rest dulled
-   * (`highlight-and-hierarchy.md` §5.3). Off, the map draws exactly what it drew before, and the
-   * per-point bit is not read.
+   * Whether the request carried a highlight. When true, the marks that satisfy it keep their
+   * colour, draw larger and carry a soft glow of their own colour, and the rest draw light grey and
+   * faint. The layer does not read this from `store`: pass the store's `view.highlighting`.
+   * Defaults to false.
    */
   highlighting?: boolean;
-  /** Whether the density wash is drawn under the points. */
-  wash?: boolean;
+  /** Whether the marks are drawn. Off, only density, outlines, labels and the selection draw. Defaults to true. */
+  points?: boolean;
   /**
-   * Which count the wash reads (`highlight-and-hierarchy.md` §5.3). The host chooses it from what
-   * it sent: `highlighted` where a highlight is set, `matched` where a filter is and no highlight
-   * is, `visible` otherwise — and it labels the wash as the count it chose, which is why the
-   * choice is the host's rather than derived here from three columns that legitimately agree.
+   * A fixed mark radius in pixels. Defaults to `null`, which sizes marks by how many are drawn and
+   * by the zoom: 1.7 px at a hundred marks or fewer down to 1.1 px at a million, plus 0.05 px per
+   * zoom level up to zoom 10. Under the legend's `sizeBy`, `sizing` sizes the marks in its place.
    */
-  washChannel?: 'visible' | 'matched' | 'highlighted';
-  /** A fixed mark radius in pixels; null sizes the marks by their count and the zoom (`markStyle`). */
   radius?: number | null;
-  /** How many marks a paint ended up drawing, for the host's probe. */
+  /**
+   * The smallest and largest radius and the scale a number column sizes marks on, under the
+   * legend's `sizeBy`. A mark with no value, NaN or an infinity draws as a ring, at the smallest
+   * radius or 3 px, whichever is larger. A radius that is not a finite number above zero is the
+   * default's. Under `rank` the store keeps the sample ranked against only where it was asked to,
+   * with `setSizeBy(column, {rank: true})`. Defaults to {@link DEFAULT_SIZING}.
+   */
+  sizing?: Sizing;
+  /**
+   * A fixed mark alpha from 0 to 1, as a fraction of the colour's own alpha. Defaults to `null`,
+   * which sets it by how many marks are drawn: 0.78 at a hundred or fewer down to 0.34 at a
+   * million, plus a little per zoom level.
+   */
+  pointOpacity?: number | null;
+  /**
+   * How density is drawn under the marks, from the exact tiles' counts: `none`, `smooth` (a soft
+   * wash), `hex` (hexagons), `grid` (square cells one tile wide) or `contours` (lines of equal
+   * density). The smooth wash is rebuilt 200 ms after `tiles` stops changing, and the previous one
+   * is drawn until then. Defaults to `smooth`.
+   */
+  density?: DensityMode;
+  /**
+   * Which per-tile count density is built from: `visible` (the items the viewer may see), `matched`
+   * (those the filter keeps) or `highlighted` (those that satisfy the highlight). The layer does
+   * not read this from `store`. `<tessera-map>` passes `highlighted` under a highlight, `matched`
+   * under a filter and `visible` otherwise. Defaults to `matched`.
+   */
+  densityChannel?: 'visible' | 'matched' | 'highlighted';
+  /**
+   * The colours density is drawn in. Defaults to `null`, which draws the smooth wash in warm grey
+   * while the marks are drawn, and every other case in Viridis.
+   */
+  densityColours?: DensityColours | null;
+  /** How strongly density is drawn, from 0 (not at all) to 1 (fully). Defaults to 1. */
+  densityStrength?: number;
+  /**
+   * The palette, ramp and chosen value colours column colour uses. Defaults to
+   * {@link DEFAULT_COLOURING}.
+   */
+  colouring?: Colouring;
+  /**
+   * Called each time the layer renders, with the marks it drew: `drawn` exact marks held for the
+   * frame, and `provisional` stand-ins drawn until the exact bands arrive. Called with `(0, 0)`
+   * when no marks are drawn. Defaults to `null`.
+   */
   onDrawn?: ((drawn: number, provisional: number) => void) | null;
-  /** Per-settle work, in ms — the slab sync, the wash bin, the lookup texture, the outlines, the labels, the whole layer build — and the mark style drawn, for the harness. */
+  /** Called each time the layer renders, with what the render cost and drew. Defaults to `null`. */
   onTimings?: ((t: LayerTimings) => void) | null;
 };
 
+/**
+ * What one render of a {@link TesseraLayer} cost and drew, passed to `onTimings`. Times are in
+ * milliseconds. On a render that draws no marks, `slabMs`, `densityMs` and the mark figures are 0.
+ */
 export type LayerTimings = {
+  /** Time spent writing new bands into the mark buffers. */
   slabMs: number;
-  washMs: number;
-  lutMs: number;
-  outlinesMs: number;
-  labelsMs: number;
-  layersMs: number;
-  lutWrites: number;
   /**
-   * The **parts** the outline layer holds and the **artifacts** they belong to; two units on
-   * purpose, because a shape is a list of parts. Both count what draws — the hovered and the
-   * opened artifact, so `outlinesDrawn` is 0, 1 or 2 — and neither counts what may be hovered,
-   * which is the frontier and is no longer the layer's to hold ({@link contourShapes}). The two
-   * differ where the drawn artifact is several pieces: two parts, one shape.
+   * Time spent on the density layers. The smooth wash's image is built later, outside the render,
+   * and the other modes aggregate inside deck.gl's own update; neither is counted.
    */
+  densityMs: number;
+  /** Time spent updating the cluster colour lookup texture. */
+  lutMs: number;
+  /** Time spent building the outlines. */
+  outlinesMs: number;
+  /** Time spent placing labels. */
+  labelsMs: number;
+  /** Time for the whole render, every stage included. */
+  layersMs: number;
+  /** Writes to the cluster colour lookup texture since the layer made it. */
+  lutWrites: number;
+  /** Outline parts drawn. An artifact in several pieces has several parts. */
   outlines: number;
+  /** Artifacts outlined: 0, 1 or 2 (the hovered and the opened). */
   outlinesDrawn: number;
+  /** Labels placed. */
   labels: number;
-  /** The mark style the paint drew: radius in pixels and composited alpha, from `markStyle`. */
+  /** The mark radius drawn, in pixels; under sizing by a column, the largest. */
   markRadius: number;
+  /** The alpha the marks are composited at, from 0 to 1, as a fraction of their colour's own alpha. */
   markAlpha: number;
-  /** The resident count the style was chosen for. */
+  /** The number of marks the radius and alpha were chosen for: the exact marks held and the stand-ins. */
   markCount: number;
 };
 
@@ -168,98 +231,74 @@ type Resolved = {
   status: PresentedStatus;
 };
 
-/** The selection's colour: the accent, as the boards draw the lasso (`gen.py`'s `lasso_layer`). */
-const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
-/** Label ink and its halo per ground (`datamap_layers2`). */
-const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
-/** The halo's own colour: the boards' 0.85 on both grounds (`gen.py`'s `datamap_layers`). */
-const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 217], dark: [12, 14, 17, 217]};
+/** The selected region's colour per ground: the interface's ink, since colour on the map is data's. */
+const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29, 33], dark: [236, 238, 241]};
+/** Label ink per ground. */
+const INK: Record<'light' | 'dark', [number, number, number]> = {light: [27, 29, 33], dark: [242, 243, 245]};
+/** The label halo per ground: the map's default background, nearly opaque. */
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [246, 246, 244, 235], dark: [17, 19, 23, 235]};
 /**
- * The halo's width as a fraction of the em: 0.10, which is 1.2 px on a 12 px name and 2.2 px on a
- * 22 px one — the range a slippy map's own labels halo at.
- *
- * **It is not the boards' 0.16, and the reason is that 0.16 cannot be drawn as a halo here.** The
- * width a distance field can express is bounded by the field's reach ({@link HALO_RADIUS}); asking
- * for more does not clamp, it saturates — every texel of the glyph's cell ends up outside the
- * outline's threshold and each character comes out as a filled rectangle. That is what 0.16 was
- * doing over the basemap. 0.10 sits at 36% of the field's reach, which is a ring.
+ * The halo's width as a fraction of the em: 2 px on a 14 px name, the middle of the size band. The
+ * distance field's reach ({@link HALO_RADIUS}) bounds the width it can draw; asking for more fills
+ * each glyph's cell as a rectangle. 0.14 em is half the reach.
  */
-const HALO_EM = 0.1;
-/** The em the SDF atlas is baked at — deck's own `fontSettings.fontSize` default. */
+const HALO_EM = 0.14;
+/** The em the SDF atlas is baked at: deck's `fontSettings.fontSize` default. */
 const ATLAS_PX = 64;
 /**
- * The distance field's reach in atlas pixels, and the padding around each glyph that holds it.
- *
- * The reach has to exceed the halo it must express with room to spare: deck's fill sits at 0.75 of
- * the field and the outline's threshold at `0.75 × (1 − outlineWidth / radius)`, so the halo is
- * `0.75 × outlineWidth` atlas pixels wide and the ratio `outlineWidth / radius` is what must stay
- * clear of 1. At 0.10 em it is 0.36. The padding need only cover the halo itself (6.4 px), and
- * every pixel of it is atlas area per glyph, so it is not the reach.
+ * The distance field's reach in atlas pixels, and the padding around each glyph. deck puts the
+ * outline threshold at `0.75 × (1 − outlineWidth / radius)`, so `outlineWidth / radius` must stay
+ * well below 1. The padding need only cover the halo (9 px), and each pixel of it costs atlas
+ * area per glyph.
  */
 const HALO_RADIUS = 24;
 const HALO_BUFFER = 14;
-/**
- * What deck wants for a halo of {@link HALO_EM}: it divides this by `fontSettings.radius` and
- * turns the result into the outline's threshold, which lands the halo at `0.75 ×` this value in
- * atlas pixels. Hence the `/ 0.75` — the previous spelling passed the atlas pixels straight in,
- * which asked for 1.33× the halo it wanted and, at the old reach of 12, for more field than
- * existed.
- */
+/** deck's `outlineWidth` for a halo of {@link HALO_EM}: deck draws `0.75 ×` this in atlas pixels. */
 const HALO_OUTLINE_WIDTH = (HALO_EM * ATLAS_PX) / 0.75;
+/**
+ * The glyphs an empty text layer is given in place of `'auto'`, which over no rows builds a font
+ * atlas 0 px high that WebGL refuses to upload.
+ */
+const WARM_GLYPHS = '0123456789';
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
 /**
- * The current colour encoding, from the store's legend and the schema.
- *
- * Falls back to uniform rather than throwing at every step where the state is not yet ready — a
- * column chosen before its values resolved, a refused `/v1/categories`. Colour is presentation,
- * so an incomplete encoding degrades to a drawn map, never to no map. A refused column colours
- * every mark *unmapped*, not uniform: uniform means no encoding chosen, unmapped means this value
- * could not be named, and the legend says the latter.
+ * The current column colour encoding, from the store's legend, the schema and the colour choices.
+ * Uniform where nothing is ready to colour by yet, such as a column chosen before any of its codes
+ * were counted. Unmapped where `/v1/categories` refused the column, so the legend can say the
+ * values could not be named. A chosen value colour applies once the legend has named its key.
  */
-export function encodingOf(meta: Meta | null, legend: LegendProjection | null): Encoding {
+export function encodingOf(meta: Meta | null, legend: LegendProjection | null, colouring: Colouring = DEFAULT_COLOURING): Encoding {
   const colourBy = legend?.colourBy ?? null;
   if (!colourBy || !meta || !legend || colourBy.startsWith(CLUSTER_PREFIX)) return {kind: 'uniform'};
   const column = meta.declaredScalars.find((c) => c.name === colourBy);
   if (!column) return {kind: 'uniform'};
   if (legend.categoryErrors[colourBy]) return {kind: 'unmapped'};
   if (column.category) {
-    // Paint follows the ranks, and the ranks are local: assigned from the codes counted in held
-    // bands, no round trip. The map is painted the moment the count lands and does not wait for
-    // `/v1/categories`, which names a colour in the legend and nothing else.
+    // The ranks come from codes counted in held bands, so the map is coloured without waiting
+    // for `/v1/categories`, which only names the legend's entries.
     const rankOfCode = legend.ranks[colourBy];
     if (!rankOfCode || Object.keys(rankOfCode).length === 0) return {kind: 'uniform'};
-    return {kind: 'category', column: colourBy, rankOfCode};
+    const chosen = new Map<number, Rgb>();
+    const picked = colouring.values[colourBy];
+    if (picked) {
+      for (const value of legend.categories[colourBy] ?? []) {
+        const colour = picked[value.key] === undefined ? null : rgbOfHex(picked[value.key]!);
+        if (colour) chosen.set(value.code, colour);
+      }
+    }
+    return {kind: 'category', column: colourBy, rankOfCode, palette: colouring.palette, chosen};
   }
   const domain = legend.domains[colourBy];
   if (!domain) return {kind: 'uniform'};
-  return {kind: 'numeric', column: colourBy, domain};
+  return {kind: 'numeric', column: colourBy, domain, ramp: colouring.ramp, scale: colouring.scale, reverse: colouring.reverse};
 }
 
 /**
- * What the current colouring *is*, as a string — the paint key's colour half. Sizes rather than
- * contents, because ranks and domains are sticky accumulators that only ever grow.
- */
-export function encodingSignature(encoding: Encoding): string {
-  switch (encoding.kind) {
-    case 'uniform':
-    case 'unmapped':
-      return encoding.kind;
-    case 'category':
-      return `category|${encoding.column}|${Object.keys(encoding.rankOfCode).length}`;
-    case 'numeric':
-      return `numeric|${encoding.column}|${encoding.domain.min}|${encoding.domain.max}`;
-  }
-}
-
-/**
- * A binary attribute descriptor, reused for as long as its buffer is the same object.
- *
- * deck.gl's skip check is reference equality on this descriptor, not on the array inside it, so
- * a fresh literal each paint re-uploads an attribute whose bytes have not changed — measured in the
- * instrument at 32.9 MB uploaded per pan where 16.4 MB was needed. Keyed on the array, so a
- * republished buffer always uploads and an unchanged one never does.
+ * A binary attribute object, reused while its array is the same object. deck.gl skips an upload
+ * when the attribute object is the same reference, so a new literal each paint would re-upload
+ * unchanged bytes.
  */
 type BinaryAttribute<T extends ArrayBufferView> = {value: T; size: number; normalized?: boolean};
 const descriptors = new WeakMap<ArrayBufferView, BinaryAttribute<ArrayBufferView>>();
@@ -274,9 +313,8 @@ function binary<T extends ArrayBufferView>(value: T, size: number, normalized?: 
 }
 
 /**
- * Attribute descriptors around a partition's own GPU buffers, keyed by attribute name so deck
- * binds the buffer (`setExternalBuffer`) rather than copying it. Memoised on the `GpuSlab`,
- * which the partition keeps stable across appends.
+ * Attribute objects around a partition's GPU buffers, keyed by attribute name so deck binds
+ * each buffer without copying. Memoised on the `GpuSlab`, which is stable across appends.
  */
 type AttributeMap = Record<string, DeckBinaryAttribute>;
 const gpuDescriptors = new WeakMap<GpuSlab, AttributeMap>();
@@ -289,29 +327,70 @@ function gpuAttributes(gpu: GpuSlab): AttributeMap {
       instanceFillColors: {buffer: gpu.colours, size: 4, type: 'unorm8', stride: 4, offset: 0},
       instancePickingColors: {buffer: gpu.picking, size: 4, type: 'uint8', stride: 4, offset: 0},
       instanceOrdinals: {buffer: gpu.ordinals, size: 1, type: 'float32', stride: 4, offset: 0},
-      instanceHighlights: {buffer: gpu.highlights, size: 1, type: 'float32', stride: 4, offset: 0}
+      instanceHighlights: {buffer: gpu.highlights, size: 1, type: 'float32', stride: 4, offset: 0},
+      instanceSizes: {buffer: gpu.sizes, size: 1, type: 'float32', stride: 4, offset: 0}
     };
     gpuDescriptors.set(gpu, held);
   }
   return held;
 }
 
-/** The stand-in buffers, once per piece list — the pieces survive most frames by reference. */
+/** The stand-in buffers, once per piece list. */
 const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>();
 /** The stand-in colours, once per (buffers, encoding). */
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
-/** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
+/** The stand-in size fractions, once per (buffers, size encoding). */
+const heldStandInSizes = new WeakMap<object, {key: string; sizes: Float32Array}>();
+/** `marks` objects whose slab-residency check has run. */
 const checkedMarks = new WeakSet<object>();
-/** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
-type HeldWash = {depth: number; channel: string; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
-const heldWash = new WeakMap<object, HeldWash>();
-/** The last wash built, drawn while the next is being built. */
-let lastWash: HeldWash | null = null;
-/** The pending wash build, one at a time: a newer `tiles` object supersedes an unbuilt older one. */
-let washTimer: ReturnType<typeof setTimeout> | null = null;
-/** How long `tiles` must stand still before the wash is rebuilt — the settle, not the frame. */
+/** What a wash is built for: one `tiles` object, at one depth, reading one count, in one set of colours. */
+type WashKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'; scheme: 'light' | 'dark'; colours: DensityColours};
+/**
+ * One layer's wash: the last image built, drawn until the next is ready, and the build waiting to
+ * run. Held in the layer's state, so two maps on one page keep separate washes.
+ */
+type WashState = {
+  built: (WashKey & {image: ImageData | null; bounds: [number, number, number, number]}) | null;
+  pending: WashKey | null;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+const sameWash = (a: WashKey | null, b: WashKey) =>
+  a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel && a.scheme === b.scheme && a.colours === b.colours;
+/** What the hexagons, grid and contours are built from: one `tiles` object, at one depth, reading one count. */
+type CellsKey = {tiles: TilesProjection; depth: number; channel: 'visible' | 'matched' | 'highlighted'};
+/**
+ * One layer's density cells: the last set built, drawn until the next is ready, and the build
+ * waiting to run. Debounced as the wash is, so a streaming response does not recolour the bins on
+ * every frame.
+ */
+type CellsState = {built: (CellsKey & {cells: DensityCell[]}) | null; pending: CellsKey | null; timer: ReturnType<typeof setTimeout> | null};
+const sameCells = (a: CellsKey | null, b: CellsKey) => a !== null && a.tiles === b.tiles && a.depth === b.depth && a.channel === b.channel;
+/** The grid's squares and colours, once per set of cells, colours and ground. */
+const heldGrid = new WeakMap<object, {key: string; data: GridDatum[]}>();
+type GridDatum = {polygon: [number, number][]; colour: [number, number, number]};
+/** The colours a hexagon or grid cell takes, sparse to dense: a quantile scale's steps. */
+const DENSITY_STEPS = 8;
+/** The share of a hexagon or grid cell drawn, so neighbouring cells show a hairline gap. */
+const DENSITY_COVERAGE = 0.94;
+
+/** The aggregation layers the hexagons and contours need, once they have loaded. */
+type Aggregation = Awaited<ReturnType<typeof importAggregation>>;
+let aggregation: Aggregation | null = null;
+let aggregationLoading: Promise<Aggregation> | null = null;
+
+/**
+ * Load `@deck.gl/aggregation-layers`, once. The hexagons and contours are drawn from it, and it is
+ * loaded the first time either is asked for, so a host that never draws them does not load it.
+ *
+ * @internal
+ */
+export function loadAggregationLayers(): Promise<Aggregation> {
+  aggregationLoading ??= importAggregation().then((m) => (aggregation = m));
+  return aggregationLoading;
+}
+/** How long `tiles` must stay unchanged before the wash is rebuilt. */
 const WASH_SETTLE_MS = 200;
-/** What the empty sublayers are given, once, so their descriptors are stable across paints. */
+/** Shared empty inputs, so the empty sublayers' attribute objects are stable across paints. */
 const EMPTY_F32 = new Float32Array(0);
 const EMPTY_U8 = new Uint8Array(0);
 const EMPTY_IDS = new BigUint64Array(0);
@@ -323,24 +402,16 @@ const NO_SHAPES: {polygon: [number, number][]}[] = [];
 const NO_POINTS: [number, number][] = [];
 /** The column encoding the slab's colour attribute holds, kept while the map colours by cluster. */
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
-/** A lookup texture per slab, for a host that handed none in. */
-const ownLut = new WeakMap<MarkSlab, LookupTexture>();
 /** The drawn outlines, once per served set, fetched shapes, opened artifact and hovered artifact. */
 const heldOutlines = new WeakMap<object, {key: string; shapes: object; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
-/**
- * The label candidates, once per served set — **not** per zoom bucket, which is what the
- * placement is per. Anchors are held in world units and scaled per bucket; see
- * {@link labelCandidates}.
- */
+/** The label candidates, once per served set, with anchors in world units; see {@link labelCandidates}. */
 const heldCandidates = new WeakMap<object, {key: string; candidates: LabelCandidate[]; byId: Map<bigint, LabelText>}>();
 
 /**
- * One drawn part — its outer ring and its holes, the nesting deck's `PolygonLayer` takes. **A
- * datum is a part, not an artifact** — a shape is a list of parts (`polygon-membership.md` §7.1),
- * and every part of one artifact carries that artifact's `id`, so an artifact whose members are
- * two separated clouds is two rows here that draw alike.
+ * One drawn part of an artifact's shape: its outer ring and its holes, as deck's `PolygonLayer`
+ * takes them. An artifact in several pieces is several rows with the same `id`, drawn alike.
  */
 export type OutlineDatum = {
   id: bigint;
@@ -348,11 +419,11 @@ export type OutlineDatum = {
   colour: Rgba;
   opened: boolean;
   hovered: boolean;
-  /** The wire's `rung` — the resolution the artifact is drawn at (contracts §3.2 r44). */
+  /** The served `rung`: the artifact's level, or its depth in a tree. */
   rung: number;
   /** Which shape the wire answered with, and so whether the ring was smoothed ({@link outlineOf}). */
   source: OutlineSource;
-  /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
+  /** The fill and line alphas (0 to 255) and the line width in pixels this outline draws with. */
   fill: number;
   line: number;
   width: number;
@@ -365,7 +436,7 @@ type LabelDatum = {
   offset: [number, number];
   colour: Rgba;
   kind: 'name' | 'count' | 'topic';
-  /** Where the offset sits on the run: a wrapped name centres, the last line ends at the seam. */
+  /** Where the offset sits on the run: a name and a topic centre, and a count starts where the name ends. */
   anchor: 'start' | 'middle' | 'end';
 };
 type LeaderDatum = {from: [number, number]; to: [number, number]};
@@ -373,16 +444,12 @@ type LeaderDatum = {from: [number, number]; to: [number, number]};
 /** The hovered outline: a faint fill and a firm line, less than the opened one's. */
 const HOVER_FILL: Record<'light' | 'dark', number> = {light: 26, dark: 33};
 const HOVER_LINE = 150;
-/** The opened outline: the boards' 0.16 fill and a strong line. */
+/** The opened outline: a 0.16 alpha fill and a strong line. */
 const OPENED_FILL = 41;
 const OPENED_LINE = 200;
 /**
- * A `box` draws as an unfilled hairline rectangle, whichever of the two states it is in.
- *
- * A box is the axis-aligned bounds of the visible members, not their shape: tinting its interior
- * would wash ground the members need not occupy at all, and a heavy line would draw the eye to a
- * rectangle that is a summary of an extent rather than a boundary anyone dug. The line still
- * carries the artifact's own colour and the state's own alpha, so the highlight reads.
+ * A `box` draws as an unfilled hairline rectangle, hovered or opened. A box is the bounds of the
+ * visible members, so filling it would tint ground they need not occupy.
  */
 const BOX_LINE_WIDTH = 0.8;
 
@@ -395,17 +462,13 @@ export type OutlineOptions = {
   meta?: Meta | null;
 };
 
-/** What is on the map at all: the level cut and the layer roster, and nothing about what draws. */
+/** The level cut and the layer roster, which decide what may be hovered. */
 export type ContourOptions = {
   level: number | undefined;
   meta?: Meta | null;
 };
 
-/**
- * Whether a served artifact is drawn at `level` and has no drawn child — {@link frontier}'s rule,
- * asked of one artifact rather than of the whole served set, which is what the hovered and the
- * opened artifact need.
- */
+/** Whether a served artifact is drawn at `level` and has no drawn child: {@link frontier}'s rule for one artifact. */
 function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined): boolean {
   const drawn = (x: {rung: number}) => level === undefined || x.rung <= level;
   if (!drawn(artifact)) return false;
@@ -417,40 +480,20 @@ function dependentLayers(meta: Meta | null | undefined): Set<string> {
   return new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
 }
 
-/**
- * Which kind of shape a layer draws — `/v1/meta`'s `shape` (`polygon-membership.md` §7.1), the
- * layer's own declaration and not a property of any one artifact. With no roster in hand this is
- * null, and the box draws.
- */
+/** The kind of shape a layer declares in `/v1/meta`, or null with no roster. */
 function shapeKindOf(meta: Meta | null | undefined, layer: string): ShapeKind | null {
   return meta?.layers.find((l) => l.name === layer)?.shape ?? null;
 }
 
 /**
- * **The shapes a viewer may point at**: one per served artifact on the **frontier**, carrying the
- * wire's own vertices — the served ring, never the drawn curve — for {@link hoverAt} to resolve a
- * hover or a click against.
+ * The shapes a viewer may point at, for {@link hoverAt}: one per served artifact in `frontier`,
+ * with the served vertices (not the smoothed curve). A response also carries their ancestors,
+ * which are not drawn and so are left out; so are a dependent layer's artifacts, which have no
+ * shape of their own.
  *
- * **The frontier and nothing above it** (the owner's review, 2026-08-27). A response carries a
- * frontier *and its ancestors*, and every served artifact used to sit in a polygon layer at zero
- * alpha so that it still answered deck's pick — which made an ancestor nobody can see reachable by
- * pointing at it: the pointer crossed a parent's invisible ring on its way across a child's and
- * the hover flipped between the two. A shape that is never drawn is not a thing a viewer can point
- * at, so it is not here. This is the same set the labels are drawn from — what carries a name
- * carries a contour and answers a hover. A dependent layer's artifacts (a clustering's topic
- * labels) are out for the same reason: their text is drawn beneath the name of the artifact they
- * attach to and they have no shape of their own, so their `box` fallback would put a rectangle
- * over the map with nothing drawn on it.
- *
- * **A shape is the artifact's `box` until its served shape arrives.** The viewport is asked for
- * centroids and boxes, so at rest every entry here is a rectangle; the shape for whatever the
- * pointer lands on is fetched by identifier (`TesseraStore.needShape`) and this is rebuilt
- * around it when it lands. A layer that draws no shape draws its box and this is the shape for
- * good.
- *
- * A shape's parts are separate pieces — a hull's α-groups (`artifact-shapes.md` §1), a
- * boundary's exclaves — so one entry holds several parts and a pointer between two of them is
- * inside neither, and a pointer in a hole is outside.
+ * An artifact's entry is its `box` until its served shape arrives: the viewport asks for
+ * centroids and boxes, and the store fetches the shape of what the pointer lands on by
+ * identifier. A pointer between two parts, or in a hole, is outside the shape.
  */
 export function contourShapes(a: ArtifactsProjection, o: ContourOptions): ContourShape[] {
   const dependent = dependentLayers(o.meta);
@@ -467,48 +510,24 @@ export function contourShapes(a: ArtifactsProjection, o: ContourOptions): Contou
 }
 
 /**
- * **What draws: the hovered artifact and the opened one, and nothing else** — on every layer,
- * nested included (the owner's review, 2026-08-26). At rest the map is colour and names.
+ * The outlines drawn: the hovered artifact and the opened one, and no others. At rest the map is
+ * colour and names; outlines for every served artifact would stack a frontier's shapes on its
+ * ancestors'.
  *
- * The rule already held for a flat layer, whose hulls overlap into a mesh, and the argument is the
- * same one level up: a response carries a frontier and its ancestors, so drawing every served hull
- * gave each region its own shape plus its parent's plus its grandparent's, translucent fills
- * stacking into a murky wash with no cue that the big shape contained the small ones. Exact colour
- * already says where a cluster is and how far it reaches, per principal, so the contours were
- * paying for a thing already drawn.
+ * On a layer that declares a shape, a box is a placeholder for a shape on its way and is not
+ * drawn, so the outline does not change under the pointer when the shape lands. Only a derived
+ * shape (a hull through member positions) is smoothed. A predicate or authored shape is a drawn
+ * boundary, and a curve through it would move the border. A box is never smoothed, since four
+ * corners through a spline make an oval.
  *
- * **So this is asked about two artifacts and never about the served set.** The rest of the
- * frontier used to be handed to deck at zero alpha to answer a pick, which made a hover change
- * cost a pass over every served artifact and a re-tessellation of every frontier ring: measured at
- * 38 ms building the rows and 16 ms more in deck's tessellator, at the 34,385 served boxes an
- * administrative hierarchy puts on screen at zoom 9, for every boundary the pointer crossed. This
- * is 0.01 ms at that count, and the pick those rows answered is resolved against
- * {@link contourShapes} instead — 17 ms once per served set, then 0.75 ms per pointer move.
- *
- * **A box is not smoothed, and where a shape is coming it is not drawn at all.** {@link smoothRing}
- * is a periodic cubic B-spline, and four corners through it is an oval: the rectangle a viewer
- * hovers must be the rectangle the wire sent. Where the layer draws a shape the box is a
- * placeholder for one that is on its way by identifier, so nothing draws until it lands —
- * a rectangle that becomes the shape a moment later reads as the shape changing under the
- * pointer. The hover still resolves against the box meanwhile ({@link contourShapes}), which is
- * what asks for the shape in the first place.
- *
- * **Only a derived shape is smoothed.** A hull's vertices are member positions and the spline is
- * the summary `artifact-shapes.md` §4 argues for; a predicate or an authored shape is a boundary
- * somebody drew, already generalised to the pixel by the server's vertex rule, and a curve
- * through its vertices would move a border and could cross its own holes. Both draw in the same
- * style — the opened artifact strong with a faint fill, the hovered one lighter.
- *
- * **A served artifact contributes one row per part of its shape**, so the length of the result is
- * the part count and not the artifact count. Every row of one artifact draws alike, because the
- * parts are one shape in several pieces and highlighting half of a cluster would be a lie about
- * where its members are. Parents are ordered first so an opened child sits over an opened parent.
+ * The result has one row per part, all parts of an artifact drawn alike, ordered by `rung` so an
+ * opened child sits over an opened parent.
  */
 export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
   const dependent = dependentLayers(o.meta);
   const data: OutlineDatum[] = [];
   const seen = new Set<bigint>();
-  // Opened first, so that opening the artifact under the pointer draws it opened and not hovered.
+  // Opened first, so the artifact under the pointer draws as opened once it is opened.
   for (const id of [o.opened, o.hovered]) {
     if (id === null || seen.has(id)) continue;
     seen.add(id);
@@ -521,7 +540,7 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
     const box = outline.source === 'box';
     const kind = shapeKindOf(o.meta, artifact.layer);
     if (box && kind !== null) continue;
-    // With no roster in hand a served shape is smoothed as a hull always was.
+    // With no roster, a served shape is smoothed as a hull.
     const smooth = !box && (kind === null || kind === 'derived');
     const opened = id === o.opened;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
@@ -544,35 +563,20 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
       });
     }
   }
-  // The wire's `rung` orders parents first (contracts §3.2 r44): the declared level on a levelled
-  // layer, the response-local chain depth on a treed one — drawn by, never derived.
   return data.sort((x, y) => x.rung - y.rung);
 }
 
 /**
- * The work ceiling on the candidate list. Placement is O(K) against a spatial hash and the
- * candidates are built once per served set, so this is high enough that no view a client draws
- * reaches it and low enough that a whole level of a large hierarchy — GeoNames' 23,821 `admin3`
- * artifacts — cannot turn a settle into a pass over every one of them.
+ * The most label candidates offered to placement, so a whole level of a large hierarchy does not
+ * make a settle a pass over tens of thousands of artifacts.
  */
 export const LABEL_CANDIDATE_CEILING = 4_096;
 
 /**
- * How many artifacts are offered to the placement: **the drawn set, not the window**.
- *
- * This was one label per 36,000 px² of viewport — twenty-eight on a 1280 × 800 screen — which
- * made the window decide *which* artifacts got to try for the ground rather than how many
- * survived the trying. The two are not the same bound, and on a compact layout the difference is
- * the whole of what is drawn: rung 3's 253 k-means clusters sit inside a ball 464 world units
- * across, so at zoom 0 the top twenty-eight by count all want the same few hundred pixels and
- * **three** of them are placed. Offered all 253 the same placement fits **sixteen** — the
- * thirteen extra are small clusters that sit in gaps the largest ones never occupied, and no
- * screen-derived number could have reached them, because they were never candidates.
- *
- * The spatial hash is what bounds the drawing and it is exact: a label is placed where it does
- * not overlap one already placed, within `MAX_DISPLACEMENT` of its own centroid, or it
- * waits for a zoom. A second bound over the window only ever discarded candidates the hash would
- * have judged. What remains here is the work bound, {@link LABEL_CANDIDATE_CEILING}.
+ * How many artifacts are offered to placement: every drawn one, up to
+ * {@link LABEL_CANDIDATE_CEILING}. The spatial hash decides how many fit. A cap from the window
+ * size would pick the largest artifacts, which crowd the same pixels, and drop small ones that fit
+ * in the gaps.
  */
 export function labelBudget(drawn: number): number {
   return Math.min(Math.max(0, drawn), LABEL_CANDIDATE_CEILING);
@@ -580,38 +584,30 @@ export function labelBudget(drawn: number): number {
 
 export type LabelText = {
   artifact: Artifact;
-  /** The name as it is drawn: up to three short lines (`wrapLabel`). */
-  lines: string[];
+  /** The name as drawn, on one line. */
+  line: string;
   countText: string;
   size: number;
   topic: string | null;
 };
 
-/** The width of a run of text at a font size, in pixels — the model the placement box uses. */
+/** A name's character width as a fraction of the font size, for the placement box. */
 const NAME_EM = 0.58;
-const COUNT_EM = 0.55;
-/** The count's size relative to the name's, and the gap between the last line and it. */
+/** The count's size relative to the name's, and the gap between the name and it. */
 const COUNT_SCALE = 0.82;
 const COUNT_GAP_EM = 0.35;
-/** The topic line beneath the block, in pixels. */
+/** The topic line beneath the name, in pixels. */
 const TOPIC_SIZE = 12;
 
 /**
- * The **frontier** of the served set at `level`: every drawn artifact with no drawn child.
+ * The artifacts named at `level`: every drawn artifact with no drawn child. An artifact with a
+ * drawn child is an ancestor of something on the map and is not labelled.
  *
- * A served artifact that has a served child in the same response is an ancestor of something on
- * the map. It names nothing its children do not name more precisely, so it draws no label (the
- * owner's review, 2026-08-26) — computed here from `parentIds` over the served set, which is what
- * `lineage` already holds, so nothing new is asked of the wire.
- *
- * With no chosen level this is the cut's leaves. With one it is that level's artifacts **and**
- * every shallower artifact whose own children the level cut away, which the plain `rung === level`
- * test that stood here dropped — a branch that stops above the chosen level went unnamed.
- *
- * The number compared is the wire's `rung` (contracts §3.2 r44): the declared level on a levelled
- * layer, the response-local chain depth on a treed one, computed server-side after the cut. It is
- * never derived here — the client-side chain count this once used answered the wrong question on
- * a levelled layer, whose edges may skip a level (trap 5.4, retired with the column).
+ * With no level this is the leaves of the served set. With one it is that level's artifacts and
+ * every shallower artifact whose children are all deeper than the level, so a branch that ends
+ * above the level is still named. The level compared is the served `rung`, which the server
+ * computes per layer kind; a levelled layer's edges may skip a level, so a client-side depth count
+ * would be wrong.
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
   const out = new Set<bigint>();
@@ -620,22 +616,13 @@ export function frontier(a: ArtifactsProjection, level: number | undefined): Set
 }
 
 /**
- * The label candidates for a served set at `zoom`: the frontier's artifacts **that have a text to
- * draw** — an artifact with no supplied text and no attached topic draws no label, never its key,
- * which is an id — the top `budget` of them by masked count, each with its name, count and topic
- * and the pixel box the placement needs.
+ * The label candidates for a served set at `zoom`: the top `budget` frontier artifacts by masked
+ * count that have text to draw, each with its name, count, topic and pixel box. An artifact with
+ * no text and no attached topic gets no label; its key is an identifier, not a name. Name size
+ * comes from {@link labelSize} over the candidates' counts.
  *
- * **A name's size is its masked count's**, on {@link labelSize}'s logarithmic band over the range
- * the drawn frontier holds. The range is taken over the candidates that survive the budget, which
- * is what is on screen: the largest name is the largest count drawn, and the smallest the
- * smallest.
- *
- * **Held per served set, not per zoom bucket.** Every part of a candidate but its anchor — the
- * frontier, the sort by masked count, the budget's cut, the wrapped lines and the box they make —
- * is a function of the served set, the level and the budget alone; only the anchor is pixels, and
- * a zoom scales it. The placement is what a bucket re-runs, and it takes the top `budget`
- * candidates rather than the served set (0.2 ms against 38 for a filter and sort of 34k, measured
- * on GeoNames at zoom 9–10). So the list is built once and each bucket scales anchors into a copy.
+ * Only the anchor depends on the zoom, so the list is built once per served set, level and budget,
+ * and each zoom bucket scales the anchors into a copy.
  */
 export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const key = `${a.version}|${level ?? ''}|${budget}`;
@@ -648,24 +635,18 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
   return {candidates: held.candidates.map((c) => ({...c, x: c.x * scale, y: c.y * scale})), byId: held.byId};
 }
 
-/**
- * The zoom-independent half of {@link labelCandidates}: the candidates with their anchors in
- * **world units**, which the caller scales.
- */
+/** {@link labelCandidates} with anchors in world units, which the caller scales. */
 function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
-  // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
-  // name of whatever they sit on, italic and small, and are placed with it: they are not
-  // candidates of their own (§5.10, D13).
+  // A dependent layer's artifacts (a clustering's topic labels) are drawn beneath their target's
+  // name and are not candidates of their own.
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-  const topicOf = attachedTopics(a, meta);
   const front = frontier(a, level);
   const named = placed
     .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
-    .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
+    .filter((x) => artifactName(x, a.attached) !== null)
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
-  // The range the band is drawn over: the counts of the names that will actually be on screen.
   let smallest = Number.POSITIVE_INFINITY;
   let largest = 0;
   for (const x of named) {
@@ -678,88 +659,42 @@ function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: numbe
   for (const artifact of named) {
     const count = Number(artifact.maskedCount);
     const size = labelSize(count, smallest, largest);
-    const attached = topicOf.get(artifact.tesseraId) ?? null;
-    // A cluster with no name of its own takes its topic as the name (a labelled clustering);
-    // one with both draws the topic beneath in italic (the boards).
-    const name = artifactName(artifact) ?? attached!;
-    const topic = artifactName(artifact) === null ? null : attached;
+    // An artifact with no text takes its topic as the name; one with both draws the topic beneath.
+    const name = artifactName(artifact, a.attached)!;
+    const attached = a.attached.get(artifact.tesseraId) ?? null;
+    const topic = attached === name ? null : attached;
     const countText = count.toLocaleString('en-GB');
-    // **The wrapped box is what is placed.** A name is drawn as up to three short lines, so the
-    // spatial hash packs against the block the viewer sees and the 40 px displacement rule is
-    // measured against it — a one-line box three hundred pixels wide overlapped everything.
-    const lines = wrapLabel(name);
-    byId.set(artifact.tesseraId, {artifact, lines, countText, size, topic});
-    const widest = lines.reduce((w, line) => Math.max(w, line.length * NAME_EM * size), 0);
-    const lastLine = lines[lines.length - 1]!.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
+    const line = labelLine(name);
+    byId.set(artifact.tesseraId, {artifact, line, countText, size, topic});
+    // The box placed is the name alone, as drawn at rest; the count and topic show on hover.
+    const lineWidth = line.length * NAME_EM * size;
     candidates.push({
       id: artifact.tesseraId,
       x: gridToWorld(artifact.centroid![0]),
       y: gridToWorld(artifact.centroid![1]),
-      width: Math.max(widest, lastLine, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
-      height: lines.length * size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
+      width: lineWidth + 8,
+      height: size * LABEL_LINE_HEIGHT,
       priority: count
     });
   }
   return {candidates, byId};
 }
 
-/** Whether an artifact carries a text to draw: its first supplied content, non-empty. */
-export function hasText(a: Artifact): boolean {
-  return (a.content[0] ?? '').length > 0;
-}
-
-/**
- * What to call an artifact: its supplied text where the layer publishes any, else **nothing**.
- *
- * A key is an identifier its layer's author chose — `hdb-2422486`, `tp2-000002` — and drawn as a
- * name it reads as a cluster called that (the owner's review, 2026-08-26). The map draws no label
- * for an artifact with no text; a panel with a row to fill draws a neutral placeholder beside the
- * count, and shows the key under the field that says *key*.
- */
-export function artifactName(a: Artifact): string | null {
-  const text = a.content[0];
-  return text !== undefined && text.length > 0 ? text : null;
-}
-
-/** Which of the two the wire answered an artifact's outline with: its served shape, or its box. */
+/** Whether an artifact's outline is its served shape or its box. */
 export type OutlineSource = 'shape' | 'box';
 
-/** A served artifact's outline in world space — parts of rings — and which of the two it is. */
+/** A served artifact's outline in world space, as parts of rings, and which kind it is. */
 export type Outline = {parts: Part[]; source: OutlineSource};
 
 /**
- * A served artifact's outline in world space: **its served shape's parts**, else its box, else
- * nothing — the wire's own vertices, in the wire's own order, and nothing else.
+ * A served artifact's outline in world space, with the served vertices unsmoothed: the parts of
+ * `fetched` (the shape fetched by identifier) where given, else of the artifact's own shape, else
+ * its box, else null. `source` says which, since a square shape and a box both have four corners
+ * and are drawn differently.
  *
- * **It says which of the two it returned**, because the two are drawn differently and a caller
- * cannot tell them apart by counting vertices: a box is four corners and so is a square shape.
- * A derived shape is smoothed and a box never is ({@link focusOutlines}), and four corners
- * through a periodic cubic B-spline is an oval.
- *
- * A shape is parts of rings (`polygon-membership.md` §7.1) — a hull's α-groups one part each, a
- * boundary's exclaves as parts and its enclaves as holes — so this returns a list of parts and
- * each one is drawn as its own polygon with holes carrying the artifact's identifier. A ring of
- * one or two vertices is degenerate — a hull's group of one or two members, with no area to draw
- * or to pick — and is left out; a part whose outer ring is degenerate goes whole, holes and all,
- * since a surviving hole drawn first would be the polygon; where that leaves no part at all the
- * box answers instead, which is the rule a degenerate single hull already met.
- *
- * **`fetched` is the shape the drill-down route answered with**, and it wins over the artifact's
- * own where both exist. The viewport is asked for centroids and boxes, so a served row carries no
- * shape and the shape for the one artifact that draws arrives by identifier
- * (`TesseraStore.needShape`); until it does, the box is what is drawn, which is the same fallback
- * a layer drawing no shape has always taken.
- *
- * **This returns the wire's vertices and does not smooth them.** The smoothing is
- * {@link smoothRing}, applied by {@link focusOutlines} to a derived shape's rings. It is a
- * **periodic cubic B-spline** through the served ring rather than a containment-preserving corner
- * cut: the curve may sit a little outside the served ring at a reflex corner, bounded by a sixth
- * of the second difference there, which is a less precise summary of where the cluster is and not
- * a claim about ground the members do not occupy (`artifact-shapes.md` §4, the owner's ruling of
- * 2026-08-28). Every vertex the engine sends is still a visible member's own position, and the
- * served ring — not the drawn curve — is what a pick reads. **Neither is a membership test**: a
- * served shape is a drawing, and whether a point belongs to the artifact is the wire's
- * `membership:<layer>` column's answer (`polygon-membership.md` §7.1).
+ * A part is an outer ring and its holes. A ring of fewer than three vertices has no area and is
+ * dropped; a part whose outer ring is dropped goes whole. With no part left, the box answers. An
+ * outline is a drawing: membership comes from the served `membership:<layer>` column.
  */
 export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   const w = gridToWorld;
@@ -777,44 +712,57 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
 }
 
 /**
- * The text a dependent layer's artifacts (a clustering's topic labels) attach to the served
- * artifacts of their generating layer. A dependent artifact carries its target's masked count
- * and no id (D13), and no centroid on this wire: it is attached to the served artifact of its
- * generating layer with the same count, and left unattached where two share one — a count is
- * not an identity. A target id on the wire (S4's drill-down route, awaiting a ruling) would make
- * this exact.
+ * The grid: one square per cell, {@link DENSITY_COVERAGE} of a tile wide, coloured by the rank of
+ * its count among the distinct counts drawn, in {@link DENSITY_STEPS} steps of `stops`.
  */
-export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<bigint, string> {
-  const topicOf = new Map<bigint, string>();
-  if (!meta) return topicOf;
-  const dependent = new Set(meta.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name));
-  const byCount = new Map<string, Artifact[]>();
-  for (const x of a.served) {
-    if (dependent.has(x.layer)) continue;
-    const k = `${x.layer}|${x.maskedCount}`;
-    (byCount.get(k) ?? byCount.set(k, []).get(k)!).push(x);
-  }
-  for (const t of a.served) {
-    if (!dependent.has(t.layer) || t.content.length === 0) continue;
-    const generating = meta.layers.find((l) => l.name === t.layer)?.depsOn ?? [];
-    for (const g of generating) {
-      const targets = byCount.get(`${g}|${t.maskedCount}`);
-      if (targets && targets.length === 1) topicOf.set(targets[0]!.tesseraId, t.content[0]!);
-    }
-  }
-  return topicOf;
+function gridSquares(cells: readonly DensityCell[], span: number, stops: readonly Rgb[]): GridDatum[] {
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
+  const steps = Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]);
+  const half = (span * DENSITY_COVERAGE) / 2;
+  return cells.map((c) => {
+    const [x, y] = c.position;
+    const step = steps[Math.min(DENSITY_STEPS - 1, Math.floor((rank.get(c.count) ?? 0) * DENSITY_STEPS))]!;
+    return {polygon: [[x - half, y - half], [x + half, y - half], [x + half, y + half], [x - half, y + half]], colour: step};
+  });
 }
+
+/** The props `<tessera-map>` also passes, through `@tesseradb/deck/internal`. */
+export type TesseraLayerInternalProps = TesseraLayerProps & {
+  /** The marks' GPU buffers. Unset, the layer makes and releases its own; a host's is attached and released by the host. */
+  slab?: MarkSlab | null;
+};
 
 /**
- * What to call a served artifact: its own text, else a topic attached to it, else **nothing** —
- * a caller with a row to fill draws a neutral placeholder rather than the key ({@link artifactName}).
+ * A deck.gl `CompositeLayer` that draws a Tessera store's marks, tiles and artifacts. From bottom
+ * to top it draws the hovered and the opened artifact's outline, the density wash from the exact
+ * tiles' counts, the marks, the artifacts' names at their centroids (with the hovered one's
+ * count), the selected region and the picked mark's ring. The props are {@link TesseraLayerProps}.
+ *
+ * The layer draws in the 512-unit world square (`WORLD_SIZE`) for an `OrthographicView` with
+ * `flipY: true`, and {@link viewInputOf} turns that view's camera into what `store.setView` takes.
+ * It has no adapter for a geographic `MapView` or a MapLibre host.
+ *
+ * With `store` set, the layer subscribes to it and redraws on each change. The layer does not
+ * fetch. Every served mark is drawn, with no budget, cap or filter applied in the layer, and a
+ * value the colouring cannot resolve draws grey.
+ *
+ * Only an artifact at the level drawn (`clusterLevel`) is outlined. On a layer that declares a
+ * shape, the outline appears once `store.needShape` has fetched the shape. On a layer that declares
+ * none, the outline is the artifact's box, drawn as a thin unfilled rectangle.
+ *
+ * Hover and pick are the host's: pass deck's pick info to {@link resolvePick}, which returns the
+ * mark or the artifact name under the pointer. Outlines, the wash and the selected region are not
+ * pickable.
+ *
+ * The layer makes its mark buffers and colour lookup texture on its deck's device, and releases
+ * them when deck finalises it.
  */
-export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string | null {
-  return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
-}
-
-export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
+export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
+  /** @internal */
   static override layerName = 'TesseraLayer';
+  /** @internal */
   static override defaultProps = {
     store: null,
     marks: null,
@@ -824,7 +772,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     meta: null,
     legend: null,
     status: 'idle',
-    lut: null,
+    slab: null,
     clusterLevel: undefined,
     labels: true,
     scheme: 'dark',
@@ -835,28 +783,44 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     drag: null,
     dragPolygon: null,
     hoveredArtifact: null,
-    wash: true,
-    // Declared, so deck's prop machinery carries them like every other host-computed property
-    // (`components/src/map.ts` repaints when either changes).
     highlighting: false,
-    washChannel: 'matched',
+    points: true,
     radius: null,
+    pointOpacity: null,
+    density: 'smooth',
+    densityChannel: 'matched',
+    densityColours: null,
+    densityStrength: 1,
+    colouring: DEFAULT_COLOURING,
+    sizing: DEFAULT_SIZING,
     pickable: true,
     onDrawn: null,
     onTimings: null
   };
 
-  declare state: {tick: number; unsubscribe: (() => void) | null; subscribed: Store | null; zoomBucket: number};
+  /** @internal */
+  declare state: {
+    tick: number;
+    unsubscribe: (() => void) | null;
+    subscribed: Store | null;
+    zoomBucket: number;
+    ownSlab: MarkSlab | null;
+    ownLut: LookupTexture | null;
+    wash: WashState;
+    cells: CellsState;
+  };
 
+  /** @internal */
   override initializeState(): void {
-    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN};
+    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}, cells: {built: null, pending: null, timer: null}};
     this.follow(this.props.store ?? null);
   }
 
   /**
-   * Labels are placed in screen space, so a zoom re-places them; a pan does not (the placement
-   * is translation-invariant). The layer rebuilds on a viewport change only when the zoom
-   * crosses a bucket, which keeps a drag from rebuilding every sublayer per frame.
+   * Labels are placed in screen space relative to their centroids, so a pan leaves them and a
+   * zoom re-places them. A viewport change rebuilds the layer only when the zoom crosses a bucket.
+   *
+   * @internal
    */
   override shouldUpdateState(params: UpdateParameters<this>): boolean {
     if (super.shouldUpdateState(params)) return true;
@@ -865,18 +829,26 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return bucket !== this.state.zoomBucket;
   }
 
+  /** @internal */
   override updateState(params: UpdateParameters<this>): void {
     super.updateState(params);
     if (params.changeFlags.propsChanged && (this.props.store ?? null) !== this.state.subscribed) {
       this.follow(this.props.store ?? null);
     }
+    if (this.props.slab) this.release({slab: true, lut: false});
   }
 
+  /** @internal */
   override finalizeState(context: Parameters<CompositeLayer['finalizeState']>[0]): void {
     super.finalizeState(context);
     this.state.unsubscribe?.();
     this.state.unsubscribe = null;
     this.state.subscribed = null;
+    this.release({slab: true, lut: true});
+    if (this.state.wash.timer !== null) clearTimeout(this.state.wash.timer);
+    this.state.wash = {built: null, pending: null, timer: null};
+    if (this.state.cells.timer !== null) clearTimeout(this.state.cells.timer);
+    this.state.cells = {built: null, pending: null, timer: null};
   }
 
   /** The `store` convenience: subscribe, and mark the layer for update on every change. */
@@ -916,20 +888,41 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     };
   }
 
-  /** The lookup texture: the host's, or one kept per slab. */
-  private lut(): LookupTexture {
-    if (this.props.lut) return this.props.lut;
-    let held = ownLut.get(this.props.slab);
-    if (!held) {
-      held = new LookupTexture();
-      ownLut.set(this.props.slab, held);
+  /** The host's slab, else the layer's own, made on the layer's device at first use. */
+  private slab(): MarkSlab {
+    if (this.props.slab) return this.props.slab;
+    if (!this.state.ownSlab) {
+      this.state.ownSlab = new MarkSlab();
+      if (this.context.device) this.state.ownSlab.attach(this.context.device);
     }
-    return held;
+    return this.state.ownSlab;
   }
 
+  /** The layer's lookup texture, made on the layer's device at first use. */
+  private lut(): LookupTexture {
+    if (!this.state.ownLut) {
+      this.state.ownLut = new LookupTexture();
+      if (this.context.device) this.state.ownLut.attach(this.context.device);
+    }
+    return this.state.ownLut;
+  }
+
+  /** Free the GPU resources the layer made; a host's slab is left alone. */
+  private release(which: {slab: boolean; lut: boolean}): void {
+    if (which.slab) {
+      this.state.ownSlab?.clear();
+      this.state.ownSlab = null;
+    }
+    if (which.lut) {
+      this.state.ownLut?.destroy();
+      this.state.ownLut = null;
+    }
+  }
+
+  /** @internal */
   override renderLayers(): LayersList {
     const started = performance.now();
-    const timings: LayerTimings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0};
+    const timings: LayerTimings = {slabMs: 0, densityMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0};
     this.state.zoomBucket = Math.round((this.context.viewport?.zoom ?? 0) * LABEL_ZOOM_STEP);
     const layers = this.buildLayers(timings);
     timings.layersMs = performance.now() - started;
@@ -940,20 +933,13 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
 
   private buildLayers(timings: LayerTimings): LayersList {
     const r = this.resolved();
-    const {slab} = this.props;
+    const slab = this.slab();
     const layers: (Layer | null)[] = [];
 
-    // The lookup texture is rewritten whenever the table, the colours, the palette, the level or
-    // the highlight moved — never O(points), and by the rows that moved rather than whole where
-    // the table only gained ordinals (`lut.ts`) — and the device it lives on is deck's. **The
-    // table and the colour map are compared inside**, by version and by identity: a point response
-    // names artifacts the debounced channel has not served yet, and those ordinals would otherwise
-    // keep the texture's neutral until the channel's next answer. The served set's version is
-    // deliberately not in the key — no texel is a function of it, and having it there rebuilt the
-    // whole texture on every settle.
+    // The key covers the palette, level and highlight; `update` compares the table and colour map
+    // itself. No texel depends on the served set's version, so it is not in the key.
     const lut = this.lut();
     const lutStarted = performance.now();
-    if (this.context.device && !lut.gpu) lut.attach(this.context.device);
     const opened = this.props.openedArtifact ?? null;
     const highlight = r.artifacts && opened !== null ? r.artifacts.served.find((a) => a.tesseraId === opened) : undefined;
     const highlightOrdinal = highlight && r.artifacts ? r.artifacts.table.ordinalOf(highlight.layer, highlight.tesseraId) : NO_ORDINAL;
@@ -965,43 +951,49 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     }
     timings.lutMs = performance.now() - lutStarted;
 
-    // A refusal draws no marks but keeps the slab: the held bands are still the answer to the last
-    // view that succeeded, and discarding them would make recovery pay for a full rewrite. So a
-    // refused view is blank — the map element paints the state over it — and never an empty corpus.
+    // A refusal draws no marks but keeps the slab, whose bands answer the last view that
+    // succeeded, so recovery does not rewrite them.
     if (r.status === 'refused' || !r.marks || r.marks.bands.length === 0 && r.marks.standIn.length === 0 && !r.marks.count.exact) {
       if (!r.marks) slab.clear();
       this.props.onDrawn?.(0, 0);
-      // Every sublayer, empty: the programs link now, during the wait for the first response,
-      // and the first paint with marks pays no shader compile (see `warmMarksLayers`).
-      return [...this.outlineLayers(r, timings), this.washLayer(null, 0), ...this.warmMarksLayers(), ...this.labelLayers(r, timings), ...this.selectionLayers()];
+      // Every sublayer, empty, so the shader programs link while the first response is awaited.
+      const density = r.status === 'refused' ? [this.washLayer(null, 0)] : this.densityLayers(r, timings);
+      return [...this.outlineLayers(r, timings), ...density, ...this.warmMarksLayers(), ...this.labelLayers(r, timings), ...this.selectionLayers()];
     }
 
-    // The slab's colour attribute holds the **column** colouring. Colouring by cluster is the
-    // texture and a uniform: the attribute keeps the last column encoding untouched, so the switch
-    // back is free and the switch there rewrites nothing per point.
+    // With the marks off the slab is left as it is, and catches up when they are drawn again.
+    if (this.props.points === false) {
+      this.props.onDrawn?.(0, 0);
+      return [...this.outlineLayers(r, timings), ...this.densityLayers(r, timings), ...this.warmMarksLayers(), ...this.labelLayers(r, timings), ...this.selectionLayers()];
+    }
+
+    // The slab's colour attribute holds the column colouring. Cluster colour is the lookup
+    // texture, so switching to it leaves the attribute holding the last column encoding.
     const colourBy = r.legend?.colourBy ?? null;
     const clusterLayer = clusterLayerOf(colourBy);
     let column = heldColumnEncoding.get(slab) ?? {encoding: {kind: 'uniform'} as Encoding, colourBy: null};
     if (!clusterLayer) {
-      column = {encoding: encodingOf(r.meta, r.legend), colourBy};
+      column = {encoding: encodingOf(r.meta, r.legend, this.props.colouring ?? DEFAULT_COLOURING), colourBy};
       heldColumnEncoding.set(slab, column);
     }
     const encoding = column.encoding;
     const encodingKey = encodingSignature(encoding);
-    // The ordinals every mark carries are the first layer on's, whichever colouring is chosen, so
-    // choosing cluster colour later is the uniform flip and not a rewrite of the attribute.
+    // Marks carry the first layer's ordinals under any colouring, so switching to cluster colour
+    // flips a uniform.
     const membershipLayer = clusterLayer ?? r.artifacts?.layers[0] ?? '';
     const useLut = clusterLayer !== null && lut.gpu !== null;
-    // One uniform for the whole draw: with no highlight set the attribute is not read at all.
     const highlighting = this.props.highlighting ?? false;
+    const sizing = drawnSizing(this.props.sizing ?? DEFAULT_SIZING);
+    const size = sizeEncodingOf(r.meta, r.legend, sizing.scale);
+    const sized = size.kind !== 'none';
     const slabStarted = performance.now();
-    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer);
+    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer, size);
     timings.slabMs = performance.now() - slabStarted;
 
     if (!checkedMarks.has(r.marks)) {
       checkedMarks.add(r.marks);
-      // Every exact band the frame draws must have reached the slab: a band written outside its
-      // slot, or a slot gone stale under a partition change, would thin the picture silently.
+      // Every exact band the frame draws must have a slab slot, or the picture would be thinner
+      // than what was served.
       for (const band of r.marks.bands) {
         if (!slab.holds(band)) {
           throw new Error(`TesseraLayer: exact band ${band.prefix} at depth ${band.depth} is drawn but has no slab slot.`);
@@ -1009,51 +1001,39 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       }
     }
 
-    if (this.props.wash) {
-      const washStarted = performance.now();
-      layers.push(this.washLayer(r.tiles, r.depth));
-      timings.washMs = performance.now() - washStarted;
-    }
+    layers.push(...this.densityLayers(r, timings));
 
-    // The marks' size and alpha follow the resident count and the zoom (`markStyle`): small and
-    // translucent at a million so density reads through them, larger and more solid as the count
-    // falls. A style change is two uniforms, never a pass over the points.
-    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer);
-    const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null);
+    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer, sized ? size.column : null);
+    const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null, this.props.pointOpacity ?? null);
+    // Under sizing the layer's radius is the largest any mark draws at, and each mark's own is a
+    // fraction of it. The edges are feathered, and the shader keeps a small mark's edge hard.
+    const radius = sized ? sizingRadius(sizing) : style.radius;
+    const antialiasing = sized ? true : style.antialiasing;
+    const sizeRange = sized ? sizing : null;
     const opacity = deckOpacity(style.alpha);
-    timings.markRadius = style.radius;
+    const dullColour = DULL_COLOUR[this.props.scheme ?? 'dark'];
+    timings.markRadius = sized ? sizing.max : style.radius;
     timings.markAlpha = style.alpha;
     timings.markCount = slab.drawn + standIn.count;
 
-    // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
-    // everything it held when it returns. One layer per retained slab partition, addressed by slot,
-    // so a depth flip is a swap and flipping back uploads nothing.
-    const passes: HighlightPass[] = highlighting ? ['dull', 'lit'] : ['all'];
+    // One layer per retained slab partition, addressed by slot, toggled by `visible`. deck
+    // destroys an omitted layer and re-uploads its buffers when it returns.
+    const passes: HighlightPass[] = highlighting ? ['dull', 'glow', 'lit'] : ['all'];
     const partitions = slab.layers();
-    // The slab's own warm layer only: the stand-in layer is added below whatever the partitions
-    // hold, and pushing the warm one here too gave deck two layers under `marks-standin`, which it
-    // warned about and resolved by keeping one of them.
+    // Only the slab's warm layer: the stand-in layer is pushed after the partitions', and two
+    // layers may not share the id `marks-standin`.
     if (partitions.length === 0) layers.push(...this.warmMarksLayers(false));
-    // The stand-ins: drawn at the same alpha as any other mark. What guards the reading is the
-    // number channel — no count is shown against a non-exact tile — not the alpha channel.
-    //
-    // **They carry their ordinal and colour through the same texture as any other mark.** A
-    // stand-in oversamples the ground it covers, but each mark in it is a real point of a real
-    // band carrying the ordinal the response that served it named, so its colour is exact in
-    // §5.10's sense. Drawing them neutral put a grey band over every tile the deeper cut had not
-    // reached yet — up to 56% of the marks on screen mid-zoom on the 2.4M corpus — and that grey
-    // is what read as colour reloading on a zoom in.
+    // Stand-ins draw like any other mark, at the same alpha and through the same texture: each is
+    // a served point with its served ordinal. No count is shown for a non-exact tile.
     const colours = this.standInColours(standIn, encoding, encodingKey);
+    const sizes = this.standInSizes(standIn, size);
     if (colours.length !== standIn.count * 4) {
       throw new Error(
         `colour buffer covers ${colours.length / 4} of ${standIn.count} stand-in marks. Colour is presentation and must never decide what is drawn.`
       );
     }
-    // **Under a highlight every mark layer is drawn twice** — the dulled marks first, then the lit
-    // ones over them (`marks-layer.ts`'s `HighlightPass`). Instances rasterise in buffer order, so
-    // in a single pass a lit mark sits under every unlit mark later in the slab, which at a
-    // million marks buries most of them; the second pass is what makes a lit mark visible in dense
-    // ground. With no highlight there is one pass and nothing changes.
+    // Under a highlight every mark layer is drawn three times, dulled, glowing and lit; see
+    // `HighlightPass`.
     for (const pass of passes) {
       for (const held of partitions) {
         layers.push(
@@ -1069,7 +1049,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
                       getPosition: binary(held.draw.positions, 2),
                       getFillColor: binary(held.draw.colours, 4, true),
                       getOrdinal: binary(held.draw.ordinals, 1),
-                      getHighlight: binary(held.draw.highlights, 1)
+                      getHighlight: binary(held.draw.highlights, 1),
+                      getSize: binary(held.draw.sizes, 1)
                     }
               },
               tesseraIds: held.draw.ids,
@@ -1077,14 +1058,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
               useLut,
               highlighting,
               highlightPass: pass,
+              dullColour,
               lutTexture: lut.gpu,
+              sizing: sizeRange,
               radiusUnits: 'pixels' as const,
-              getRadius: style.radius,
+              getRadius: radius,
               radiusMinPixels: 1,
-              antialiasing: style.antialiasing,
+              antialiasing,
               opacity,
-              // One pass answers a pick, or the same mark is reported twice.
-              pickable: this.props.pickable && held.active && pass !== 'lit',
+              // Each mark is drawn by one of the dull and lit passes, which pick; the glow does not.
+              pickable: this.props.pickable && held.active && pass !== 'glow',
               parameters: {depthCompare: 'always' as const}
             } as never
           )
@@ -1101,7 +1084,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
                 getPosition: binary(standIn.positions, 2),
                 getFillColor: binary(colours, 4, true),
                 getOrdinal: binary(standIn.ordinals, 1),
-                getHighlight: binary(standIn.highlights, 1)
+                getHighlight: binary(standIn.highlights, 1),
+                getSize: binary(sizes, 1)
               }
             },
             tesseraIds: standIn.ids,
@@ -1109,13 +1093,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             useLut,
             highlighting,
             highlightPass: pass,
+            dullColour,
             lutTexture: lut.gpu,
+            sizing: sizeRange,
             radiusUnits: 'pixels' as const,
-            getRadius: style.radius,
+            getRadius: radius,
             radiusMinPixels: 1,
-            antialiasing: style.antialiasing,
+            antialiasing,
             opacity,
-            pickable: this.props.pickable && pass !== 'lit',
+            pickable: this.props.pickable && pass !== 'glow',
             parameters: {depthCompare: 'always' as const}
           } as never
         )
@@ -1130,13 +1116,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The mark layers with nothing in them — the first partition's slot and the stand-ins — so
-   * that their programs are linked at the first paint of the session rather than at the first
-   * paint with marks. luma links synchronously when a pipeline is made (its shader-layout
-   * introspection forces the link to complete), and every program of this composite cost
-   * 130–190 ms on the main thread at the moment the first million marks arrived — the largest
-   * single block in that paint. An empty layer draws nothing and uploads nothing; a layer that
-   * later fills keeps its id, so deck updates it rather than making it again.
+   * The mark layers with nothing in them, the first partition's and the stand-ins', so their
+   * programs link at the first paint instead of when the first marks arrive. luma links
+   * synchronously, at 130 to 190 ms per program on the main thread. A layer that later fills keeps
+   * its id, so deck updates it.
    */
   private warmMarksLayers(standIn = true): Layer[] {
     const layers: Layer[] = [
@@ -1176,11 +1159,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return layers;
   }
 
-  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string): StandInBuffers {
-    const key = `${colourBy ?? ''}|${layer}`;
+  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string, sizeBy: string | null): StandInBuffers {
+    const key = `${colourBy ?? ''}|${layer}|${sizeBy ?? ''}`;
     const held = heldStandIn.get(marks.standIn);
     if (held && held.key === key) return held.buffers;
-    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : [], layer);
+    const buffers = materialiseStandIn(marks.standIn, new Set([colourBy, sizeBy].filter((c): c is string => c !== null)), layer);
     heldStandIn.set(marks.standIn, {key, buffers});
     return buffers;
   }
@@ -1193,62 +1176,181 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return colours;
   }
 
+  private standInSizes(standIn: StandInBuffers, size: SizeEncoding): Float32Array {
+    const key = sizeSignature(size);
+    const held = heldStandInSizes.get(standIn);
+    if (held && held.key === key) return held.sizes;
+    const sizes = buildSizeAttribute(standIn.count, standIn.scalars, size);
+    heldStandInSizes.set(standIn, {key, sizes});
+    return sizes;
+  }
+
   /**
-   * The density wash, rebuilt once per `tiles` object — and **off the paint path**. Binning and
-   * filtering the wash over a full viewport's tiles (65,536 at depth 8) is 60–70 ms, and it sat
-   * inside the first paint with marks. Now a new `tiles` object schedules the build on a
-   * macrotask, the paint draws the previous wash (or none) meanwhile, and the layer asks for an
-   * update when the image is ready — one frame later, never inside the frame that draws the
-   * marks. The image still comes from the exact tiles' counts and nothing else (§5.10).
-   *
-   * `tiles` null draws the empty layer, so the bitmap program links with the rest at the first
-   * paint of the session.
+   * Whether the labels sit on plates: while density is drawn as hexagons or a grid, or as a smooth
+   * wash in a ramp, whose colours fill the ground under the names.
    */
-  private washLayer(tiles: TilesProjection | null, depth: number): Layer {
+  private platesLabels(): boolean {
+    const mode = this.props.density ?? 'smooth';
+    return mode === 'hex' || mode === 'grid' || (mode === 'smooth' && this.densityColours(mode) !== 'warm-grey');
+  }
+
+  /** The density colours drawn: the prop, else warm grey for a wash under the marks, else Viridis. */
+  private densityColours(mode: DensityMode): DensityColours {
+    return this.props.densityColours ?? (mode === 'smooth' && this.props.points !== false ? 'warm-grey' : 'viridis');
+  }
+
+  /**
+   * The density layers for `density`, all built from the exact tiles' counts at the drawn depth in
+   * the `densityChannel` count ({@link densityCells}), never from the marks. The wash's layer is
+   * always present, hidden unless `smooth` is drawn, so its program links at the first paint.
+   *
+   * The grid is one square per tile, coloured by the tile's count on a quantile scale over the
+   * tiles drawn. The hexagons colour each bin by the mean count of the tiles whose centres fall in
+   * it, on the same scale, so a bin that happens to hold two tile centres does not read as twice as
+   * dense. The contours are drawn at the counts {@link contourThresholds} picks, in the label ink.
+   * The hexagons and contours come from `@deck.gl/aggregation-layers`, loaded the first time one is
+   * asked for ({@link loadAggregationLayers}); nothing of theirs is drawn until it has loaded.
+   */
+  private densityLayers(r: Resolved, timings: {densityMs: number}): Layer[] {
+    const started = performance.now();
+    const mode = this.props.density ?? 'smooth';
+    const scheme = this.props.scheme ?? 'dark';
+    const colours = this.densityColours(mode);
+    const strength = Math.min(1, Math.max(0, this.props.densityStrength ?? 1));
+    const layers: Layer[] = [this.washLayer(mode === 'smooth' ? r.tiles : null, r.depth, colours, strength)];
+    const binned = mode === 'hex' || mode === 'grid' || mode === 'contours';
+    const cells = binned && r.tiles ? this.cells({tiles: r.tiles, depth: r.depth, channel: this.props.densityChannel ?? 'matched'}) : null;
+    if (cells) {
+      const span = WORLD_SIZE / 2 ** cells.depth;
+      const stops = densityStops(colours, scheme);
+      const common = {opacity: strength, pickable: false, parameters: {depthCompare: 'always' as const}};
+      if (mode === 'grid') {
+        const key = `${colours}|${scheme}`;
+        let held = heldGrid.get(cells.cells);
+        if (!held || held.key !== key) {
+          held = {key, data: gridSquares(cells.cells, span, stops)};
+          heldGrid.set(cells.cells, held);
+        }
+        layers.push(
+          new PolygonLayer(this.getSubLayerProps({id: 'density-grid'}), {
+            ...common,
+            data: held.data,
+            getPolygon: (d: GridDatum) => d.polygon,
+            getFillColor: (d: GridDatum) => d.colour,
+            stroked: false,
+            updateTriggers: {getFillColor: key}
+          } as never)
+        );
+      } else if (!aggregation) {
+        void loadAggregationLayers().then(() => this.redrawLater());
+      } else if (mode === 'contours') {
+        const thresholds = contourThresholds(cells.cells);
+        const ink = INK[scheme];
+        layers.push(
+          new aggregation.ContourLayer(this.getSubLayerProps({id: 'density-contours'}), {
+            ...common,
+            data: cells.cells,
+            getPosition: (d: DensityCell) => d.position,
+            gpuAggregation: false,
+            cellSize: span,
+            getWeight: (d: DensityCell) => d.count,
+            aggregation: 'SUM',
+            contours: thresholds.map((threshold, i) => ({
+              threshold,
+              color: [ink[0], ink[1], ink[2], Math.round(90 + (140 * (i + 1)) / thresholds.length)] as [number, number, number, number],
+              strokeWidth: i === thresholds.length - 1 ? 1.5 : 1
+            }))
+          } as never)
+        );
+      } else {
+        layers.push(
+          new aggregation.HexagonLayer(this.getSubLayerProps({id: 'density-hex'}), {
+            ...common,
+            data: cells.cells,
+            getPosition: (d: DensityCell) => d.position,
+            gpuAggregation: false,
+            getColorWeight: (d: DensityCell) => d.count,
+            colorAggregation: 'MEAN',
+            colorScaleType: 'quantile',
+            colorRange: Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]),
+            coverage: DENSITY_COVERAGE,
+            extruded: false,
+            radius: span
+          } as never)
+        );
+      }
+    }
+    timings.densityMs = performance.now() - started;
+    return layers;
+  }
+
+  /**
+   * The cells for the hexagons, grid and contours, built {@link WASH_SETTLE_MS} after `tiles` stops
+   * changing; the previous set, if any, draws until then.
+   */
+  private cells(want: CellsKey): (CellsKey & {cells: DensityCell[]}) | null {
+    const state = this.state.cells;
+    if (!sameCells(state.built, want) && !sameCells(state.pending, want)) {
+      state.pending = want;
+      const build = () => {
+        state.timer = null;
+        state.pending = null;
+        state.built = {...want, cells: densityCells(want.tiles.tiles, want.depth, want.channel)};
+        this.redrawLater();
+      };
+      if (typeof setTimeout !== 'undefined') {
+        if (state.timer !== null) clearTimeout(state.timer);
+        state.timer = setTimeout(build, WASH_SETTLE_MS);
+      } else build();
+    }
+    return state.built;
+  }
+
+  /** Ask for a redraw of the layer that is current for this id, which may no longer be this instance. */
+  private redrawLater(): void {
+    const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+    // A discarded instance has no manager to ask; the next paint reads the state anyway.
+    if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+    current.setNeedsUpdate();
+    current.setNeedsRedraw();
+  }
+
+  /**
+   * The smooth wash from the exact tiles' counts, built once per `tiles` object and off the paint
+   * path, since a full viewport's tiles take 60 to 70 ms to bin and filter. A new `tiles` object
+   * schedules a build; the previous wash, if any, draws until it is ready. `tiles` null draws the
+   * empty layer so its program links at the first paint.
+   */
+  private washLayer(tiles: TilesProjection | null, depth: number, colours: DensityColours = 'warm-grey', strength = 1): Layer {
     let image: ImageData | null = null;
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (tiles) {
-      // The channel is in the key beside the depth: a highlight change hands the layer the same
-      // `tiles` object with a different question to wash, and a memo on the object alone would
-      // draw the old answer.
-      const channel = this.props.washChannel ?? 'matched';
-      let held = heldWash.get(tiles);
-      if (!held || held.depth !== depth || held.channel !== channel) {
-        if (!held || !held.pending) {
-          // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
-          held = {depth, channel, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
-          heldWash.set(tiles, held);
-          const build = () => {
-            washTimer = null;
-            const binned = binDensity(tiles.tiles, depth, channel);
-            const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
-            const entry = {
-              depth,
-              channel,
-              image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
-              bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
-              pending: false
-            };
-            heldWash.set(tiles, entry);
-            lastWash = entry;
-            // The layer that is current for this id, which may no longer be this instance.
-            const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
-            // A discarded instance has no manager to ask; the next paint reads the memo anyway.
-            if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
-            current.setNeedsUpdate();
-            current.setNeedsRedraw();
+      // A highlight change can hand over the same `tiles` object with a different channel.
+      const want: WashKey = {tiles, depth, channel: this.props.densityChannel ?? 'matched', scheme: this.props.scheme ?? 'dark', colours};
+      const wash = this.state.wash;
+      if (!sameWash(wash.built, want) && !sameWash(wash.pending, want)) {
+        wash.pending = want;
+        const build = () => {
+          wash.timer = null;
+          wash.pending = null;
+          const binned = binDensity(want.tiles.tiles, want.depth, want.channel);
+          const built = binned && binned.filled > 0 ? filterDensity(binned, want.depth, densityPaint(want.colours, want.scheme)) : null;
+          wash.built = {
+            ...want,
+            image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
+            bounds: built ? built.bounds : [0, 0, 1, 1]
           };
-          // Debounced to the settle: while a response streams in, every fold hands the layer a
-          // new `tiles` object a frame apart, and a wash per frame would cost more than the
-          // marks it sits under. The last one asked for is the one built.
-          if (typeof setTimeout !== 'undefined') {
-            if (washTimer !== null) clearTimeout(washTimer);
-            washTimer = setTimeout(build, WASH_SETTLE_MS);
-          } else build();
-        }
+          this.redrawLater();
+        };
+        // Debounced: a streaming response hands over a new `tiles` object every frame. The last
+        // one asked for is built.
+        if (typeof setTimeout !== 'undefined') {
+          if (wash.timer !== null) clearTimeout(wash.timer);
+          wash.timer = setTimeout(build, WASH_SETTLE_MS);
+        } else build();
       }
-      image = held.image;
-      bounds = held.bounds;
+      image = wash.built?.image ?? null;
+      bounds = wash.built?.bounds ?? bounds;
     }
     const [x0, y0, x1, y1] = bounds;
     return new BitmapLayer(
@@ -1256,11 +1358,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       {
         visible: image !== null,
         image: image ?? EMPTY_IMAGE,
-        // `[left, bottom, right, top]`: row 0 of the image is the lowest tile row, and under the
-        // y-down orthographic view that is the smaller world y — so `top` is `y0`.
+        // `[left, bottom, right, top]`: row 0 of the image is the lowest tile row, which is the
+        // smaller world y, and the view is y-down, so `top` is `y0`.
         bounds: [x0, y1, x1, y0],
+        opacity: strength,
         pickable: false,
-        // Linear, over the filtered field: the tile grid is never drawn (decision 0097).
+        // Linear, so the tile grid does not show.
         textureParameters: {minFilter: 'linear', magFilter: 'linear'},
         parameters: {depthCompare: 'always' as const}
       } as never
@@ -1268,21 +1371,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The served shape's parts — or the `box`, where the layer draws no shape — for the hovered and
-   * the opened artifact, in its own colour, the opened one strong with a faint fill
-   * ({@link focusOutlines}), every kind through this one path. A derived shape is per principal
-   * (contracts §3.2), so it is exact for this viewer; nothing is contoured from held marks
-   * (decision 0099).
+   * The hovered and opened artifacts' outlines ({@link focusOutlines}). A derived shape is computed
+   * per principal by the server; nothing is contoured from held marks. The layer is not pickable:
+   * hover and click over a contour resolve against {@link contourShapes}.
    *
-   * **Nothing else is in this layer.** The rest of the frontier used to sit here at zero alpha to
-   * answer deck's pick, which put every served ring through the tessellator on every hover change;
-   * a pick over a contour is resolved in JS instead, against {@link contourShapes}, and a click
-   * takes the same route as the hover (`map.ts`'s `onClick`). So this layer is not pickable and
-   * carries no `artifactIds`: a label still answers deck's pick and names its artifact, and that is
-   * now the only route by which `resolvePick` reports one.
-   *
-   * The shapes do not depend on the zoom, so the memo survives a zoom that re-places the labels.
-   * It is keyed on the fetched shapes as well as the served set, because a shape arriving by
+   * The memo is keyed on the fetched shapes as well as the served set, since a shape arriving by
    * identifier changes neither the served array nor the projection's version.
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number; outlinesDrawn: number}): Layer[] {
@@ -1301,7 +1394,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     timings.outlinesMs = performance.now() - started;
     timings.outlines = data.length;
     timings.outlinesDrawn = new Set(data.map((d) => d.id)).size;
-    // The layer exists from the first paint, empty, so its program is linked before it is needed.
+    // Present from the first paint, empty, so its program links early.
     return [
       new PolygonLayer(
         this.getSubLayerProps({id: 'outlines'}),
@@ -1309,8 +1402,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           visible: data.length > 0,
           data,
           getPolygon: (d: OutlineDatum) => d.polygon,
-          // A box draws unfilled, which is the whole of what `fill` carries here — every row in
-          // this layer is a shape that draws.
+          // A box draws unfilled through its `fill` alpha of 0.
           filled: true,
           getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.fill],
           stroked: true,
@@ -1327,11 +1419,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * Names and counts at each artifact's `centroid`, sized by masked count on a logarithmic band,
-   * placed by priority into a spatial hash — a few hundred fit a viewport and the rest wait for
-   * a zoom — with a leader line where a label moved. A dependent artifact draws at its own
-   * declared centroid with the count the wire carries for it (its target's, D13). Free text is
-   * deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
+   * Names at each artifact's centroid, placed by priority into a spatial hash, with a leader line
+   * where a label moved. The hovered artifact's name also shows its count after it and, where a
+   * dependent artifact's text is attached, that text beneath. Text is deck's `TextLayer` with
+   * `characterSet: 'auto'` and an SDF halo.
    */
   private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
     const a = this.props.labels ? r.artifacts : null;
@@ -1339,8 +1430,6 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const started = performance.now();
     const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    // The drawn set is the candidate list (`labelBudget`); the window bounds nothing here, the
-    // spatial hash does.
     const budget = a ? labelBudget(a.served.length) : 0;
     const key = a ? `${a.version}|${a.palette}|${bucket}|${budget}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldLabels.get(a.served) : undefined;
@@ -1352,37 +1441,17 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       let placed = 0;
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
         placed += 1;
-        const {artifact, lines, countText, size, topic} = byId.get(p.id)!;
+        const {artifact, line, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
         const colour = a.colours.get(ordinal) ?? NEUTRAL;
-        // The name over up to three lines, centred on the anchor; the count beside the **last**
-        // line — smaller and lighter — then the topic beneath the block. The last line ends and
-        // the count starts at one seam, so the two width estimates cannot overlap.
-        const step = size * LABEL_LINE_HEIGHT;
-        const top = p.dy - ((lines.length - 1) * step) / 2;
-        const last = lines[lines.length - 1]!;
-        const lastWidth = last.length * NAME_EM * size;
-        const countWidth = countText.length * COUNT_EM * size * COUNT_SCALE;
-        const seam = p.dx - (lastWidth + countWidth + size * COUNT_GAP_EM) / 2 + lastWidth;
-        lines.forEach((line, i) => {
-          const isLast = i === lines.length - 1;
-          data.push({
-            id: artifact.tesseraId,
-            position,
-            text: line,
-            size,
-            offset: [isLast ? seam : p.dx, top + i * step],
-            colour,
-            kind: 'name',
-            anchor: isLast ? 'end' : 'middle'
-          });
-        });
-        const baseline = top + (lines.length - 1) * step;
+        // The name centred on the anchor; the count starts where the name ends, and the topic
+        // sits beneath, so neither overlaps it.
+        const seam = p.dx + (line.length * NAME_EM * size) / 2;
+        const baseline = p.dy;
+        data.push({id: artifact.tesseraId, position, text: line, size, offset: [p.dx, baseline], colour, kind: 'name', anchor: 'middle'});
         data.push({id: artifact.tesseraId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
         if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
-        // A leader wherever the label moved: the placement bounds the move (`MAX_DISPLACEMENT`),
-        // so a leader is a short tie to the centroid and never a line across the map.
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
       held = {key, data, leaders, placed};
@@ -1391,9 +1460,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const data = held?.data ?? NO_LABELS;
     const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    // Labels placed, not text rows: a wrapped name is several rows of one label.
+    // Labels placed, not text rows: a label is its name, its count and its topic.
     timings.labels = held?.placed ?? 0;
-    // Both layers exist from the first paint, empty, so their programs are linked before needed.
+    // Present from the first paint, empty, so their programs link early.
     const layers: Layer[] = [];
     {
       layers.push(
@@ -1416,6 +1485,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     }
     const scheme = this.props.scheme ?? 'dark';
     const ink = [...INK[scheme], 255] as [number, number, number, number];
+    // Over density in saturated colours a halo in the ground colour reads as an outline round each
+    // glyph, so the names sit on plates of the ground colour there instead. The plates are drawn as
+    // layers of their own beneath all the text, so one row's plate does not cover another's glyphs.
+    const plated = this.platesLabels();
+    const plateProps = {background: true, getBackgroundColor: HALO[scheme], backgroundPadding: [6, 4], backgroundBorderRadius: 3, getColor: [0, 0, 0, 0], outlineWidth: 0, pickable: false};
+    const own = plated ? {outlineWidth: 0} : {};
     const text = (id: string, kind: LabelDatum['kind'], rows: LabelDatum[], extra: Record<string, unknown>) =>
       new TextLayer(
         this.getSubLayerProps({id}),
@@ -1430,35 +1505,34 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           getPixelOffset: (d: LabelDatum) => d.offset,
           getTextAnchor: (d: LabelDatum) => d.anchor,
           getAlignmentBaseline: 'center' as const,
-          fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-          // **The halo is the distance field's, so both its width and its shape are the field's.**
-          // deck's defaults (buffer 4, radius 24 at a 64 px atlas) clip the field so tightly that
-          // the widest outline a 12 px name could draw was about a third of a pixel, whatever
-          // `outlineWidth` said, and the names read as unhaloed over the marks. Asking for more
-          // than the field can express is the opposite failure and looks worse: the threshold
-          // falls below every texel in the glyph's cell and each character is drawn as a filled
-          // rectangle. {@link HALO_RADIUS} and {@link HALO_OUTLINE_WIDTH} are sized so the halo is
-          // a ring at 36% of the field's reach.
+          fontFamily: "'Instrument Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+          // The halo is drawn from the distance field. deck's default buffer of 4 clips the field
+          // to about a third of a pixel of outline on a 12 px name; see HALO_RADIUS.
           fontSettings: {sdf: true, buffer: HALO_BUFFER, radius: HALO_RADIUS, cutoff: 0.25},
           outlineWidth: HALO_OUTLINE_WIDTH,
           outlineColor: HALO[scheme],
-          characterSet: 'auto',
+          characterSet: rows.length > 0 ? 'auto' : WARM_GLYPHS,
           pickable: this.props.pickable && kind === 'name',
           artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
-          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme},
+          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme, getBackgroundColor: scheme},
           ...extra
         } as never
       );
-    layers.push(
-      text('labels', 'name', data.filter((d) => d.kind === 'name'), {fontWeight: 600}),
-      text('label-counts', 'count', data.filter((d) => d.kind === 'count'), {fontWeight: 400}),
-      text('label-topics', 'topic', data.filter((d) => d.kind === 'topic'), {fontWeight: 400, fontStyle: 'italic'})
-    );
+    const kinds = [
+      {id: 'labels', kind: 'name', style: {fontWeight: 600}},
+      {id: 'label-counts', kind: 'count', style: {fontWeight: 400}},
+      {id: 'label-topics', kind: 'topic', style: {fontWeight: 400, fontStyle: 'italic'}}
+    ] as const;
+    // A name shows at rest; its count and topic only while its artifact is hovered.
+    const hovered = this.props.hoveredArtifact ?? null;
+    const rowsOf = (kind: LabelDatum['kind']) => data.filter((d) => d.kind === kind && (kind === 'name' || d.id === hovered));
+    if (plated) for (const k of kinds) layers.push(text(`${k.id}-plates`, k.kind, rowsOf(k.kind), {...k.style, ...plateProps}));
+    for (const k of kinds) layers.push(text(k.id, k.kind, rowsOf(k.kind), {...k.style, ...own}));
     return layers;
   }
 
-  /** The picked mark's marker, and the selected region as the shape drawn — never its cells. */
+  /** The picked mark's marker, and the selected region as the shape drawn. */
   private selectionLayers(): Layer[] {
     const layers: Layer[] = [];
     const box = this.props.drag ?? this.props.region ?? null;
@@ -1468,7 +1542,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const live = this.props.drag != null || this.props.dragPolygon != null;
     const scheme = this.props.scheme ?? 'dark';
     const accent = ACCENT[scheme];
-    // Both layers exist from the first paint, empty, so their programs are linked before needed.
+    // Present from the first paint, empty, so their programs link early.
     {
       layers.push(
         new PolygonLayer(

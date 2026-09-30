@@ -1,97 +1,110 @@
-"""The rest of the layer and vocabulary surface: python-sdk.md §4.4 and §4.6.
+"""The layer and vocabulary surface: what the verbs write, and what they refuse.
 
-What each parameter compiles to, and what each refusal says. The blocks are read back from the
-verb's own return value; the TOML they become is proved by `tessera check` in `test_sdk_corpus.py`
-and against every committed corpus declaration in `test_sdk_corpora.py`.
+A `declare_*` verb takes no data, so a layer's tables are its inserts' and the verb writes a
+declaration. What is asserted here is that declaration through the check every build runs: a
+shape, an inline roster, levels and a value set reach it as the verbs wrote them. The rules the
+check itself owns are its own to state, and the refusals below stand for the SDK's blocks
+reaching it at all — an inline artifact row among them, which the check reads inside.
+
+The refusals that are the SDK's own are here too: how a shape, a membership and a scope are
+spelled on a Python call, which no file expresses.
 """
 
 import pytest
 
 from tesseradb._database import create
 from tesseradb._refusal import Refusal
-from tesseradb._toml import Inline
 
 pd = pytest.importorskip("pandas")
+
+WORLD = {"lon": [-180.0, 180.0], "lat": [-85.0511287798066, 85.0511287798066]}
+
+
+def members():
+    return pd.DataFrame({"key": ["a"], "entity": ["p0"]})
 
 
 @pytest.fixture
 def db(tmp_path):
     database = create(tmp_path / "db")
-    database.stage(
-        "points",
-        pd.DataFrame({"id": ["p0", "p1"], "x": [0.0, 1.0], "y": [0.0, 1.0]}),
-        id="id",
-        default=True,
-    )
-    database.stage("members", pd.DataFrame({"key": ["a"], "entity": [1]}))
-    database.stage("shapes", pd.DataFrame({"key": ["a"], "wkt": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}))
     database.declare_view("s0")
+    database.declare_attribute("entity", type="keyword", unique=True)
     return database
 
 
-# ---------------------------------------------------------------------------- membership
+# ---------------------------------------------------------------------------- what is declared
 
 
-def test_a_spatial_layer_names_its_shape_kind_and_the_space_its_shapes_are_written_in(db):
-    block = db.declare_layer(
+def test_a_spatial_layer_names_its_shape_kind_and_the_space_its_shapes_are_written_in(
+    tmp_path, checked
+):
+    db = create(tmp_path / "db")
+    db.declare_view("world", projection="web_mercator", extent=WORLD)
+    db.declare_layer(
         "regions",
         kind="flat",
-        source="shapes",
         membership="spatial",
         shape={"kind": "polygon"},
         default_space="wgs84",
     )
-    assert block["membership"] == "spatial"
-    assert block["shape"] == {"kind": "polygon"}
-    assert block["default_space"] == "wgs84"
-    text = db.declaration
-    assert '[layer.shape]\nkind = "polygon"' in text
-    assert 'default_space = "wgs84"' in text
-
-
-def test_a_spatial_layer_derives_no_hull_beside_its_membership_shape(db):
-    block = db.declare_layer("regions", kind="flat", source="shapes", membership="spatial",
-                             shape="bbox")
-    assert block["content"] == Inline({"computed": ["centroid", "box"]})
-    with pytest.raises(Refusal, match="one drawn geometry"):
-        db.declare_layer("more", kind="flat", source="shapes", membership="spatial", shape="bbox",
-                         computed=("centroid", "hull"))
-
-
-def test_a_shape_kind_may_be_named_bare(db):
-    block = db.declare_layer("regions", kind="flat", source="shapes", membership="spatial",
-                             shape="bbox")
-    assert block["shape"] == {"kind": "bbox"}
-
-
-def test_an_attribute_membership_is_a_predicate_and_declares_no_content(db):
-    block = db.declare_layer("programmes", kind="flat", membership={"attribute": "kind"})
-    assert block["membership"] == Inline({"attribute": "kind"})
-    # A predicate layer's artifacts are the column's distinct values, which the vocabulary bounds.
-    assert block["value_set"] == "closed"
-    assert "content" not in block
-    assert "[layer.content]" not in db.declaration
-
-
-def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(db):
-    db.declare("view_group", {"name": "quarter", "source": "points"})
-    block = db.declare_layer(
-        "quarter_clusters",
-        kind="flat",
-        source="members",
-        views=["quarter"],
-        scope={"group": "quarter"},
-        fields={"view": "quarter"},
+    db.insert(
+        "regions",
+        artifacts=pd.DataFrame(
+            {"key": ["a"], "geometry": ["POLYGON ((0 0, 1 0, 1 1, 0 0))"]}
+        ),
+        key="key",
+        shape="polygon",
     )
-    assert block["scope"] == Inline({"group": "quarter"})
-    assert block["fields"] == Inline({"view": "quarter"})
+    assert checked(db).ok
 
 
-# ---------------------------------------------------------------------------- the artifact rows
+def test_a_shape_kind_may_be_named_bare(db, checked):
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox")
+    db.insert(
+        "regions",
+        artifacts=pd.DataFrame(
+            {"key": ["a"], "min_x": [0.0], "min_y": [0.0], "max_x": [1.0], "max_y": [1.0]}
+        ),
+        key="key",
+        shape="bbox",
+    )
+    assert checked(db).ok
 
 
-def test_inline_artifacts_carry_the_shape_the_space_and_the_exclusion(db):
-    block = db.declare_layer(
+def test_an_attribute_membership_is_a_predicate_over_a_declared_column(db, checked):
+    db.declare_vocabulary("kind", closed=True, width="u8", values=["road", "rail"])
+    db.declare_attribute("kind", type="category", vocabulary="kind", index=True)
+    db.declare_layer("programmes", kind="flat", membership={"attribute": "kind"})
+    assert checked(db).ok
+
+
+def test_a_layer_scoped_to_a_view_group_keys_its_artifacts_per_view(tmp_path, checked):
+    db = create(tmp_path / "db")
+    db.declare_attribute("id", type="keyword", unique=True)
+    db.declare_view_group("quarter", extent={"x": [0.0, 1.0], "y": [0.0, 1.0]})
+    db.declare_layer(
+        "quarter_clusters", kind="flat", views=["quarter"], scope={"group": "quarter"}
+    )
+    db.insert(
+        "quarter",
+        pd.DataFrame({"id": ["p0"], "x": [0.0], "y": [0.0], "q": ["q1"]}),
+        x="x",
+        y="y",
+        view="q",
+    )
+    db.insert(
+        "quarter_clusters",
+        artifacts=pd.DataFrame({"key": ["a"], "quarter": ["q1"]}),
+        key="key",
+        view="quarter",
+    )
+    assert checked(db).ok
+
+
+def test_inline_artifacts_carry_the_shape_the_space_and_the_exclusion(tmp_path, checked):
+    db = create(tmp_path / "db")
+    db.declare_view("world", projection="web_mercator", extent=WORLD)
+    db.declare_layer(
         "regions",
         kind="flat",
         membership="spatial",
@@ -99,203 +112,278 @@ def test_inline_artifacts_carry_the_shape_the_space_and_the_exclusion(db):
         artifacts=[
             {"key": "iberia", "wkt": "POLYGON ((-10 36, 3 36, 3 44, -10 44, -10 36))",
              "space": "wgs84"},
-            {"key": "box", "bbox": [0.0, 0.0, 1.0, 1.0]},
+            {"key": "japan", "wkt": "POLYGON ((129 31, 146 31, 146 46, 129 46, 129 31))",
+             "space": "wgs84"},
         ],
     )
-    assert [row["key"] for row in block["artifacts"]] == ["iberia", "box"]
-    assert block["artifacts"][0]["space"] == "wgs84"
-    assert block["artifacts"][1]["bbox"] == [0.0, 0.0, 1.0, 1.0]
-    assert "[[layer.artifacts]]" in db.declaration
+    assert checked(db).ok
 
 
-def test_an_artifacts_frame_carries_the_artifact_tables_columns(db):
-    block = db.declare_layer(
+def test_an_artifacts_frame_written_in_the_declaration_carries_the_tables_columns(db, checked):
+    db.declare_layer(
         "cases",
         kind="flat",
         artifacts=pd.DataFrame(
-            {"key": ["a", "b"], "level": [0, 0], "excluding": [[1], [2]],
+            {"key": ["a", "b"], "level": [0, 0],
+             "excluding": [[{"entity": "p0"}], [{"entity": "p1"}]],
              "contents": [[["Ward A"]], [["Ward B"]]]}
         ),
+        supplied=[("ward", "text", "inherited")],
     )
-    assert [row["key"] for row in block["artifacts"]] == ["a", "b"]
-    assert block["artifacts"][0]["excluding"] == [1]
-    assert block["value_set"] == "closed"
+    assert checked(db).ok
 
 
-def test_an_artifact_hangs_from_the_edge_attached_to_names(db):
-    db.declare_layer("clusters", kind="flat", members="members")
-    block = db.declare_layer(
+def test_an_artifact_hangs_from_the_edge_attached_to_names(db, checked):
+    """`attached_to` is the call's spelling; the declaration carries the layer and the key."""
+    db.declare_layer(
+        "clusters", kind="flat", artifacts=[{"key": "a", "members": {"entity": ["p0"]}}]
+    )
+    db.declare_layer(
         "topics",
         kind="flat",
         depends_on=["clusters"],
-        artifacts=[{"key": "t0", "members": [1],
+        artifacts=[{"key": "t0", "members": {"entity": ["p0"]},
                     "attached_to": {"layer": "clusters", "key": "a", "level": 0}}],
     )
-    row = block["artifacts"][0]
-    assert row["attached_layer"] == "clusters" and row["attached_key"] == "a"
-    assert row["attached_level"] == 0
-    assert block["depends_on"] == ["clusters"]
+    assert checked(db).ok
+    assert "attached_layer" in db.declaration and "attached_to" not in db.declaration
 
 
-# ---------------------------------------------------------------------------- the other keys
-
-
-def test_a_level_carries_its_own_zoom_range_and_a_layer_prunes_its_children(db):
-    block = db.declare_layer(
+def test_a_level_carries_its_own_zoom_range_and_a_layer_prunes_its_children(db, checked):
+    db.declare_layer(
         "taxonomy",
         kind="tiered",
-        members="members",
         levels=[(0, "Family", [0, 5]), (1, "Genus", [4, 10])],
         prune_children=True,
     )
-    assert block["levels"] == [
-        {"level": 0, "title": "Family", "zoom": [0, 5]},
-        {"level": 1, "title": "Genus", "zoom": [4, 10]},
-    ]
-    assert block["hierarchy"]["prune_children"] is True
+    db.insert("taxonomy", members=members(), key="key")
+    assert checked(db).ok
 
 
-def test_the_serving_layout_is_pinned_by_a_word(db):
-    block = db.declare_layer("clusters", kind="flat", members="members", layout="column")
-    assert block["layout"] == "column"
+def test_the_serving_layout_and_the_artifact_gate_reach_the_declaration(db, checked):
+    db.declare_layer("a", kind="flat", layout="column", artifact_visibility="ir:analyst")
+    db.declare_layer("b", kind="flat")
+    db.declare_layer("c", kind="flat")
+    db.insert(
+        "c",
+        artifacts=pd.DataFrame({"key": ["a"], "team": ["public"]}),
+        key="key",
+        access="team",
+    )
+    import tomllib
+
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "c")
+    assert layer["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert checked(db).ok
 
 
-def test_artifact_visibility_is_a_label_inherited_or_a_column_and_its_default(db):
-    one = db.declare_layer("a", kind="flat", members="members", artifact_visibility="ir:analyst")
-    two = db.declare_layer("b", kind="flat", members="members")
-    three = db.declare_layer("c", kind="flat", members="members",
-                             artifact_visibility={"field": "access", "default": "inherited"})
-    assert one["artifact_visibility"] == Inline({"default": "ir:analyst"})
-    assert two["artifact_visibility"] == Inline({"default": "inherited"})
-    assert three["artifact_visibility"] == Inline({"field": "access", "default": "inherited"})
+def test_a_layer_reads_its_labels_from_one_column_whichever_call_names_it(db, checked):
+    """The label column is declared on the layer or named by its first labelled insert, and an
+    insert naming another is refused."""
+    import tomllib
+
+    team = pd.DataFrame({"key": ["a"], "team": ["x"]})
+    squad = pd.DataFrame({"key": ["b"], "squad": ["x"]})
+    db.declare_layer("d", kind="flat", artifact_visibility={"field": "team", "default": "inherited"})
+    with pytest.raises(Refusal):
+        db.insert("d", artifacts=squad, key="key", access="squad")
+    db.insert("d", artifacts=team, key="key", access="team")
+    db.declare_layer("e", kind="flat")
+    db.insert("e", artifacts=team, key="key", access="team")
+    with pytest.raises(Refusal):
+        db.insert("e", artifacts=squad, key="key", access="squad")
+    layers = {one["name"]: one for one in tomllib.loads(db.declaration)["layer"]}
+    assert layers["d"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert layers["e"]["artifact_visibility"] == {"default": "inherited", "field": "team"}
+    assert checked(db).ok
+
+
+LABELLED = {"field": "team", "default": "inherited"}
+
+
+def test_a_member_key_the_layer_declares_inline_is_not_a_new_artifact(db):
+    """Before the first commit, a members insert naming a key the layer's inline artifacts declare
+    creates nothing, so a layer that reads labels takes it; a key nothing declares is refused."""
+    db.declare_layer(
+        "teams", kind="flat", value_set="open", artifact_visibility=LABELLED,
+        artifacts=[{"key": "a", "members": {"entity": ["p0"]}, "access": None}],
+    )
+    db.insert("teams", members=members(), key="key")
+    with pytest.raises(Refusal):
+        db.insert(
+            "teams", members=pd.DataFrame({"key": ["b"], "entity": ["p1"]}),
+            key="key",
+        )
+
+
+def test_a_member_key_in_no_artifact_is_not_a_new_artifact(db):
+    """A null key and the integer -1 put a member in no artifact, as the build reads them, so a
+    layer that reads labels takes them before the first commit; a text "-1" is a key."""
+    import pyarrow as pa
+
+    db.declare_layer("teams", kind="flat", value_set="open", artifact_visibility=LABELLED)
+    db.insert(
+        "teams",
+        artifacts=pd.DataFrame({"key": ["a"], "team": [None]}, dtype=object),
+        key="key",
+        access="team",
+    )
+    db.insert(
+        "teams",
+        members=pa.table({"key": pa.array([None, -1], pa.int64()), "entity": ["p0", "p1"]}),
+        key="key",
+    )
+    with pytest.raises(Refusal):
+        db.insert(
+            "teams", members=pd.DataFrame({"key": ["-1"], "entity": ["p2"]}),
+            key="key",
+        )
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_a_list_member_key_names_one_artifact_per_element(db, large):
+    """A list key names an artifact per element, at the element's level on a tiered layer, so a
+    list naming declared artifacts creates nothing; an element nothing declares is refused. A
+    large list reads as a list does."""
+    import pyarrow as pa
+
+    db.declare_layer(
+        "taxonomy", kind="tiered", levels=[(0, "Family"), (1, "Genus")], value_set="open",
+        artifact_visibility=LABELLED,
+    )
+    db.insert(
+        "taxonomy",
+        artifacts=pa.table({
+            "level": pa.array([0, 1], pa.uint32()),
+            "key": ["f", "g"],
+            "team": pa.array([None, None], pa.string()),
+        }),
+        key="key",
+        level="level",
+        access="team",
+    )
+    listed = pa.large_list(pa.string()) if large else pa.list_(pa.string())
+    db.insert(
+        "taxonomy",
+        members=pa.table({"key": pa.array([["f", "g"]], listed), "entity": ["p0"]}),
+        key="key",
+    )
+    with pytest.raises(Refusal):
+        db.insert(
+            "taxonomy",
+            members=pa.table({"key": pa.array([["g", "f"]], listed), "entity": ["p1"]}),
+            key="key",
+        )
+
+
+def test_a_label_set_takes_no_label_column(db):
+    """A label set's text insert carries no labels of its own, so a column for them is refused."""
+    db.declare_layer("clusters", kind="flat")
+    with pytest.raises(Refusal):
+        db.declare_labels(
+            "topics", of="clusters", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+    db.declare_labels("topics", of="clusters", artifact_visibility={"default": "inherited"})
 
 
 # ---------------------------------------------------------------------------- vocabularies
 
 
-def test_a_vocabulary_carries_its_values_inline_as_keys_or_as_pinned_codes(db):
-    keys = db.declare_vocabulary("mood", closed=True, width="u8", values=["calm", "wild"])
-    codes = db.declare_vocabulary("kind", closed=True, width="u8", values={"road": 1, "rail": 2},
-                                  reserved=[7, 9])
-    assert keys["values"] == ["calm", "wild"]
-    assert codes["values"] == Inline({"road": 1, "rail": 2})
-    assert codes["reserved"] == [7, 9]
-    text = db.declaration
-    assert 'values = ["calm", "wild"]' in text
-    assert "values = { road = 1, rail = 2 }" in text
-    assert "reserved = [7, 9]" in text
+def test_a_vocabulary_carries_its_values_inline_as_keys_or_as_pinned_codes(db, checked):
+    db.declare_vocabulary("mood", closed=True, width="u8", values=["calm", "wild"])
+    db.declare_vocabulary("kind", closed=True, width="u8", values={"road": 1, "rail": 2},
+                          reserved=[7, 9])
+    db.declare_attribute("mood", type="category", vocabulary="mood")
+    db.declare_attribute("kind", type="category", vocabulary="kind")
+    assert checked(db).ok
 
 
-def test_a_derived_vocabulary_and_an_open_one_naming_a_source_for_titles(db):
-    db.stage("titles", pd.DataFrame({"key": ["a"], "title": ["A"]}))
-    derived = db.declare_vocabulary("country", closed=True, width="u16", visibility="derived",
-                                    values=["fr"])
-    open_set = db.declare_vocabulary("type", source="titles", width="u8",
-                                     fields={"key": "key", "title": "title"})
-    assert derived["visibility"] == "derived"
-    assert open_set["value_set"] == "open" and open_set["source"] == "titles"
-    assert open_set["fields"] == Inline({"key": "key", "title": "title"})
-
-
-def test_a_vocabulary_gate_takes_no_access_label(db):
-    with pytest.raises(Refusal, match="takes no access label"):
-        db.declare_vocabulary("country", closed=True, values=["fr"], visibility="ir:analyst")
+def test_a_derived_vocabulary_and_an_open_one_taking_an_insert_for_its_titles(db, checked):
+    db.declare_vocabulary("country", closed=True, width="u16", visibility="derived",
+                          values=["fr"])
+    db.declare_vocabulary("type", width="u8")
+    db.declare_attribute("country", type="category", vocabulary="country")
+    db.declare_attribute("type", type="category", vocabulary="type")
+    insert = db.insert("type", pd.DataFrame({"k": ["a"], "t": ["A"]}), key="k", title="t")
+    assert insert.read == ["k", "t"]
+    assert checked(db).ok
 
 
 # ---------------------------------------------------------------------------- the refusals
 
 
-def test_a_shape_on_a_layer_that_is_not_spatial_is_refused_naming_the_remedy(db):
-    with pytest.raises(Refusal, match='Give membership="spatial", or drop shape='):
-        db.declare_layer("clusters", kind="flat", members="members", shape={"kind": "polygon"})
-    with pytest.raises(Refusal, match="default_space="):
-        db.declare_layer("clusters", kind="flat", members="members", default_space="wgs84")
+def test_the_check_refuses_a_declaration_the_verbs_wrote_and_names_the_layer(db, checked):
+    """The blocks reach the check: a rule about what may be declared is the check's to state."""
+    db.declare_layer("clusters", kind="nested", levels=[(0, "Top", None)])
+    report = checked(db)
+    assert not report.ok
+    assert "clusters" in report.log
 
 
-def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db):
-    with pytest.raises(Refusal, match='Give membership="spatial"'):
-        db.declare_layer("cases", kind="flat", artifacts=[{"key": "a", "wkt": "POLYGON EMPTY"}])
+def test_a_shape_on_an_artifact_row_of_a_layer_that_evaluates_none_is_refused(db, checked):
+    db.declare_layer("cases", kind="flat", artifacts=[{"key": "ring", "wkt": "POLYGON EMPTY"}])
+    report = checked(db)
+    assert not report.ok
+    assert "cases" in report.log and "ring" in report.log
 
 
-def test_excluding_beside_members_on_one_row_is_refused(db):
-    with pytest.raises(Refusal, match="Drop members= or excluding="):
-        db.declare_layer("cases", kind="flat",
-                         artifacts=[{"key": "a", "members": [1], "excluding": [2]}])
+def test_one_row_carries_one_shape(db, checked):
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
+                     artifacts=[{"key": "both", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
+    report = checked(db)
+    assert not report.ok
+    assert "regions" in report.log and "both" in report.log
 
 
-def test_levels_on_a_nested_layer_are_refused_naming_the_remedy(db):
-    with pytest.raises(Refusal, match="declare the layer as tiered"):
-        db.declare_layer("clusters", kind="nested", members="members", levels=[(0, "Top", None)])
+def test_a_rows_shape_is_its_layers_kind_and_no_other(db, checked):
+    db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
+                     artifacts=[{"key": "round", "circle": [0, 0, 1]}])
+    report = checked(db)
+    assert not report.ok
+    assert "regions" in report.log and "round" in report.log
 
 
-def test_a_spatial_layer_declares_no_stored_member_set(db):
-    with pytest.raises(Refusal, match="no stored member set"):
-        db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
-                         members="members")
+def test_an_inline_roster_with_no_row_is_refused(db):
+    with pytest.raises(Refusal):
+        db.declare_layer("cases", kind="flat", artifacts=[])
 
 
-def test_a_spatial_layer_with_neither_a_table_nor_inline_rows_is_refused(db):
-    with pytest.raises(Refusal, match="Give source= or artifacts="):
-        db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox")
+def test_a_scoped_layers_insert_names_the_column_its_rows_carry_the_view_in(db):
+    db.declare_view_group("quarter")
+    db.declare_layer("q", kind="flat", views=["quarter"], scope={"group": "quarter"})
+    with pytest.raises(Refusal):
+        db.insert("q", members=members(), key="key")
 
 
-def test_inline_artifacts_beside_a_source_are_refused(db):
-    with pytest.raises(Refusal, match="artifacts= is the roster"):
-        db.declare_layer("cases", kind="flat", source="shapes",
-                         artifacts=[{"key": "a", "members": [1]}])
-
-
-def test_an_inline_artifact_is_spelled_with_the_artifact_tables_own_keys(db):
-    with pytest.raises(Refusal, match="names nothing"):
-        db.declare_layer("cases", kind="flat", artifacts=[{"key": "a", "colour": "red"}])
-    with pytest.raises(Refusal, match="names itself"):
-        db.declare_layer("cases", kind="flat", artifacts=[{"members": [1]}])
-
-
-def test_one_row_carries_one_shape(db):
-    with pytest.raises(Refusal, match="is two shapes"):
-        db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
-                         artifacts=[{"key": "a", "bbox": [0, 0, 1, 1], "circle": [0, 0, 1]}])
-
-
-def test_a_shape_is_written_in_the_view_space_or_in_wgs84(db):
-    with pytest.raises(Refusal, match="'view' or 'wgs84'"):
-        db.declare_layer("regions", kind="flat", membership="spatial", shape="bbox",
-                         artifacts=[{"key": "a", "bbox": [0, 0, 1, 1], "space": "utm"}])
-
-
-def test_an_attribute_membership_refuses_what_it_would_not_serve(db):
-    for kwargs, why in [
-        ({"kind": "tiered", "levels": [(0, "Top", None)]}, 'kind is "flat"'),
-        ({"supplied": [("topic", "text", "all")]}, "supplied="),
-        ({"depends_on": ["other"]}, "depends_on="),
-        ({"layout": "column"}, "layout="),
-        ({"members": "members"}, "members="),
-        ({"artifact_visibility": {"field": "access", "default": "inherited"}}, "no column"),
-    ]:
-        with pytest.raises(Refusal, match=why):
-            db.declare_layer("programmes", kind=kwargs.pop("kind", "flat"),
-                             membership={"attribute": "kind"}, **kwargs)
-
-
-def test_a_scoped_layer_names_the_column_its_rows_carry_the_view_in(db):
-    with pytest.raises(Refusal, match="fields=\\{'view': column\\}"):
-        db.declare_layer("q", kind="flat", source="members", scope={"group": "quarter"})
-
-
-def test_the_layout_pin_is_one_of_three_words(db):
-    with pytest.raises(Refusal, match="serving-layout pin"):
-        db.declare_layer("clusters", kind="flat", members="members", layout="rowmajor")
+def test_a_scoped_block_names_a_group_that_is_declared(db):
+    with pytest.raises(Refusal):
+        db.declare_layer("q", kind="flat", scope={"group": "quarter"})
 
 
 def test_a_membership_is_two_words_or_one_table(db):
-    with pytest.raises(Refusal, match="'enumerated', 'spatial'"):
-        db.declare_layer("clusters", kind="flat", members="members", membership="derived")
-    with pytest.raises(Refusal, match="names nothing else"):
+    with pytest.raises(Refusal):
+        db.declare_layer("clusters", kind="flat", membership="derived")
+    with pytest.raises(Refusal):
         db.declare_layer("clusters", kind="flat", membership={"attribute": "k", "depth": 3})
 
 
-def test_withdrawing_a_whole_artifact_is_refused_as_unbuilt(db):
-    with pytest.raises(Refusal, match="specified and not built"):
-        db.declare_layer("cases", kind="flat", members="members",
-                         withdraw_on_member_deletion=True)
+def test_a_shape_declares_its_kind_and_nothing_else(db):
+    with pytest.raises(Refusal):
+        db.declare_layer("regions", kind="flat", membership="spatial",
+                         shape={"kind": "bbox", "space": "wgs84"})
+
+
+def test_a_refused_labelled_insert_leaves_the_declaration_as_it_was(db):
+    """A misnamed label column is refused before anything is written, so the corrected call is
+    taken and the declaration names only the column it read."""
+    import tomllib
+
+    db.declare_layer("f", kind="flat")
+    table = pd.DataFrame({"key": ["a"], "team": ["x"]})
+    with pytest.raises(Refusal):
+        db.insert("f", artifacts=table, key="key", access="tema")
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "f")
+    assert "field" not in layer["artifact_visibility"]
+    db.insert("f", artifacts=table, key="key", access="team")
+    layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "f")
+    assert layer["artifact_visibility"]["field"] == "team"

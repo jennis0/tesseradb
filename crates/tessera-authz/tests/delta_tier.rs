@@ -1,4 +1,4 @@
-//! The sparse delta postings tier a flush publishes (§3.1, §5.2).
+//! The sparse delta postings tier a flush publishes.
 
 use tessera_authz::{write_delta_tier, DeltaTier, PostingRef};
 use tessera_types::TermId;
@@ -13,10 +13,8 @@ fn tier(dir: &std::path::Path, name: &str, entries: &[(u32, &[u32])]) -> DeltaTi
     DeltaTier::open(&path).unwrap()
 }
 
-/// **Sparse: the file holds one record per term the flushed set carried, and nothing for the
-/// gaps.** The ordinal-indexed `postings.arrow` layout cannot express this — record *i* is term
-/// *i*, so a flush touching term 1_000_000 would write a million empty records, at nine bytes
-/// each, per tier per 90 seconds. This is the property that rules that out.
+/// Sparse: the file holds one record per term the flushed set carried, and nothing for the gaps.
+/// The ordinal-indexed `postings.arrow` layout cannot express this, since record *i* is term *i*.
 #[test]
 fn a_tier_holds_one_record_per_carried_term_however_high_the_ordinals() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -68,8 +66,8 @@ fn both_posting_encodings_round_trip() {
 }
 
 /// Term ids must arrive ascending and distinct: the lookup is a binary search over them, and a
-/// duplicate would make one of the two records unreachable — a silently missing posting, which
-/// on the authorisation path means items a viewer is entitled to simply not appearing.
+/// duplicate would make one of the two records unreachable, a missing posting, which on the
+/// authorisation path means items a viewer is entitled to simply not appearing.
 #[test]
 fn a_tier_refuses_unordered_or_duplicated_term_ids() {
     let dir = tempfile::TempDir::new().unwrap();

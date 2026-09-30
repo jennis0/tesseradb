@@ -1,15 +1,11 @@
 import type {Meta, ViewInfo, ViewMetadataValue} from './types.js';
 
 /**
- * The views of one group, in the order the server lists them (`views.md` §3.2).
+ * The views of `group` that `meta.views` lists, in the server's order, which is creation order.
+ * Keys are not sorted: a key is the caller's own string, and `2026-Q2` sorts after `2026-Q10`. An
+ * unknown group gives the empty list, as a group with no views does.
  *
- * The order is the server's: `/v1/meta` lists a group's views in creation order and this walks
- * that list rather than sorting keys. **A key is the caller's own string
- * and means nothing to a client**: `2026-Q2` sorts after `2026-Q10` and a key need not be a date
- * at all, so a picker that sorted keys would offer a corpus's quarters in an order nobody chose.
- *
- * An unknown group is the empty list, which is the same answer as a group with no views — a
- * picker draws nothing in either case.
+ * @category Layers and views
  */
 export function viewsOfGroup(meta: Meta, group: string): ViewInfo[] {
   const byId = new Map(meta.views.map((v) => [v.id, v]));
@@ -21,12 +17,10 @@ export function viewsOfGroup(meta: Meta, group: string): ViewInfo[] {
 }
 
 /**
- * The view `step` places along its own group's roster — `stepView(meta, id, -1)` and
- * `stepView(meta, id, 1)` are previous and next.
+ * The view `step` places from view `id` along its group: `-1` is the previous view and `1` the next.
+ * Returns `null` past either end, and for a plain view, which is in no group. It does not wrap.
  *
- * `null` at either end, and `null` for a plain view, which is in no group and has no neighbours.
- * It does **not** wrap: a picker that wrapped would take a viewer from the last quarter back to
- * the first without saying so.
+ * @category Layers and views
  */
 export function stepView(meta: Meta, id: string, step: number): ViewInfo | null {
   const view = meta.views.find((v) => v.id === id);
@@ -37,11 +31,8 @@ export function stepView(meta: Meta, id: string, step: number): ViewInfo | null 
 }
 
 /**
- * Whether two groups address one key set (`views.md` §3.3) — `membersOf` in **either** direction,
- * and two `members` groups over one owner as well.
- *
- * Creating a key on the owner creates it on every sharer, so a key held in one group is a key held
- * in the other and a layout toggle can keep it.
+ * Whether two groups address one key set: `membersOf` in either direction, or two `members` groups
+ * over one owner. A key created on the owner is created on every sharer.
  */
 function sharesKeys(meta: Meta, a: string, b: string): boolean {
   if (a === b) return true;
@@ -52,9 +43,8 @@ function sharesKeys(meta: Meta, a: string, b: string): boolean {
 }
 
 /**
- * The roster metadata a view's label is read from: its own where it has any, else — for a
- * `members` group, whose views carry none of their own (`views.md` §3.3) — the owning group's view
- * under the same key, found through `membersOf`.
+ * The roster metadata a view's label is read from: its own where it has any, else, for a `members`
+ * group whose views carry none, the owning group's view under the same key.
  */
 function rosterMetadata(meta: Meta, view: ViewInfo): Record<string, ViewMetadataValue> {
   const roster = view.roster;
@@ -67,17 +57,9 @@ function rosterMetadata(meta: Meta, view: ViewInfo): Record<string, ViewMetadata
 }
 
 /**
- * A `timestamp_us` roster value as a date, and a `starts`/`ends` pair as a range — `en-GB`, short
- * month, **in UTC**.
- *
- * Microseconds since the epoch is the one unit that type may hold, so nothing here guesses whether
- * a large integer is a count or an instant. The zone is UTC rather than the reader's, so a quarter
- * boundary is drawn where the deployment put it and two viewers reading one roster read one label.
- *
- * Two elisions, each firing only where it is exactly true: a range whose endpoints are the first
- * and last day of a month is drawn by its months (`Jul – Sep 2026`, not `1 Jul – 30 Sep 2026`),
- * and a year shared by both endpoints is written once. Both are what makes a roster label fit a
- * 336px control beside its key.
+ * A `timestamp_us` roster value as a date, and a `starts`/`ends` pair as a range, in `en-GB` with a
+ * short month, in UTC so every viewer reads one label. A range covering whole months is written by
+ * its months (`Jul – Sep 2026`), and a year both ends share is written once.
  */
 function dateSpan(startsUs: number, endsUs: number | null): string {
   const parts = (over: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('en-GB', {timeZone: 'UTC', ...over});
@@ -94,17 +76,16 @@ function dateSpan(startsUs: number, endsUs: number | null): string {
 }
 
 /**
- * What one view of a roster reads as (`view-switching.md` §6.2): its label where the group declared
- * metadata a label can be made of, and its key, which is the view's only address.
+ * What one view of a group reads as: a label, and its key, which is the view's only address.
  *
- * **The rule reads metadata names by convention**, which is the only interpretation available to a
- * client, and is stated here rather than in a picker so two hosts agree: a text-typed value named
- * `label` or `title`; else a `timestamp_us`-typed `starts`, as a date and, with an `ends`, as a
- * range; else no label, and the key stands for the view. A `members` group's views carry no
- * metadata of their own and resolve through `membersOf` to the owning group's view under the same
- * key.
+ * The label is the view's text metadata value named `label`, else one named `title`, else its
+ * `timestamp_us` value `starts` as a date (`3 Jul 2026`), or with an `ends` as a range. Dates are
+ * written in `en-GB`, in UTC; a range covering whole months is written by its months
+ * (`Apr – Jun 2026`). With none of these the label is `null` and the key stands for the view. A
+ * view of a `members` group with no metadata of its own reads the owner group's view under the
+ * same key. For a plain view, which is in no group, both fields are `null`.
  *
- * A plain view is in no roster: both fields are `null`, and a picker draws its `displayName`.
+ * @category Layers and views
  */
 export function viewLabel(meta: Meta, view: ViewInfo): {label: string | null; key: string | null} {
   const roster = view.roster;
@@ -122,25 +103,30 @@ export function viewLabel(meta: Meta, view: ViewInfo): {label: string | null; ke
   return {label: text('label') ?? text('title') ?? (starts === null ? null : dateSpan(starts, instant('ends'))), key: roster.key};
 }
 
-/** One entry of the layout picker — a plain view or a whole group. See {@link viewPickerEntries}. */
+/**
+ * One entry of the layout picker: a plain view or a whole group. See {@link viewPickerEntries}.
+ *
+ * @category Layers and views
+ */
 export type ViewPickerEntry = {
+  /** `view` for a plain view, `group` for a group of views. */
   kind: 'view' | 'group';
-  /** A view's id, or a group's name — what {@link enterGroup} and `setCurrentView` are given. */
+  /** A plain view's id, as {@link Store.setCurrentView} takes it, or a group's name, as {@link enterGroup} takes it. */
   id: string;
   /** What the entry reads as: a view's `displayName`, a group's `title` else its `name`. */
   text: string;
-  /** Whether `currentId` is this entry — the view itself, or any view of this group. */
+  /** Whether `currentId` is this view, or any view of this group. */
   current: boolean;
 };
 
 /**
- * The layout picker's entries (`view-switching.md` §6.1): one per **plain view**, then one per
- * **group**, in `/v1/meta`'s serving order.
+ * The layout picker's entries: one per plain view, then one per group, in `/v1/meta`'s order. An
+ * owner group and a `members` group over its keys are two entries, two layouts of one roster. A
+ * group is one entry however many views it holds; {@link enterGroup} picks which is entered.
  *
- * An owner group and the `members` group laid over its keys are two entries, because they are two
- * layouts of one roster — an embedding and a map of the same quarters — and choosing between them
- * is the layout toggle. A group is one entry however many views it holds: which of them is entered
- * is {@link enterGroup}'s question, not this one's.
+ * @param currentId - The view the store answers from, which decides each entry's `current`.
+ *
+ * @category Layers and views
  */
 export function viewPickerEntries(meta: Meta, currentId: string): ViewPickerEntry[] {
   const current = meta.views.find((v) => v.id === currentId) ?? null;
@@ -157,27 +143,25 @@ export function viewPickerEntries(meta: Meta, currentId: string): ViewPickerEntr
 }
 
 /**
- * Whether a bundle offers **one layout**, and the layout picker should therefore draw nothing —
- * not an empty select (`view-switching.md` §6.1). One plain view and no groups is every demo
- * corpus today, and the toolbar looks exactly as it did before views existed.
+ * Whether a bundle offers one layout, so the layout picker draws nothing. A bundle whose one layout
+ * is a group of many views answers `true`, and its key picker still draws the group's views.
  *
- * It is a question about layouts and not about views: a bundle whose one layout is a *group* of
- * forty quarters answers `true` here, and the key picker still draws its roster. Nothing about
- * this says a viewer has one view to look at.
+ * @category Layers and views
  */
 export function hasOneLayout(meta: Meta): boolean {
   return viewPickerEntries(meta, '').length <= 1;
 }
 
 /**
- * Which view of `group` a picker enters (`view-switching.md` §6.1), or `null` for a group with no
- * views this session may reach.
+ * The id of the view of `group` a picker enters, or `null` for a group with no views this viewer
+ * may reach. In order: the view under the current view's key, where the current view's group
+ * shares keys with this one, so a layout toggle keeps the key; else the view under `lastLeft`;
+ * else the group's first view in creation order.
  *
- * Three rungs, in order: **the key the user is already on**, where the current view is in a group
- * sharing that key set (`membersOf` either way) — so a layout toggle keeps the quarter; else
- * `lastLeft`, the key the caller last left this group on, which is a picker's own memory and not
- * a fact about the bundle; else the group's **first view in creation order**, never its first key
- * by sort (`views.md` §3.2, decision 0113).
+ * @param currentId - The view the store answers from.
+ * @param lastLeft - The key the caller last left this group on, if it recorded one.
+ *
+ * @category Layers and views
  */
 export function enterGroup(meta: Meta, group: string, currentId: string, lastLeft?: string): string | null {
   const roster = viewsOfGroup(meta, group);

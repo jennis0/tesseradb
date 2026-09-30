@@ -34,7 +34,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, Int8Array, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
     UInt64Array, UInt8Array,
 };
@@ -311,93 +311,8 @@ impl SegmentWriter {
     }
 }
 
-/// The fields of `external-ids.arrow` (contracts §2.4), in column order. One definition, so
-/// [`RunWriter`] and [`crate::flush::write_external_id_run`] cannot drift apart.
-fn external_id_fields() -> Vec<Field> {
-    vec![
-        Field::new("external_id", DataType::Binary, false),
-        Field::new("entity_id", DataType::UInt32, false),
-    ]
-}
-
-/// Writes one `external-ids.arrow` from `(external_id, entity)` pairs arriving in **ascending key
-/// order**, holding no pair.
-///
-/// [`SegmentWriter`]'s counterpart on the entity-space side, and for the same reason: the
-/// entity-space coalesce and compaction's pass 3 (compaction §3) both merge runs that are already
-/// key-sorted, and neither may accumulate every key to do it. The flush path — which holds its
-/// rows anyway — is the second producer, via [`crate::flush::write_external_id_run`].
-///
-/// Memory is the `i32` offset table (4 B/key) and two `BufWriter`s.
-pub(crate) struct RunWriter {
-    path: PathBuf,
-    keys: ColumnSpool,
-    entities: ColumnSpool,
-    rows: usize,
-    last_key: Option<Vec<u8>>,
-    spools: SpoolGuard,
-}
-
-impl RunWriter {
-    /// Create the run at `path` (the `external-ids.arrow` file itself), spooling beside it.
-    pub(crate) fn create(path: &Path) -> io::Result<Self> {
-        let spool = |i: usize| {
-            let mut name = path.as_os_str().to_os_string();
-            name.push(format!(".spool.{i}"));
-            PathBuf::from(name)
-        };
-        let spools = SpoolGuard(vec![spool(0), spool(1)]);
-        Ok(RunWriter {
-            path: path.to_path_buf(),
-            keys: ColumnSpool::create(&spools.0[0], ColumnKind::Binary)?,
-            entities: ColumnSpool::create(&spools.0[1], ColumnKind::U32)?,
-            rows: 0,
-            last_key: None,
-            spools,
-        })
-    }
-
-    /// Append one pair. Keys must arrive **strictly ascending** — the sidecar binary-searches this
-    /// file and verifies the ordering at open, so an out-of-order producer is a refusal there
-    /// rather than a wrong answer here. Checked as a `debug_assert`, matching [`SegmentWriter`].
-    pub(crate) fn append(&mut self, key: &[u8], entity: u32) -> io::Result<()> {
-        debug_assert!(
-            self.last_key.as_deref().is_none_or(|last| last < key),
-            "RunWriter::append: keys must arrive strictly ascending"
-        );
-        self.last_key = Some(key.to_vec());
-        self.keys.append_bytes(key, "external_id")?;
-        self.entities.append_u32(entity)?;
-        self.rows += 1;
-        Ok(())
-    }
-
-    /// Assemble `external-ids.arrow` and return the pair count.
-    pub(crate) fn finish(self) -> io::Result<usize> {
-        let RunWriter {
-            path,
-            keys,
-            entities,
-            rows,
-            spools,
-            ..
-        } = self;
-        let schema = Arc::new(Schema::new(external_id_fields()));
-        let columns: Vec<ArrayRef> = vec![
-            keys.into_array(rows, "external_id")?,
-            entities.into_array(rows, "entity_id")?,
-        ];
-        let batch = RecordBatch::try_new(schema.clone(), columns)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        write_single_batch(&path, &schema, &batch)?;
-        drop(batch);
-        drop(spools);
-        Ok(rows)
-    }
-}
-
-/// Unlinks the spool files it names, on every exit path from [`SegmentWriter`] or [`RunWriter`] —
-/// success, error and panic alike.
+/// Unlinks the spool files it names, on every exit path from [`SegmentWriter`] — success, error
+/// and panic alike.
 ///
 /// **A destructor rather than a line at the bottom of `finish`**: the fold's spools are
 /// corpus-sized (compaction §3, ~12 GB at 10⁹), so leaving them behind on a failure is a filled
@@ -432,9 +347,6 @@ pub(crate) enum ColumnKind {
     F64,
     TimestampUs,
     Utf8,
-    /// `external-ids.arrow`'s key column (contracts §2.4). Same shape as [`ColumnKind::Utf8`] —
-    /// `i32` offsets over a values buffer — but external ids are arbitrary bytes, not UTF-8.
-    Binary,
 }
 
 impl ColumnKind {
@@ -453,7 +365,6 @@ impl ColumnKind {
             DataType::Float64 => Ok(ColumnKind::F64),
             DataType::Timestamp(TimeUnit::Microsecond, None) => Ok(ColumnKind::TimestampUs),
             DataType::Utf8 => Ok(ColumnKind::Utf8),
-            DataType::Binary => Ok(ColumnKind::Binary),
             other => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("write_segment: column '{name}' has unsupported type {other:?}"),
@@ -463,14 +374,11 @@ impl ColumnKind {
 
     /// Whether this kind carries an offset table rather than fixed-width values.
     fn is_var_width(self) -> bool {
-        matches!(self, ColumnKind::Utf8 | ColumnKind::Binary)
+        matches!(self, ColumnKind::Utf8)
     }
 }
 
 /// One column's values, appended to a spool file as rows arrive.
-///
-/// `pub(crate)` because [`crate::coalesce`]'s external-id run writer spools its two columns the
-/// same way — one spool implementation, for [`SegmentWriter`]'s reason.
 pub(crate) struct ColumnSpool {
     kind: ColumnKind,
     writer: BufWriter<File>,
@@ -513,24 +421,15 @@ impl ColumnSpool {
         self.writer.write_all(&value.to_ne_bytes())
     }
 
-    /// The `residual` column, and `external-ids.arrow`'s `entity_id` column.
+    /// The `residual` column.
     pub(crate) fn append_u32(&mut self, value: u32) -> io::Result<()> {
         debug_assert!(matches!(self.kind, ColumnKind::U32));
         self.writer.write_all(&value.to_ne_bytes())
     }
 
-    /// One `Binary` value — an external id (contracts §1: arbitrary bytes, ≤ 64).
-    pub(crate) fn append_bytes(&mut self, value: &[u8], name: &str) -> io::Result<()> {
-        debug_assert!(matches!(self.kind, ColumnKind::Binary));
-        let next = self.next_offset(value.len(), name)?;
-        self.writer.write_all(value)?;
-        self.offsets.push(next);
-        Ok(())
-    }
-
     /// The running `i32` offset after appending `len` more bytes, refusing the overflow rather
-    /// than wrapping — `PostingsSpool`'s `next_offset` rule, at `i32` because Arrow's `Binary`
-    /// and `Utf8` offsets are 32-bit.
+    /// than wrapping — `PostingsSpool`'s `next_offset` rule, at `i32` because Arrow's `Utf8`
+    /// offsets are 32-bit.
     fn next_offset(&self, len: usize, name: &str) -> io::Result<i32> {
         let last = *self
             .offsets
@@ -648,14 +547,6 @@ impl ColumnSpool {
                     )
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
                 ),
-                ColumnKind::Binary => Arc::new(
-                    BinaryArray::try_new(
-                        OffsetBuffer::new(ScalarBuffer::from(offsets)),
-                        Buffer::from_vec(Vec::<u8>::new()),
-                        None,
-                    )
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
-                ),
             });
         }
 
@@ -704,10 +595,6 @@ impl ColumnSpool {
             ColumnKind::F64 => Arc::new(Float64Array::new(typed_column(name, buffer, rows)?, None)),
             ColumnKind::Utf8 => Arc::new(
                 StringArray::try_new(OffsetBuffer::new(ScalarBuffer::from(offsets)), buffer, None)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
-            ),
-            ColumnKind::Binary => Arc::new(
-                BinaryArray::try_new(OffsetBuffer::new(ScalarBuffer::from(offsets)), buffer, None)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?,
             ),
         })

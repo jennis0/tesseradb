@@ -1,5 +1,6 @@
 {
   "name": "@tesseradb/wire-example",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "description": "A worked decode of the framed /v1/viewport body with apache-arrow alone — shares no code with the client packages, deliberately.",

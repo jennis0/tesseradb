@@ -1,4 +1,4 @@
-bundle: /home/joe/code/tessera/data/bench-fixtures/1e9
+bundle: /home/user/code/tessera/data/bench-fixtures/1e9
 grant mode: spread (deterministic) (w=10)
 
                  shape   zoom      tiles  rows_in_rng    serial_ns       par_ns     ratio  winner

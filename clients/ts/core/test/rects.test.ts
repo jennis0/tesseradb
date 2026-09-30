@@ -13,7 +13,7 @@ import {
 
 const R = (x0: number, y0: number, x1: number, y1: number): TileRect => ({x0, y0, x1, y1});
 
-/** Every tile of a rect, as "x,y" — the ground truth subtraction is checked against. */
+/** Every tile of a rect, as "x,y", to check subtraction against. */
 function tilesOf(r: TileRect): Set<string> {
   const s = new Set<string>();
   for (let y = r.y0; y <= r.y1; y++) for (let x = r.x0; x <= r.x1; x++) s.add(`${x},${y}`);
@@ -36,8 +36,9 @@ describe('rectSubtract', () => {
   });
 
   it('is exact, and its pieces are disjoint, for every overlap of two small rects', () => {
-    // Exhaustive over a 6x6 grid: the union of the pieces must equal want-minus-hole exactly, and
-    // no tile may appear twice — a duplicated tile would be requested and absorbed twice.
+    // Exhaustive over a 4x4 grid: the pieces must equal want minus hole, with no tile twice. Failures
+    // are collected and asserted once, since ten thousand cases of three `expect`s each run slowly.
+    const wrong: string[] = [];
     for (let ax0 = 0; ax0 < 4; ax0++)
       for (let ax1 = ax0; ax1 < 4; ax1++)
         for (let ay0 = 0; ay0 < 4; ay0++)
@@ -50,11 +51,13 @@ describe('rectSubtract', () => {
                     const hole = R(bx0, by0, bx1, by1);
                     const pieces = rectSubtract(want, hole);
                     const got = unionOf(pieces);
-                    expect(new Set(got).size).toBe(got.length); // disjoint
-                    const expected = [...tilesOf(want)].filter((t) => !tilesOf(hole).has(t));
-                    expect(new Set(got)).toEqual(new Set(expected)); // exact
-                    expect(pieces.length).toBeLessThanOrEqual(4);
+                    const holeTiles = tilesOf(hole);
+                    const expected = [...tilesOf(want)].filter((t) => !holeTiles.has(t)).sort();
+                    const disjoint = new Set(got).size === got.length;
+                    const exact = [...new Set(got)].sort().join() === expected.join();
+                    if (!disjoint || !exact || pieces.length > 4) wrong.push(JSON.stringify({want, hole, pieces}));
                   }
+    expect(wrong).toEqual([]);
   });
 
   it('produces the L-shape a pan actually generates', () => {
@@ -77,8 +80,8 @@ describe('rectSubtractAll', () => {
   });
 
   it('gives up rather than fragmenting, and gives up towards MORE', () => {
-    // Nine scattered holes would shatter the rect. The bound stops subtracting and returns a
-    // superset: extra bytes, never a hole. Anything less than a superset would be a silent gap.
+    // Nine scattered holes would split the rect into many pieces. The bound stops subtracting and
+    // returns a superset: extra bytes, not a gap.
     const holes: TileRect[] = [];
     for (let i = 0; i < 9; i++) holes.push(R(i * 3 + 1, i * 3 + 1, i * 3 + 1, i * 3 + 1));
     const want = R(0, 0, 29, 29);
@@ -100,9 +103,9 @@ describe('coverage', () => {
   it('drops a rect already covered, and replaces one it subsumes', () => {
     let list: Coverage[] = [];
     list = coverageAdd(list, cov(R(0, 0, 9, 9)));
-    list = coverageAdd(list, cov(R(2, 2, 3, 3))); // inside — no growth
+    list = coverageAdd(list, cov(R(2, 2, 3, 3))); // inside: no growth
     expect(list).toHaveLength(1);
-    list = coverageAdd(list, cov(R(0, 0, 19, 19))); // subsumes — replaces
+    list = coverageAdd(list, cov(R(0, 0, 19, 19))); // contains the rest: replaces
     expect(list).toHaveLength(1);
     expect(list[0]!.rect).toEqual(R(0, 0, 19, 19));
   });
@@ -118,16 +121,15 @@ describe('coverage', () => {
   });
 
   it('will not reuse coverage fetched at a smaller cap', () => {
-    // Where the cap bound the selection, a larger k yields more points for the same tiles — so
-    // coverage bought at k=100 cannot answer a k=500 request.
+    // Where the cap limited the selection, a larger k serves more points from the same tiles, so
+    // coverage at k=100 does not answer k=500.
     const list = coverageAdd([], cov(R(0, 0, 9, 9), 5, 'ck', 100));
     expect(coverageAt(list, 5, 'ck', 100)).toHaveLength(1);
     expect(coverageAt(list, 5, 'ck', 500)).toHaveLength(0);
   });
 
   it('fuses a pan sequence into one rectangle', () => {
-    // The property that keeps one pan to one request: each strip extends the covered rectangle
-    // rather than lengthening a chain the next subtraction has to shatter against.
+    // Each strip extends the covered rectangle, so one pan stays one request.
     let list: Coverage[] = [];
     for (let i = 0; i < 8; i++) list = coverageAdd(list, cov(R(i * 10, 0, i * 10 + 19, 99)));
     expect(list).toHaveLength(1);
@@ -145,9 +147,8 @@ describe('coverage', () => {
   });
 
   it('never fuses two rects into ground neither covered', () => {
-    // The one failure this structure must not have: claiming emptiness for tiles nobody asked
-    // about. Two adjacent-but-not-nested rects stay two.
-    // Offset rows: the union is L-shaped, so these must stay two.
+    // Coverage must not claim tiles nobody asked about: offset rows have an L-shaped union, so the
+    // two rectangles stay two.
     let list: Coverage[] = [];
     list = coverageAdd(list, cov(R(0, 0, 9, 9)));
     list = coverageAdd(list, cov(R(10, 5, 19, 14)));

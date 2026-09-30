@@ -2,6 +2,7 @@
 name = "tessera-cli"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [[bin]]
 name = "tessera"
@@ -22,6 +23,13 @@ path = "src/main.rs"
 # switchboard — and that this build does.
 fault-injection = ["tessera-server/fault-injection"]
 
+# The measurement build: a `tessera` binary whose write executor, flush and viewport laps are
+# recorded rather than compiled out, readable at `/control/status`. OFF by default, and it goes to
+# its own path for the same reason `fault-injection` does:
+#
+#   cargo build --release -p tessera-cli --features bench-timing --target-dir target/timing
+bench-timing = ["tessera-server/bench-timing"]
+
 [dependencies]
 tessera-build = { path = "../tessera-build" }
 # The `tokenise` verb only — the conformance oracle's access to the shipped analyser, so the two
@@ -31,23 +39,33 @@ tessera-analyse = { path = "../tessera-analyse" }
 # (`correctness-suite.md` §12.1), on the same drive-the-CLI precedent as `tokenise`.
 tessera-corpus = { path = "../tessera-corpus" }
 tessera-spatial = { path = "../tessera-spatial" }
+tessera-config = { path = "../tessera-config" }
 tessera-server = { path = "../tessera-server" }
 tessera-store = { path = "../tessera-store" }
 tessera-types = { path = "../tessera-types" }
+# The `items` and `artifacts` verbs: a bulk read's frames, and the zstd codec its pages may be
+# compressed with.
+tessera-wire = { path = "../tessera-wire" }
 # The `corpus` verbs' output encoding: expected items and censuses leave on stdout as Arrow IPC,
 # the same encoding the suite's other Arrow surfaces speak.
 arrow = { workspace = true }
+# The `items` and `artifacts` verbs write Parquet as well as Arrow IPC.
+parquet = { workspace = true }
+# The `items` and `artifacts` verbs' HTTP client, reading each response's frames as they arrive.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 clap = { workspace = true }
 serde_json = { workspace = true }
-rand = { workspace = true }
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-parquet = { workspace = true }
+# The records test authorises its token as a client does, with `auth_data` in base64.
+base64 = { workspace = true }
 # The check verb's payload test round-trips stdout through the type `PUT /control/layers` takes:
 # a body that will not deserialise there is not a payload, whatever it looks like.
 serde_json = { workspace = true }
+# docs/reference/cli.md is rendered with its table helpers (`src/reference.rs`).
+tessera-docgen = { path = "../tessera-docgen" }
 

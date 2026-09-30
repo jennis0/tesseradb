@@ -1,44 +1,21 @@
 import {describe, expect, it} from 'vitest';
-import {BandBudget, BandCache, bandSplitter, bandsOfResult, isComplete, type Band} from '../src/bands.js';
+import {BandBudget, BandCache, bandSplitter, bandsOfResult, type Band} from '../src/bands.js';
 import {mortonOfTile, tileContains, tileOfCode, tileXY} from '../src/coords.js';
-import type {ScalarColumn, ViewportResult} from '../src/types.js';
+import type {ScalarColumn} from '../src/types.js';
+import {band as heldBand, result, tile} from './support.js';
 
 /**
- * A band whose identities are `base, base+1, …` — ascending, as the wire delivers them, which is
- * what every prefix operation here depends on.
+ * A band whose identities are `1, 2, …`, ascending as the wire delivers them, which is what every
+ * prefix operation here depends on.
  */
 function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: number}): Band {
-  const {n, ...rest} = overrides;
-  const ids = BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1));
-  const codes = BigUint64Array.from({length: n}, () => overrides.prefix << BigInt(64 - 2 * overrides.depth));
-  // The tile index the store would have de-interleaved when the band was built.
-  const {x, y} = tileXY(overrides.prefix, overrides.depth);
-  return {
-    x,
-    y,
-    ids,
-    codes,
-    positions: new Float32Array(n * 2),
-    scalars: {},
-    served: n,
-    capUsed: 500,
-    visible: BigInt(n),
-    matched: BigInt(n),
-    membership: {},
-    heldBelow: n === 0 ? 0n : ids[n - 1]! + 1n,
-    identityKey: 'ik',
-    contentKey: 'ck',
-    // What the store itself would compute: 8 for the id, 8 for the code, 16 for the position pair.
-    bytes: n * 32,
-    touchedAt: 0,
-    ...rest
-  };
+  const {n, depth, prefix, ...rest} = overrides;
+  return heldBand(depth, prefix, n, {heldBelow: n === 0 ? 0n : BigInt(n + 1), ...rest});
 }
 
 describe('tile addressing', () => {
   it('takes the prefix over the Morton cell, not the whole code', () => {
-    // The cell is the code's high half. At depth 16 the tile IS the cell, so a shift of 32-2z
-    // would return the whole 64-bit code and bucket every point separately.
+    // The cell is the code's high half; at depth 16 the tile is the cell.
     const code = (0xdeadbeefn << 32n) | 0x12345678n;
     expect(tileOfCode(code, 16)).toBe(0xdeadbeefn);
     expect(tileOfCode(code, 0)).toBe(0n);
@@ -59,71 +36,37 @@ describe('bandsOfResult', () => {
     const scalars: Record<string, ScalarColumn> = {
       w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}
     };
-    const result: ViewportResult = {
-      tiles: [
-        {tile: 7n, visible: 90n, matched: 90n, served: 2n},
-        {tile: 8n, visible: 0n, matched: 0n, served: 0n},
-        {tile: 9n, visible: 40n, matched: 40n, served: 3n}
-      ],
+    const res = result({
+      tiles: [tile(7n, 90n, {served: 2n}), tile(8n, 0n), tile(9n, 40n, {served: 3n})],
       ids: BigUint64Array.from([1n, 2n, 5n, 6n, 7n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n, 0n]),
       positions: Float64Array.from([0, 0, 128, 128, 256, 256, 384, 384, 512, 512]),
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
-      scalars,
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
+      scalars
+    });
 
-    const bands = bandsOfResult(result, 4, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
+    const bands = bandsOfResult(res, 4, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 
     expect(bands.map((b) => b.prefix)).toEqual([7n, 9n]); // the empty tile yields no band
     expect([...bands[0]!.ids]).toEqual([1n, 2n]);
     expect([...bands[1]!.ids]).toEqual([5n, 6n, 7n]);
     expect([...(bands[1]!.scalars.w!.values as Uint32Array)]).toEqual([12, 13, 14]);
-    // Cell space on the wire, world space in the band — converted once, when the band is built.
+    // Cell space on the wire, world space in the band.
     expect(bands[1]!.positions).toEqual(Float32Array.from([2, 2, 3, 3, 4, 4]));
     expect(bands[0]!.heldBelow).toBe(3n); // one past the largest held identity
   });
 
   it('copies rather than views, so evicting a band frees its bytes', () => {
-    const result: ViewportResult = {
-      tiles: [{tile: 1n, visible: 2n, matched: 2n, served: 2n}],
+    const res = result({
+      tiles: [tile(1n, 2n, {served: 2n})],
       ids: BigUint64Array.from([1n, 2n, 3n, 4n]),
       codes: BigUint64Array.from([0n, 0n, 0n, 0n]),
       positions: new Float64Array(8),
-      world: new Float32Array(8),
-      scalars: {},
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
-    const [only] = bandsOfResult(result, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
+      world: new Float32Array(8)
+    });
+    const [only] = bandsOfResult(res, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
     // A subarray would share the 4-element response buffer; a copy owns exactly its own two.
     expect(only!.ids.buffer.byteLength).toBe(2 * 8);
-  });
-});
-
-describe('isComplete', () => {
-  it('requires the whole served set', () => {
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 10, served: 10}), 'ck', 500)).toBe(true);
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 9, served: 10}), 'ck', 500)).toBe(false);
-  });
-
-  it('survives a larger k when the cap was not the binding clause', () => {
-    // served < capUsed: theta or the floor decided, and neither moves with k.
-    const thetaBound = band({depth: 3, prefix: 1n, n: 40, served: 40, capUsed: 500});
-    expect(isComplete(thetaBound, 'ck', 2000)).toBe(true);
-  });
-
-  it('is void at a larger k when the cap WAS binding', () => {
-    const capped = band({depth: 3, prefix: 1n, n: 500, served: 500, capUsed: 500});
-    expect(isComplete(capped, 'ck', 500)).toBe(true);
-    expect(isComplete(capped, 'ck', 2000)).toBe(false);
-  });
-
-  it('is void under a rotated content key', () => {
-    expect(isComplete(band({depth: 3, prefix: 1n, n: 10, served: 10}), 'other', 500)).toBe(false);
   });
 });
 
@@ -153,8 +96,7 @@ describe('BandCache.planRegion', () => {
   });
 
   it('subtracts nothing on a counts-only request', () => {
-    // k=0 exists to refresh the number channel and the content key over ground already held, so
-    // subtracting coverage would make it a no-op and the staleness bound unreachable.
+    // k=0 refreshes counts and the content key over held ground, so it subtracts nothing.
     const cache = new BandCache(1e9);
     cache.markCovered(R(0, 0, 9, 9), 4, 'ck', 500);
     expect(cache.planRegion(R(0, 0, 9, 9), 4, 'ck', 0).fetch).toEqual([R(0, 0, 9, 9)]);
@@ -178,8 +120,7 @@ describe('BandCache.bandsForRegion', () => {
 
   it('returns the bands inside the region and not those outside it', () => {
     const cache = new BandCache(1e9);
-    // The depth-2 grid is only 4x4, so the region has to be smaller than the grid for "outside"
-    // to exist at all.
+    // The depth-2 grid is 4x4, so the region is smaller than the grid.
     cache.markCovered(R(0, 0, 1, 1), 2, 'ck', 500);
     cache.put(band({depth: 2, prefix: mortonOfTile(1, 1, 2), n: 2})); // inside
     cache.put(band({depth: 2, prefix: mortonOfTile(3, 3, 2), n: 2})); // outside
@@ -246,7 +187,7 @@ describe('BandCache.resolve', () => {
   });
 });
 
-describe('BandBudget — one budget over every view (view-switching.md §3)', () => {
+describe('BandBudget: one budget over every view', () => {
   /** Two views' caches under one budget: the current one and one the user left. */
   function twoViews(budgetBytes: number): {budget: BandBudget; current: BandCache; held: BandCache} {
     const budget = new BandBudget(budgetBytes);
@@ -265,8 +206,8 @@ describe('BandBudget — one budget over every view (view-switching.md §3)', ()
   });
 
   it('takes the view that is not current before the one being drawn', () => {
-    // Two 128-byte bands against a 250-byte budget. The current view's is on screen; the one the
-    // user left yields its tail, and its bytes are what brings the whole store under the mark.
+    // Two 128-byte bands against a 250-byte budget. The current view's is on screen; the other view's
+    // gives up its tail.
     const {current, held} = twoViews(250);
     const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 10});
     current.put(shown);
@@ -279,8 +220,8 @@ describe('BandBudget — one budget over every view (view-switching.md §3)', ()
   });
 
   it('never truncates the current view’s drawn rectangle, however little another view can give', () => {
-    // The held view holds a single point and has nothing left to shed, so the budget stays over —
-    // and the rectangle on screen is still not a candidate.
+    // The held view has one point left to shed, so the budget stays over, and the rectangle on
+    // screen is still not a candidate.
     const {current, held} = twoViews(100);
     const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 0});
     current.put(shown);
@@ -317,13 +258,13 @@ describe('BandCache eviction', () => {
     for (let i = 0; i < 8; i++) {
       const held = cache.get(3 + (i % 3), BigInt(i))!;
       expect(held.ids.length).toBeGreaterThanOrEqual(1); // the head survives
-      expect(held.ids[0]).toBe(1n); // and it is the LOW-identity head
+      expect(held.ids[0]).toBe(1n); // the low-identity head
     }
   });
 
   it('never truncates a band on screen at the current depth, however old its touch', () => {
-    // Two 128-byte depth-9 bands against a 250-byte budget. The older one is on screen (inside
-    // the protected rectangle) and is left whole; the newer, off-screen one is halved instead.
+    // Two 128-byte depth-9 bands against a 250-byte budget. The older one is on screen and kept
+    // whole; the newer, off-screen one is halved.
     const cache = new BandCache(250);
     const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 0});
     const off = band({depth: 9, prefix: 3n, n: 4, touchedAt: 5});
@@ -345,7 +286,7 @@ describe('BandCache eviction', () => {
 
   it('takes the deepest band first, and stops once under the mark', () => {
     // Two 128-byte bands against a 250-byte budget: truncating the deeper one to 64 reaches the
-    // 225-byte low-water mark, so the shallow band is never touched.
+    // 225-byte low-water mark, so the shallow band is untouched.
     const cache = new BandCache(250);
     cache.put(band({depth: 2, prefix: 1n, n: 4, touchedAt: 0}));
     cache.put(band({depth: 9, prefix: 2n, n: 4, touchedAt: 0}));
@@ -355,8 +296,7 @@ describe('BandCache eviction', () => {
   });
 
   it('stops at the heads rather than going under a budget it cannot meet', () => {
-    // Every band is already one point; there is nothing left to truncate, and dropping a head is
-    // what would blank overview rendering. Overshooting the budget is the correct answer.
+    // Every band is one point; dropping a head would blank the overview, so the budget stays over.
     const cache = new BandCache(1);
     for (let i = 0; i < 4; i++) cache.put(band({depth: 5, prefix: BigInt(i), n: 1}));
     cache.evict({depth: 5, prefix: 0n});
@@ -369,10 +309,9 @@ describe('BandCache eviction and coverage', () => {
   const R = (x0: number, y0: number, x1: number, y1: number) => ({x0, y0, x1, y1});
 
   it('retracts the coverage claim over a band it truncates', () => {
-    // Otherwise the region stays "held", the plan keeps subtracting it, and the points eviction
-    // discarded are never fetched again — the client draws short for the rest of the session.
-    // Bands first, then the claim — the order `fetchRegion` uses, and the only sound one: the
-    // first band establishes the identity partition, which drops any coverage recorded before it.
+    // Otherwise the plan keeps subtracting the region and the evicted points are not fetched again.
+    // Bands first, then coverage, as `fetchRegion` does: the first band sets the identity
+    // partition, which drops coverage recorded before it.
     const cache = new BandCache(400);
     cache.put(band({depth: 2, prefix: mortonOfTile(1, 1, 2), n: 40}));
     cache.markCovered(R(0, 0, 3, 3), 2, 'ck', 500);
@@ -429,8 +368,7 @@ describe('BandCache.version', () => {
     cache.markCovered(WHOLE, 2, 'ck', 500);
     const held = cache.version;
 
-    // A redraw skips re-deriving a frame precisely when this holds still, so a read that bumped it
-    // would silently reinstate the per-frame cost the counter exists to remove.
+    // A redraw skips re-deriving while this holds still, so a read must not change it.
     cache.planRegion(WHOLE, 2, 'ck', 500);
     cache.bandsForRegion(WHOLE, 2, 'ck', 500);
     cache.coverageFor(2, 'ck', 500);
@@ -463,42 +401,34 @@ describe('BandCache.bandsForRegion at scale', () => {
     expect(fallback).toHaveLength(0);
   });
 
+  // 160,000 bands: under a second alone, and past the default timeout on a loaded machine.
   it('collects a large stand-in set without exceeding the call stack', () => {
     const cache = new BandCache(1e9);
     // `push(...bucket)` passes one argument per entry and throws a RangeError somewhere near 10^5.
     for (let x = 0; x < 400; x++) for (let y = 0; y < 400; y++) cache.put(tile(11, x, y));
     const {fallback} = cache.bandsForRegion({x0: 0, y0: 0, x1: 63, y1: 63}, 8, 'ck', 500);
     expect(fallback.length).toBeGreaterThan(100_000);
-  });
+  }, 30_000);
 });
 
 describe('bandSplitter', () => {
   it('reassembles exactly what the one-call split produces, however it is sliced', () => {
-    const tiles = Array.from({length: 200}, (_, i) => ({
-      tile: BigInt(i),
-      visible: 3n,
-      matched: 3n,
-      served: 3n
-    }));
+    const tiles = Array.from({length: 200}, (_, i) => tile(BigInt(i), 3n, {served: 3n}));
     const n = 200 * 3;
-    const result: ViewportResult = {
+    const res = result({
       tiles,
       ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i)),
       codes: new BigUint64Array(n),
       positions: new Float64Array(n * 2),
       world: Float32Array.from({length: n * 2}, (_, i) => i),
-      scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
-      subCells: null,
-      membership: {},
-      artifacts: []
-    };
+      scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}}
+    });
     const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};
 
-    const whole = bandsOfResult(result, 4, meta);
+    const whole = bandsOfResult(res, 4, meta);
 
-    // A deadline already in the past forces the smallest slices the splitter will make; every
-    // slice must still make progress, or an arrival would spin forever without absorbing.
-    const splitter = bandSplitter(result, 4, meta);
+    // A deadline in the past forces the smallest slices; every slice must still make progress.
+    const splitter = bandSplitter(res, 4, meta);
     const sliced: Band[] = [];
     let steps = 0;
     while (!splitter.done()) {

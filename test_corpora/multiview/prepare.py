@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -136,6 +137,26 @@ def quarter_layout(entity_id: np.ndarray, quarter_idx: int) -> tuple[np.ndarray,
     return np.clip(xr, -39.5, 39.5), np.clip(yr, -39.5, 39.5)
 
 
+#: The Arrow type of each integer attribute type a member may be named by.
+ARROW_INT = {"i64": pa.int64(), "u64": pa.uint64()}
+
+
+def member_field(declaration: Path) -> pa.Field:
+    """The struct field a member list names each place by: `geonameid`'s column and type."""
+    attributes = tomllib.loads(declaration.read_text())["attribute"]
+    (geonameid,) = [a for a in attributes if a["name"] == "geonameid" and a.get("unique")]
+    return pa.field(geonameid.get("field", "geonameid"), ARROW_INT[geonameid["type"]])
+
+
+def member_lists(lists: list[list[int]], field: pa.Field) -> pa.Array:
+    """One `list<struct<field>>` per artifact, each member named by its `geonameid`."""
+    offsets = np.cumsum([0] + [len(m) for m in lists])
+    values = pa.array([v for m in lists for v in m], field.type)
+    return pa.ListArray.from_arrays(
+        pa.array(offsets, pa.int32()), pa.StructArray.from_arrays([values], fields=[field])
+    )
+
+
 def load_geonames_sample(points_path: Path, n_total: int, rng: np.random.Generator) -> pa.Table:
     """`n_total` rows sampled without replacement from a built GeoNames rung's own points file."""
     if not points_path.exists():
@@ -174,6 +195,8 @@ def main() -> None:
     points_path = args.geonames_points or (repo_root / "data" / "ladder" / "geonames" / "points.parquet")
 
     out = ladder(RUNG)
+    here = Path(__file__).parent
+    member = member_field(here / "corpus.toml")
 
     print(f"multiview: sampling {n_total:,} entities from {points_path}")
     sample = load_geonames_sample(points_path, n_total, rng)
@@ -364,7 +387,13 @@ def main() -> None:
     # Six curated collections, membership drawn irrespective of bucket — some members will be
     # absent from a given view (a C-bucket entity under "quarter", a D-bucket one under "world"),
     # which is the ordinary case a layer over a group has to tolerate.
+    # Each collection carries an access label of its own, which a principal must hold to be served
+    # it: `public`, one country, two countries, or none, which the layer's `inherited` default
+    # answers with the layer's own label. The layer asks for one visible member, so a principal on
+    # the ladder who sees a collection's members and lacks its label is withheld it by the label
+    # alone: every collection draws members from every country.
     collection_names = ["frontier", "core", "outliers", "review", "watchlist", "archive"]
+    collection_labels = [["public"], ["US"], None, ["CN", "RU"], ["IN"], None]
     coll_rows = {"key": [], "contents": [], "members": [], "access": []}
     for i, name in enumerate(collection_names):
         pick = hashed_unit(entity_id, 0xC0 + i) < 0.08  # ~8% of the whole population each
@@ -372,13 +401,13 @@ def main() -> None:
         coll_rows["key"].append(name)
         coll_rows["contents"].append([[f"{name}-tag"]])
         coll_rows["members"].append(members)
-        coll_rows["access"].append(None if i % 3 else "public")
+        coll_rows["access"].append(collection_labels[i])
     coll_table = pa.table(
         {
             "key": pa.array(coll_rows["key"], type=pa.string()),
             "contents": pa.array(coll_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
-            "members": pa.array(coll_rows["members"], type=pa.list_(pa.uint64())),
-            "access": pa.array(coll_rows["access"], type=pa.string()),
+            "members": member_lists(coll_rows["members"], member),
+            "access": pa.array(coll_rows["access"], type=pa.list_(pa.string())),
         }
     )
     pq.write_table(coll_table, out / "collections.parquet")
@@ -407,13 +436,12 @@ def main() -> None:
             "key": pa.array(clus_rows["key"], type=pa.string()),
             "quarter": pa.array(clus_rows["quarter"], type=pa.string()),
             "contents": pa.array(clus_rows["contents"], type=pa.list_(pa.list_(pa.string()))),
-            "members": pa.array(clus_rows["members"], type=pa.list_(pa.uint64())),
+            "members": member_lists(clus_rows["members"], member),
         }
     )
     pq.write_table(clus_table, out / "clusters-quarter.parquet")
 
     # === the declaration, copied beside the data it declares ==========================
-    here = Path(__file__).parent
     shutil.copy(here / "corpus.toml", out / "corpus.toml")
 
     print("\nwrote:")

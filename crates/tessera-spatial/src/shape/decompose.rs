@@ -1,18 +1,14 @@
-//! The descent: a shape against the Morton grid, into interior tiles and boundary cells
-//! (`selection-operand.md` §3, which is normative for it).
+//! The descent: a shape against the Morton grid, into interior tiles and boundary cells.
 //!
 //! From the root, a tile disjoint from the shape is discarded whole; a tile wholly inside is an
-//! **interior tile** and is never opened; a tile the boundary crosses is refined into its four
-//! children, down to depth 16, where a crossing tile is a **boundary cell** whose rows are tested
-//! one by one. The number of crossing tiles at depth *d* grows with the shape's perimeter rather
-//! than its area, so the whole descent — and the interior it emits — is linear in the perimeter.
+//! interior tile and is never opened; a tile the boundary crosses is refined into its four
+//! children, down to depth 16, where a crossing tile is a boundary cell whose rows are tested one
+//! by one.
 //!
-//! **The descent is breadth-first, and that is what the budget needs.** Under `max_boundary_cells`
-//! the descent stops at the deepest depth whose crossing-tile count fits, and the crossing tiles
-//! at that depth are emitted as **cover** — a superset of the shape, marked as such by the caller
-//! (selection-operand §6). Breadth-first is what makes "the deepest depth that fits" a single
-//! depth rather than a ragged frontier, and it bounds memory to one level of crossing tiles.
-//! A published shape passes no budget and the descent always reaches the grid.
+//! The descent is breadth-first: under `max_boundary_cells` it stops at the deepest depth whose
+//! crossing-tile count fits, and the crossing tiles at that depth are emitted as cover, a
+//! superset of the shape marked as such by the caller. Breadth-first bounds memory to one level
+//! of crossing tiles. A published shape passes no budget and always reaches the grid.
 
 use tessera_types::MortonCode;
 
@@ -30,7 +26,6 @@ pub struct Rect {
 }
 
 impl Rect {
-    /// The whole grid.
     pub const ALL: Rect = Rect {
         x0: 0,
         y0: 0,
@@ -38,8 +33,7 @@ impl Rect {
         y1: u32::MAX,
     };
 
-    /// The grid positions a tile covers. At depth 16 this is one cell — `1 << 16` positions on
-    /// each axis, which is what the residual addresses.
+    /// The grid positions a tile covers. At depth 16 this is one cell.
     pub fn of_tile(tile: &Tile) -> Rect {
         debug_assert!(tile.depth <= 16);
         if tile.depth == 0 {
@@ -60,7 +54,6 @@ impl Rect {
         }
     }
 
-    /// The cell at depth 16 whose code this is.
     pub fn of_cell(cell: MortonCode) -> Rect {
         Rect::of_tile(&Tile {
             prefix: u64::from(cell.raw()),
@@ -72,7 +65,6 @@ impl Rect {
         x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
     }
 
-    /// Whether this rectangle lies wholly inside `outer`.
     pub fn within(&self, outer: &Rect) -> bool {
         self.x0 >= outer.x0 && self.x1 <= outer.x1 && self.y0 >= outer.y0 && self.y1 <= outer.y1
     }
@@ -81,7 +73,6 @@ impl Rect {
         self.x1 < other.x0 || other.x1 < self.x0 || self.y1 < other.y0 || other.y1 < self.y0
     }
 
-    /// The four corners.
     pub fn corners(&self) -> [GridPoint; 4] {
         [
             (self.x0, self.y0),
@@ -99,29 +90,26 @@ pub enum Class {
     Disjoint,
     /// Every position in the tile is inside.
     Inside,
-    /// The boundary passes through it — or the shape cannot cheaply tell, which is answered the
-    /// same way: refine, and at the grid, test the rows. A conservative `Crossed` is never wrong.
+    /// The boundary passes through it, or the shape cannot cheaply tell: both are answered the
+    /// same way, by refining and, at the grid, testing the rows. A conservative `Crossed` is
+    /// never wrong.
     Crossed,
 }
 
 /// The two questions the descent asks of a shape, plus the context it may carry per tile.
 ///
 /// `Ctx` is what a tile needs beyond the shape itself to answer cheaply: a polygon carries the
-/// edges that cross the tile and the parity of its lower corner, refined from the parent's; the
-/// closed forms carry nothing. The descent never inspects it.
+/// edges crossing the tile and the parity of its lower corner; the closed forms carry nothing.
 pub trait Region {
     type Ctx: Clone;
 
-    /// The context at the root tile.
     fn root(&self) -> Self::Ctx;
 
-    /// The context of a child tile `to`, derived from its parent's context over `from`. The
-    /// child lies within the parent.
+    /// The context of a child tile `to`, derived from its parent's context over `from`.
     fn refine(&self, parent: &Self::Ctx, from: Rect, to: Rect) -> Self::Ctx;
 
     fn classify(&self, rect: Rect, ctx: &Self::Ctx) -> Class;
 
-    /// Whether `p`, a position inside `rect`, is inside the shape.
     fn contains(&self, p: GridPoint, rect: Rect, ctx: &Self::Ctx) -> bool;
 }
 
@@ -135,13 +123,11 @@ pub struct BoundaryCell<C> {
 /// The descent's output.
 #[derive(Debug, Clone)]
 pub struct Decomposition<C> {
-    /// Tiles wholly inside, at whatever depth the descent found them. Every position in each is
-    /// inside the shape, so a tile is a whole row range and never opened.
+    /// Tiles wholly inside, at whatever depth found: a whole row range, never opened.
     pub interior: Vec<Tile>,
-    /// Depth-16 cells the boundary crosses.
     pub boundary: Vec<BoundaryCell<C>>,
-    /// Non-empty only when a budget stopped the descent: the crossing tiles at the depth it
-    /// stopped, every one taken as inside. The answer is then exact for a **cover** of the shape.
+    /// Non-empty only when a budget stopped the descent: the crossing tiles at that depth, taken
+    /// as inside, exact for a cover of the shape.
     pub cover: Vec<Tile>,
     /// The depth the cover was taken at, when there is one.
     pub cover_depth: Option<u8>,
@@ -185,9 +171,8 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
         prefix: 0,
         depth: 0,
     };
-    // The crossing tiles at the current depth, with their contexts.
     let mut pending: Vec<(Tile, R::Ctx)> = Vec::new();
-    match classify_into(shape, root, shape.root(), &mut out) {
+    match classify_into(shape, root, shape.root(), &mut out.interior) {
         Some(p) => pending.push(p),
         None => return out,
     }
@@ -202,15 +187,9 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
             }
             break;
         }
-        // Classify the children into a staging area first: under a budget the whole level is
-        // accepted or rejected together, and a rejected level's interior tiles must not leak into
-        // the output beside a cover of their parents.
-        let mut staged = Decomposition {
-            interior: Vec::new(),
-            boundary: Vec::new(),
-            cover: Vec::new(),
-            cover_depth: None,
-        };
+        // Staged before being accepted: under a budget the whole level is accepted or rejected
+        // together, so a rejected level's interior tiles do not leak in beside a cover.
+        let mut staged: Vec<Tile> = Vec::new();
         let mut next: Vec<(Tile, R::Ctx)> = Vec::new();
         'level: for (tile, ctx) in &pending {
             let from = Rect::of_tile(tile);
@@ -234,27 +213,23 @@ pub fn decompose<R: Region>(shape: &R, max_boundary_cells: Option<usize>) -> Dec
             out.cover = pending.into_iter().map(|(t, _)| t).collect();
             return out;
         }
-        out.interior.extend(staged.interior);
+        out.interior.extend(staged);
         pending = next;
     }
     out
 }
 
-/// **The context of each named cell, re-derived by a descent that opens only their ancestors.**
+/// The context of each named cell, re-derived by a descent that opens only their ancestors.
 ///
-/// A held decomposition keeps a boundary cell as its code and parity alone
-/// (`polygon-membership.md` §6.3): the per-cell edge list is the structure that dominated memory at
-/// world scale, so it is not held but re-derived when a segment first puts rows in the cell. This
-/// is that derivation, shared across the cells of one shape: from the root, a tile is refined only
-/// if some named cell lies under it, so a segment touching *k* of a polygon's cells pays the
-/// ancestors of those *k* cells rather than a walk of every edge per cell. `cells` is ascending;
-/// the result is parallel to it.
+/// A held decomposition keeps a boundary cell as its code and parity alone; the per-cell edge
+/// list is re-derived when a segment first puts rows in the cell. From the root, a tile is
+/// refined only if some named cell lies under it, so a segment touching *k* cells pays their
+/// ancestors rather than a walk of every edge per cell. `cells` is ascending; the result is
+/// parallel to it.
 ///
-/// No tile is classified on the way down, because a named cell is by construction one the
-/// boundary crosses and every ancestor of a crossed tile is crossed. A cell that is *not* a
-/// boundary cell still gets a well-formed context — its inherited edges and parity — and
-/// [`Region::contains`] answers correctly over it, so a caller passing an interior cell by mistake
-/// gets a slower right answer rather than a wrong one.
+/// No tile is classified on the way down: every ancestor of a crossed tile is crossed. A cell
+/// that is not a boundary cell still gets a well-formed context, and [`Region::contains`]
+/// answers correctly over it.
 pub fn contexts_at<R: Region>(shape: &R, cells: &[MortonCode]) -> Vec<R::Ctx> {
     let mut out = Vec::with_capacity(cells.len());
     if cells.is_empty() {
@@ -299,17 +274,16 @@ fn descend_to<R: Region>(
     }
 }
 
-/// Classify one tile, record it if settled, and hand it back if it needs refining.
 fn classify_into<R: Region>(
     shape: &R,
     tile: Tile,
     ctx: R::Ctx,
-    out: &mut Decomposition<R::Ctx>,
+    interior: &mut Vec<Tile>,
 ) -> Option<(Tile, R::Ctx)> {
     match shape.classify(Rect::of_tile(&tile), &ctx) {
         Class::Disjoint => None,
         Class::Inside => {
-            out.interior.push(tile);
+            interior.push(tile);
             None
         }
         Class::Crossed => Some((tile, ctx)),
@@ -358,8 +332,8 @@ mod tests {
         );
     }
 
-    /// **The pruned descent hands every named cell the context the full descent gave it.** The
-    /// full descent is the oracle: a boundary cell's rows are tested against exactly the edges and
+    /// The pruned descent hands every named cell the context the full descent gave it. The full
+    /// descent is the oracle: a boundary cell's rows are tested against exactly the edges and
     /// parity it carried down, so the re-derivation must reproduce both.
     #[test]
     fn the_pruned_descent_reproduces_each_boundary_cells_context() {

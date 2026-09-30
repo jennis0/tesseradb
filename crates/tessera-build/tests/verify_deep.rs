@@ -1,23 +1,23 @@
 //! The verifier against the bundle shapes the write path actually produces.
 //!
-//! The fixture is a bundle that has **flushed and re-ingested**: a batch build, one flush
-//! segment above it, a delta postings tier the flush's terms live in, and an external-id key
-//! the flush re-binds after its build-time holder was deleted (decision 0047) — retained
-//! superseded binding, tombstone and all. Correctness-suite §18 obligation 10 is why the accept
-//! tests exist at all: the false-refusal direction is what a checker extended past its original
-//! single-segment shape gets wrong, and nothing else in the tree exercises the verifier over a
-//! multi-segment bundle.
+//! The fixture is a bundle that has **flushed**: a batch build, one flush segment above it, a delta
+//! postings tier the flush's terms live in, and a deleted build item's tombstone. Correctness-suite
+//! §18 obligation 10 is why the accept tests exist at all: the false-refusal direction is what a
+//! checker extended past its original single-segment shape gets wrong, and nothing else in the tree
+//! exercises the verifier over a multi-segment bundle.
 //!
 //! The refuse tests damage one artefact each and **repair its manifest digest**, so what fails
 //! is the structural check under test, never the digest sweep in front of it (§18 obligation 9:
 //! a checker nobody has seen fail is a checker nobody knows works).
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -26,14 +26,14 @@ use sha2::{Digest, Sha256};
 use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
-use tessera_store::manifest::{CurrentPointer, FileDigest, SegmentsManifest};
+use tessera_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
 use tessera_store::write_segments_manifest;
 use tessera_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N_ITEMS: u64 = 48;
-/// The build item whose external id the flush re-binds (decision 0047's delete + re-ingest).
-const REBOUND_SOURCE: u64 = 5;
+/// The build entity the fixture deletes.
+const DELETED: u32 = 5;
 
 fn extent() -> Bounds {
     Bounds {
@@ -93,15 +93,16 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// A bundle that has flushed and re-ingested: build (external ids minted, oracle pairs on), one
-/// flush segment holding two entities, a delta tier carrying their postings, a re-bound external
-/// id whose superseded holder is tombstoned, and a complete-current-state `SEGMENTS-1.json`.
+/// A bundle that has flushed: build (oracle pairs on), one flush segment holding two entities, a
+/// delta tier carrying their postings, a deleted build entity's tombstone, and a
+/// complete-current-state `SEGMENTS-1.json`.
 fn flushed_bundle(root: &Path) {
     let points = root.join("points.parquet");
     let pairs = root.join("pairs.parquet");
     let out = root.join("bundle");
     write_points(&points);
     write_pairs(&pairs);
+    let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -116,22 +117,20 @@ fn flushed_bundle(root: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the batch build succeeds");
 
@@ -147,36 +146,19 @@ fn flushed_bundle(root: &Path) {
     let n = manifest.entity_id_high_water;
     assert_eq!(n, N_ITEMS);
 
-    // The deleted holder of the re-bound key: resolved through the sidecar *before* the flush
-    // publishes the newer binding, so the tombstone names the entity the build actually bound.
-    let old_holder = {
-        let bundle = tessera_store::read::open_bundle(&out).expect("the built bundle opens");
-        let partition = bundle.partitions.get("default").expect("one partition");
-        let sidecar = tessera_store::ExternalIdSidecar::deferred_from_manifest(
-            &bundle.manifest,
-            &partition.manifest,
-            &prefix_dir,
-        )
-        .expect("the sidecar constructs");
-        sidecar
-            .resolve(&REBOUND_SOURCE.to_le_bytes())
-            .expect("the sidecar resolves")
-            .expect("the build bound this key")
-    };
-
-    // Two flushed entities: one under a fresh key, one re-binding the deleted holder's key.
+    // Two flushed entities.
     let key = IdentityKey::from_hex(TEST_KEY_HEX).unwrap();
     let rows = vec![
         FlushRow {
             entity_id: EntityId::new(n),
-            external_id: Some(9_999u64.to_le_bytes().to_vec()),
+            number: EntityId::new(n),
             x: 10.0,
             y: 10.0,
             scalars: Vec::new(),
         },
         FlushRow {
             entity_id: EntityId::new(n + 1),
-            external_id: Some(REBOUND_SOURCE.to_le_bytes().to_vec()),
+            number: EntityId::new(n + 1),
             x: 990.0,
             y: 990.0,
             scalars: Vec::new(),
@@ -197,6 +179,7 @@ fn flushed_bundle(root: &Path) {
             shard_id: 0,
             scalar_schema: &[],
             row_base: n as u32,
+            entity_floor: 0,
         },
     )
     .expect("the flush segment writes");
@@ -220,8 +203,6 @@ fn flushed_bundle(root: &Path) {
 
     let mut segments = seg0.segments.clone();
     segments.push(flush.segment.clone());
-    let mut external_id_runs = seg0.external_id_runs.clone();
-    external_id_runs.push(flush.external_id_run.clone());
 
     let manifest_1 = SegmentsManifest {
         watermark: flush.watermark,
@@ -229,36 +210,13 @@ fn flushed_bundle(root: &Path) {
         entity_id_low_water: seg0.entity_id_low_water,
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
-        views: Vec::new(),
-        scoped_columns: Vec::new(),
-        attributes: Vec::new(),
-        scoped_attributes: Vec::new(),
-        vocabularies: Vec::new(),
-        groups: Vec::new(),
-        plain_views: Vec::new(),
-        dead_view_incarnations: Vec::new(),
-        membership_extents: Vec::new(),
-        level_versions: Vec::new(),
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
-        shape_rows_extents: Vec::new(),
-        shape_held_extents: Vec::new(),
-        term_image_extents: Vec::new(),
-        artifact_record_extents: Vec::new(),
+        layer_registry_version: seg0.layer_registry_version,
         segments,
         deltas: vec![delta_rel],
         dict_extents: seg0.dict_extents.clone(),
-        attr_extents: Vec::new(),
-        record_extents: Vec::new(),
-        entity_terms_extents: Vec::new(),
-        text_extents: Vec::new(),
-        external_id_runs,
-        locator_extents: vec![flush.locator_extent.clone()],
-        tombstones: vec![old_holder.raw()],
-        deny: Vec::new(),
-        vocabulary_extensions: Vec::new(),
+        tombstones: EntitySet::of(&croaring::Bitmap::of(&[DELETED])),
         files,
+        ..SegmentsManifest::empty()
     };
     write_segments_manifest(&prefix_dir, "default", 1, &manifest_1)
         .expect("SEGMENTS-1.json commits");
@@ -320,13 +278,12 @@ fn refresh_digest(root: &Path, rel: &str) {
     .unwrap();
 }
 
-/// The false-refusal direction (§18 obligation 10): a valid bundle that has flushed and
-/// re-ingested must verify — shallow and deep. Before the row-offset fix the shallow verifier
-/// refused every such bundle: its bijection sweep counted only the base permutation's rows and
-/// its identity loop restarted the row index at zero per segment while indexing a view-wide
-/// array.
+/// The false-refusal direction (§18 obligation 10): a valid bundle that has flushed must verify —
+/// shallow and deep. Before the row-offset fix the shallow verifier refused every such bundle: its
+/// bijection sweep counted only the base permutation's rows and its identity loop restarted the row
+/// index at zero per segment while indexing a view-wide array.
 #[test]
-fn a_flushed_and_reingested_bundle_verifies_shallow_and_deep() {
+fn a_flushed_bundle_verifies_shallow_and_deep() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
@@ -341,9 +298,6 @@ fn a_flushed_and_reingested_bundle_verifies_shallow_and_deep() {
     // The delta tier's pairs are not in `pairs.parquet` — the scoped check must not refuse them.
     assert_eq!(deep.delta_tiers, 1);
     assert!(deep.pairs_rows > 0, "the base pairs were compared");
-    // Two runs (build + flush), and the re-bound key appears in both — newest binding first,
-    // not a bijection (decision 0047).
-    assert_eq!(deep.external_id_bindings, N_ITEMS + 2);
 }
 
 /// **Both routes of the identity check, over one fixture.**
@@ -380,7 +334,6 @@ fn the_partition_route_and_the_window_route_agree() {
     )
     .expect("the partition route accepts the same bundle deep");
     assert_eq!(deep.shallow.rows, window.rows);
-    assert_eq!(deep.external_id_bindings, N_ITEMS + 2);
 
     // One `tessera_id` of the *base* segment is replaced by another entity's, so the row is
     // claimed — surjectivity still holds — and what refuses is the derivation. The base is the
@@ -419,43 +372,6 @@ fn the_partition_route_and_the_window_route_agree() {
         "expected the derivation refusal, got: {window}"
     );
     assert_eq!(window.to_string(), partition.to_string());
-}
-
-/// The damage helper's own premise, asserted once: the fixture's re-bound key really does appear
-/// in two runs, so the accept test above is exercising 0047's retained superseded binding rather
-/// than a corpus where every key is unique.
-#[test]
-fn the_fixture_carries_a_key_bound_in_two_runs() {
-    let temp = tempfile::TempDir::new().unwrap();
-    flushed_bundle(temp.path());
-    let root = bundle_root(&temp);
-    let prefix_dir = root.join("v00000");
-
-    let mut holders = 0usize;
-    let segments: SegmentsManifest = serde_json::from_slice(
-        &fs::read(prefix_dir.join("partitions/default/SEGMENTS-1.json")).unwrap(),
-    )
-    .unwrap();
-    for rel in &segments.external_id_runs {
-        let reader = arrow::ipc::reader::FileReader::try_new(
-            File::open(prefix_dir.join(rel)).unwrap(),
-            None,
-        )
-        .unwrap();
-        for batch in reader {
-            let batch = batch.unwrap();
-            let keys = batch
-                .column_by_name("external_id")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::BinaryArray>())
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                if keys.value(i) == REBOUND_SOURCE.to_le_bytes().as_slice() {
-                    holders += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(holders, 2, "the re-bound key must appear in both runs");
 }
 
 // ---- deliberate damage (§18 obligation 9) --------------------------------------------------
@@ -576,118 +492,6 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     refresh_digest(&root, rel);
 
     expect_refusal(&root, "strictly ascending");
-}
-
-/// The locator and the runs disagreeing: two build entities' locator slots are swapped, so each
-/// addresses the other's binding row.
-#[test]
-fn a_locator_slot_addressing_another_entitys_binding_is_refused() {
-    let temp = tempfile::TempDir::new().unwrap();
-    flushed_bundle(temp.path());
-    let root = bundle_root(&temp);
-    let rel = "partitions/default/entities/ext-locator.u32";
-    let path = root.join("v00000").join(rel);
-
-    let mut bytes = fs::read(&path).unwrap();
-    assert!(bytes.len() >= 8);
-    let (first, rest) = bytes.split_at_mut(4);
-    first.swap_with_slice(&mut rest[..4]);
-    fs::write(&path, &bytes).unwrap();
-    refresh_digest(&root, rel);
-
-    expect_refusal(&root, "the locator and the runs disagree");
-}
-
-/// A run whose external ids stop ascending. The sidecar binary-searches each run, so a key out
-/// of order makes a binding unreachable; the scan holds no key but the previous one, and the pair
-/// it compares is the whole check.
-#[test]
-fn a_run_whose_external_ids_stop_ascending_is_refused() {
-    let temp = tempfile::TempDir::new().unwrap();
-    flushed_bundle(temp.path());
-    let root = bundle_root(&temp);
-
-    rewrite_first_run_keys(&root, |values| values.swap(0, 1));
-
-    expect_refusal(&root, "external ids are not strictly ascending at row 1");
-}
-
-/// Rewrite the first external-id run's key column through `damage`, leaving its entity column
-/// where it was, and repair the run's manifest digest. What then fails is the ordering check and
-/// never the digest sweep in front of it.
-fn rewrite_first_run_keys(root: &Path, damage: impl FnOnce(&mut Vec<Vec<u8>>)) {
-    let prefix_dir = root.join("v00000");
-    let segments: serde_json::Value = serde_json::from_slice(
-        &fs::read(prefix_dir.join("partitions/default/SEGMENTS-1.json")).unwrap(),
-    )
-    .unwrap();
-    let rel = segments["external_id_runs"][0]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let path = prefix_dir.join(&rel);
-
-    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
-    let schema = reader.schema();
-    let batches: Vec<RecordBatch> = reader.map(|batch| batch.unwrap()).collect();
-    assert!(
-        batches[0].num_rows() >= 2,
-        "the run must hold two keys for there to be an order to break"
-    );
-    let keys = batches[0]
-        .column_by_name("external_id")
-        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
-        .expect("the run carries a binary 'external_id' column");
-    let mut values: Vec<Vec<u8>> = (0..keys.len()).map(|i| keys.value(i).to_vec()).collect();
-    damage(&mut values);
-    let damaged: Vec<&[u8]> = values.iter().map(|v| v.as_slice()).collect();
-    let at = batches[0].schema().index_of("external_id").unwrap();
-    let mut columns = batches[0].columns().to_vec();
-    columns[at] = Arc::new(BinaryArray::from(damaged));
-    let first = RecordBatch::try_new(batches[0].schema(), columns).unwrap();
-
-    let mut writer =
-        arrow::ipc::writer::FileWriter::try_new(File::create(&path).unwrap(), &schema).unwrap();
-    writer.write(&first).unwrap();
-    for batch in &batches[1..] {
-        writer.write(batch).unwrap();
-    }
-    writer.finish().unwrap();
-    drop(writer);
-    refresh_digest(root, &rel);
-}
-
-/// The same external id twice in one run. A duplicate is not merely out of order: a check written
-/// as `previous > key` accepts it and the sidecar's binary search then reaches one of the two rows
-/// and never the other. Strictly ascending is the requirement, and this is the case that says so.
-#[test]
-fn a_run_repeating_an_external_id_is_refused() {
-    let temp = tempfile::TempDir::new().unwrap();
-    flushed_bundle(temp.path());
-    let root = bundle_root(&temp);
-
-    rewrite_first_run_keys(&root, |values| {
-        values[1] = values[0].clone();
-    });
-
-    expect_refusal(&root, "external ids are not strictly ascending at row 1");
-}
-
-/// A sidecar file whose bytes stopped matching the manifest: the family is exempt from the
-/// open-time digest sweep (contracts §0.3 deviation 9), so the deep pass must be the one that
-/// catches it at rest. The damage here is *not* followed by a digest repair — that is the test.
-#[test]
-fn a_sidecar_file_failing_its_digest_is_refused() {
-    let temp = tempfile::TempDir::new().unwrap();
-    flushed_bundle(temp.path());
-    let root = bundle_root(&temp);
-    let path = root.join("v00000/partitions/default/entities/ext-locator.u32");
-
-    let mut bytes = fs::read(&path).unwrap();
-    bytes[0] ^= 0xFF;
-    fs::write(&path, &bytes).unwrap();
-
-    expect_refusal(&root, "deviation 9");
 }
 
 /// Decision 0042: a dictionary extent repeating a descriptor the list already carries. A second
@@ -831,8 +635,10 @@ fn read_base_postings(path: &Path) -> Vec<Vec<u32>> {
     (0..reader.term_count())
         .map(|t| match reader.posting_at(t).unwrap().unwrap() {
             tessera_authz::PostingRef::Array(bytes) => bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect(),
             tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
         })
@@ -935,6 +741,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         access: tessera_build::config::AccessInput::relation(pairs.clone()),
     };
     let out = dir.join("bundle");
+    let (schema, attribute_sources) = common::id_attributes(&points);
     build(&BuildArgs {
         views: vec![view("2026-Q1"), view("2026-Q2")],
         anchor: 0,
@@ -973,27 +780,26 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
                 value_set: None,
                 index: false,
                 render: true,
+                unique: false,
             },
             group: "quarter".to_string(),
             views: vec![0, 1],
             source: None,
         }],
-        attribute_sources: Vec::new(),
+        attribute_sources,
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     })
     .expect("a rendered scoped family builds");
 

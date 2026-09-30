@@ -18,10 +18,11 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
 use tessera_engine::occupancy::{
     occupied_tiles, occupied_tiles_ladder_with_precision, TileSketch, SKETCH_PRECISION,
 };
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold,
@@ -79,6 +80,7 @@ fn segment_of(points: &[(f32, f32, u64)]) -> Segment {
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "seg0".to_string(),
         row_count: items.len() as u32,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
@@ -126,7 +128,7 @@ fn mask_over_with(
 
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
+        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -140,7 +142,8 @@ fn mask_over_with(
     let base = Arc::new(RowProjection::walk(&fragment, &perm));
     let satisfied: FxHashSet<TermId> = [TermId::new(0)].into_iter().collect();
     let denied = tessera_engine::denied_rows_of(overlay, &perm);
-    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied);
+    let buffered = tessera_engine::buffered_rows_of(buffer, &perm);
+    let mask = compose(&satisfied, overlay, buffer, base, &perm, &denied, Some(&buffered));
     (temp, mask)
 }
 
@@ -308,12 +311,12 @@ fn no_non_empty_tile_ever_serves_zero_marks() {
     }
 }
 
-/// Why `k_min = 0` is refused at config load rather than clamped.
+/// Why `Engine::open` refuses `k_min = 0` rather than clamping it.
 ///
 /// With no floor, `m = min(cap, max(0, C_θ))` is 0 whenever the threshold admits nothing, and the
 /// tile goes blank despite having visible items — I7 gone, with no error anywhere. This test pins
-/// the consequence so the `ConfigError::FloorClauseDisabled` refusal has a demonstrated reason
-/// rather than an asserted one, and so nobody "simplifies" the refusal away later.
+/// the consequence so the refusal has a demonstrated reason rather than an asserted one, and so
+/// nobody "simplifies" the refusal away later.
 #[test]
 fn a_zero_floor_would_blank_a_tile_which_is_why_config_refuses_it() {
     let points: Vec<(f32, f32, u64)> = (0..12u64)
@@ -328,7 +331,7 @@ fn a_zero_floor_would_blank_a_tile_which_is_why_config_refuses_it() {
     assert!(
         got.is_empty(),
         "a zero floor is expected to blank a tile whose items are all above the threshold — if \
-         this no longer holds, revisit ConfigError::FloorClauseDisabled"
+         this no longer holds, revisit Engine::open's refusal of k_min = 0"
     );
 
     // The same tile with the smallest legal floor is not blank.
@@ -952,7 +955,6 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                 {
                     buffer.insert_row_with_terms(
                         &tessera_lifecycle::WalRow {
-                            external_id: None,
                             entity_id: EntityId::new(row as u64),
                             view: "s0".to_string(),
                             join: false,
@@ -1288,7 +1290,6 @@ fn the_occupied_tile_count_is_exact_with_a_composed_mask() {
     for row in (0..n).filter(|r| !vis.contains(r)).step_by(5) {
         buffer.insert_row_with_terms(
             &tessera_lifecycle::WalRow {
-                external_id: None,
                 entity_id: EntityId::new(u64::from(row)),
                 view: "s0".to_string(),
                 join: false,

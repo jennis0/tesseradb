@@ -1,6 +1,6 @@
 """The paged commit, against a real served database (python-sdk.md §6, §10.3, §10.4).
 
-Every test here commits a database, stages a delta on it and reads the answer back through the
+Every test here commits a database, inserts into it again and reads the answer back through the
 viewer plane. What is under test is that the SDK's pages are what the control plane takes, so
 nothing here doubles the server: a fake control plane would check the SDK against the SDK's own
 reading of the contract.
@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from conftest import browse, item, viewport
+from tesseradb import _commit as commit_module
 from tesseradb._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -41,7 +42,7 @@ def whole_frame(db, view: str = "s0") -> list[float]:
 
 
 def new_papers(db, ids=None, x_offset: float = 0.0) -> pa.Table:
-    """A week of new papers, as the frame §10.3 stages."""
+    """A week of new papers, as the frame §10.3 inserts."""
     ids = list(NEW_IDS if ids is None else ids)
     x, y = centre(db)
     return pa.table(
@@ -61,30 +62,47 @@ def new_papers(db, ids=None, x_offset: float = 0.0) -> pa.Table:
     )
 
 
-def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio diffusion") -> None:
-    """§10.3's other four stagings: a cluster, its members, its label and its generating set."""
+def insert_the_new_papers(db, ids=None, x_offset: float = 0.0) -> None:
+    """The allocation view's own insert: geometry, labels, the id, and the columns by name."""
+    db.insert(
+        "s0",
+        new_papers(db, ids, x_offset),
+        columns={"id": "entity_id"},
+        x="x",
+        y="y",
+        access="categories",
+    )
+
+
+def insert_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio diffusion"):
+    """§10.3's other four inserts: a cluster, its members, its label and its generating set."""
     ids = list(NEW_IDS if ids is None else ids)
-    db.stage(
-        "kmeans",
-        pa.table(
+    db.insert(
+        "clusters/kmeans",
+        artifacts=pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
                 "key": pa.array([key], pa.string()),
             }
         ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_members",
-        pa.table(
+    db.insert(
+        "clusters/kmeans",
+        members=pa.table(
             {
                 "level": pa.array([0] * len(ids), pa.uint32()),
                 "key": pa.array([key] * len(ids), pa.string()),
                 "entity": pa.array(ids, pa.uint64()),
             }
         ),
+        columns={"id": "entity"},
+        key="key",
+        level="level",
     )
-    db.stage(
-        "kmeans_topics",
+    db.insert(
+        "topics/kmeans",
         pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
@@ -94,12 +112,17 @@ def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio 
                 "attached_key": pa.array([key], pa.string()),
             }
         ),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
     )
     # A label's member table carries two grains: a null rank is the membership, and rank *k* is
     # content *k*'s generating set (annotation-write-cycle §6.1).
-    db.stage(
-        "kmeans_topic_members",
-        pa.table(
+    db.insert(
+        "topics/kmeans",
+        members=pa.table(
             {
                 "level": pa.array([0] * (2 * len(ids)), pa.uint32()),
                 "key": pa.array([f"{key}-label"] * (2 * len(ids)), pa.string()),
@@ -107,6 +130,10 @@ def stage_the_new_cluster(db, ids=None, key: str = "k-new", label: str = "Audio 
                 "entity": pa.array(ids + ids, pa.uint64()),
             }
         ),
+        columns={"id": "entity"},
+        key="key",
+        level="level",
+        rank="rank",
     )
 
 
@@ -117,13 +144,13 @@ def notebook(served, corpus):
 # ---------------------------------------------------------------------------- §10.3
 
 
-def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corpus):
+def test_new_papers_with_a_cluster_and_a_label_are_served(served, corpus):
     """python-sdk.md §10.3, through to the served answer."""
     db = notebook(served, corpus)
     before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
 
-    db.stage("points", new_papers(db))
-    stage_the_new_cluster(db)
+    insert_the_new_papers(db)
+    insert_the_new_cluster(db)
 
     plan = db.check()
     assert plan.ok, plan
@@ -163,22 +190,14 @@ def test_a_delta_of_new_papers_with_a_cluster_and_a_label_is_served(served, corp
     # text is read through the cluster it attaches to: a label set expands to a layer whose
     # artifacts attach, and `browse` refuses such a layer directly.
     assert set(report.artifact_ids) == {"clusters/kmeans", "topics/kmeans"}
-    assert set(report.artifact_ids["topics/kmeans"]) == {"k-new-label"}
+    assert set(report.artifact_ids["topics/kmeans"]) == {(0, None, "k-new-label")}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="issue #150: a content gated `all` whose generating set holds entities that arrived by "
-    "ingest fails containment for every principal, so the label is served to nobody. The "
-    "publication is accepted and the artifact exists; the same label over entities the build read "
-    "is served, which `test_a_label_set_declared_after_the_first_commit_is_declared_and_served` "
-    "shows",
-)
 def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, corpus):
     """§10.3's last step: the label's own text, as the viewport's artifacts frame carries it."""
     db = notebook(served, corpus)
-    db.stage("points", new_papers(db))
-    stage_the_new_cluster(db)
+    insert_the_new_papers(db)
+    insert_the_new_cluster(db)
     assert db.commit().ok
     served_labels = [
         (layer, key, content)
@@ -188,95 +207,220 @@ def test_the_new_label_is_served_over_the_rows_the_same_commit_ingested(served, 
     assert served_labels == [("topics/kmeans", "k-new-label", ["Audio diffusion"])]
 
 
-def test_a_re_staged_frame_is_sent_again_and_the_database_answers_for_it(served, corpus):
+def test_the_same_frame_inserted_again_is_sent_again_and_the_database_answers_for_it(
+    served, corpus
+):
     """§3: a re-run of a cell is a re-run, and the database is what says the rows are there.
 
-    The SDK keeps no record of what it sent, so the same frame staged again is sent again. What
-    happens then is the server's to decide, and it is two different things: identical bytes under
-    the batch id they were first sent under are a **replay** and land nothing (write-path §2.4),
-    while a page naming ids the database holds is a `409` on the whole page, reported by the page
-    it refused and applied nowhere.
+    The SDK keeps no record of what it sent, so the same frame inserted again is sent again, as a
+    new request under a fresh batch id. Every row names by its id an item the database holds and
+    carries what that item stores, so the page changes nothing and every row is already present.
+    The same rows moved a little change the items' positions, and edit them.
     """
     db = notebook(served, corpus)
     delta = new_papers(db)
-    db.stage("points", delta)
+    db.insert("s0", delta, columns={"id": "entity_id"}, x="x", y="y", access="categories")
     first = db.commit()
     assert first.ok and first.rows_accepted == {"s0": len(NEW_IDS)}
     after = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
 
-    db.stage("points", delta)
+    db.insert("s0", delta, columns={"id": "entity_id"}, x="x", y="y", access="categories")
     plan = db.check()
     # One page, and the flush that publishes it.
     assert len(plan.plan) == 2 and plan.plan[0].startswith("points"), plan
-    replayed = db.commit()
-    assert replayed.ok, replayed
-    # The server says it applied nothing rather than the SDK inferring it from a count.
-    assert len(replayed.replayed) == 1 and replayed.rows_accepted == {}
+    again = db.commit()
+    assert again.ok, again
+    assert again.rows_accepted == {"s0": 0} and again.already_present == len(NEW_IDS), again
+    assert not again.replayed, again
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
 
-    # The same rows moved a little: different bytes, so a batch the server has not seen, and
-    # every id on it is one it holds.
-    db.stage("points", new_papers(db, x_offset=0.5))
-    refused = db.commit()
-    assert not refused.ok
-    assert [r["status"] for r in refused.refusals] == [409]
-    assert refused.rows_accepted == {}
+    insert_the_new_papers(db, x_offset=0.5)
+    moved = db.commit()
+    assert moved.ok, moved
+    assert moved.items_edited == len(NEW_IDS), moved
     assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == after
+
+
+def test_the_same_id_less_frame_committed_three_times_lands_three_times(served, corpus):
+    """**Five loads for five commits** (owner ruling, 2026-09-18).
+
+    A request's identity is an id the client chose, never a hash of what it carries, so committing
+    the same id-less frame again is a second load and not a replay: a row with no id names no item,
+    so each commit creates its rows again.
+    """
+    db = notebook(served, corpus)
+    before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
+    frame = new_papers(db).drop_columns(["entity_id"])
+
+    for run in range(3):
+        db.insert("s0", frame, x="x", y="y", access="categories")
+        report = db.commit()
+        assert report.ok, report
+        assert report.rows_accepted == {"s0": len(NEW_IDS)}, report
+        assert not report.replayed, report
+        assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == before + len(
+            NEW_IDS
+        ) * (run + 1)
+
+
+def test_a_retried_request_inside_one_commit_is_a_replay_and_lands_nothing(served, corpus):
+    """The other half of the ruling: **a retry is the same request sent again**.
+
+    A `429`, a timeout or a lost answer is resent under the id the first attempt carried, and the
+    server answers it as a replay (write-path §2.4). Simulated here by sending one page through the
+    control client twice with its own id, which is exactly what `Control._send`'s `429` loop does.
+    """
+    db = notebook(served, corpus)
+    before = viewport(db, "s0", whole_frame(db))["counts"]["visible"]
+    db.insert("s0", new_papers(db).drop_columns(["entity_id"]), x="x", y="y", access="categories")
+
+    db.serve()
+    control = db.control
+    pages, findings = commit_module.Planner(db, control, db.meta()).plan()
+    assert not findings, findings
+    page = next(p for p in pages if p.kind == "points")
+    first = control.ingest(page.body, page.batch, page.view)
+    assert first.ok and first.body["created"] == len(NEW_IDS), first
+    retry = control.ingest(page.body, page.batch, page.view)
+    assert retry.ok, retry
+    assert retry.body["replayed"] is True, retry.body
+    assert retry.body["created"] == 0, retry.body
+    assert retry.body["tessera_ids"] == first.body["tessera_ids"], retry.body
+
+    control.flush(wait=True)
+    assert viewport(db, "s0", whole_frame(db))["counts"]["visible"] == before + len(NEW_IDS)
+
+
+def test_a_commit_of_rows_and_values_flushes_between_them(served, corpus):
+    """§6.2 step 2: a value addresses a row the database holds, so the rows go visible first."""
+    db = served(small)
+    db.insert(
+        "map",
+        pa.table(
+            {
+                "id": pa.array(["p20", "p21"], pa.string()),
+                "x": pa.array([20.0, 21.0], pa.float64()),
+                "y": pa.array([0.0, 0.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                # Every declared column travels with the rows, null until the values fill it.
+                "score": pa.nulls(2, pa.float64()),
+            }
+        ),
+        x="x",
+        y="y",
+        access="labels",
+    )
+    db.insert(
+        "score",
+        pa.table(
+            {"id": pa.array(["p20", "p21"], pa.string()), "score": pa.array([2.0, 2.5], pa.float64())}
+        ),
+        value="score",
+    )
+    plan = db.check()
+    lines = plan.plan
+    rows_at = next(i for i, line in enumerate(lines) if line.startswith("points"))
+    flush_at = next(i for i, line in enumerate(lines) if line.startswith("flush the rows"))
+    values_at = next(i for i, line in enumerate(lines) if line.startswith("values into"))
+    assert rows_at < flush_at < values_at, lines
+
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2} and report.items_edited == 2
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
+                      filters={"score": {"range": {"gte": 2.0}}})
+    assert answer["counts"]["matched"] == 2
 
 
 # ---------------------------------------------------------------------------- §10.4
 
 
-def test_a_second_clustering_over_held_rows_is_published_through_its_tables(served, corpus):
-    """python-sdk.md §10.4, on §6.2 step 3's terms: a clustering over rows the database holds.
+def test_a_second_clustering_over_held_rows_is_one_key_column(served, corpus):
+    """python-sdk.md §10.4: a table with an id column and a key column, over rows it holds.
 
-    `from_column=` mints artifacts from the rows that carry the column, which happens at the build
-    and on the ingest route; rows that are already there carry nothing. So the layer is declared
-    over its own tables and the keys are published with their members.
+    Rows without coordinates carry a layer column by the ingest route's own rule: a key an
+    artifact holds places the item in it, and a key no artifact holds mints the artifact it names
+    on a layer whose value set is `open`. So the clustering is one insert.
     """
     db = notebook(served, corpus)
     held = [7, 8, 9, 10, 11]
-    db.declare_layer("clusters/second", kind="flat", source="second", members="second_members")
-    db.stage(
-        "second",
-        pa.table({"level": pa.array([0, 0], pa.uint32()),
-                  "key": pa.array(["c2-a", "c2-b"], pa.string())}),
-    )
-    db.stage(
-        "second_members",
+    db.declare_layer("clusters/second", kind="flat")
+    db.insert(
+        "clusters/second",
         pa.table(
             {
-                "level": pa.array([0] * len(held), pa.uint32()),
-                "key": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
-                "entity": pa.array(held, pa.uint64()),
+                "entity_id": pa.array(held, pa.uint64()),
+                "cluster2": pa.array(["c2-a", "c2-a", "c2-b", "c2-b", "c2-b"], pa.string()),
             }
         ),
+        columns={"id": "entity_id"},
+        key="cluster2",
     )
+    plan = db.check()
+    assert plan.ok, plan
+    assert any("values into 'clusters/second'" in line for line in plan.plan), plan.plan
 
     report = db.commit()
     assert report.ok, report
     assert report.rows_accepted == {}
+    # The two keys no artifact held were minted at this commit, and the five items joined them
+    # without being edited.
     assert report.artifacts_minted == 2
+    assert report.memberships_joined == len(held) and report.items_edited == 0
 
     rows = {row["key"]: row["masked_count"]
             for row in browse(db, "s0", "clusters/second")["artifacts"]}
     assert rows == {"c2-a": 2, "c2-b": 3}
 
 
-def test_a_from_column_layer_over_held_rows_is_refused_naming_the_tables(served, corpus):
-    """§6.2 step 3: the values route fills a column and mints no artifact."""
+def test_a_key_column_into_a_layer_the_database_holds_joins_its_artifacts(served, corpus):
+    """The other arm of the same route: a key the layer's artifacts already declare."""
     db = notebook(served, corpus)
-    with pytest.raises(Refusal, match="through its tables"):
-        db.declare_layer("clusters/third", kind="flat", from_column="cluster3")
+    key = browse(db, "s0", "clusters/kmeans")["artifacts"][0]["key"]
+    before = browse(db, "s0", "clusters/kmeans", q=key)["artifacts"][0]["masked_count"]
+    fresh = list(range(910_001, 910_011))
+    db.insert(
+        "s0",
+        new_papers(db, ids=fresh, x_offset=1.5),
+        columns={"id": "entity_id"},
+        x="x",
+        y="y",
+        access="categories",
+    )
+    db.insert(
+        "clusters/kmeans",
+        pa.table(
+            {
+                "entity_id": pa.array(fresh, pa.uint64()),
+                "cluster": pa.array([key] * len(fresh), pa.string()),
+            }
+        ),
+        columns={"id": "entity_id"},
+        key="cluster",
+    )
+    report = db.commit()
+    assert report.ok, report
+    assert report.memberships_joined == len(fresh)
+    after = browse(db, "s0", "clusters/kmeans", q=key)["artifacts"][0]["masked_count"]
+    assert after == before + len(fresh)
 
 
 # ---------------------------------------------------------------------------- values
 
 
+def joined(db) -> None:
+    """The frames' `id` column, a string, declared unique: every table names its rows' items
+    by it."""
+    db.declare_attribute("id", type="keyword", unique=True)
+
+
 def small(db) -> None:
-    """A database whose attribute reads a source of its own, so a delta on it fills values."""
-    db.stage(
-        "points",
+    """A database with one indexed column, so an insert into it fills values."""
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
+    db.declare_attribute("score", type="f64", index=True, render=False)
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
@@ -285,45 +429,140 @@ def small(db) -> None:
                 "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
             }
         ),
-        id="id",
-        default=True,
+        x="x",
+        y="y",
+        access="labels",
     )
-    db.stage(
-        "scores",
+    # The build reads `score` from this table, which holds a row for every item: a value on `p0`
+    # and nulls on the rest.
+    db.insert(
+        "score",
         pa.table(
             {
-                "id": pa.array(["p0"], pa.string()),
-                "score": pa.array([0.5], pa.float64()),
+                "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+                "score": pa.array([0.5] + [None] * 19, pa.float64()),
             }
         ),
-        id="id",
+        value="score",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
-    db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
 
 
-def test_a_values_delta_fills_an_indexed_attribute_and_a_filter_finds_it(served, corpus):
+def rows(ids, x0: float = 20.0, **columns) -> pa.Table:
+    """Points at `x0` onwards, labelled `public`, with `columns` beside them."""
+    n = len(ids)
+    return pa.table(
+        {
+            "id": pa.array(ids, pa.string()),
+            "x": pa.array([x0 + i for i in range(n)], pa.float64()),
+            "y": pa.array([1.0] * n, pa.float64()),
+            "labels": pa.array([["public"]] * n, pa.list_(pa.string())),
+            **columns,
+        }
+    )
+
+
+def test_a_later_insert_of_new_items_without_a_declared_column_creates_them_without_it(
+    served, corpus
+):
+    """The SDK adds no column: a frame of new items without `score` reaches the server as it
+    was given, and the items are created holding no value in it."""
+    db = served(small)
+    db.insert("map", rows(["s0", "s1"]), x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2}
+
+
+def test_a_column_declared_after_the_first_commit_travels_with_the_rows_that_carry_it(
+    served, corpus
+):
+    """A column declared at a running service is sent on a later points page whose frame carries
+    it, so the new items hold their values from the commit that adds them."""
+    db = served(small)
+    db.declare_attribute("rank", type="u32", index=True)
+    db.insert(
+        "map",
+        rows(["r0", "r1"], score=pa.nulls(2), rank=pa.array([3, 4], pa.uint32())),
+        x="x",
+        y="y",
+        access="labels",
+    )
+    report = db.commit()
+    assert report.ok, report
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0], filters={"rank": {"range": {"gte": 3}}})
+    assert answer["counts"]["matched"] == 2
+
+
+def two_views(db) -> None:
+    """[`small`], and a second view over the same items."""
+    small(db)
+    db.declare_view("atlas", extent={"x": [-5, 40], "y": [-5, 40]})
+    db.insert(
+        "atlas",
+        rows([f"p{i}" for i in range(20)], x0=0.0),
+        x="x",
+        y="y",
+        access="labels",
+    )
+
+
+def test_a_second_views_rows_carry_the_declared_columns_their_frame_holds(served, corpus):
+    """Every view's points page carries the declared columns its frame holds: a new item placed
+    in the second view first holds the `score` it was inserted with, and an item the first view's
+    page creates joins the second view with none."""
+    db = served(two_views)
+    db.insert("atlas", rows(["a0"], score=pa.array([7.5])), x="x", y="y", access="labels")
+    db.insert("map", rows(["b0"], score=pa.array([8.5])), x="x", y="y", access="labels")
+    db.insert("atlas", rows(["b0"]), x="x", y="y", access="labels")
+    report = db.commit()
+    assert report.ok, report
+    assert report.rows_accepted == {"atlas": 2, "map": 1}
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 7.0}}})
+    assert answer["counts"]["matched"] == 2
+
+
+def test_columns_maps_an_attribute_on_a_second_views_rows(served, corpus):
+    """After the first commit `columns=` maps a declared attribute to a column of any view's rows,
+    so a new item placed in the second view holds the value its renamed column carried."""
+    db = served(two_views)
+    db.insert(
+        "atlas",
+        rows(["m0"], points=pa.array([9.5])),
+        x="x",
+        y="y",
+        access="labels",
+        columns={"score": "points"},
+    )
+    report = db.commit()
+    assert report.ok, report
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    answer = viewport(db, "atlas", frame, filters={"score": {"range": {"gte": 9.0}}})
+    assert answer["counts"]["matched"] == 1
+
+
+def test_an_insert_into_an_attribute_fills_it_and_a_filter_finds_it(served, corpus):
     db = served(small)
     frame = [-5.0, -5.0, 40.0, 40.0]
     assert viewport(db, "map", frame, filters={"score": {"range": {"gte": 0.0, "lte": 10.0}}})["counts"][
         "matched"
     ] == 1
 
-    db.stage(
-        "scores",
+    db.insert(
+        "score",
         pa.table(
             {
                 "id": pa.array(["p1", "p2", "p3"], pa.string()),
                 "score": pa.array([1.5, 2.5, 3.5], pa.float64()),
             }
         ),
-        id="id",
+        value="score",
     )
     plan = db.check()
-    assert any("values on existing entities" in line for line in plan.plan), plan
+    assert any("values into 'score'" in line for line in plan.plan), plan
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == 3
+    assert report.items_edited == 3
 
     answer = viewport(db, "map", frame, filters={"score": {"range": {"gte": 0.0, "lte": 10.0}}})
     assert answer["counts"]["matched"] == 4
@@ -337,47 +576,110 @@ def test_a_values_cell_re_run_is_sent_again_and_lands_on_the_cells_it_landed_on(
     delta = pa.table(
         {"id": pa.array(["p4", "p5"], pa.string()), "score": pa.array([4.0, 5.0], pa.float64())}
     )
-    db.stage("scores", delta, id="id")
+    db.insert("score", delta, value="score")
     first = db.commit()
-    assert first.ok and first.values_filled == 2
+    assert first.ok and first.items_edited == 2
 
-    # The same frame staged again is sent again: a value that matches the cell it names is
+    # The same frame inserted again is sent again: a value that matches the cell it names is
     # accepted with no effect, which is the route's own dedupe rather than a log in the SDK.
-    db.stage("scores", delta, id="id")
+    db.insert("score", delta, value="score")
     again = db.commit()
     assert again.ok, again
-    assert again.values_filled == 0
+    assert again.items_edited == 0
 
-    # A changed value on a held cell is a `409` on that part, reported and not retried: an edit is
-    # a delete and a re-ingest (decision 0047), and the SDK does not do that for the user.
-    db.stage(
-        "scores",
-        pa.table(
-            {"id": pa.array(["p4"], pa.string()), "score": pa.array([9.0], pa.float64())},
-        ),
-        id="id",
+    # A changed value edits the item.
+    db.insert(
+        "score",
+        pa.table({"id": pa.array(["p4"], pa.string()), "score": pa.array([9.0], pa.float64())}),
+        value="score",
     )
-    conflicted = db.commit()
-    assert not conflicted.ok
-    assert [r["status"] for r in conflicted.refusals] == [409]
-    assert "score" in conflicted.refusals[0]["detail"]
-    # And the cell still holds what it held.
+    edited = db.commit()
+    assert edited.ok and edited.items_edited == 1, edited
     answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0],
                       filters={"score": {"range": {"gte": 8.0}}})
-    assert answer["counts"]["matched"] == 0
+    assert answer["counts"]["matched"] == 1
+
+
+def a_value_for_nobody_and_two_new_papers(db) -> None:
+    """A values table whose first row names no item, and two rows creating items."""
+    db.insert(
+        "score",
+        pa.table(
+            {"id": pa.array(["nobody", "p3"], pa.string()),
+             "score": pa.array([9.0, 3.0], pa.float64())}
+        ),
+        value="score",
+    )
+    db.insert(
+        "map",
+        pa.table(
+            {
+                "id": pa.array(["q0", "q1"], pa.string()),
+                "x": pa.array([1.5, 2.5], pa.float64()),
+                "y": pa.array([1.0, 1.0], pa.float64()),
+                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
+            }
+        ),
+        x="x",
+        y="y",
+        access="labels",
+    )
+
+
+def test_a_row_naming_no_item_is_left_out_and_counted_and_the_rest_of_the_commit_lands(
+    served, corpus
+):
+    """No item is named `nobody`, and a row without coordinates creates none: that row is
+    refused, the report names it by its row in the table inserted and counts it by reason, and
+    every other row lands."""
+    db = served(small)
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    before = viewport(db, "map", frame)["counts"]["visible"]
+    a_value_for_nobody_and_two_new_papers(db)
+    report = db.commit()
+    assert report.ok, report
+    assert report.refused == [
+        {"target": "score", "view": None, "row": 0, "reason": "names_no_item"}
+    ]
+    assert report.refused_by_reason == {"names_no_item": 1}
+    assert report.items_edited == 1 and report.rows_accepted == {"map": 2}
+    assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
+    scored = {"score": {"range": {"gte": 2.0, "lte": 4.0}}}
+    assert viewport(db, "map", frame, filters=scored)["counts"]["matched"] == 1
+
+
+def test_a_strict_commit_refuses_the_request_carrying_a_refused_row_and_serves_what_landed(
+    served, corpus
+):
+    """A commit some of whose pages landed has happened: it returns the report, which names the
+    page refused, and the rows that were accepted are served. Strict, the values page carrying the
+    row naming nobody is refused whole."""
+    db = served(small)
+    frame = [-5.0, -5.0, 40.0, 40.0]
+    before = viewport(db, "map", frame)["counts"]["visible"]
+    a_value_for_nobody_and_two_new_papers(db)
+    report = db.commit(strict=True)
+    assert not report.ok
+    assert [r["status"] for r in report.refusals] == [409]
+    assert report.refused == []
+    assert report.rows_accepted == {"map": 2}
+    assert viewport(db, "map", frame)["counts"]["visible"] == before + 2
+    scored = {"score": {"range": {"gte": 2.0, "lte": 4.0}}}
+    assert viewport(db, "map", frame, filters=scored)["counts"]["matched"] == 0
 
 
 def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
     """§6.2 step 5: the closing flush waits for the publication it arms, and a commit whose only
-    work was filling cells reaches it like any other (decision 0144)."""
+    work was setting values reaches it like any other."""
     db = served(small)
-    db.stage(
-        "scores",
+    db.insert(
+        "score",
         pa.table(
             {"id": pa.array(["p8", "p9"], pa.string()),
              "score": pa.array([8.0, 9.0], pa.float64())}
         ),
-        id="id",
+        value="score",
     )
     report = db.commit()
     assert report.ok, report
@@ -395,19 +697,26 @@ def test_a_values_only_commit_returns_with_its_effect_visible(served, corpus):
 def test_an_artifacts_only_commit_returns_with_its_effect_visible(served, corpus):
     """The same wait, for a commit whose only work was publishing artifacts."""
     db = served(clustering)
-    db.stage(
-        "cl",
-        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"], pa.string())}),
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c1"], pa.string())}
+        ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "clm",
-        pa.table(
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * 4, pa.uint32()),
                 "key": pa.array(["c1"] * 4, pa.string()),
                 "entity": pa.array([f"p{i}" for i in range(4)], pa.string()),
             }
         ),
+        columns={"id": "entity"},
+        key="key",
+        level="level",
     )
     report = db.commit()
     assert report.ok, report
@@ -420,17 +729,17 @@ def test_an_artifacts_only_commit_returns_with_its_effect_visible(served, corpus
 # ---------------------------------------------------------------------------- §6.5
 
 
-def test_remove_stops_a_row_being_served_and_a_removed_id_restages_as_a_point(served, corpus):
+def test_remove_stops_a_row_being_served_and_a_removed_id_is_inserted_as_a_point(served, corpus):
     db = notebook(served, corpus)
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
 
-    report = db.remove([7])
+    report = db.remove({"id": [7]})
     assert report.ok, report
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
 
-    # A removed id staged again goes as a point row, which decision 0047 allows.
-    db.stage("points", new_papers(db, ids=[7]))
+    # A deleted item names nothing, so its value inserted again creates a new item.
+    insert_the_new_papers(db, ids=[7])
     plan = db.check()
     assert any(line.startswith("points") for line in plan.plan), plan
     again = db.commit()
@@ -443,151 +752,123 @@ def test_suppress_hides_a_row_and_unsuppress_returns_it(served, corpus):
     db = notebook(served, corpus)
     frame = whole_frame(db)
     before = viewport(db, "s0", frame)["counts"]["visible"]
-    assert db.suppress([8]).ok
+    [held] = db.lookup("s0", "id", [8]).column("tessera_id").to_pylist()
+    assert db.suppress({"id": [8]}).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before - 1
-    assert db.unsuppress([8]).ok
+    # The same item, named by the `tessera_id` it was served under.
+    assert db.unsuppress([held]).ok
     assert viewport(db, "s0", frame)["counts"]["visible"] == before
 
 
 def test_leave_shrinks_a_generating_set_and_emptying_it_withdraws_the_content(served, corpus):
     """The one set that may shrink (decision 0135, §6.5), read back from what is served."""
     db = served(clustering)
-    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
-    db.stage("lb", label_rows())
-    db.stage("lbm", label_members(n=5))
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    db.insert(
+        "topics",
+        label_rows(),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
+    db.insert(
+        "topics", members=label_members(n=5), key="key", level="level", rank="rank",
+        columns={"id": "entity"},
+    )
     assert db.commit().ok
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    # Five members of its own, so five is what its row carries — never its cluster's twenty
+    # (owner ruling, 2026-09-18, which withdrew the copy).
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
-    # Three of the five leave: the content is served against the two that remain.
-    assert db.leave("topics", "l0", ["p0", "p1", "p2"], rank=0).ok
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    # Three of the five leave: the content is served against the two that remain. The generating
+    # set shrinks; the membership the count is taken over does not.
+    assert db.leave("topics", "l0", {"id": ["p0", "p1", "p2"]}, rank=0).ok
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
+
+    # A `None` names no item, as it does for `remove`: the row is refused and nothing leaves.
+    report = db.leave("topics", "l0", [None], rank=0)
+    assert report.accepted == 0 and report.refused == [{"row": 0, "reason": "names_no_item"}]
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
 
     # The page that empties the set withdraws the content, and it does not come back on its own.
-    assert db.leave("topics", "l0", ["p3", "p4"], rank=0).ok
+    # A column naming no item is not sent, and the report names it.
+    report = db.leave("topics", "l0", {"id": ["p3", "p4"], "note": ["a", "b"]}, rank=0)
+    assert report.ok and report.accepted == 2 and report.ignored_columns == ["note"], report
     assert not [row for row in artifact_rows_of(db) if row[0] == "topics" and row[2]]
 
 
 # ---------------------------------------------------------------------------- §6.3
 
 
-def test_a_row_outside_the_frame_refuses_the_commit_and_nothing_is_sent(served, corpus):
-    """§6.3: the pre-flight reports and sends nothing, and drops no row to send the rest."""
+def test_a_row_outside_the_frame_commits_on_the_frames_edge_and_is_reported(served, corpus):
+    """A row outside the view's frame is stored on its edge and counted as clamped."""
     db = served(small)
     before = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"]
-    db.stage(
-        "points",
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array(["far", "near"], pa.string()),
                 "x": pa.array([9_000.0, 3.5], pa.float64()),
                 "y": pa.array([0.0, 0.0], pa.float64()),
                 "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
+                "score": pa.nulls(2, pa.float64()),
             }
         ),
-        id="id",
+        x="x",
+        y="y",
+        access="labels",
     )
-    plan = db.check()
-    assert not plan.ok
-    assert any("outside view 'map''s frame" in str(f) for f in plan.findings), plan
+    assert db.check().ok
     report = db.commit()
-    assert not report.ok, report
-    assert report.rows_accepted == {} and not report.refusals
-    # Neither row was sent: the one inside the frame is not a commit the user staged on its own.
-    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before
-
-    # The remedy is the rows. With the far one moved inside, both go.
-    db.stage(
-        "points",
-        pa.table(
-            {
-                "id": pa.array(["far", "near"], pa.string()),
-                "x": pa.array([4.5, 3.5], pa.float64()),
-                "y": pa.array([0.0, 0.0], pa.float64()),
-                "labels": pa.array([["public"]] * 2, pa.list_(pa.string())),
-            }
-        ),
-        id="id",
-    )
-    again = db.commit()
-    assert again.ok, again
-    assert again.rows_accepted == {"map": 2}
+    assert report.ok, report
+    assert report.rows_accepted == {"map": 2} and report.clamped == 1
+    assert viewport(db, "map", [-5.0, -5.0, 40.0, 40.0])["counts"]["visible"] == before + 2
 
 
-def test_a_delta_carrying_one_coordinate_column_is_refused_naming_both(served, corpus):
-    """§6.2 step 2: a row with half a position is not a point, and no other route takes one."""
-    db = served(small)
-    db.stage(
-        "points",
-        pa.table(
-            {
-                "id": pa.array(["p10"], pa.string()),
-                "x": pa.array([3.0], pa.float64()),
-                "labels": pa.array([["public"]], pa.list_(pa.string())),
-            }
-        ),
-        id="id",
-    )
-    plan = db.check()
-    assert not plan.ok
-    assert any("coordinate column" in str(f) and "'y'" in str(f) for f in plan.findings), plan
-    assert plan.plan == []
+def test_a_rendered_column_set_after_the_first_commit_edits_the_item(served, corpus):
+    """A rendered value set on an item the database holds edits the item, which is drawn with it."""
 
-
-def test_a_rendered_column_on_a_values_delta_refuses_the_commit(served, corpus):
-    """§6.3: the route refuses a rendered column, and the SDK does not send the delta without it."""
     def with_a_rendered_score(db) -> None:
-        db.stage(
-            "points",
+        db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+        joined(db)
+        db.declare_attribute("note", type="f64", render=True)
+        db.insert(
+            "map",
             pa.table(
                 {
                     "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
                     "x": pa.array([float(i) for i in range(20)], pa.float64()),
                     "y": pa.array([0.0] * 20, pa.float64()),
                     "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+                    "note": pa.array([0.5] * 20, pa.float64()),
                 }
             ),
-            id="id",
-            default=True,
+            x="x",
+            y="y",
+            access="labels",
         )
-        db.stage(
-            "scores",
-            pa.table(
-                {
-                    "id": pa.array(["p0"], pa.string()),
-                    "score": pa.array([0.5], pa.float64()),
-                    "note": pa.array([0.5], pa.float64()),
-                }
-            ),
-            id="id",
-        )
-        db.declare_view(
-            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
-        )
-        db.declare_attribute("score", type="f64", source="scores", index=True, render=False)
-        db.declare_attribute("note", type="f64", source="scores", render=True)
 
     db = served(with_a_rendered_score)
-    db.stage(
-        "scores",
-        pa.table(
-            {
-                "id": pa.array(["p1"], pa.string()),
-                "score": pa.array([1.0], pa.float64()),
-                "note": pa.array([1.0], pa.float64()),
-            }
-        ),
-        id="id",
+    db.insert(
+        "note",
+        pa.table({"id": pa.array(["p1"], pa.string()), "note": pa.array([1.0], pa.float64())}),
+        value="note",
     )
-    plan = db.check()
-    assert not plan.ok
-    assert any("rendered column" in str(f) for f in plan.findings), plan
-    assert plan.plan == []
+    report = db.commit()
+    assert report.ok, report
+    assert report.items_edited == 1, report
+    answer = viewport(db, "map", [-5.0, -5.0, 40.0, 40.0], filters={"note": {"range": {"gte": 0.9}}})
+    assert answer["counts"]["matched"] == 1
 
 
-def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
+def test_a_column_no_target_reads_is_ignored_and_reported_as_ignored(served, corpus):
+    """§3: a frame with more columns than the target reads is the ordinary case."""
     db = served(small)
-    db.stage(
-        "scores",
+    insert = db.insert(
+        "score",
         pa.table(
             {
                 "id": pa.array(["p6"], pa.string()),
@@ -595,33 +876,21 @@ def test_the_pre_flight_refuses_a_column_no_block_declares(served, corpus):
                 "sentiment": pa.array([0.1], pa.float64()),
             }
         ),
-        id="id",
+        value="score",
     )
-    with pytest.raises(Refusal, match="sentiment"):
-        db.check()
+    assert insert.ignored == ["sentiment"]
+    report = db.commit()
+    assert report.ok, report
+    assert report.items_edited == 1
 
 
-def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(served, corpus):
-    """§6.3: ordered after the clustering's pages, or refused where none are staged."""
+def test_a_labels_insert_whose_clustering_is_neither_held_nor_inserted_is_refused(served, corpus):
+    """§6.3: ordered after the clustering's pages, or refused where none are inserted."""
     db = served(small)
-    db.declare_layer("clusters/new", kind="flat", source="cl2", members="clm2")
-    empty = pa.table(
-        {"level": pa.array([], pa.uint32()), "key": pa.array([], pa.string())}
-    )
-    db.stage("cl2", empty)
-    db.stage(
-        "clm2",
-        pa.table(
-            {
-                "level": pa.array([], pa.uint32()),
-                "key": pa.array([], pa.string()),
-                "entity": pa.array([], pa.string()),
-            }
-        ),
-    )
-    db.declare_labels("topics/new", of="clusters/new", source="lb2", content_requires="inherited")
-    db.stage(
-        "lb2",
+    db.declare_layer("clusters/new", kind="flat")
+    db.declare_labels("topics/new", of="clusters/new", content_requires="all")
+    db.insert(
+        "topics/new",
         pa.table(
             {
                 "level": pa.array([0], pa.uint32()),
@@ -631,57 +900,55 @@ def test_a_labels_delta_whose_clustering_is_neither_held_nor_staged_is_refused(s
                 "attached_key": pa.array(["never-published"], pa.string()),
             }
         ),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
+    db.insert(
+        "topics/new",
+        members=pa.table(
+            {
+                "key": pa.array(["orphan"], pa.string()),
+                "entity": pa.array(["p0"], pa.string()),
+            }
+        ),
+        columns={"id": "entity"},
+        key="key",
     )
     plan = db.check()
     assert not plan.ok
-    assert any("labels delta before its clustering" in str(f) for f in plan.findings), plan
+    assert any("labels insert before its clustering" in str(f) for f in plan.findings), plan
 
 
-def test_a_key_column_staged_for_a_layer_with_supplied_content_is_refused(served, corpus):
+def test_a_key_column_inserted_into_a_layer_with_supplied_content_is_refused(tmp_path, corpus):
     """§6.3: an artifact served without content its layer declares cannot be told from one whose
     content was withheld, so such a layer takes an artifacts table."""
+    from tesseradb._database import create
 
-    def with_a_supplied_layer(db) -> None:
-        db.stage(
-            "points",
-            pa.table(
-                {
-                    "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
-                    "x": pa.array([float(i) for i in range(20)], pa.float64()),
-                    "y": pa.array([0.0] * 20, pa.float64()),
-                    "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
-                    "topic": pa.array(["t"] * 20, pa.string()),
-                }
-            ),
-            id="id",
-            default=True,
-        )
-        db.declare_view(
-            "map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]}
-        )
-        db.declare_layer(
-            "topics/inline",
-            kind="flat",
-            from_column="topic",
-            supplied=[("topic", "text", "inherited")],
-        )
-
-    db = served(with_a_supplied_layer)
-    db.stage(
-        "points",
-        pa.table(
-            {
-                "id": pa.array(["p7"], pa.string()),
-                "x": pa.array([7.0], pa.float64()),
-                "y": pa.array([0.0], pa.float64()),
-                "labels": pa.array([["public"]], pa.list_(pa.string())),
-                "topic": pa.array(["t"], pa.string()),
-            }
-        ),
-        id="id",
+    db = create(tmp_path / "db")
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
+    db.declare_layer(
+        "topics/inline", kind="flat", supplied=[("topic", "text", "inherited")]
     )
-    with pytest.raises(Refusal, match="artifacts table"):
-        db.check()
+    points = pa.table(
+        {
+            "id": pa.array([f"p{i}" for i in range(20)], pa.string()),
+            "x": pa.array([float(i) for i in range(20)], pa.float64()),
+            "y": pa.array([0.0] * 20, pa.float64()),
+            "labels": pa.array([["public"]] * 20, pa.list_(pa.string())),
+            "topic": pa.array(["t"] * 20, pa.string()),
+        }
+    )
+    db.insert("map", points, x="x", y="y", access="labels")
+    db.insert("topics/inline", points, key="topic")
+    report = db.check()
+    assert not report.ok
+    assert any("supplied content" in str(f) for f in report.findings), report
+    with pytest.raises(Refusal):
+        db.commit()
 
 
 # ---------------------------------------------------------------------------- declared after the
@@ -691,8 +958,11 @@ def test_a_key_column_staged_for_a_layer_with_supplied_content_is_refused(served
 def clustering(db) -> None:
     """A small database with one clustering, so a label set can be declared over it later."""
     n = 20
-    db.stage(
-        "points",
+    db.declare_view("map", extent={"x": [-5, 40], "y": [-5, 40]})
+    joined(db)
+    db.declare_layer("clusters", kind="flat")
+    db.insert(
+        "map",
         pa.table(
             {
                 "id": pa.array([f"p{i}" for i in range(n)], pa.string()),
@@ -701,25 +971,31 @@ def clustering(db) -> None:
                 "labels": pa.array([["public"]] * n, pa.list_(pa.string())),
             }
         ),
-        id="id",
-        default=True,
+        x="x",
+        y="y",
+        access="labels",
     )
-    db.stage(
-        "cl",
-        pa.table({"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}),
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+        ),
+        key="key",
+        level="level",
     )
-    db.stage(
-        "clm",
-        pa.table(
+    db.insert(
+        "clusters",
+        members=pa.table(
             {
                 "level": pa.array([0] * n, pa.uint32()),
                 "key": pa.array(["c0"] * n, pa.string()),
                 "entity": pa.array([f"p{i}" for i in range(n)], pa.string()),
             }
         ),
+        columns={"id": "entity"},
+        key="key",
+        level="level",
     )
-    db.declare_view("map", source="points", access="labels", extent={"x": [-5, 40], "y": [-5, 40]})
-    db.declare_layer("clusters", kind="flat", source="cl", members="clm")
 
 
 def label_rows(key: str = "l0", text: str = "A generated label") -> pa.Table:
@@ -748,7 +1024,7 @@ def label_members(key: str = "l0", n: int = 5, ranked: bool = True) -> pa.Table:
     )
 
 
-def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
+def artifact_rows_of(db, view: str = "map", frame=None, terms=None) -> list[tuple]:
     """The kind-5 artifacts frame of a whole-extent viewport: layer, key, content, masked count."""
     import io
 
@@ -759,7 +1035,7 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
     content = post(
         db.viewer_url + "/v1/viewport",
-        db.token().token,
+        db.token(terms).token,
         {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
     )
     at = 0
@@ -782,12 +1058,152 @@ def artifact_rows_of(db, view: str = "map", frame=None) -> list[tuple]:
     return rows
 
 
+def artifact_targets_of(db, view: str = "map", frame=None) -> dict[tuple[str, str], tuple[int, int | None]]:
+    """`(layer, key) -> (tessera_id, target)` from the same frame.
+
+    `target` is the identifier of the artifact a row is attached to, as this same response served
+    it, and `None` for a row attached to nothing (owner ruling, 2026-09-18). It is how a client
+    joins a label to its cluster; the masked count beside it is the label's own and says nothing
+    about which cluster it describes.
+    """
+    import io
+
+    import pyarrow.ipc as ipc
+
+    from conftest import post
+
+    box = [-5.0, -5.0, 40.0, 40.0] if frame is None else list(frame)
+    content = post(
+        db.viewer_url + "/v1/viewport",
+        db.token().token,
+        {"view": view, "zoom": 0, "bbox": box, "k": 16, "layers": "all"},
+    )
+    at = 0
+    out: dict[tuple[str, str], tuple[int, int | None]] = {}
+    while at + 5 <= len(content):
+        kind = content[at]
+        length = int.from_bytes(content[at + 1 : at + 5], "little")
+        payload = content[at + 5 : at + 5 + length]
+        at += 5 + length
+        if kind == 5:
+            table = ipc.open_stream(io.BytesIO(payload)).read_all().to_pydict()
+            for layer, key, tessera_id, target in zip(
+                table["layer"], table["key"], table["tessera_id"], table["target"]
+            ):
+                out[(layer, key)] = (tessera_id, target)
+    return out
+
+
+def test_one_members_insert_means_the_same_at_the_first_commit_and_at_the_second(served, corpus):
+    """§3: what the call named is what both doors read, so the same table is the same membership.
+
+    The same `(level, key, rank, entity)` table is inserted into one layer at the first commit and
+    into another at a later one, with the same column names on the call. The masked counts the two
+    layers serve are equal: the build and the publication route read the columns the call named
+    and nothing else.
+    """
+    n = 20
+    table = pa.table(
+        {
+            "level": pa.array([0] * n, pa.uint32()),
+            "key": pa.array(["c0"] * n, pa.string()),
+            "rank": pa.array([None] * n, pa.uint32()),
+            "entity": pa.array([f"p{i}" for i in range(n)], pa.string()),
+        }
+    )
+
+    def declare(db):
+        clustering(db)
+        db.declare_layer("at_build", kind="flat")
+        db.insert(
+            "at_build",
+            artifacts=pa.table(
+                {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+            ),
+            key="key",
+            level="level",
+        )
+        db.insert("at_build", members=table, key="key", level="level", rank="rank",
+                  columns={"id": "entity"})
+
+    db = served(declare)
+    db.declare_layer("at_ingest", kind="flat")
+    db.insert(
+        "at_ingest",
+        artifacts=pa.table(
+            {"level": pa.array([0], pa.uint32()), "key": pa.array(["c0"], pa.string())}
+        ),
+        key="key",
+        level="level",
+    )
+    db.insert("at_ingest", members=table, key="key", level="level", rank="rank",
+              columns={"id": "entity"})
+    report = db.commit()
+    assert report.ok, report
+
+    built = {row["key"]: row["masked_count"] for row in browse(db, "map", "at_build")["artifacts"]}
+    ingested = {
+        row["key"]: row["masked_count"] for row in browse(db, "map", "at_ingest")["artifacts"]
+    }
+    assert built == ingested == {"c0": n}
+
+
+def test_a_label_attached_to_a_cluster_minted_in_the_same_commit_is_served(served, corpus):
+    """§6.2 step 4: a publication naming a key step 3 mints waits for the mint to be visible.
+
+    The clustering is one key column, which the values route mints the artifact from; the label
+    attaches to that key in the same commit, and a minted artifact is resolvable only from its
+    publication, so the commit flushes between the two. The label carries no members of its own
+    and is served over the cluster's (decision 0145).
+    """
+    db = served(clustering)
+    keys = pa.table(
+        {
+            "id": pa.array([f"p{i}" for i in range(8)], pa.string()),
+            "cluster": pa.array(["c-new"] * 8, pa.string()),
+        }
+    )
+    db.declare_layer("clusters/fresh", kind="flat", title="Minted here")
+    db.declare_labels("topics/fresh", of="clusters/fresh")
+    db.insert("clusters/fresh", keys, key="cluster")
+    db.insert("topics/fresh", {"c-new": "A cluster minted at the values route"})
+
+    plan = db.check()
+    assert plan.ok, plan
+    lines = plan.plan
+    values_at = next(i for i, line in enumerate(lines) if line.startswith("values into"))
+    flush_at = next(i for i, line in enumerate(lines) if line.startswith("flush the values"))
+    publish_at = next(i for i, line in enumerate(lines) if line.startswith("publish"))
+    assert values_at < flush_at < publish_at, lines
+
+    report = db.commit()
+    assert report.ok, report
+    # One artifact minted by the values page, and one published by the labels page.
+    assert report.artifacts_minted == 2
+    rows = {(row[0], row[1]): row for row in artifact_rows_of(db)}
+    assert rows[("clusters/fresh", "c-new")][3] == 8
+    # The label is served with its text, over the members its cluster holds and none of its own.
+    assert rows[("topics/fresh", "c-new")][2] == ["A cluster minted at the values route"]
+    assert rows[("topics/fresh", "c-new")][3] == 8
+
+
 def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(served, corpus):
     """§6.2 step 1: the runtime `PUT` body comes from `tessera check --payloads`."""
     db = served(clustering)
-    db.declare_labels("topics", of="clusters", source="lb", members="lbm", content_requires="all")
-    db.stage("lb", label_rows())
-    db.stage("lbm", label_members())
+    db.declare_labels("topics", of="clusters", content_requires="all")
+    db.insert(
+        "topics",
+        label_rows(),
+        key="key",
+        level="level",
+        contents="contents",
+        attached_layer="attached_layer",
+        attached_key="attached_key",
+    )
+    db.insert(
+        "topics", members=label_members(), key="key", level="level", rank="rank",
+        columns={"id": "entity"},
+    )
 
     plan = db.check()
     assert plan.plan[0] == "declare layer 'topics' (flat)", plan
@@ -797,46 +1213,56 @@ def test_a_label_set_declared_after_the_first_commit_is_declared_and_served(serv
     # The database is what says the layer is there, and the next commit reads it from there.
     assert "topics" in {layer["name"] for layer in db.meta()["layers"]}
 
-    assert ("topics", "l0", ["A generated label"], 20) in artifact_rows_of(db)
+    # The label's own five, and its cluster named by identifier rather than by a shared number
+    # (owner ruling, 2026-09-18).
+    assert ("topics", "l0", ["A generated label"], 5) in artifact_rows_of(db)
+    targets = artifact_targets_of(db)
+    assert targets[("topics", "l0")][1] == targets[("clusters", "c0")][0]
+    assert targets[("clusters", "c0")][1] is None
 
 
 def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, corpus):
     """§4.7's mapping form, through the build and out of the viewport.
 
-    `source={key: text}` is an artifacts table the SDK writes, and each row carries the attachment
-    as well as the text: a label set expands to a layer that depends on its clustering, so every
-    artifact it publishes attaches to one and a row naming none is refused at the build. The key
-    the mapping gives is the cluster's, which is what the label hangs from and what names the
-    label's own artifact.
+    `insert(labels, {key: text})` is an artifacts table the SDK writes, and each row carries the
+    attachment as well as the text: a label set expands to a layer that depends on its clustering,
+    so every artifact it publishes attaches to one and a row naming none is refused at the build.
+    The key the mapping gives is the cluster's, which is what the label hangs from and what names
+    the label's own artifact.
     """
     held = list(range(1, 200))
     keys = ["c2-a"] * 100 + ["c2-b"] * (len(held) - 100)
 
     def declare(db):
         declare_notebook(db, corpus)
-        db.stage(
-            "second",
-            pa.table({"level": pa.array([0, 0], pa.uint32()),
-                      "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+        db.declare_layer("clusters/second", kind="flat")
+        db.declare_labels("topics/second", of="clusters/second", content_requires="all")
+        db.insert(
+            "clusters/second",
+            artifacts=pa.table({"level": pa.array([0, 0], pa.uint32()),
+                                "key": pa.array(["c2-a", "c2-b"], pa.string())}),
+            key="key",
+            level="level",
         )
-        db.stage(
-            "second_members",
-            pa.table(
+        db.insert(
+            "clusters/second",
+            members=pa.table(
                 {
                     "level": pa.array([0] * len(held), pa.uint32()),
                     "key": pa.array(keys, pa.string()),
                     "entity": pa.array(held, pa.uint64()),
                 }
             ),
+            columns={"id": "entity"},
+            key="key",
+            level="level",
         )
-        db.declare_layer(
-            "clusters/second", kind="flat", source="second", members="second_members"
-        )
+        db.insert("topics/second", {"c2-a": "Audio diffusion", "c2-b": "Graph learning"})
         # Both grains, as any label's member table carries them: a null rank is the membership the
         # label is drawn over, and rank 0 is content 0's generating set.
-        db.stage(
-            "topic_members",
-            pa.table(
+        db.insert(
+            "topics/second",
+            members=pa.table(
                 {
                     "level": pa.array([0] * (2 * len(held)), pa.uint32()),
                     "key": pa.array(keys + keys, pa.string()),
@@ -844,17 +1270,16 @@ def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, c
                     "entity": pa.array(held + held, pa.uint64()),
                 }
             ),
-        )
-        db.declare_labels(
-            "topics/second",
-            of="clusters/second",
-            source={"c2-a": "Audio diffusion", "c2-b": "Graph learning"},
-            members="topic_members",
+            columns={"id": "entity"},
+            key="key",
+            level="level",
+            rank="rank",
         )
 
     db = served(declare)
     # The table the mapping was written to: the text, and where each row attaches.
-    table = pq.read_table(db.sources["topics_second"].path)
+    written = next(one for one in db.inserts if one.target == "topics/second" and one.role == "text")
+    table = pq.read_table(written.path)
     assert table.column_names == ["level", "key", "contents", "attached_layer", "attached_key"]
     assert table["attached_layer"].to_pylist() == ["clusters/second"] * 2
     assert table["attached_key"].to_pylist() == ["c2-a", "c2-b"]
@@ -862,3 +1287,271 @@ def test_a_label_set_from_a_mapping_builds_and_is_served_with_its_text(served, c
     rows = artifact_rows_of(db, view="s0", frame=whole_frame(db))
     served_text = {key: content for layer, key, content, _ in rows if layer == "topics/second"}
     assert served_text == {"c2-a": ["Audio diffusion"], "c2-b": ["Graph learning"]}
+
+
+def test_a_memberless_attached_record_omits_members_and_an_unattached_one_sends_the_empty_list():
+    """A label with no members of its own carries no `members` field (decision 0145).
+
+    The route stopped requiring one on an attached record, and the empty list the SDK used to send
+    said the same thing. Omitting it is what the mapping form — a cluster key to a line of text —
+    actually means, and an unattached record still names its membership or is refused.
+    """
+    import json
+
+    from tesseradb._commit import _artifact_block
+
+    label = {
+        "key": "t0",
+        "attached": {"layer": "clusters", "key": "c0", "level": 0},
+        "content": [["Ward A"]],
+    }
+    body, remainders, count = _artifact_block(label, 4096, ["paper"])
+    record = json.loads(body)
+    assert "members" not in record, record
+    assert record["attached_to"] == {"layer": "clusters", "key": "c0", "level": 0}
+    assert remainders == [] and count == 0
+
+    # An attached record that does name members keeps them: they are the generating set the caller
+    # claimed, and the predicate is a state rather than a flag.
+    held = dict(label, members=[{"paper": "p0"}])
+    assert json.loads(_artifact_block(held, 4096, ["paper"])[0])["members"] == {"paper": ["p0"]}
+
+    # A record attaching to nothing has no membership to borrow, so the empty table still travels.
+    empty = json.loads(_artifact_block({"key": "c0"}, 4096, ["paper"])[0])["members"]
+    assert empty == {"paper": []}
+
+
+def labelled_teams(db) -> None:
+    """Two teams over the clustering's twenty points, one labelled `red` and one unlabelled."""
+    db.declare_layer("teams", kind="flat")
+    insert_teams(db)
+
+
+def insert_teams(db) -> None:
+    db.insert(
+        "teams",
+        artifacts=pa.table(
+            {
+                "key": pa.array(["red-team", "open-team"], pa.string()),
+                "team": pa.array([["red"], None], pa.list_(pa.string())),
+            }
+        ),
+        key="key",
+        access="team",
+    )
+    db.insert(
+        "teams",
+        members=pa.table(
+            {
+                "key": pa.array(["red-team"] * 5 + ["open-team"] * 5, pa.string()),
+                "entity": pa.array([f"p{i}" for i in range(10)], pa.string()),
+            }
+        ),
+        columns={"id": "entity"},
+        key="key",
+    )
+
+
+def teams_seen(db, terms) -> list[str]:
+    return sorted(row[1] for row in artifact_rows_of(db, terms=terms) if row[0] == "teams")
+
+
+def test_an_artifacts_own_label_withholds_it_from_a_viewer_without_it_at_either_door(
+    served, corpus
+):
+    """`access=` on an artifacts insert: read by the build before the first commit and sent with
+    each record after it, and served to a viewer holding the label and no other."""
+    def built(db):
+        clustering(db)
+        labelled_teams(db)
+
+    for db in (served(built), served(clustering)):
+        if "teams" not in [row[0] for row in artifact_rows_of(db)]:
+            labelled_teams(db)
+            assert db.commit().ok
+        assert teams_seen(db, ["public"]) == ["open-team"]
+        assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+
+def test_a_layer_declared_with_its_label_column_takes_labels_after_an_empty_commit(
+    served, corpus
+):
+    """A layer whose label column is declared can be committed empty and given labelled
+    artifacts later. An insert naming another column is refused before anything is sent."""
+    def declare(db):
+        clustering(db)
+        db.declare_layer(
+            "teams", kind="flat", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+
+    db = served(declare)
+    assert "teams" not in [row[0] for row in artifact_rows_of(db)]
+    insert_teams(db)
+    assert db.commit().ok
+    assert teams_seen(db, ["public"]) == ["open-team"]
+    assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+    squad = pa.table(
+        {"key": pa.array(["blue-team"], pa.string()), "squad": pa.array([["blue"]], pa.list_(pa.string()))}
+    )
+    with pytest.raises(Refusal):
+        db.insert("teams", artifacts=squad, key="key", access="squad")
+    assert db.check().ok
+
+
+def test_an_artifacts_insert_naming_no_label_column_is_refused_before_and_after_the_first_commit(
+    served, corpus
+):
+    """On a layer that reads labels, whether its column was declared or sent by a commit, an
+    artifacts insert without `access=` is refused before the first commit and after it, and
+    nothing reaches the server."""
+    unlabelled = pa.table({"key": pa.array(["blue-team"], pa.string())})
+
+    def declared(db):
+        clustering(db)
+        db.declare_layer(
+            "teams", kind="flat", artifact_visibility={"field": "team", "default": "inherited"}
+        )
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+
+    def labelled(db):
+        clustering(db)
+        labelled_teams(db)
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+
+    for db, served_before in ((served(declared), []), (served(labelled), ["open-team"])):
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=unlabelled, key="key")
+        assert db.commit().ok
+        assert teams_seen(db, ["public"]) == served_before
+
+
+def test_a_key_or_members_insert_creating_an_unlabelled_artifact_is_refused(served, corpus):
+    """On a layer that reads labels, a `key=` or `members=` insert naming a key no artifacts insert
+    declares would create an artifact with no labels: refused at the insert before the first
+    commit and by the server after it. Members joining an artifact that exists are taken."""
+    stray_members = pa.table({"key": ["blue-team"], "entity": ["p0"]})
+    stray_keys = pa.table({"id": ["p1"], "cluster": ["blue-team"]})
+
+    def declared(db):
+        clustering(db)
+        db.declare_layer(
+            "teams",
+            kind="flat",
+            value_set="open",
+            artifact_visibility={"field": "team", "default": "inherited"},
+        )
+        insert_teams(db)
+        with pytest.raises(Refusal):
+            db.insert("teams", members=stray_members, columns={"id": "entity"}, key="key")
+        with pytest.raises(Refusal):
+            db.insert("teams", stray_keys, key="cluster")
+
+    db = served(declared)
+    for insert in (
+        lambda: db.insert("teams", members=stray_members, columns={"id": "entity"}, key="key"),
+        lambda: db.insert("teams", stray_keys, key="cluster"),
+    ):
+        insert()
+        with pytest.raises(Refusal):
+            db.commit()
+    assert teams_seen(db, ["public", "red"]) == ["open-team", "red-team"]
+
+    db.insert("teams", members=pa.table({"key": ["open-team"], "entity": ["p15"]}),
+              columns={"id": "entity"},
+              key="key")
+    assert db.commit().ok
+
+
+def test_the_label_column_a_commit_sent_is_the_one_every_later_insert_names(served, corpus):
+    """Whichever commit first sends a layer's label column, from a build or a later declaration,
+    the local declaration records it and an insert naming another column is refused."""
+    import tomllib
+
+    def built(db):
+        clustering(db)
+        labelled_teams(db)
+
+    squad = pa.table(
+        {"key": pa.array(["blue-team"], pa.string()), "squad": pa.array([["blue"]], pa.list_(pa.string()))}
+    )
+    for db in (served(built), served(clustering)):
+        if "teams" not in [row[0] for row in artifact_rows_of(db)]:
+            labelled_teams(db)
+            assert db.commit().ok
+        layer = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "teams")
+        assert layer["artifact_visibility"]["field"] == "team"
+        with pytest.raises(Refusal):
+            db.insert("teams", artifacts=squad, key="key", access="squad")
+
+
+def test_a_growth_page_names_the_view_of_a_group_scoped_artifact():
+    """A growth on a layer scoped to a group says which view's artifact it grows."""
+    import json
+
+    member = [{"paper": "p0"}]
+    body = json.loads(commit_module.patch_body(0, "c1", ["paper"], joining=member, view="q2"))
+    assert body["artifacts"][0]["view"] == "q2"
+    body = json.loads(commit_module.patch_body(0, "c1", ["paper"], joining=member))
+    assert "view" not in body["artifacts"][0]
+
+
+def test_a_labelled_insert_into_a_held_layer_leaves_the_declaration_and_the_route_answers(
+    served, corpus
+):
+    """After the first commit a layer the server holds is the server's: labels sent into one whose
+    declaration names no label field are refused by the route, and the local declaration is not
+    changed to pretend otherwise."""
+    import tomllib
+
+    db = served(clustering)
+    before = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    db.insert(
+        "clusters",
+        artifacts=pa.table(
+            {"key": pa.array(["c9"], pa.string()), "team": pa.array([["red"]], pa.list_(pa.string()))}
+        ),
+        key="key",
+        access="team",
+    )
+    after = next(one for one in tomllib.loads(db.declaration)["layer"] if one["name"] == "clusters")
+    assert after == before
+    with pytest.raises(Refusal):
+        db.commit()
+    assert "c9" not in [row[1] for row in artifact_rows_of(db)]
+
+
+def test_the_databases_own_viewer_holds_a_layers_named_default(served, corpus):
+    """`viewer()` and `token()` with no terms hold every label the database was given, a layer's
+    named default among them, so an artifact taking that default is served to its own principal."""
+    def declare(db):
+        clustering(db)
+        db.declare_layer("teams", kind="flat", artifact_visibility="red")
+        db.insert(
+            "teams",
+            artifacts=pa.table(
+                {
+                    "key": pa.array(["bare"], pa.string()),
+                    "team": pa.array([None], pa.list_(pa.string())),
+                }
+            ),
+            key="key",
+            access="team",
+        )
+        db.insert(
+            "teams",
+            members=pa.table(
+                {
+                    "key": pa.array(["bare"] * 5, pa.string()),
+                    "entity": pa.array([f"p{i}" for i in range(5)], pa.string()),
+                }
+            ),
+            columns={"id": "entity"},
+            key="key",
+        )
+
+    db = served(declare)
+    assert "bare" in teams_seen(db, None)
+    assert "bare" not in teams_seen(db, ["public"])

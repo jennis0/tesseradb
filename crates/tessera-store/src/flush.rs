@@ -1,9 +1,10 @@
-//! What a flush writes into an existing bundle (§3.1).
+//! What a flush writes into an existing bundle.
 //!
-//! Per segment: `morton.u32`, `columns.arrow`, an `external-ids.arrow` extent and an
-//! `ext-locator.u32` extent, plus the descriptor, the row-space extent and the digests the new
-//! `SEGMENTS-<n+1>.json` names them by. **Never `MANIFEST.json`, never `CURRENT`** — a flush
-//! publishes inside the current prefix, which is what separates it from a compaction.
+//! Per segment: `morton.u32`, `columns.arrow`, the render columns' presence and the edited rows,
+//! plus the descriptor, the row-space extent and the digests the new `SEGMENTS-<n+1>.json` names
+//! them by. A flush
+//! never writes `MANIFEST.json` or `CURRENT`: it publishes inside the current prefix, which is
+//! what separates it from a compaction.
 //!
 //! ## What is deliberately not here
 //!
@@ -33,13 +34,13 @@ use sha2::{Digest, Sha256};
 
 use tessera_spatial::fixed32;
 use tessera_spatial::tiler::{sort_batch, ScalarType, ScalarValue, TilerItem};
-use tessera_types::{EntityId, IdentityKey, TesseraId, ROW_ABSENT};
+use tessera_types::{EntityId, IdentityKey, TesseraId};
 
 use crate::error::{Result, StoreError};
-use crate::manifest::{FileDigest, LocatorExtent, Quantisation, SegmentDescriptor};
+use crate::manifest::{FileDigest, Quantisation, SegmentDescriptor};
 use crate::permutation::SegmentExtent;
 use crate::render_presence::{render_presence_path, RenderPresence, RENDER_PRESENCE_DIR};
-use crate::write::{write_segment, RunWriter};
+use crate::write::write_segment;
 
 /// One item a flush is about to give geometry to.
 ///
@@ -55,9 +56,9 @@ use crate::write::{write_segment, RunWriter};
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
-    /// `None` for an item ingested without one (contracts §3.4 r6): addressable only by its
-    /// `tessera_id`, present in no external-id extent, and given the locator's absent sentinel.
-    pub external_id: Option<Vec<u8>>,
+    /// The item's number, which its `tessera_id` is taken from: `entity_id` for an item never
+    /// edited, and the entity it was first given for one an edit moved ([`crate::edited`]).
+    pub number: EntityId,
     pub x: f64,
     pub y: f64,
     /// One value per **render** column, in declared order. [`ScalarValue::Null`] is a legal member
@@ -73,9 +74,8 @@ pub struct FlushInput<'a> {
     /// The incarnation of the view this segment is written into (decision 0115), stamped into the
     /// descriptor so that a key created again cannot adopt it.
     pub incarnation: tessera_types::view::ViewIncarnation,
-    /// **Ascending by `entity_id`, with deleted entities already removed** (§3.5: a deletion's ID
-    /// stays burned and no row is created for it). Contiguity is I9's doing — ids are issued
-    /// monotonically from the high-water — and it is what makes the extent dense.
+    /// **Ascending by `entity_id`, with deleted entities already removed**: no row is created for
+    /// a deleted entity.
     pub rows: Vec<FlushRow>,
     pub quantisation: Quantisation,
     pub identity_key: &'a IdentityKey,
@@ -83,6 +83,9 @@ pub struct FlushInput<'a> {
     pub scalar_schema: &'a [(String, ScalarType)],
     /// Where this segment's rows begin in the view's row space — the view's current total.
     pub row_base: u32,
+    /// The view's [`crate::permutation::RowSpace::entity_floor`]: the rows of entities below it
+    /// are listed in the extent rather than given its dense span.
+    pub entity_floor: u64,
 }
 
 /// What a flush produced, for the caller to name in `SEGMENTS-<n+1>.json` and hand to
@@ -91,9 +94,6 @@ pub struct FlushInput<'a> {
 pub struct FlushOutput {
     pub segment: SegmentDescriptor,
     pub extent: SegmentExtent,
-    /// Prefix-relative path of the forward (external_id → entity) extent.
-    pub external_id_run: String,
-    pub locator_extent: LocatorExtent,
     /// Every file written, prefix-relative, for the manifest's `files` map.
     pub files: BTreeMap<String, FileDigest>,
     /// `entity_hi + 1` — see this module's doc.
@@ -104,7 +104,7 @@ pub struct FlushOutput {
 /// Write one flush segment under `prefix_dir`, for `(partition, view)`.
 ///
 /// Returns without fsyncing the directory: the caller's commit point is the side-manifest, and it
-/// is responsible for making every file here durable **before** writing it (§7.3).
+/// is responsible for making every file here durable before writing it.
 pub fn write_flush_segment(
     prefix_dir: &Path,
     partition: &str,
@@ -122,20 +122,16 @@ pub fn write_flush_segment(
         .all(|w| w[0].entity_id < w[1].entity_id)
     {
         return Err(StoreError::MalformedBundle {
-            detail: "write_flush_segment: rows must be strictly ascending by entity id (I9's \
-                     monotone allocation is what makes the extent dense)"
+            detail: "write_flush_segment: rows must be strictly ascending by entity id, the order \
+                     the extent is written in"
                 .to_string(),
         });
     }
 
-    let entity_lo = input.rows[0].entity_id.raw();
-    let entity_hi = input.rows[input.rows.len() - 1].entity_id.raw();
-    let span =
-        usize::try_from(entity_hi - entity_lo + 1).map_err(|_| StoreError::MalformedBundle {
-            detail: format!(
-                "write_flush_segment: entity span {entity_lo}..={entity_hi} is too wide"
-            ),
-        })?;
+    let (entity_lo, entity_hi) = SegmentExtent::flush_span(
+        input.entity_floor,
+        input.rows.iter().map(|r| r.entity_id.raw()),
+    );
 
     // **`view_rel`, never the joined id** (`views.md` §3.2): a group's view lays its files down
     // at `views/<group>/<key>/` and a `files` key spelled `views/<group>:<key>/` names a path no
@@ -166,7 +162,7 @@ pub fn write_flush_segment(
     let mut items: Vec<TilerItem> = Vec::with_capacity(input.rows.len());
     for row in &input.rows {
         items.push(TilerItem {
-            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.entity_id)?,
+            tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.number)?,
             qx: fixed32(row.x, q.x_min, q.x_max),
             qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
@@ -220,56 +216,50 @@ pub fn write_flush_segment(
         }
     })?;
 
-    // The extent's `rows[e - entity_lo]` is the entity's position in the sorted order, relative to
-    // `row_base`. Written here rather than as a `permutation.bin`, whose length is the *bundle's*
-    // whole entity space — the wrong shape for a segment covering a few thousand ids at the top of
-    // it. Every slot is filled: deleted entities were removed by the caller, so the span is dense.
-    let mut extent_rows = vec![ROW_ABSENT; span];
-    for (row, entity) in entity_ids.iter().enumerate() {
-        extent_rows[(entity.raw() - entity_lo) as usize] = row as u32;
-    }
+    // Each entity's position in the sorted order, relative to `row_base`. Held here rather than
+    // as a `permutation.bin`, whose length is the *bundle's* whole entity space — the wrong shape
+    // for a segment covering a few thousand ids at the top of it. The rows are ascending and
+    // distinct, so only a span too wide to address is refused; that a listed entity has no row
+    // elsewhere in the view holds because the fold that freed it dropped every row of its
+    // previous holder, and publication checks it.
+    let extent = SegmentExtent::from_rows(
+        input.seg_id,
+        input.row_base,
+        (entity_lo, entity_hi),
+        entity_ids.iter().map(|e| e.raw()),
+    )
+    .ok_or_else(|| StoreError::MalformedBundle {
+        detail: format!(
+            "write_flush_segment: the entity span {entity_lo}..={entity_hi} is too wide to address"
+        ),
+    })?;
 
-    // ---- the external-id directions (§3.6) --------------------------------------------------
-    //
-    // Forward: external_id → entity, sorted by the id bytes, because the reader binary-searches
-    // it. Reverse: entity → this extent's ordinal, dense over the entity span. Both, because the
-    // reverse direction is served live-map-first and locator-second, and rotation empties the live
-    // map at restart — without a durable reverse path a visible flushed item would answer
-    // `/v1/items` with a typed error for ever.
-    let mut forward: Vec<(&[u8], u32)> = input
-        .rows
+    // The rows whose entity is not their number, which their `tessera_id` cannot name.
+    let edited: Vec<(u32, u32)> = entity_ids
         .iter()
-        .filter_map(|r| {
-            let id = r.external_id.as_deref()?;
-            u32::try_from(r.entity_id.raw()).ok().map(|e| (id, e))
+        .enumerate()
+        .filter_map(|(row, entity)| {
+            let at = input
+                .rows
+                .binary_search_by_key(entity, |r| r.entity_id)
+                .expect("every sorted entity is an input row's");
+            (input.rows[at].number != *entity).then(|| (row as u32, entity.raw() as u32))
         })
         .collect();
-    forward.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-    let external_id_rel = rel("external-ids.arrow");
-    write_external_id_run(&seg_dir.join("external-ids.arrow"), &forward)?;
-
-    let mut locator = vec![ROW_ABSENT; span];
-    for (ordinal, (_, entity)) in forward.iter().enumerate() {
-        locator[(*entity as u64 - entity_lo) as usize] = ordinal as u32;
-    }
-    let locator_rel = rel("ext-locator.u32");
-    write_u32_array(&seg_dir.join("ext-locator.u32"), &locator)?;
+    let edited_written = crate::edited::write_edited_rows(&seg_dir, &edited)?;
 
     // ---- what the manifest must name --------------------------------------------------------
     let mut files = BTreeMap::new();
-    for name in [
-        "morton.u32",
-        crate::read::CutIndex::FILE,
-        "columns.arrow",
-        "external-ids.arrow",
-        "ext-locator.u32",
-    ] {
+    for name in ["morton.u32", crate::read::CutIndex::FILE, "columns.arrow"] {
         files.insert(rel(name), digest_of(&seg_dir.join(name))?);
     }
     for column in presence_written {
         let name = format!("{RENDER_PRESENCE_DIR}/{column}.roaring");
         files.insert(rel(&name), digest_of(&seg_dir.join(&name))?);
+    }
+    if edited_written {
+        let name = crate::edited::EDITED_ROWS_FILE;
+        files.insert(rel(name), digest_of(&seg_dir.join(name))?);
     }
 
     Ok(FlushOutput {
@@ -281,20 +271,7 @@ pub fn write_flush_segment(
             entity_lo,
             entity_hi,
         },
-        extent: SegmentExtent {
-            entity_lo,
-            entity_hi,
-            seg_id: input.seg_id.to_string(),
-            row_base: input.row_base,
-            rows: extent_rows,
-        },
-        external_id_run: external_id_rel.clone(),
-        locator_extent: LocatorExtent {
-            path: locator_rel,
-            entity_lo,
-            entity_hi,
-            external_id_run: external_id_rel,
-        },
+        extent,
         files,
         // Composition treats entities at or above the watermark as buffer-resident, so this is
         // `entity_hi + 1` and not `entity_hi`. See the module doc.
@@ -311,27 +288,6 @@ fn tessera_id_of(key: &IdentityKey, shard_id: u32, entity: EntityId) -> Result<T
                 entity.raw()
             ),
         })
-}
-
-/// One external-id extent: `external_id: Binary` and `entity_id: UInt32`, ascending by the id
-/// bytes. The shape `crate::sidecar` binary-searches, and it verifies that sortedness at open —
-/// so an unsorted extent is a refusal there rather than a wrong answer here.
-///
-/// **One of [`crate::write::RunWriter`]'s two producers, not a second writer**, on the same
-/// argument [`write_flush_segment`] delegates to `SegmentWriter` for: the flush holds its rows
-/// anyway, so nothing is streamed *in* here, but this path and the coalesce's k-way merge cannot
-/// then drift apart in what `external-ids.arrow` looks like.
-pub(crate) fn write_external_id_run(path: &Path, rows: &[(&[u8], u32)]) -> Result<()> {
-    let io = |source| StoreError::Io {
-        path: path.to_path_buf(),
-        source,
-    };
-    let mut writer = RunWriter::create(path).map_err(io)?;
-    for (external_id, entity) in rows {
-        writer.append(external_id, *entity).map_err(io)?;
-    }
-    writer.finish().map_err(io)?;
-    Ok(())
 }
 
 /// Write one render column's presence bitmap into `segment_dir`, or nothing at all if every row of
@@ -372,8 +328,7 @@ pub fn write_render_presence(
     Ok(Some(path))
 }
 
-/// A raw little-endian `u32` array, no header — the `ext-locator.u32` shape (contracts §2.4 r6),
-/// here over one segment's entity range rather than the whole entity space.
+/// A raw little-endian `u32` array, no header.
 pub(crate) fn write_u32_array(path: &Path, values: &[u32]) -> Result<()> {
     let io = |source| StoreError::Io {
         path: path.to_path_buf(),
@@ -453,7 +408,7 @@ mod tests {
     fn row(entity: u64, x: f64, score: ScalarValue) -> FlushRow {
         FlushRow {
             entity_id: EntityId::new(entity),
-            external_id: None,
+            number: EntityId::new(entity),
             x,
             y: 0.0,
             scalars: vec![score],
@@ -479,6 +434,7 @@ mod tests {
                 shard_id: 0,
                 scalar_schema: &schema,
                 row_base: 0,
+                entity_floor: 0,
             },
         )
         .expect("flush");

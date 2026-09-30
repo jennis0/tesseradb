@@ -2,9 +2,8 @@
 //! bundle `tests/pins.rs` uses.
 //!
 //! **These cases go through the real request path on purpose.** The single-flight state machine,
-//! the four eviction rules and the lock accounting are unit-tested in
-//! `crates/tessera-engine/src/single_flight.rs`, where
-//! a synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
+//! the eviction rules and the lock accounting are unit-tested in `tessera-cache`, where a
+//! synthetic `V` makes every interleaving schedulable. What cannot be tested there is the thing
 //! that matters most here: that a *rebuilt* projection is the same projection. A test that
 //! constructed two `RowProjection`s in-process and compared them would never exercise the hit path
 //! at all, and would therefore pass under a hit path that widened — which is the disclosure
@@ -124,7 +123,7 @@ fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
     let mut largest = 0u64;
     for session in sessions {
         for resident in sessions {
-            engine.prune_token(resident.token_id);
+            engine.prune_token(resident.token_id());
         }
         engine
             .viewport(session, whole_extent())
@@ -137,7 +136,7 @@ fn tighten_to_one_entry(engine: &Engine, sessions: &[&Session]) -> u64 {
         largest = largest.max(stats.bytes);
     }
     for resident in sessions {
-        engine.prune_token(resident.token_id);
+        engine.prune_token(resident.token_id());
     }
     assert!(largest > 0, "an entry must be charged something");
     engine.set_cache_bounds(largest, u64::MAX);
@@ -168,7 +167,7 @@ fn revoke_prunes_the_token() {
     assert_eq!(engine.row_projection_cache_stats().entries, 2);
 
     assert_eq!(
-        engine.prune_token(doomed.token_id),
+        engine.prune_token(doomed.token_id()),
         1,
         "exactly the revoked session's entry"
     );
@@ -336,7 +335,7 @@ fn eviction_never_widens_a_mask() {
 /// A bound below the working set costs rebuilds, never refusals, and never a wrong answer. *The
 /// bound holding is not the risk; the bound biting is.*
 ///
-/// The engine-level companion to `single_flight`'s unit test of the same name, which covers the
+/// The engine-level companion to `tessera-cache`'s unit test of the same name, which covers the
 /// refusal accounting deterministically. What this adds is that a real `RowProjection` round-robin
 /// under a biting bound still serves correct responses to every session.
 ///
@@ -418,7 +417,7 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
 
     // No sort: `canonical_key_for` sorts and dedups internally (see `canonical_key`'s doc — the key
     // must not depend on the caller's term order), and a sort here reads as if it did.
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let key = engine.fragment_canonical_key(&satisfied);
 
     assert!(engine.evict_fragment(&key), "the entry was resident");
@@ -443,7 +442,71 @@ fn fragment_evict_drops_the_memory_tier_not_the_sidecar() {
          re-union of postings"
     );
     assert_eq!(
-        again.fragment.watermark, session.fragment.watermark,
+        again.fragment_at_authorise_for_test().watermark,
+        session.fragment_at_authorise_for_test().watermark,
         "and the reopened fragment is the one that was built, not a fresh one"
     );
+}
+
+/// **Every authorise mints its own token, and the token is the bearer secret's whole shape.**
+///
+/// Two sessions over one credential share a fragment — the case above is what proves that — and
+/// share nothing else: a token repeated across two authorises would let one viewer's bearer secret
+/// name another's session, and a `token_id` repeated would hand the second session every
+/// per-session cache entry the first one warmed. The lifetime is the bound `Session::is_stale`
+/// leans on for a session that ignores the hint, so it is asserted here rather than assumed.
+#[test]
+fn every_authorise_mints_its_own_token() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let engine = open_with(config(), &tmp, &bundle_root);
+
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let before = now();
+    let first = engine.authorise(&full_coverage_credential()).unwrap();
+    let second = engine.authorise(&full_coverage_credential()).unwrap();
+    let after = now();
+
+    assert_ne!(
+        first.token(),
+        second.token(),
+        "the same credential twice must not mint the same bearer secret"
+    );
+    assert_ne!(
+        first.token_id(),
+        second.token_id(),
+        "nor the same per-session cache identity"
+    );
+
+    for token in [first.token(), second.token()] {
+        assert_eq!(token.len(), 64, "32 random bytes, hex-encoded: {token}");
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex and nothing else: {token}"
+        );
+    }
+
+    let lifetime = config().token_max_lifetime_secs;
+    for session in [&first, &second] {
+        assert!(
+            session.expires_at() >= before + lifetime && session.expires_at() <= after + lifetime,
+            "a session expires exactly its configured lifetime from when it was authorised: \
+             {} against {}..={}",
+            session.expires_at(),
+            before + lifetime,
+            after + lifetime
+        );
+    }
 }

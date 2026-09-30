@@ -1,7 +1,7 @@
 pub mod dict;
 pub mod fragment;
+pub mod label;
 pub mod postings;
-mod single_flight;
 pub mod term_sweep;
 pub mod tier;
 
@@ -12,6 +12,7 @@ pub use fragment::{
     build_fragment, build_fragment_with_deltas, delta_entities, residual_fragment, FragmentCache,
     FragmentCacheError, FrozenFragment,
 };
+pub use label::{Label, LabelError, Labels, Shape, DEFAULT_MAX_NODES};
 pub use postings::{
     decode_single_batch, encode_posting, encode_posting_bitmap, write_posting_records,
     write_postings, PostingRef, PostingsReader, PostingsSpool,

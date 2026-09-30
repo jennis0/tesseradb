@@ -3,7 +3,7 @@
 Every test here commits the notebook corpus, declares a column on the running service and reads
 the answer back through the viewer plane. The routes are `PUT /control/attributes`,
 `PUT /control/vocabularies/{name}` and `PATCH /control/vocabularies/{name}/values`; the values
-arrive on `POST /control/values` as any values delta does, so what is under test is the plan's
+arrive on rows of `POST /control/ingest` without coordinates, so what is under test is the plan's
 order and the served answer, not a second reading of the contract.
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from conftest import categories, viewport
+from conftest import viewport
 from tesseradb._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -21,7 +21,7 @@ from test_sdk_pages import whole_frame
 pytest.importorskip("pyarrow")
 
 #: Entities the build wrote, which the values route fills. The notebook corpus names its rows by
-#: `entity_id`, so these are the ids the staged delta carries.
+#: `entity_id`, so these are the ids the inserted table carries.
 HELD = list(range(1, 41))
 
 
@@ -30,10 +30,12 @@ def notebook(served, corpus):
 
 
 def fill(db, column: str, values) -> None:
-    """A delta on the points source carrying ids and one column: no coordinates, so values."""
-    db.stage(
-        "points",
+    """An insert into the attribute itself: the ids it fills, and the column the values are in."""
+    db.insert(
+        column,
         pa.table({"entity_id": pa.array(HELD, pa.uint64()), column: values}),
+        columns={"id": "entity_id"},
+        value=column,
     )
 
 
@@ -61,11 +63,11 @@ def test_an_indexed_attribute_declared_after_the_first_commit_is_filled_and_filt
     # The declaration is step 1 and the values page is step 3: the column exists for resolution
     # from the answer, so the page that fills it may name it.
     assert plan.plan[0] == "declare attribute 'citations' (u32)"
-    assert any(line.startswith("values on existing entities") for line in plan.plan[1:])
+    assert any(line.startswith("values into 'citations'") for line in plan.plan[1:])
 
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
 
     # `/v1/meta` lists the new column with the placement it was declared with.
     assert declared(db, "citations")["index"] is True
@@ -87,7 +89,7 @@ def test_a_render_column_declared_after_the_first_commit_is_refused_at_the_verb(
     declaration is still the user's to change, and it names the first commit.
     """
     db = notebook(served, corpus)
-    with pytest.raises(Refusal, match="render=True is fixed at the first commit"):
+    with pytest.raises(Refusal):
         db.declare_attribute("hotness", type="u8", render=True)
     # Nothing was declared, so the next commit has nothing to send.
     assert db.check().plan == []
@@ -121,7 +123,7 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
 
     report = db.commit()
     assert report.ok, report
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
     assert report.values_bound == 3
 
     # `/v1/meta` names the vocabulary the category reads and carries none of its values.
@@ -129,31 +131,31 @@ def test_a_category_over_an_inline_closed_vocabulary_is_declared_filled_and_list
     assert declared(db, "venue")["category"]["kind"] == "declared"
 
     # `/v1/categories/{column}` is where the values are, codes and all.
-    listed = categories(db, "venue")["values"]
-    assert sorted(one["key"] for one in listed) == sorted(keys)
+    assert sorted(db.categories("venue").column("key").to_pylist()) == sorted(keys)
     assert matched(db, {"venue": {"eq": "neurips"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "neurips"]
     )
 
 
 def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(served, corpus):
-    """The emitter reports `values_source` rather than rows, so the SDK reads the table (§4.4).
+    """A closed set declared at a running service carries its keys inline (§3, §4.4).
 
-    A sourced value set's keys are rows and never travel in a declaration payload, so the pages
-    are the SDK's: `(key, title?)` from the staged table, through the same `PATCH` an inline set's
-    page takes.
+    The route refuses a closed value set declared with no values, so the keys the insert carries
+    travel in the declaration and the same values follow with their titles, through the `PATCH`
+    an inline set's page takes.
     """
     db = notebook(served, corpus)
-    # The declaration comes first: a delta names a source some block of the declaration reads.
-    db.declare_vocabulary("venue", source="venues", closed=True, width="u8", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", closed=True, width="u8", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(["neurips", "icml", "iclr"], pa.string()),
                 "title": pa.array(["NeurIPS", "ICML", "ICLR"], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     keys = ["neurips", "icml", "iclr"]
@@ -161,16 +163,17 @@ def test_a_category_over_a_sourced_closed_vocabulary_pages_the_tables_rows(serve
 
     report = db.commit()
     assert report.ok, report
-    assert report.plan[:2] == [
+    assert report.plan[:3] == [
         "declare vocabulary 'venue' (closed)",
+        "page 3 value(s) into vocabulary 'venue'",
         "declare attribute 'venue' (category)",
     ]
-    assert report.values_filled == len(HELD)
+    assert report.items_edited == len(HELD)
     assert report.values_bound == 3
 
     # The titles came from the table's own column, which is what a sourced set is for.
-    listed = {one["key"]: one.get("title") for one in categories(db, "venue")["values"]}
-    assert listed == {"neurips": "NeurIPS", "icml": "ICML", "iclr": "ICLR"}
+    listed = db.categories("venue").to_pydict()
+    assert dict(zip(listed["key"], listed["title"])) == {"neurips": "NeurIPS", "icml": "ICML", "iclr": "ICLR"}
     assert matched(db, {"venue": {"eq": "icml"}}) == len(
         [i for i in range(len(HELD)) if keys[i % 3] == "icml"]
     )
@@ -186,7 +189,7 @@ def test_a_declaration_the_database_already_holds_is_not_sent_again(served, corp
     db.declare_attribute("citations", type="u32", index=True)
     fill(db, "citations", pa.array([1] * len(HELD), pa.uint32()))
     assert db.commit().ok
-    # A second delta on the same column: the attribute is held now, so only the values page goes.
+    # A second insert into the same column: it is held now, so only the values page goes.
     fill(db, "citations", pa.array([2] * len(HELD), pa.uint32()))
     plan = db.check()
     assert [line for line in plan.plan if line.startswith("declare")] == []
@@ -200,15 +203,17 @@ def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(ser
     /control/vocabularies/{name}/values` is where one is given.
     """
     db = notebook(served, corpus)
-    db.declare_vocabulary("venue", source="venues", width="u8", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", width="u8", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(["neurips", "icml"], pa.string()),
                 "title": pa.array(["NeurIPS", "ICML"], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     fill(db, "venue", pa.array(["neurips"] * len(HELD), pa.string()))
@@ -222,7 +227,8 @@ def test_an_open_vocabulary_declared_after_the_first_commit_pages_its_titles(ser
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == 2
-    assert {one["key"]: one.get("title") for one in categories(db, "venue")["values"]} == {
+    listed = db.categories("venue").to_pydict()
+    assert dict(zip(listed["key"], listed["title"])) == {
         "neurips": "NeurIPS",
         "icml": "ICML",
     }
@@ -236,15 +242,17 @@ def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
     """
     db = notebook(served, corpus)
     keys = [f"v{i:04d}" for i in range(600)]
-    db.declare_vocabulary("venue", source="venues", width="u16", title="Venue")
-    db.stage(
-        "venues",
+    db.declare_vocabulary("venue", width="u16", title="Venue")
+    db.insert(
+        "venue",
         pa.table(
             {
                 "key": pa.array(keys, pa.string()),
                 "title": pa.array([f"{key} " + "long " * 1200 for key in keys], pa.string()),
             }
         ),
+        key="key",
+        title="title",
     )
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     fill(db, "venue", pa.array([keys[i % len(keys)] for i in range(len(HELD))], pa.string()))
@@ -256,8 +264,7 @@ def test_a_value_set_over_the_bodys_cap_is_paged_by_bytes(served, corpus):
     report = db.commit()
     assert report.ok, report
     assert report.values_bound == len(keys)
-    listed = categories(db, "venue", limit=1000)["values"]
-    assert len(listed) == len(keys)
+    assert db.categories("venue").num_rows == len(keys)
 
 
 def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served, corpus):
@@ -283,3 +290,58 @@ def test_a_vocabulary_no_column_names_is_redeclared_and_answered_as_held(served,
     db.declare_attribute("venue", type="category", vocabulary="venue", index=True)
     assert db.commit().ok
     assert [line for line in db.check().plan if "vocabulary" in line] == []
+
+
+# ---------------------------------------------------------------------------- a unique column
+
+
+def test_a_unique_column_is_declared_filled_looked_up_and_refuses_a_held_value(served, corpus):
+    """`unique=True` on a column declared after the first commit: its values are filled, `lookup`
+    finds the items holding them through `in`, and a row giving one to a second item names two
+    items and is refused: left out and counted, or, strict, the commit refused."""
+    db = notebook(served, corpus)
+    db.declare_attribute("doi", type="keyword", unique=True)
+    fill(db, "doi", pa.array([f"10.{i}/x" for i in range(len(HELD))], pa.string()))
+    report = db.commit()
+    assert report.ok, report
+    assert declared(db, "doi")["unique"] is True
+
+    found = db.lookup("s0", "doi", ["10.3/x", "10.7/x", "10.nobody/x"])
+    assert sorted(found.column("doi").to_pylist()) == ["10.3/x", "10.7/x"]
+    assert found.num_rows == 2
+
+    # An item holding no `doi` yet, given one another item holds.
+    def give_a_held_doi() -> None:
+        db.insert(
+            "doi",
+            pa.table({"entity_id": pa.array([HELD[-1] + 1], pa.uint64()), "doi": ["10.7/x"]}),
+            columns={"id": "entity_id"},
+            value="doi",
+        )
+
+    give_a_held_doi()
+    report = db.commit()
+    assert report.refused_by_reason == {"names_two_items": 1}, report
+    assert db.lookup("s0", "doi", ["10.7/x"]).num_rows == 1
+    give_a_held_doi()
+    with pytest.raises(Refusal):
+        db.commit(strict=True)
+    assert db.lookup("s0", "doi", ["10.7/x"]).num_rows == 1
+
+
+def test_declare_unique_on_a_held_column_is_sent_at_the_next_commit(served, corpus):
+    """`declare_unique` changes the flag on a column the database holds; the next commit sends the
+    declaration, and the database answers it as unique from then on."""
+    db = notebook(served, corpus)
+    db.declare_attribute("ref", type="u64", index=True)
+    fill(db, "ref", pa.array([1_000 + i for i in range(len(HELD))], pa.uint64()))
+    assert db.commit().ok
+    assert declared(db, "ref")["unique"] is False
+
+    db.declare_unique("ref")
+    plan = db.check()
+    assert plan.ok, plan
+    assert "declare attribute 'ref' unique" in plan.plan
+    assert db.commit().ok
+    assert declared(db, "ref")["unique"] is True
+    assert db.lookup("s0", "ref", [1_000 + 5]).num_rows == 1

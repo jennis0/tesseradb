@@ -19,7 +19,7 @@ of terms) whose posting list **is** the intended entity set, exactly.
 Entity IDs are not the fixture's to choose — `tessera-build` assigns them, permanently (I9), in
 **term-signature order**: items are sorted by their sorted term-ID list and each item's entity ID is
 its position in that order (§11.1; `tessera_build::signature_sort_key`). The minor key is the
-**Morton code**, with the source ID below it for totality
+**Morton code**, with the item's position in the points file below it for totality
 ([decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
 
 The corpus exploits the major key rather than working around it:
@@ -43,8 +43,9 @@ corpus went on being the shape it claims, and only the per-item joins moved.
 **`entity_id == source_id` is gone**, with decision 0073's Morton tiebreak. Ties within a block used
 to break by source ID, so the assignment collapsed to the identity; they now break by geometry, so a
 block's entities are the same *set* in the same *range* and are internally permuted. Every join from
-a planted value to a served one must go through `Bundle.source_of_entity` — the external-ID sidecar
-is the real bridge and always was. What makes this worth a paragraph is how it hid: `verify()`
+a planted value to a served one must go through [`entities_by_source`] — the bundle's own index of
+the unique field `serial` is the real bridge and always was. What makes this worth a paragraph is
+how it hid: `verify()`
 compares each block's postings against its entity range **as a set**, and a within-block permutation
 preserves a set exactly, so the check whose comment said it re-derived the identity never tested it.
 
@@ -66,8 +67,8 @@ it, and a cross-block reassignment does not.
 
 Conformance design §2 and decision 4: every fixture item carries a unique planted **declared
 scalar**, `fx_key`, served in the points batch. It is the legitimate handle→item join — the oracle
-identifies a served point without a reverse map, an extra endpoint, or an external ID on the viewer
-plane, and therefore with **no I10 tension**: entity IDs never cross the trust boundary, and this
+identifies a served point without a reverse map or an extra endpoint, and therefore with **no I10
+tension**: entity IDs never cross the trust boundary, and this
 is how the oracle names an item without one.
 
 `fx_key` is drawn from a seeded RNG and is deliberately **not a function of the entity ID**. That
@@ -82,9 +83,18 @@ carried in the points batch. It was planted in the points parquet long before th
 day the gap closed; `conformance/tests/test_mask_catalogue.py` held a strict xfail throughout,
 which is what made the closure a test that flipped rather than a gap somebody had to remember.
 
+## `serial`
+
+The source id offset by [`PLANTED_ID_BASE`], declared `unique`: the column both corpus files
+carry, so each row names its item by it. It rises with the source id, so the build meets the items
+in source order, which the block layout above is designed against.
+The bundle's index of it is how this module carries a source id to the entity the build made of it
+([`entities_by_source`]). The offset keeps it clear of the entity-id range, for the byte scan's
+reason: it is rendered, and served on every item card.
+
 ## Reuse is decided by a stamped recipe, not by a predicate over the artefact
 
-The bundle is built once per machine at a fixed path and reused. **What may be reused is decided
+The bundle is built once per `tessera` binary and reused. **What may be reused is decided
 by comparing the full input set against a `FIXTURE.json` receipt written beside the bundle** — see
 [`recipe`] — and never by inspecting the bundle for properties a reader happens to think of. That
 distinction is the whole mechanism, and it is here because the predicate form failed twice: a
@@ -117,18 +127,15 @@ from .bundle import Bundle
 from .harness import (
     CLI_BIN,
     REPO_ROOT,
-    build_env,
-    bundle_format_matches,
     ensure_cli_built,
-    read_recipe,
+    fixture_dir,
+    open_bundle_with_source,
+    recipe_matches,
     write_deployment,
     write_recipe,
 )
 
-# Where the corpus and its bundle live between runs. A fixed path, like `/tmp/tessera-250k`, so
-# the build is paid once per machine rather than once per session — `build_catalogue_bundle`
-# reuses whatever is already there if it was built from this module's current inputs.
-DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
+WORK_DIR_NAME = "catalogue"
 
 #: The view's quantisation frame — the grid's own coordinates, since this catalogue states its
 #: expected answers in cells. Written into the declaration below rather than passed at invocation:
@@ -206,13 +213,13 @@ DEPLOYMENT_NAME = "catalogue-tessera.toml"
 # contradiction it looks like: the empty string is refused as a *dictionary key* and a blob-resident
 # column has no dictionary — its row carries the bytes the wire carried.
 # Their planting carries the blob's adversarial shapes: an empty string (a value, not an absence),
-# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
+# a present zero in `pages` (distinguishable from the absent stride), a row larger than the 32 KiB
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
 # absent from both (absent from has-row entirely).
 #: The acquisition half, built from this module's own constants rather than restated, so that
 #: `EXTENT`, `VIEW_ID` and the two file names stay the single statement of each. One points file
 #: carries identity, geometry and every declared column, so the view and every attribute name one
-#: source; the exploded `(entity_id, term_id)` relation is the other. `[sources]` writes each path
+#: source; the exploded `(serial, term_id)` relation is the other. `[sources]` writes each path
 #: once, **relative to this document**, which the generator writes beside them
 #: (`configuration.md` §3).
 #:
@@ -267,6 +274,12 @@ visibility = "public"
   north = 51
   south = 52
   east  = 53
+
+[[attribute]]
+name     = "serial"
+type     = "u64"
+render   = true
+unique   = true
 
 [[attribute]]
 name     = "fx_key"
@@ -372,7 +385,7 @@ ABSTRACT_ABSENT_STRIDE = 137
 PAGES_ZERO_STRIDE = 17
 
 # Two designated `note` entities, both inside `cross_lo` (so the crossover principals can reach
-# them at drill-down) and off every stride above. The oversize row is larger than the 256 KiB
+# them at drill-down) and off every stride above. The oversize row is larger than the 32 KiB
 # block target, so the build must give it an oversized block of its own (records §3 — the target
 # is a target, not a cap); the empty string is a value and must survive as one.
 NOTE_OVERSIZE_ID = 65_700
@@ -601,7 +614,7 @@ def note_of(source_id: int) -> str | None:
     if source_id % NOTE_ABSENT_STRIDE == 0:
         return None
     if source_id == NOTE_OVERSIZE_ID:
-        # > 256 KiB uncompressed, a pure function of the id range: the one row the block target
+        # 320,000 bytes uncompressed, a pure function of the id range: the one row the block target
         # cannot hold, which must become an oversized block of its own rather than split.
         return "".join(f"{i:08x}" for i in range(40_000))
     if source_id == NOTE_EMPTY_ID:
@@ -629,10 +642,10 @@ def blob_entities_expected(bundle) -> set[int]:
     artefact walk verifies; *which entities have a row* is the fixture's own fact.
 
     The generation functions take a **source** id and has-row is in entity space, so the set is
-    carried across by the bundle's own sidecar. It used to be returned in source space and compared
+    carried across by [`entities_by_source`]. It used to be returned in source space and compared
     directly, which was the same set only while the two spaces were one (decision 0073).
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {
         entity_of[source]
         for source in range(N_ITEMS)
@@ -714,6 +727,8 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
         # drift this function exists to pin.
         "abstract": ("text", frozenset({"match", "phrase"})),
         "fx_key": ("numeric", frozenset({"eq", "in", "range"})),
+        # The unique field: a rendered number, so the same family as `fx_key`.
+        "serial": ("numeric", frozenset({"eq", "in", "range"})),
     }
 
 # The whole map, as `(x0, y0, x1, y1)` — the request's bbox order, which is **not** the order
@@ -724,13 +739,6 @@ def filter_operands_expected() -> dict[str, tuple[str, frozenset[str]]]:
 # because it cost a debugging round and the failure is invisible — two copies means one copy
 # without this comment.
 FULL_VIEWPORT = (0.0, 0.0, 65536.0, 65536.0)
-
-# One fixed identity key, never minted. A minted key is independent per build, and `tessera_id`
-# is both the storage sort key and §7.2's selection order — so two builds under two keys draw
-# different samples from the same corpus, which would make every point-set comparison across a
-# rebuild vacuous. (`canary_fixture.py` records the same reasoning at greater length; it is the
-# same trap.)
-CATALOGUE_ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
 
 # The depth-6 tile the `one_tile` block is confined to. Depth 6 splits each axis into 64 columns
 # of 1,024 grid cells; column 17 is an arbitrary interior choice, away from both the origin and
@@ -770,7 +778,7 @@ class Block:
 
         The range survives decision 0073; the order inside it does not, so this is the one thing
         that may be read as both spaces at once. A per-item join between them goes through
-        `Bundle.source_of_entity`.
+        [`entities_by_source`].
         """
         return set(range(self.start, self.stop))
 
@@ -795,14 +803,33 @@ def entity_of_fx_key(bundle) -> dict[int, int]:
 
     A served point carries its planted `fx_key` and its opaque `tessera_id`; the key is what lets a
     differential name the item without a reverse map and without an entity id crossing the boundary
-    (I10). The keys are planted **by source id**, so the join lands in source space and has to be
-    carried the last hop by the bundle's own sidecar — which is the hop three modules used to skip,
-    back when the two spaces were one.
-
-    One implementation, because there were three and each was the same wrong line.
+    (I10). The keys are planted **by source id**, so the join lands in source space and is carried
+    the last hop by [`entities_by_source`].
     """
-    entity_of = bundle.entities_by_source()
+    entity_of = entities_by_source(bundle)
     return {key: entity_of[source] for source, key in enumerate(fx_keys())}
+
+
+def entities_by_source(bundle) -> dict[int, int]:
+    """`source id -> entity id` for every planted item, from the bundle's index of `serial`.
+
+    The generation functions take a source id and every answer the engine gives is in entity space;
+    the two are not equal (decision 0073), so every per-item join between them comes through here.
+    """
+    return {
+        serial - PLANTED_ID_BASE: entity
+        for serial, entity in bundle.unique_entities("serial").items()
+    }
+
+
+def entity_of_source(bundle, source_id: int) -> int:
+    """[`entities_by_source`] for one item."""
+    return bundle.unique_entities("serial")[PLANTED_ID_BASE + source_id]
+
+
+def source_of_entity(bundle) -> dict[int, int]:
+    """[`entities_by_source`] the other way: `entity id -> source id`."""
+    return {entity: source for source, entity in entities_by_source(bundle).items()}
 
 
 def dict_terms(bundle, names) -> set[int]:
@@ -1045,9 +1072,9 @@ def ingest_fx_keys(n: int) -> list[int]:
     the value is the fixture's to choose — an ingested item is not in [`fx_keys`], whose list is
     the corpus.
 
-    **Its own seeded stream, and rejected against the planted set.** Deriving one from the external
-    id would make it an encoding of an identifier the test chose, and re-using a planted key would
-    make two items answer to one join value — the mapping `fx_key` exists to be. Separate streams
+    **Its own seeded stream, and rejected against the planted set.** Deriving one from another
+    identifier would make it an encoding of that identifier, and re-using a planted key would make
+    two items answer to one join value — the mapping `fx_key` exists to be. Separate streams
     are this module's existing discipline (see [`fx_keys`]), for the same reason: the values stay a
     pure function of `SEED` and not of how many draws anything else took.
     """
@@ -1119,6 +1146,10 @@ def _term_of(source_id: int) -> int:
     raise AssertionError(f"source id {source_id} is in no block")
 
 
+def _serials() -> list[int]:
+    return [PLANTED_ID_BASE + i for i in range(N_ITEMS)]
+
+
 def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     """Write `catalogue-points.parquet` and `catalogue-pairs.parquet`; return them and the planted
     `fx_key`s indexed by source id.
@@ -1137,11 +1168,10 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     pq.write_table(
         pa.table(
             {
-                "entity_id": pa.array(range(N_ITEMS), type=pa.uint64()),
+                # The unique field: how this row and the relation's rows name one item.
+                "serial": pa.array(_serials(), type=pa.uint64()),
                 "x": pa.array([g[0] for g in geometry], type=pa.float32()),
                 "y": pa.array([g[1] for g in geometry], type=pa.float32()),
-                # Planted, and currently ignored by the build — see the module doc's `fx_key`
-                # section. Written anyway so the fixture is whole the day the build reads it.
                 "fx_key": pa.array(fx, type=pa.uint64()),
                 # The filter columns, as the declaration requires them in the source: a category
                 # arrives as its *key* (utf8) and is resolved against the declared vocabulary,
@@ -1176,7 +1206,7 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     pq.write_table(
         pa.table(
             {
-                "entity_id": pa.array(range(N_ITEMS), type=pa.uint64()),
+                "serial": pa.array(_serials(), type=pa.uint64()),
                 "term_id": pa.array([_term_of(i) for i in range(N_ITEMS)], type=pa.uint32()),
             }
         ),
@@ -1188,16 +1218,9 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
 def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
     """The `tessera build` invocation, in one place so [`recipe`] records what is actually run.
 
-    `--mint-external-ids` is passed because the overlay-heavy states address individual items over
-    `/control/changes`, which takes an `external_id`. It is off by default in the product for a
-    good reason (contracts §2.4 forbids manufacturing one for an item whose caller supplied none),
-    and passing it here is a statement that *this fixture's* items do have caller-supplied ids —
-    the source corpus is synthesised by this module, so they do.
-
-    Everything else the build once carried on the command line is in the two documents beside the
+    Everything the build once carried on the command line is in the two documents beside the
     corpus: the declaration names its own sources and its own extent, and the deployment file names
-    the declaration. The identity key travels in the environment ([`harness.build_env`]), never in
-    an argv a CI log would keep.
+    the declaration. The build generates the bundle's identity key.
     """
     return [
         str(CLI_BIN),
@@ -1206,7 +1229,6 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
         str(work_dir / DEPLOYMENT_NAME),
         "--out",
         str(bundle_root),
-        "--mint-external-ids",
     ]
 
 
@@ -1228,6 +1250,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """
     argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
     return {
+        # 10: both files name their items by `serial`, the source id offset past the entity-id
+        #     range, which both carry in place of the source id (2026-09-27).
         # 9: the corpus gained the keyword column (`submitter`) and its planting rules, for the
         #    keyword family's conformance coverage (2026-08-13).
         # 8: every planted value that writes an id into free text (`note`, `title`) offsets it by
@@ -1243,7 +1267,7 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         # the solo id, which `SCHEMA_TOML` does not carry, so they are stamped below and the
         # version moves with them.
         # 3: the bundle gained a declared `fx_key` column (2026-08-07).
-        "recipe_version": 9,
+        "recipe_version": 10,
         "layout": [list(entry) for entry in _LAYOUT],
         "n_items": N_ITEMS,
         "seed": SEED,
@@ -1257,7 +1281,6 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "points_name": POINTS_NAME,
         "pairs_name": PAIRS_NAME,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
-        "id_key": CATALOGUE_ID_KEY_HEX,
         # The filter columns' planting rules — everything `department_of`/`title_of` are a
         # function of that the schema text is not. An edited stride under an unchanged
         # declaration would otherwise reuse a bundle whose stored values no longer match the
@@ -1311,7 +1334,15 @@ def catalogue_points_path(work_dir: Path | None = None) -> Path:
     Exposed because the oracle now recomputes geometry from the build's *input* rather than from
     `columns.arrow`, and the catalogue is the one corpus whose input this module owns.
     """
-    return (DEFAULT_WORK_DIR if work_dir is None else work_dir) / POINTS_NAME
+    return (fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir) / POINTS_NAME
+
+
+def open_catalogue_bundle(bundle_root: Path, work_dir: Path | None = None) -> Bundle:
+    """The catalogue bundle at `bundle_root` with its points file attached as its source geometry,
+    keyed by `serial`."""
+    return open_bundle_with_source(
+        bundle_root, catalogue_points_path(work_dir), field="serial", column=None
+    )
 
 
 def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int]]:
@@ -1321,7 +1352,7 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     See the module doc for why the reuse test is a stamped recipe and not a predicate over the
     artefact.
     """
-    work_dir = DEFAULT_WORK_DIR if work_dir is None else work_dir
+    work_dir = fixture_dir(WORK_DIR_NAME) if work_dir is None else work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
     bundle_root = work_dir / "bundle-catalogue"
     wanted = recipe(work_dir, bundle_root)
@@ -1345,7 +1376,6 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     subprocess.run(
         _build_argv(work_dir, bundle_root),
         cwd=REPO_ROOT,
-        env=build_env(CATALOGUE_ID_KEY_HEX),
         check=True,
     )
     write_recipe(bundle_root, wanted)
@@ -1356,16 +1386,12 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     """The receipt matches, there is a readable post-r6 bundle under it, and nothing has been
     published into it since the build.
 
-    The receipt is the test; the two structural checks below are a cheap second gate against a
-    bundle that was damaged or *written to* after its receipt was written — cases the receipt
-    cannot see, because neither is an input. All three are tolerant of anything unreadable: what
-    cannot be confirmed is rebuilt, because being wrong in that direction costs a build and being
-    wrong in the other hands every test a fixture nobody asked for.
-
-    **The format number is one of the structural checks, not part of the receipt**
-    ([`harness.bundle_format_matches`]). The recipe stamps the corpus and the arguments, which a
-    format bump does not touch, so a fixture built by an engine at an earlier number would be
-    reused and read as though it were this one.
+    The receipt is the test, and it records the binary that built the bundle as well as the
+    inputs ([`harness.write_recipe`]). The two structural checks below are a cheap second gate
+    against a bundle that was damaged or *written to* after its receipt was written — cases the
+    receipt cannot see, because neither is an input. All three are tolerant of anything
+    unreadable: what cannot be confirmed is rebuilt, because being wrong in that direction costs a
+    build and being wrong in the other hands every test a fixture nobody asked for.
 
     **The published-state check is not hypothetical.** An accepted deny is written into the bundle
     prefix as a further `SEGMENTS-<n>.json` (contracts §2.3), so any driver that points a server at
@@ -1374,7 +1400,7 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
     (`conformance/conftest.py`'s `private_catalogue_bundle`); this is the backstop for the one that
     forgets, and it turns a wrong answer into a rebuild.
     """
-    if read_recipe(bundle_root) != wanted:
+    if not recipe_matches(bundle_root, wanted):
         return False
     try:
         current = json.loads((bundle_root / "CURRENT").read_text())
@@ -1387,8 +1413,6 @@ def _is_usable_bundle(bundle_root: Path, wanted: dict) -> bool:
             for p in prefix.glob("partitions/*/SEGMENTS-*.json")
             if p.name != "SEGMENTS-0.json"
         ]
-        if not bundle_format_matches(prefix):
-            return False
         return not published
     except (OSError, KeyError, ValueError):
         return False
@@ -1448,6 +1472,7 @@ def verify(bundle: Bundle) -> VerificationReport:
         )
     expected_offset = 1 if public_term == 0 else 0
 
+    source_of = source_of_entity(bundle)
     for block in BLOCKS.values():
         term_id = bundle.term_id_of(block.descriptor.encode("ascii"))
         if term_id is None:
@@ -1475,9 +1500,9 @@ def verify(bundle: Bundle) -> VerificationReport:
         # 0073 introduced, and exactly what made every per-item join in this suite silently wrong
         # while this function reported green. Here the two spaces are compared item by item.
         strayed = [
-            (entity, bundle.source_of_entity(entity))
+            (entity, source_of[entity])
             for entity in sorted(postings)
-            if not (block.start <= bundle.source_of_entity(entity) < block.stop)
+            if not (block.start <= source_of[entity] < block.stop)
         ]
         if strayed:
             entity, source = strayed[0]

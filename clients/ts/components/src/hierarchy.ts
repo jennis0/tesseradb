@@ -1,6 +1,7 @@
-import {css, html, nothing, type PropertyValues} from 'lit';
+import {css, html, nothing, type PropertyValues, type TemplateResult} from 'lit';
 import {property, state} from 'lit/decorators.js';
-import {browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {artifactName, browsableLayers, isFilterLayer, withMember, withoutMember, type BrowsePage, type BrowseRow, type ClauseVerb, type Layer, type Masked, type Refusal} from '@tesseradb/client';
+import {refusalOf} from '@tesseradb/client/internal';
 import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -8,40 +9,11 @@ import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
-/**
- * `<tessera-hierarchy>` — a layer's hierarchy, browsable **independently of the viewport**
- * (`highlight-and-hierarchy.md` §5.1), over `POST /v1/artifacts/browse` (§4).
- *
- * Rung 3 is why it exists: a 30,217-descriptor DAG went into a bundle and the viewer could show
- * none of it. The viewport serves a budget cut — roughly 48 artifacts at zoom 0, doubling per
- * level — and a MeSH descriptor's members are spread over the whole layout, so the cut deepens
- * uniformly and the leaves arrive at a zoom nobody reaches. **Nothing here depends on the
- * viewport**: it opens on the roots whatever the zoom, and it does not move when the map does.
- *
- * A layer picker over the bundle's hierarchical layers, then a tree. Each row is a name, a masked
- * count and an expander; a child fetches its children on expansion and pages under *N more*. On a
- * `dag` layer a node appears under **each** of its served parents and says *also under X* by
- * listing its other parents — C29 per entry, so a parent this principal may not see is simply
- * absent and the node reads as a root of what they were given. A search box drives §4's search
- * form and shows its matches as rows with their lineage.
- *
- * **When the map carries a filter the panel sends the same `filters`** and shows each row's
- * `matchedCount` beside its masked one, so a filtered map and a filtered tree read the same
- * numbers. Existence and the masked count never move with the filter, and a row matching nothing
- * is still a row.
- *
- * **A click is *highlight* by default** (§5.2), because that is the action that shows where a
- * descriptor lives without losing the map; *filter* is beside it, and *fit* beside that on a layer
- * that draws something. A filter layer (§5.4) is offered here like any other and has no *fit*.
- *
- * The walk is this element's state and not the store's: what is expanded and what has been paged
- * belong to the panel, and a projection would have to hold them and be rebuilt on every tick.
- */
 
 /** One node of the walk: a row, its children once fetched, and where its paging got to. */
 type Node = {
   row: BrowseRow;
-  /** The path that reached it — a `dag` node under two parents is two nodes, and this tells them apart. */
+  /** The path that reached it; a `dag` node under two parents is two nodes with different paths. */
   path: string;
   children: Node[] | null;
   next: string | null;
@@ -51,6 +23,59 @@ type Node = {
 
 const masked = (n: bigint): Masked => ({value: Number(n), exact: true});
 
+/**
+ * A layer's hierarchy, browsed through `POST /v1/artifacts/browse` independently of the viewport:
+ * it opens on the roots at any zoom and does not move with the map. A select chooses among the
+ * bundle's hierarchical layers where there are several. Each row is a name, a masked count and,
+ * where the server counts children under it, an expander; expanding fetches the children, a page
+ * at a time under More. On a layer where a child
+ * may have several parents, a row appears under each parent it is served under and names the
+ * others. A parent the viewer may not see is absent, so its child reads as a root. The search box
+ * lists matching names.
+ *
+ * The panel sends the map's filters and, while any is set, shows each row's matched count beside
+ * its masked count. A row's presence and its masked count do not change with the filters. A row's
+ * buttons put a `member_of` clause on its artifact as a highlight or a filter, and Fit fits the map
+ * to it on a layer that draws. Pressing the name highlights it. A row holding a clause is filled,
+ * grey for a filter and in the highlight colour for a highlight, and carries a × per clause that
+ * takes it off.
+ *
+ * The panel asks for nothing while it is hidden. The element keeps which rows are expanded and
+ * paged.
+ *
+ * @summary A layer's hierarchy, browsed apart from the viewport.
+ * @tagname tessera-hierarchy
+ * @category Elements
+ * @fires {CustomEvent<TesseraEventDetails['tessera-clausechange']>} tessera-clausechange - A row's
+ *   name, highlight or filter button put a `member_of` clause on or took it off.
+ * @fires {CustomEvent<TesseraEventDetails['tessera-artifactfit']>} tessera-artifactfit - A row's Fit
+ *   button was pressed.
+ * @csspart title - The heading.
+ * @csspart state - The state line, with `data-state`.
+ * @csspart refusal - The words "Layer unavailable", with `data-code` set to the refusal's code.
+ * @csspart layer - The layer select, shown where there are several layers.
+ * @csspart search - The search box.
+ * @csspart tree - The tree of rows.
+ * @csspart row - One row, with `data-id`, and `data-clause` while a clause is on its artifact:
+ *   `filter`, `highlight`, or both separated by a space.
+ * @csspart expander - A row's expand button, with `data-leaf` and hidden where the row has no
+ *   children, so every row's name starts at the same place.
+ * @csspart name - A row's name, with `data-unnamed` where it has none, which highlights the artifact
+ *   when pressed.
+ * @csspart counts - A row's counts.
+ * @csspart count-matched - A row's matched `<tessera-count>`, while a filter is set.
+ * @csspart count-masked - A row's masked `<tessera-count>`.
+ * @csspart actions - A row's buttons.
+ * @csspart highlight - A row's highlight button, with `aria-pressed`.
+ * @csspart filter - A row's filter button, with `aria-pressed`.
+ * @csspart fit - A row's Fit button, on a layer that draws.
+ * @csspart dismiss - A × on a row holding a clause, one per clause, with `data-verb`; it takes that
+ *   clause off.
+ * @csspart also - The other parents a row is served under, or "Children unavailable" with
+ *   `data-code` where its children were refused.
+ * @csspart children - An expanded row's children.
+ * @csspart more - The More button that fetches the next page.
+ */
 export class TesseraHierarchy extends TesseraElement {
   static override styles = [
     tokens,
@@ -74,28 +99,29 @@ export class TesseraHierarchy extends TesseraElement {
         overflow-y: auto;
       }
       [part='row'] {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 6px;
         min-height: 28px;
         padding: 0 4px 0 calc(2px + var(--depth, 0) * 14px);
-        border-radius: 3px;
+        border-radius: var(--_tessera-radius-control);
       }
       [part='row']:hover {
-        background: var(--tessera-surface-2);
+        background: var(--_tessera-surface-2);
       }
-      [part='row'][data-clause='highlight'] {
-        background: var(--tessera-highlight-soft);
-        color: var(--tessera-highlight);
+      [part='row'][data-clause~='filter'] {
+        background: var(--_tessera-surface-2);
+        font-weight: 500;
       }
-      [part='row'][data-clause='filter'] {
-        background: var(--tessera-accent-soft);
-        color: var(--tessera-accent);
+      [part='row'][data-clause~='highlight'] {
+        background: var(--_tessera-highlight-soft);
+        color: var(--_tessera-highlight);
       }
       [part='expander'] {
         display: inline-flex;
         width: 14px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='expander'][data-leaf] {
         visibility: hidden;
@@ -107,55 +133,77 @@ export class TesseraHierarchy extends TesseraElement {
         white-space: nowrap;
         text-align: left;
       }
-      [part='name'][data-unnamed] {
-        color: var(--tessera-ink-2);
-      }
       [part='counts'] {
         display: inline-flex;
         gap: 6px;
         align-items: baseline;
         font-size: 12px;
-        color: var(--tessera-ink-2);
+        color: var(--_tessera-ink-2);
       }
+      /* Over the counts, so hidden buttons take no width from the name; still reachable by Tab. */
       [part='actions'] {
+        position: absolute;
+        right: 2px;
+        top: 50%;
+        transform: translateY(-50%);
         display: inline-flex;
         gap: 2px;
+        padding-left: 6px;
+        background: var(--_tessera-surface-2);
+        border-radius: var(--_tessera-radius-control);
         opacity: 0;
+        pointer-events: none;
       }
       [part='row']:hover [part='actions'],
       [part='row']:focus-within [part='actions'] {
         opacity: 1;
+        pointer-events: auto;
       }
       [part='actions'] button {
         display: inline-flex;
-        padding: 2px;
-        color: var(--tessera-ink-3);
-        border-radius: 2px;
+        padding: 3px;
+        color: var(--_tessera-ink-2);
+        border-radius: 4px;
       }
       [part='actions'] button:hover {
-        color: var(--tessera-ink);
-        background: var(--tessera-surface-3);
+        color: var(--_tessera-ink);
+        background: var(--_tessera-surface-3);
+      }
+      [part='dismiss'] {
+        display: inline-grid;
+        place-items: center;
+        width: 20px;
+        height: 20px;
+        flex: none;
+        border-radius: 4px;
+        color: var(--_tessera-ink-2);
+      }
+      [part='dismiss'][data-verb='highlight'] {
+        color: var(--_tessera-highlight);
+      }
+      [part='dismiss']:hover {
+        background: var(--_tessera-surface-3);
       }
       [part='also'] {
         padding-left: calc(18px + var(--depth, 0) * 14px);
         font-size: 11px;
-        color: var(--tessera-ink-3);
+        color: var(--_tessera-ink-3);
       }
       [part='more'] {
-        padding-left: calc(18px + var(--depth, 0) * 14px);
-        font-size: 12px;
-        color: var(--tessera-accent);
+        margin: 4px 0 4px calc(18px + var(--depth, 0) * 14px);
       }
-      [part='lineage'] {
-        font-size: 11px;
-        color: var(--tessera-ink-3);
+      [part='refusal'] {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
       }
     `
   ];
 
-  /** Which layer's hierarchy is shown; unset, the first the bundle offers. */
+  /** The layer whose hierarchy is shown. Unset or unknown, the first the bundle offers. */
   @property() accessor layer = '';
-  /** Rows per page, and what *N more* fetches. Clamped to the deployment's own ceiling. */
+  /** Rows per page, at least 1 and at most the server's `maxBrowseRows`. */
   @property({type: Number}) accessor limit = 50;
 
   @state() private accessor roots: Node[] | null = null;
@@ -166,18 +214,34 @@ export class TesseraHierarchy extends TesseraElement {
   @state() private accessor refusal: Refusal | null = null;
   /** Which paths are open, so a re-render of the tree keeps the walk. */
   @state() private accessor open = new Set<string>();
-  /** Bumped to re-render after a node's children land — the tree is held in `roots`, by mutation. */
+  /** Bumped to re-render after a node's children land, since the tree in `roots` is mutated. */
   @state() private accessor revision = 0;
 
-  /** What the roots were fetched under, so a filter or a layer change refetches and nothing else does. */
+  /** The question the roots were fetched under; see {@link question}. */
   private fetchedUnder = '';
   /**
-   * Every name the walk has seen, by identifier. **The only place a name for one of these
-   * artifacts exists on this client**: a filter layer is never named in a viewport request, so its
-   * artifacts are never served, and *also under 546790* says nothing about what a node sits under.
+   * Every name the walk has seen, by identifier. A filter layer's artifacts are never served in a
+   * viewport, so this is the client's only source of their names.
    */
   private names = new Map<bigint, string>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Moved by {@link resetServerData}, so a page asked for before it is dropped. */
+  private epoch = 0;
+
+  protected override resetServerData(): void {
+    this.epoch += 1;
+    this.roots = null;
+    this.rootsNext = null;
+    this.searching = null;
+    this.loading = false;
+    this.refusal = null;
+    this.open = new Set();
+    this.names.clear();
+    this.fetchedUnder = '';
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+    this.query = '';
+  }
 
   private layers(): Layer[] {
     return browsableLayers(this.resolvedStore?.get('meta')?.layers ?? []);
@@ -189,34 +253,21 @@ export class TesseraHierarchy extends TesseraElement {
   }
 
   /**
-   * The question the panel is asking, as a string: the layer and the map's own filter. A change
-   * refetches the roots and drops the walk, because every count in it answers the old question.
+   * The question the panel is asking, as a string: the layer and the map's filter. A change
+   * refetches the roots and drops the walk, whose counts answer the old question.
    */
   private question(): string {
-    // **The composed request, not the projections.** `store.browse` sends `requestFilters()` —
-    // the draft's filter-position leaves, the `member_of` clauses in that position *and the drawn
-    // region's leaf* — so a question hashed from `filters.expr` and the clauses alone missed a
-    // region change entirely and the tree kept counts answering the question before it. One
-    // source, and it is the one the request is built from. It is JSON-safe by construction: a
-    // `member_of` leaf spells its artifact as a decimal string.
+    // Hashed from `requestFilters()`, what `store.browse` sends, which includes the drawn region.
+    // A `member_of` leaf holds its artifact as a decimal string, so it serialises.
     return `${this.current()?.name ?? ''}|${JSON.stringify(this.resolvedStore?.requestFilters() ?? null)}`;
   }
 
   /**
-   * Whether the panel is being shown. **A panel that is not asks nothing.**
+   * Whether the panel is shown. A hidden panel sends no request, so a panel in a closed drawer
+   * does not load the roots alongside the first viewport.
    *
-   * The walk is a request per layer and the roots are the widest one there is; a panel in a closed
-   * drawer, a collapsed accordion or a tab nobody opened was making it anyway — on the page's
-   * first meta, beside the first viewport, against a server still materialising the session.
-   * Measured on rung 3: 320 ms of server time for roots nothing was drawing. So the ask waits
-   * until the element is shown, and follows the moment it is. In the demo's overlay layout the
-   * panel *is* shown, so it still browses on load; what changes is that a host who put it away no
-   * longer pays for it.
-   *
-   * `checkVisibility` is the test — display, visibility and `content-visibility`, which is what
-   * *put away* means here — and it is re-asked on every render. A reveal that re-renders nothing
-   * (a drawer opening above it) is caught by the observer instead. A runtime with neither answers
-   * *shown*, which is the behaviour this panel has always had.
+   * `checkVisibility` is asked on every render; a reveal that re-renders nothing (a drawer opening
+   * above it) is caught by the intersection observer. A runtime with neither counts as shown.
    */
   @state() private accessor shown = false;
   private observer: IntersectionObserver | null = null;
@@ -238,7 +289,7 @@ export class TesseraHierarchy extends TesseraElement {
     super.disconnectedCallback();
   }
 
-  /** Whether this element is displayed at all — see {@link shown}. */
+  /** Whether this element is displayed; see {@link shown}. */
   private displayed(): boolean {
     return typeof this.checkVisibility === 'function' ? this.checkVisibility() : true;
   }
@@ -270,7 +321,7 @@ export class TesseraHierarchy extends TesseraElement {
     }
   }
 
-  /** One page of the current layer, under the map's own filter — the store supplies that. */
+  /** One page of the current layer, under the map's filter, which the store supplies. */
   private page(req: {parent?: bigint; q?: string; cursor?: string}): Promise<BrowsePage> | null {
     const s = this.resolvedStore;
     const layer = this.current();
@@ -282,44 +333,49 @@ export class TesseraHierarchy extends TesseraElement {
   private async loadRoots(cursor?: string): Promise<void> {
     const request = this.page(cursor === undefined ? {} : {cursor});
     if (!request) return;
+    const epoch = this.epoch;
     this.loading = true;
     this.refusal = null;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, ''));
       this.roots = cursor === undefined ? nodes : [...(this.roots ?? []), ...nodes];
       this.rootsNext = page.next;
     } catch (error) {
+      if (epoch !== this.epoch) return;
       this.refusal = refusalOf(error);
       this.roots = this.roots ?? [];
     } finally {
-      this.loading = false;
+      if (epoch === this.epoch) this.loading = false;
     }
   }
 
   private node(row: BrowseRow, parentPath: string): Node {
-    if (row.name !== null) this.names.set(row.tesseraId, row.name);
+    const name = artifactName(row);
+    if (name !== null) this.names.set(row.tesseraId, name);
     return {row, path: `${parentPath}/${row.tesseraId}`, children: null, next: null, loading: false, refusal: null};
   }
 
-  /** What to call an artifact this walk has met; its identifier where the walk has not. */
+  /** What to call an artifact: its name where the walk has met one. */
   private nameOf(id: bigint): string {
-    return this.names.get(id) ?? idString(id);
+    return this.names.get(id) ?? UNNAMED;
   }
 
   /**
-   * Expand a node: its children, paged. A node already opened keeps what it fetched — closing and
-   * reopening costs nothing, and the counts are still answers to the same question, which
-   * {@link question} is what guards.
+   * Expand a node: its children, paged. A node keeps what it fetched while {@link question} is
+   * unchanged, so reopening it fetches nothing.
    */
   private async expand(node: Node, more = false): Promise<void> {
     const request = this.page({parent: node.row.tesseraId, ...(more && node.next ? {cursor: node.next} : {})});
     if (!request) return;
+    const epoch = this.epoch;
     node.loading = true;
     node.refusal = null;
     this.revision++;
     try {
       const page = await request;
+      if (epoch !== this.epoch) return;
       const nodes = page.artifacts.map((row) => this.node(row, node.path));
       node.children = more ? [...(node.children ?? []), ...nodes] : nodes;
       node.next = page.next;
@@ -345,8 +401,7 @@ export class TesseraHierarchy extends TesseraElement {
   private search(text: string): void {
     this.query = text;
     if (this.searchTimer) clearTimeout(this.searchTimer);
-    // Debounced like every other typed control here: a scan over the layer's keys and names is
-    // bounded by its artifact count and never by the corpus, but it is still a request a keystroke.
+    // Debounced, like every typed control.
     this.searchTimer = setTimeout(() => {
       this.searchTimer = null;
       const q = text.trim();
@@ -356,22 +411,24 @@ export class TesseraHierarchy extends TesseraElement {
       }
       const request = this.page({q});
       if (!request) return;
+      const epoch = this.epoch;
       void request
         .then((page) => {
-          this.searching = page.artifacts.map((row) => this.node(row, 'q'));
+          if (epoch === this.epoch) this.searching = page.artifacts.map((row) => this.node(row, 'q'));
         })
         .catch((error: unknown) => {
+          if (epoch !== this.epoch) return;
           this.refusal = refusalOf(error);
           this.searching = [];
         });
     }, 250);
   }
 
-  /** The clause this row carries, if any — what colours the row and what the buttons toggle. */
-  private clauseOn(id: bigint): ClauseVerb | null {
+  /** The positions of the clauses on this row's artifact, which colour the row and set the buttons. */
+  private clausesOn(id: bigint): ClauseVerb[] {
     const layer = this.current()?.name;
     const held = this.resolvedStore?.get('filters').members ?? [];
-    return held.find((c) => c.layer === layer && c.artifact === id && !c.outside)?.verb ?? null;
+    return held.filter((c) => c.layer === layer && c.artifact === id && !c.outside).map((c) => c.verb);
   }
 
   private apply(id: bigint, verb: ClauseVerb): void {
@@ -379,17 +436,17 @@ export class TesseraHierarchy extends TesseraElement {
     const layer = this.current();
     if (!s || !layer) return;
     const held = s.get('filters').members;
-    const on = this.clauseOn(id) === verb;
+    const on = this.clausesOn(id).includes(verb);
     const label = this.names.get(id);
     s.setMembers(
       on
-        ? withoutMember(held, layer.name, id)
+        ? withoutMember(held, layer.name, id, verb)
         : withMember(held, {layer: layer.name, artifact: id, outside: false, verb, ...(label === undefined ? {} : {label})})
     );
     emit(this, 'tessera-clausechange', {id: idString(id), layer: layer.name, outside: false, verb, on: !on});
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     const s = this.resolvedStore;
     const heading = html`<h2 part="title">Hierarchy</h2>`;
     const meta = s?.get('meta') ?? null;
@@ -408,83 +465,80 @@ export class TesseraHierarchy extends TesseraElement {
             this.searching = null;
             this.open = new Set();
           }}>
-            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}${isFilterLayer(l) ? ' (filter layer)' : ''}</option>`)}
+            ${offered.map((l) => html`<option value=${l.name} ?selected=${l.name === layer.name}>${l.title || l.name}</option>`)}
           </select>`
         : nothing}
       <div part="search" class="input">${icon('search', 14)}<input
         type="search"
-        aria-label=${`Search ${layer.name}`}
+        aria-label=${`Search ${layer.title || layer.name}`}
         .value=${this.query}
         placeholder="Search names"
         autocomplete="off"
         @input=${(e: Event) => this.search((e.target as HTMLInputElement).value)}
       /></div>
-      ${this.refusal ? html`<span part="refusal">${this.refusal.code}: ${this.refusal.detail}</span>` : nothing}
-      ${rows === null
+      ${this.refusal ? html`<span part="refusal" data-code=${this.refusal.code}><span class="dot refuse"></span>Layer unavailable</span>` : nothing}
+      ${rows === null || (this.refusal && rows.length === 0)
         ? nothing
         : rows.length === 0
           ? html`<span part="state" data-state="empty">${this.searching ? 'No match' : 'Nothing here'}</span>`
           : html`<ul part="tree">${rows.map((n) => this.renderNode(n, 0, layer, filtered))}</ul>`}
       ${this.searching === null && this.rootsNext
-        ? html`<button part="more" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More…</button>`
+        ? html`<button part="more" class="more-link" type="button" @click=${() => void this.loadRoots(this.rootsNext ?? undefined)}>More</button>`
         : nothing}
     </div>`;
   }
 
   private renderNode(node: Node, depth: number, layer: Layer, filtered: boolean): unknown {
     const open = this.open.has(node.path);
-    const clause = this.clauseOn(node.row.tesseraId);
-    const name = node.row.name ?? node.row.key ?? null;
-    // A `dag` node under several served parents is drawn under each of them; the row says which
-    // others it sits under, so the duplication reads as the structure it is (§5.1).
+    const clauses = this.clausesOn(node.row.tesseraId);
+    const name = artifactName(node.row);
+    // A `dag` node is drawn under each served parent; the row names the others.
     const also = node.row.parentIds.filter((p) => String(p) !== node.path.split('/').at(-2));
     const drawn = !isFilterLayer(layer);
     return html`<li>
-      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clause ?? nothing}>
-        <button part="expander" type="button" data-leaf=${layer.hierarchy.kind === 'flat' ? '' : nothing}
+      <div part="row" style=${`--depth:${depth}`} data-id=${idString(node.row.tesseraId)} data-clause=${clauses.length > 0 ? clauses.sort().join(' ') : nothing}>
+        <button part="expander" type="button" data-leaf=${node.row.childCount === 0 ? '' : nothing}
           aria-expanded=${open ? 'true' : 'false'}
           aria-label=${open ? `Collapse ${name ?? 'row'}` : `Expand ${name ?? 'row'}`}
           @click=${() => this.toggle(node)}>${icon(open ? 'chev' : 'chevr', 12)}</button>
         <button part="name" type="button" data-unnamed=${name === null ? '' : nothing}
-          title="Highlight this — the map stays and its members are lit"
+          title="Highlight"
           @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${name ?? UNNAMED}</button>
         <span part="counts">
           ${filtered && node.row.matchedCount !== null
             ? html`<tessera-count part="count-matched" .masked=${masked(node.row.matchedCount)}></tessera-count>/`
             : nothing}<tessera-count part="count-masked" .masked=${masked(node.row.maskedCount)}></tessera-count>
         </span>
+        ${clauses.map(
+          (verb) => html`<button part="dismiss" type="button" data-verb=${verb} aria-label=${verb === 'highlight' ? `Stop highlighting ${name ?? UNNAMED}` : `Stop filtering to ${name ?? UNNAMED}`}
+            title=${verb === 'highlight' ? 'Stop highlighting' : 'Stop filtering'} @click=${() => this.apply(node.row.tesseraId, verb)}>${icon('close', 12)}</button>`
+        )}
         <span part="actions">
-          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clause === 'highlight' ? 'true' : 'false'}
+          <button part="highlight" type="button" data-verb="highlight" aria-pressed=${clauses.includes('highlight') ? 'true' : 'false'}
             title="Highlight this" @click=${() => this.apply(node.row.tesseraId, 'highlight')}>${icon('highlight', 13)}</button>
-          <button part="filter" type="button" data-verb="filter" aria-pressed=${clause === 'filter' ? 'true' : 'false'}
+          <button part="filter" type="button" data-verb="filter" aria-pressed=${clauses.includes('filter') ? 'true' : 'false'}
             title="Filter to this" @click=${() => this.apply(node.row.tesseraId, 'filter')}>${icon('filter', 13)}</button>
           ${
-            // No *fit* on a filter layer: its artifacts are spread across the frame and there is
-            // nothing to fit to (§5.4).
+            // A filter layer draws nothing, so there is nothing to fit to.
             drawn
-              ? html`<button part="fit" type="button" title="Fit the map to this"
+              ? html`<button part="fit" type="button" title="Fit the map to it"
                   @click=${() => emit(this, 'tessera-artifactfit', {id: idString(node.row.tesseraId)})}>${icon('fit', 13)}</button>`
               : nothing
           }
         </span>
       </div>
       ${also.length > 0 ? html`<div part="also" style=${`--depth:${depth}`}>also under ${also.map((p) => this.nameOf(p)).join(', ')}</div>` : nothing}
-      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`}>${node.refusal.code}: ${node.refusal.detail}</div>` : nothing}
+      ${node.refusal ? html`<div part="also" style=${`--depth:${depth}`} data-code=${node.refusal.code}>Children unavailable</div>` : nothing}
       ${open && node.children
         ? html`<ul part="children" class="list" style="list-style:none;margin:0;padding:0">
             ${node.children.map((c) => this.renderNode(c, depth + 1, layer, filtered))}
             ${node.next
-              ? html`<li><button part="more" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More…</button></li>`
+              ? html`<li><button part="more" class="more-link" style=${`--depth:${depth + 1}`} type="button" @click=${() => void this.expand(node, true)}>More</button></li>`
               : nothing}
           </ul>`
         : nothing}
     </li>`;
   }
-}
-
-function refusalOf(error: unknown): Refusal {
-  const e = error as {code?: string; detail?: string; message?: string};
-  return {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)};
 }
 
 attachContextRoot();

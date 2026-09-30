@@ -44,7 +44,8 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
+use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{
     cell_route_pays, decode_tier, CellRoute, DecodeTier, SelectParams, Selection, SelectionPart,
     SelectionParts, Threshold, CELL_ROUTE_MIN_ROWS_PER_CELL,
@@ -249,6 +250,7 @@ fn segment_of(rows_per_cell: u32) -> Segment {
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
     let data = SegmentData {
+        entities: tessera_store::edited::RowEntities::Numbers,
         seg_id: "cell-route".to_string(),
         row_count: ROWS,
         morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
@@ -275,7 +277,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
 
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
+        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
         .unwrap();
 
     let perm_path = temp.path().join("permutation.bin");
@@ -288,6 +290,6 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
     let denied = tessera_engine::denied_rows_of(&overlay, &perm);
-    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied);
+    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }

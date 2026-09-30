@@ -21,8 +21,6 @@ use tessera_build::{build, BuildArgs};
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
-/// This file's fixtures name their rows by an integer `entity_id` column (`tessera_build::ids`).
-static INTEGER_IDS: tessera_build::ids::IdSpace = tessera_build::ids::IdSpace::Integer;
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 40;
@@ -66,7 +64,7 @@ fn write_moved_points(path: &Path) {
 
 fn write_pairs(path: &Path) {
     let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let ids: Vec<u64> = (0..N).collect();
@@ -86,18 +84,15 @@ fn write_pairs(path: &Path) {
 
 /// One view, one open vocabulary and one category over it, all read from moved names.
 ///
-/// **The identity column is moved once, in `[defaults]`.** The points file spells it `id`, so the
-/// view and the attribute both join on `id` without either saying so — which is what
-/// `entity_id_field` is for. The exploded relation is not reached by it and keeps the canonical
-/// `(entity_id, term_id)` (`configuration.md` §8), which is what the pairs file here carries.
+/// **The unique `id` is read from a column of its own name**, so the points and the exploded
+/// relation name their items by it without a `fields` entry.
 const MOVED: &str = r#"
 [sources]
 points = "points.parquet"
 pairs  = "pairs.parquet"
 
 [defaults]
-source          = "points"
-entity_id_field = "id"
+source = "points"
 
 [[view]]
 name             = "s0"
@@ -117,6 +112,11 @@ field      = "dept"
 type       = "category"
 vocabulary = "departments"
 render     = true
+
+[[attribute]]
+name   = "id"
+type   = "u64"
+unique = true
 "#;
 
 fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
@@ -142,14 +142,12 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
         attribute_sources: acquired.attribute_sources,
         out,
         limit: None,
+        strict: false,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -254,7 +252,7 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
     let message = format!(
         "{}",
         tessera_build::input::read_points(
-            tessera_build::input::Source::new(&path, &fields, &INTEGER_IDS),
+            tessera_build::input::Source::every_row(&path, &fields),
             tessera_spatial::Projection::None,
             &extent(),
         )

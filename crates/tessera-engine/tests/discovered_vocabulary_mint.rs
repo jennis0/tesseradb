@@ -6,7 +6,7 @@
 //! deliberately does not mint — see that function's own doc) and is resolved to a code once, on the
 //! write executor, at the close of the commit window the row lands in.
 //!
-//! Every case here calls `Engine::accept_ingest` directly, the same boundary the HTTP handler calls
+//! Every case here calls `Engine::ingest` directly, the same boundary the HTTP handler calls
 //! after it has already turned a discovered vocabulary's key into `WalScalar::Utf8` (or, for a
 //! declared one, into its code). That is deliberate: it is the executor's own resolution this file
 //! is pinning, not the handler's validation, which has no engine-crate seam to test from here.
@@ -148,14 +148,12 @@ fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildA
         ),
         out: out.to_path_buf(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -169,7 +167,7 @@ fn build_fixture_with_schema(out: &Path, tmp: &Path, schema_toml: &str, column: 
     let pairs = tmp.join("pairs.parquet");
     write_points_with_absent_category(&points, n, column);
     write_pairs_n(&pairs, n);
-    let schema = parse_schema(tmp, schema_toml);
+    let schema = with_id(parse_schema(tmp, schema_toml));
     build(&build_args(&points, &pairs, out, schema))
         .expect("a discovered-vocabulary build should succeed");
 }
@@ -188,24 +186,10 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
     engine
 }
 
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId {
+fn ingest_row(engine: &Engine, batch: &str, scalar: WalScalar) -> EntityId {
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -215,7 +199,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
                 scoped: Vec::new(),
             }],
-            format!("batch-{external_id}"),
+            format!("batch-{batch}"),
             [0u8; 32],
         )
         .expect("the ingest is accepted")[0]
@@ -261,7 +245,8 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
 
 /// Every `VocabularyMint` record in the WAL at `wal_path`, in file order.
 fn mint_records(wal_path: &Path) -> Vec<(String, String, u32)> {
-    let (_wal, records) = Wal::open(wal_path).expect("the WAL reopens");
+    let wal = Wal::open(wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     records
         .into_iter()
         .filter_map(|r| match r {
@@ -300,7 +285,7 @@ fn a_novel_key_mints_and_the_row_stores_the_code() {
         .expect("the novel key is bound as soon as the window that minted it is published");
     assert_ne!(code, 0, "0 is the absent sentinel, never a minted code");
 
-    flush(&engine);
+    publish_buffered(&engine);
 
     assert_eq!(
         stored_code_of(&root, "department", entity),
@@ -339,8 +324,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
     let engine = engine_over(tmp.path(), &root, config());
 
-    let row = |external_id: &str| UnallocatedRow {
-        external_id: Some(external_id.as_bytes().to_vec()),
+    let row = || UnallocatedRow {
         view: "s0".to_string(),
         join: None,
         descriptors: vec![b"0".to_vec()],
@@ -352,8 +336,8 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     };
 
     let entities = engine
-        .accept_ingest(
-            vec![row("f-1"), row("f-2")],
+        .ingest_rows(
+            vec![row(), row()],
             "batch-finance".to_string(),
             [1u8; 32],
         )
@@ -387,7 +371,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
     assert_eq!(finance_mints[0].2, code);
 
     let engine = engine_over(tmp.path(), &root, config());
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(stored_code_of(&root, "department", entities[0]), Some(code));
     assert_eq!(stored_code_of(&root, "department", entities[1]), Some(code));
     drop(engine);
@@ -407,7 +391,8 @@ fn the_mint_record_precedes_the_ingest_batch_record_in_the_wal() {
     let wal_path = tmp.path().join("wal.log");
     drop(engine); // joins the executor and closes the WAL handle before it is reopened below
 
-    let (_wal, records) = Wal::open(&wal_path).expect("the WAL reopens");
+    let wal = Wal::open(&wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
     let mint_index = records
         .iter()
         .position(|r| {
@@ -509,9 +494,8 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
     // The space is now fully spent (`code_before` plus the four just minted = all five free
     // codes); a sixth novel key must be refused, not silently reuse one of the five.
     let err = engine
-        .accept_ingest(
+        .ingest_rows(
             vec![UnallocatedRow {
-                external_id: Some(b"one-too-many".to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 descriptors: vec![b"0".to_vec()],
@@ -533,6 +517,133 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
         detail.contains("department") && detail.contains("full"),
         "the detail must name the exhausted vocabulary: {detail}"
     );
+}
+
+/// **A predicate layer over a category column names its artifact by the value's key.** The code is
+/// internal and a viewer never sees one, so an artifact named by the number a row carries would be
+/// both unrecognisable and unreachable from the key a client asks about.
+#[test]
+fn a_predicate_layer_over_a_category_names_its_artifact_by_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    const LAYER: &str = "departments/by-value";
+    engine
+        .register_layer(tessera_types::layer::LayerDeclaration {
+            scope: Default::default(),
+            name: LAYER.to_string(),
+            title: None,
+            views: vec!["s0".to_string()],
+            membership: tessera_types::layer::MembershipSource::Attribute("department".to_string()),
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: tessera_types::layer::Hierarchy {
+                kind: tessera_types::layer::HierarchyKind::Flat,
+                prune_children: false,
+            },
+            content: Default::default(),
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: None,
+            shape: None,
+        })
+        .expect("a predicate layer over the discovered column");
+
+    let before = engine.published_artifacts();
+    ingest_row(&engine, "finance-1", WalScalar::Utf8("finance".to_string()));
+    assert_eq!(
+        engine.published_artifacts(),
+        before + 1,
+        "the value the row carried created its artifact at the window's close"
+    );
+    // A second row under the same key names the artifact the first created, which it can only do
+    // if both windows derived the same key.
+    ingest_row(&engine, "finance-2", WalScalar::Utf8("finance".to_string()));
+    assert_eq!(
+        engine.published_artifacts(),
+        before + 1,
+        "the same key minted a second artifact"
+    );
+
+    // Read before any flush, which rotates the log these publications were written to.
+    drop(engine);
+    assert_eq!(
+        published_keys(&tmp.path().join("wal.log"), LAYER),
+        vec!["finance".to_string()],
+        "the artifact must be named by the vocabulary key, not by the code the mint drew"
+    );
+}
+
+/// The key of every artifact published into `layer` by the records in the WAL at `wal_path`.
+fn published_keys(wal_path: &Path, layer: &str) -> Vec<String> {
+    let wal = Wal::open(wal_path).expect("the WAL reopens");
+    let records = wal.records().map(|r| r.unwrap().1).collect::<Vec<_>>();
+    records
+        .into_iter()
+        .filter_map(|r| match r {
+            WalRecord::ArtifactPublish {
+                layer: named,
+                artifacts,
+                ..
+            } if named == layer => Some(artifacts),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|a| a.key)
+        .collect()
+}
+
+/// **A window that fails after minting publishes none of its mints.** The draw happens before
+/// anything is appended, so a later row refusing the window has to leave the bindings exactly as
+/// they were: a key bound by a window that never committed would colour nothing and would be
+/// undrawable for ever.
+#[test]
+fn a_refused_window_publishes_none_of_the_keys_it_drew() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_with_schema(&root, tmp.path(), DISCOVERED_WIDE, "department", 4);
+    let engine = engine_over(tmp.path(), &root, config());
+
+    let row = |key: &str| UnallocatedRow {
+        view: "s0".to_string(),
+        join: None,
+        descriptors: vec![b"0".to_vec()],
+        x: 1.0,
+        y: 1.0,
+        scalars: vec![WalScalar::Utf8(key.to_string())],
+        terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
+    };
+
+    // The first row's key draws a code; the second is the empty string, which is not a value, so
+    // the window is refused after the first has already minted.
+    engine
+        .ingest_rows(
+            vec![row("logistics"), row("")],
+            "batch-refused".to_string(),
+            [7u8; 32],
+        )
+        .expect_err("the empty key refuses the window");
+
+    let bound = |engine: &Engine| {
+        engine
+            .generation()
+            .vocabularies
+            .get("department")
+            .unwrap()
+            .code_of("logistics")
+    };
+    assert_eq!(bound(&engine), None, "the refused window bound nothing");
+
+    // And nothing durable carries it either: a restart replays the log the window did not write.
+    drop(engine);
+    let engine = engine_over(tmp.path(), &root, config());
+    assert_eq!(bound(&engine), None, "nor does a restart bind it");
+    drop(engine);
 }
 
 /// **Case 5**: a declared vocabulary is unaffected. Its column never carries `WalScalar::Utf8` at
@@ -570,7 +681,7 @@ fn a_declared_vocabulary_is_unaffected_by_the_mint_loop() {
         "nothing mints for a declared vocabulary — the assigned set must not grow"
     );
 
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         stored_code_of(&root, "band", entity),
         Some(2),

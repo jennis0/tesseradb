@@ -31,17 +31,17 @@ battery on the catalogue bundle (2026-08-15, this host), with headroom for the w
 rotation phases the read-only measurement does not exercise. At deployment scale the floor is
 rounding noise and the rule reads as written.
 
-Two behaviours below the completion zone were measured while pinning the out-of-memory control's
-limit, and the gap between them matters:
+Below the completion zone the outcome depends on how much of the charge the kernel cannot
+reclaim. With swap off, only anonymous memory forces a kill. The server's anonymous memory after
+boot grows with the CPU count (measured 2026-09-24: about 4.9 MB on one CPU, 6.2 MB on four,
+9.5 MB on twelve), so a limit above the smallest of those kills on some hosts and not others: at
+8 MiB a twelve-CPU host kills the server during boot, and a four-CPU CI runner completes the run
+with no `oom_kill`. At 16 MiB (measured 2026-08-15) the server neither booted nor died: enough
+charge was reclaimable that the kernel thrashed text pages indefinitely, and the run surfaced as
+a health-wait timeout with `oom_kill 0`, a resource outcome the cgroup never names.
 
-- at 8 MiB the kernel kills the server during boot, reliably — the binary's own text cannot
-  fault in (`memory.events` records `oom_kill 1`);
-- at 16 MiB the server neither boots nor dies: enough charge is reclaimable that the kernel
-  thrashes text pages indefinitely, and the run surfaces as a health-wait timeout with
-  `oom_kill 0` — a resource outcome the cgroup never names.
-
-So the control below pins the discrimination at 8 MiB, where the kill is certain, and the
-constrained walk's limit sits far from both bands. The thrash band is why the floor carries
+So the control below pins the discrimination at 2 MiB, under the anonymous floor on any CPU count,
+and the constrained walk's limit sits far from the thrash band, which is why the floor carries
 headroom rather than hugging the measurement.
 
 **At this corpus size the limit is real but does not yet bite — measured, and stated so nobody
@@ -92,9 +92,11 @@ from .driver import (
 from .test_stage_invariance import (
     BBOX,
     CHECKED_LABELS,
+    COALESCE_WIDTH,
     FILTER_DEPARTMENT,
     GRANTS,
     K,
+    MERGE_TIER_WIDTH,
     _battery_item,
     _write_stage,
 )
@@ -104,9 +106,10 @@ from .test_stage_invariance import (
 #: measured 16 MiB thrash band).
 PROCESS_FLOOR_BYTES = 48 * 1024 * 1024
 
-#: The out-of-memory control's limit — inside the certain-kill band the module doc records.
+#: The out-of-memory control's limit — under the server's anonymous memory at any CPU count, so
+#: the kill does not depend on the host (module doc).
 #: Contrived on purpose: the control exists to observe the discrimination, not the regime.
-OOM_CONTROL_LIMIT_BYTES = 8 * 1024 * 1024
+OOM_CONTROL_LIMIT_BYTES = 2 * 1024 * 1024
 
 PROFILE_NAMES = ("default", "constrained", "cold", "single-thread")
 
@@ -135,9 +138,9 @@ def _rotation_growth(h: SuiteHarness) -> None:
     and because a pair that failed to restore byte-identically would fail the rotate stage's
     entitlement in the warm profiles too, which is coverage, not cost.
     """
-    external_id_b64, _fx = _battery_item(0)(h)
+    tessera_id, _fx = _battery_item(0)(h)
     for op in ("suppress", "unsuppress"):
-        resp = h.server.change(external_id_b64, op)
+        resp = h.server.change(tessera_id, op)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"rotation growth: {op} refused ({resp.status_code}): {resp.text}"
@@ -147,20 +150,18 @@ def _rotation_growth(h: SuiteHarness) -> None:
 def _full_plan() -> list:
     """The stage-invariance plan, stage for stage — §7 applies a profile to a full stage
     sequence, and this module's claim is that the *same* sequence holds under every regime."""
-    fx = cat.ingest_fx_keys(16)
+    fx = cat.ingest_fx_keys(12)
     return [
         Build(),
         _write_stage(0, fx[0:2]),
         _write_stage(1, fx[2:4]),
         _write_stage(2, fx[4:6]),
-        _write_stage(3, fx[6:8]),
         Merge("merge-1"),
-        _write_stage(4, fx[8:10]),
-        _write_stage(5, fx[10:12]),
-        _write_stage(6, fx[12:14]),
-        Merge("merge-2"),
-        _write_stage(7, fx[14:16]),
+        _write_stage(3, fx[6:8]),
         Coalesce("coalesce"),
+        _write_stage(4, fx[8:10]),
+        Merge("merge-2"),
+        _write_stage(5, fx[10:12]),
         Deny("suppress", _battery_item(0)),
         Deny("unsuppress", _battery_item(0)),
         Deny("delete", _battery_item(1)),
@@ -201,6 +202,8 @@ def profile_walk(request, tmp_path_factory, private_catalogue_bundle):
         k=K,
         filters={"department": {"eq": FILTER_DEPARTMENT}},
         profile=_profile(name, bundle),
+        merge_tier_width=MERGE_TIER_WIDTH,
+        coalesce_width=COALESCE_WIDTH,
     )
     try:
         results = run_plan(h, _full_plan())
@@ -243,7 +246,7 @@ def test_a_completed_constrained_walk_is_accounted_for_by_its_cgroup(profile_wal
 def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failure(
     tmp_path_factory, private_catalogue_bundle
 ):
-    """Contrive the kill — a limit inside the measured certain-kill band — and observe the
+    """Contrive the kill — a limit under the server's anonymous memory — and observe the
     discrimination: the walk raises `OutOfMemory` carrying the cgroup's own `oom_kill` count,
     and that type is not the correctness failure's type, so the first real out-of-memory a
     constrained run meets is reported as a measurement rather than triaged as data corruption."""
@@ -259,12 +262,30 @@ def test_a_memory_killed_run_reports_a_resource_outcome_not_a_correctness_failur
         k=K,
         profile=Profile("constrained", memory_max=OOM_CONTROL_LIMIT_BYTES),
     )
+    outcome = None
+    failure = None
     try:
-        with pytest.raises(OutOfMemory) as caught:
-            run_plan(h, [Build()])
+        run_plan(h, [Build()])
+    except OutOfMemory as exc:
+        outcome = exc
+    except Exception as exc:
+        failure = exc
     finally:
         h.stop()
-    outcome = caught.value
+    if outcome is None:
+        # The tail tells a server that thrashed without being killed (a spawn timeout with
+        # `oom_kill` 0) apart from one that ran within the limit.
+        log_path = getattr(h, "log_path", None)
+        tail = (
+            log_path.read_bytes()[-8192:].decode(errors="replace")
+            if log_path is not None and log_path.exists()
+            else "(no server log)"
+        )
+        ran = f"failed with {failure!r}" if failure is not None else "completed"
+        pytest.fail(
+            f"expected an out-of-memory kill, but the run {ran}; memory report "
+            f"{h.memory_report}\nserver log tail:\n{tail}"
+        )
     assert outcome.events.get("oom_kill", 0) >= 1, (
         "the outcome must carry the cgroup's own record of the kill, not an inference from "
         "the symptoms"

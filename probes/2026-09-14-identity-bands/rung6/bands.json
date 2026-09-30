@@ -121,6 +121,6 @@
   "out": "/tmp/claude-1000/-home-joe-code-tessera/426a89fb-7a28-4283-ac18-8c0e052b2c16/scratchpad/rung6-bands/bands",
   "read_bytes": 42716803072,
   "row_count": 3495729729,
-  "segment": "/home/joe/code/tessera/data/ladder/gbif/bundle/v00000/partitions/default/views/geo/segments/seg-0",
+  "segment": "/home/user/code/tessera/data/ladder/gbif/bundle/v00000/partitions/default/views/geo/segments/seg-0",
   "wall_s": 63.914113802
 }

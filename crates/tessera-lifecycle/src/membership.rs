@@ -242,7 +242,7 @@ impl ArtifactShapes {
 ///
 /// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
 /// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
-/// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
+/// blinded identifier reaches durable state (I10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
     /// The caller's own name for this artifact. **Effectively mandatory for a layer another
@@ -299,6 +299,11 @@ pub struct IncomingArtifact {
     /// layer, because the rows inside the shape are resolved from it at every segment's
     /// publication.
     pub shape: Option<ArtifactShapes>,
+    /// The artifact's own access labels, as the plugin's descriptors for the labels the caller
+    /// wrote. `Some` of an empty list is no label, which the layer's `artifact_visibility.default`
+    /// answers; `None` is a record that did not state its labels at all, which a layer reading
+    /// labels refuses.
+    pub access: Option<Vec<Vec<u8>>>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -345,10 +350,7 @@ fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
     // here would turn an id that somehow was outside into another entity's, which is a document
     // nobody named put into the artifact. The build refuses the same id where it decodes a member
     // table, and refusing rather than truncating is what makes the two entry points agree.
-    let mut values: Vec<u32> = entities
-        .into_iter()
-        .map(crate::overlay::as_u32)
-        .collect();
+    let mut values: Vec<u32> = entities.into_iter().map(crate::overlay::as_u32).collect();
     values.sort_unstable();
     bitmap_of_sorted(&values)
 }
@@ -398,6 +400,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: None,
         }
     }
 
@@ -464,6 +467,7 @@ impl IncomingArtifact {
             attached_to: None,
             parent_keys: Vec::new(),
             shape: None,
+            access: None,
         }
     }
 }
@@ -478,7 +482,7 @@ impl IncomingArtifact {
 /// suppressed (`artifacts-from-points.md` §5).
 ///
 /// **Members are entities, resolved at admission**, on [`IncomingArtifact`]'s rule: no blinded
-/// identifier reaches durable state, where a key rotation would silently redirect it (I10).
+/// identifier reaches durable state (I10).
 ///
 /// **The fixed parts follow the fill rule** (`ingest.md` §1.1): a part the artifact does not hold
 /// is filled, a part it holds identically is accepted with no effect, and a part it holds
@@ -492,6 +496,9 @@ pub struct IncomingGrowth {
     /// nothing behind it. Minting is what a *membership column* does — at a build from a member
     /// source, and at ingest from a column named for the layer (`artifacts-from-points.md` §6.3).
     pub key: String,
+    /// The view the artifact belongs to, on a layer scoped to a group: part of its identity, as on
+    /// a publication. `None` on an entity-scoped layer.
+    pub view: Option<String>,
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
     pub joining: Bitmap,
@@ -530,6 +537,8 @@ pub struct FixedParts {
     pub contents: Vec<(u16, Vec<String>)>,
     /// The canonical shapes, on [`IncomingArtifact::shape`]'s terms.
     pub shape: Option<ArtifactShapes>,
+    /// The access label, on [`IncomingArtifact::access`]'s terms. Empty supplies none.
+    pub access: Vec<Vec<u8>>,
 }
 
 impl FixedParts {
@@ -539,6 +548,7 @@ impl FixedParts {
             && self.attached_to.is_none()
             && self.contents.is_empty()
             && self.shape.is_none()
+            && self.access.is_empty()
     }
 }
 
@@ -549,6 +559,7 @@ impl IncomingGrowth {
     pub fn from_entities(key: String, joining: impl IntoIterator<Item = EntityId>) -> Self {
         IncomingGrowth {
             key,
+            view: None,
             joining: bitmap_of_entities(joining),
             leaving: Bitmap::new(),
             rank: None,
@@ -568,6 +579,7 @@ impl IncomingGrowth {
     ) -> Self {
         IncomingGrowth {
             key,
+            view: None,
             joining: bitmap_of_entities(joining),
             leaving: bitmap_of_entities(leaving),
             rank,
@@ -602,7 +614,7 @@ pub struct Degradation {
 }
 
 /// One artifact's membership — **the bitmap, or a read-only view of the same bitmap's bytes
-/// somewhere the heap is not**.
+/// somewhere the heap is not, with what has joined since beside it**.
 ///
 /// # Why the field is not simply a `Bitmap`
 ///
@@ -631,10 +643,15 @@ pub struct Degradation {
 ///
 /// # What a view may and may not do
 ///
-/// Reads go through [`Deref`](std::ops::Deref), so every caller that asks a membership a question is unchanged and
-/// cannot tell the two apart. A *write* takes [`Members::to_mut`], which materialises an owned
-/// bitmap first — growth and retirement therefore behave identically on either form, which is what
-/// keeps write-path §5.4's two removal rules the only routes a bit leaves a membership.
+/// A view is never written. A growth over one keeps the view and holds only the members the view
+/// lacks, on the heap beside it ([`Members::join`]). The fold's rewrite, read back through
+/// [`ArtifactStore::rehouse_members`], replaces the pair with a view of their union. Any other
+/// write takes [`Members::to_mut`], which first materialises the whole membership on the heap.
+///
+/// Reads go through this type's own methods and answer over the whole membership, the view and
+/// what joined it alike. There is no `Deref` to a bitmap, because a membership with joins is not
+/// one bitmap anywhere: [`Members::whole`] builds it where a reader needs a single bitmap, and
+/// [`Members::projected`] maps the parts separately where the map distributes over a union.
 ///
 /// ⊘ **The mapping's lifetime is the owner's, and the owner is held here.** `bytes` points into an
 /// allocation `owner` keeps alive — the mapped extent file, at a build and at a serving open alike
@@ -649,13 +666,16 @@ enum MembersInner {
         view: BitmapView<'static>,
         bytes: &'static [u8],
         owner: Arc<dyn Any + Send + Sync>,
+        /// The members joined since the bytes were written, disjoint from the view. `None` where
+        /// nothing has joined.
+        joined: Option<Box<Bitmap>>,
     },
 }
 
 /// `Bitmap` carries croaring's own `Send`/`Sync`, and a view over bytes nothing else may write is
-/// no weaker: every operation reachable through [`Deref`](std::ops::Deref) is a read of a `roaring_bitmap_t` and of
-/// the immutable slice behind it, and the one route to a mutation ([`Members::to_mut`]) needs
-/// `&mut self`. The owner is `Send + Sync` by its own bound.
+/// no weaker: every read is a read of a `roaring_bitmap_t` and of the immutable slice behind it,
+/// and every write ([`Members::to_mut`], [`Members::join`]) needs `&mut self`. The owner is
+/// `Send + Sync` by its own bound.
 unsafe impl Send for Members {}
 unsafe impl Sync for Members {}
 
@@ -689,18 +709,41 @@ impl Members {
         // moved into the value that holds the view, so the two cannot be separated.
         let bytes: &'static [u8] = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
         let view = unsafe { BitmapView::deserialize::<Portable>(bytes) };
-        Some(Members(MembersInner::Mapped { view, bytes, owner }))
+        Some(Members(MembersInner::Mapped {
+            view,
+            bytes,
+            owner,
+            joined: None,
+        }))
     }
 
-    /// The membership as something that can be written to, materialising an owned copy where this
-    /// was a view. Every mutation in this module goes through it.
+    /// The whole membership as something that can be written to, materialising it on the heap
+    /// where it was a view. Every write in this module but a join goes through it.
     pub fn to_mut(&mut self) -> &mut Bitmap {
-        if let MembersInner::Mapped { view, .. } = &self.0 {
-            self.0 = MembersInner::Owned(view.to_bitmap());
+        if let MembersInner::Mapped { .. } = &self.0 {
+            self.0 = MembersInner::Owned(self.whole().into_owned());
         }
         match &mut self.0 {
             MembersInner::Owned(bitmap) => bitmap,
             MembersInner::Mapped { .. } => unreachable!("the arm above replaced it"),
+        }
+    }
+
+    /// Add `joining` to the membership. Over a view, only the members the view does not hold are
+    /// kept, beside it, so what this costs the heap is the join rather than the artifact.
+    pub fn join(&mut self, joining: &Bitmap) {
+        match &mut self.0 {
+            MembersInner::Owned(bitmap) => bitmap.or_inplace(joining),
+            MembersInner::Mapped { view, joined, .. } => {
+                let new = joining.andnot(view);
+                if new.is_empty() {
+                    return;
+                }
+                match joined {
+                    Some(held) => held.or_inplace(&new),
+                    None => *joined = Some(Box::new(new)),
+                }
+            }
         }
     }
 
@@ -710,16 +753,99 @@ impl Members {
     pub fn is_mapped(&self) -> bool {
         matches!(self.0, MembersInner::Mapped { .. })
     }
-}
 
-impl std::ops::Deref for Members {
-    type Target = Bitmap;
+    /// The members joined since the mapped bytes were written, disjoint from them. `None` where
+    /// nothing has, and always for a membership on the heap, which holds its joins in itself.
+    pub fn joined(&self) -> Option<&Bitmap> {
+        match &self.0 {
+            MembersInner::Mapped {
+                joined: Some(joined),
+                ..
+            } => Some(joined),
+            _ => None,
+        }
+    }
 
-    fn deref(&self) -> &Bitmap {
+    /// The bitmap written or mapped, without what [`Self::joined`] holds.
+    fn base(&self) -> &Bitmap {
         match &self.0 {
             MembersInner::Owned(bitmap) => bitmap,
             MembersInner::Mapped { view, .. } => view,
         }
+    }
+
+    /// The membership as one bitmap: borrowed where nothing has joined a view, and otherwise the
+    /// union built on the heap.
+    pub fn whole(&self) -> std::borrow::Cow<'_, Bitmap> {
+        match self.joined() {
+            None => std::borrow::Cow::Borrowed(self.base()),
+            Some(joined) => std::borrow::Cow::Owned(self.base().or(joined)),
+        }
+    }
+
+    /// `map` of the whole membership, for a `map` that distributes over a union, such as a
+    /// projection into row space: each part is mapped separately and the results unioned, so the
+    /// membership is never built whole.
+    pub fn projected(&self, map: impl Fn(&Bitmap) -> Bitmap) -> Bitmap {
+        let mut out = map(self.base());
+        if let Some(joined) = self.joined() {
+            out.or_inplace(&map(joined));
+        }
+        out
+    }
+
+    pub fn cardinality(&self) -> u64 {
+        self.base().cardinality() + self.joined().map_or(0, Bitmap::cardinality)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.base().is_empty() && self.joined().is_none()
+    }
+
+    pub fn contains(&self, entity: u32) -> bool {
+        self.base().contains(entity) || self.joined().is_some_and(|j| j.contains(entity))
+    }
+
+    /// How many of `other`'s members this membership holds.
+    pub fn and_cardinality(&self, other: &Bitmap) -> u64 {
+        self.base().and_cardinality(other) + self.joined().map_or(0, |j| j.and_cardinality(other))
+    }
+
+    /// Whether this membership shares a member with `other`.
+    pub fn intersect(&self, other: &Bitmap) -> bool {
+        self.base().intersect(other) || self.joined().is_some_and(|j| j.intersect(other))
+    }
+
+    /// `set` without this membership's members.
+    pub fn remove_from(&self, set: &mut Bitmap) {
+        set.andnot_inplace(self.base());
+        if let Some(joined) = self.joined() {
+            set.andnot_inplace(joined);
+        }
+    }
+
+    /// The members in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        let mut base = self.base().iter().peekable();
+        let mut joined = self.joined().map(|j| j.iter().peekable());
+        std::iter::from_fn(move || {
+            let Some(joined) = joined.as_mut() else {
+                return base.next();
+            };
+            match (base.peek(), joined.peek()) {
+                (Some(b), Some(j)) if j < b => joined.next(),
+                (Some(_), _) => base.next(),
+                (None, _) => joined.next(),
+            }
+        })
+    }
+
+    /// How many Roaring containers hold the membership, the view's and what joined it.
+    pub fn containers(&self) -> u64 {
+        self.base().statistics().n_containers as u64
+            + self
+                .joined()
+                .map_or(0, |j| j.statistics().n_containers as u64)
     }
 }
 
@@ -740,12 +866,18 @@ impl Clone for Members {
     fn clone(&self) -> Self {
         match &self.0 {
             MembersInner::Owned(bitmap) => Members::owned(bitmap.clone()),
-            MembersInner::Mapped { bytes, owner, .. } => Members(MembersInner::Mapped {
+            MembersInner::Mapped {
+                bytes,
+                owner,
+                joined,
+                ..
+            } => Members(MembersInner::Mapped {
                 // SAFETY: `bytes` is the slice this value's own view already addresses, and
                 // `owner` — cloned beside it — is what keeps it alive.
                 view: unsafe { BitmapView::deserialize::<Portable>(bytes) },
                 bytes,
                 owner: Arc::clone(owner),
+                joined: joined.clone(),
             }),
         }
     }
@@ -764,7 +896,7 @@ impl std::fmt::Debug for Members {
 
 impl PartialEq for Members {
     fn eq(&self, other: &Self) -> bool {
-        **self == **other
+        self.cardinality() == other.cardinality() && *self.whole() == *other.whole()
     }
 }
 
@@ -772,13 +904,13 @@ impl Eq for Members {}
 
 impl PartialEq<Bitmap> for Members {
     fn eq(&self, other: &Bitmap) -> bool {
-        **self == *other
+        self.cardinality() == other.cardinality() && *self.whole() == *other
     }
 }
 
 impl PartialEq<Members> for Bitmap {
     fn eq(&self, other: &Members) -> bool {
-        *self == **other
+        other == self
     }
 }
 
@@ -809,6 +941,11 @@ pub struct ArtifactRecord {
     /// reopened comes back with each artifact in the view it was published into, which is what
     /// keeps two views' keys apart across a fold.
     pub view: Option<String>,
+    /// The incarnation of `view` this artifact was published under, and
+    /// [`tessera_types::view::DECLARED_INCARNATION`] where `view` is `None`. A view dropped and
+    /// created again under the same key is a new incarnation, and none of the old one's artifacts
+    /// belong to it ([`ArtifactStore::retire_dead_views`]).
+    pub incarnation: tessera_types::view::ViewIncarnation,
     /// Entity-space membership — the canonical, view-invariant record. Owned, or read through a
     /// mapping of the bytes that carry it (see [`Members`]).
     pub members: Members,
@@ -847,6 +984,30 @@ pub struct ArtifactRecord {
     /// the cut does not — those are information about what contains what, not a ladder to coarsen
     /// along (owner ruling, 2026-08-18).
     pub parents: Vec<crate::wal::ParentRef>,
+    /// The artifact's own access label as descriptors, ascending and without repeats. Empty is no
+    /// label.
+    pub access: Vec<Vec<u8>>,
+}
+
+/// An access label's descriptors in the one order every copy of it is stored and compared in.
+pub fn canonical_access(descriptors: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut sorted = descriptors.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted
+}
+
+/// How far a chain of borrowed memberships is followed. A label may attach to a label, which
+/// attaches to a cluster. A layer is registered only after every layer it names in `depends_on`, so
+/// the declaration graph has no cycles; this bound is a backstop for a store that disagrees with
+/// that, and it refuses rather than follows.
+const BORROW_CHAIN_MAX: u32 = 8;
+
+/// Whether this artifact takes its membership from what it attaches to. It does where it is an
+/// attachment and declares no members of its own (decision 0145). Asked here so that every reader
+/// of a membership asks it the same way.
+pub fn borrows_membership(record: &ArtifactRecord) -> bool {
+    record.attached_to.is_some() && record.members.is_empty()
 }
 
 /// The resolved target of an attachment: the edge `annotation-representation.md` §2.4 names, with
@@ -1293,6 +1454,15 @@ impl ArtifactStore {
         .min_by_key(|(_, pos)| *pos)
     }
 
+    /// Whether this store holds memberships or supplied content that no manifest names — the two
+    /// pins a side-manifest releases, and not the two only a whole rewrite does.
+    ///
+    /// What a freshly replayed store answers here is whether the log is carrying artifact state on
+    /// its own, which is the state the next publication has to end.
+    pub fn has_unpublished(&self) -> bool {
+        self.oldest_wal_pos.is_some() || self.content_wal_pos.is_some()
+    }
+
     /// Applies a durable publication, a durable growth or a durable fill — the **three** paths by
     /// which artifact state enters, taken by both the live write path and replay.
     ///
@@ -1496,6 +1666,19 @@ impl ArtifactStore {
                     }
                 }
             }
+            ArtifactPart::Access(access) => {
+                if *access != canonical_access(access) || access.is_empty() {
+                    return FillOutcome::Undecodable;
+                }
+                if record.access.is_empty() {
+                    record.access = access.clone();
+                    FillOutcome::Filled
+                } else if record.access == *access {
+                    FillOutcome::Identical
+                } else {
+                    FillOutcome::Differs
+                }
+            }
             ArtifactPart::Content {
                 rank,
                 values,
@@ -1621,6 +1804,7 @@ impl ArtifactStore {
                     entity: published.entity,
                     key: published.key.clone(),
                     view: published.view.clone(),
+                    incarnation: published.incarnation,
                     members: Members::owned(members),
                     contents,
                     attached_to: published.attached_to.clone().map(|a| Attachment {
@@ -1630,6 +1814,7 @@ impl ArtifactStore {
                         entity: a.entity,
                     }),
                     parents: published.parents.clone(),
+                    access: published.access.clone(),
                 },
                 shape,
             );
@@ -1716,13 +1901,14 @@ impl ArtifactStore {
     /// ## How this stands to the two removal rules
     ///
     /// It does not touch them, and that is the whole of its relationship to them. Write-path §5.4's
-    /// rules govern *retirement* — a suppression retires only on unsuppress and never touches a
-    /// stored structure (Rule S); a deletion retires only at the compaction fold that executes it
-    /// (Rule F) — and the hazard they exist against is a second route by which a bit **leaves** a
-    /// membership. This adds bits. A member added here is retired by exactly the routes every other
-    /// member is retired by, having no separate provenance once it is in the set: [`Self::retire`]
-    /// and [`Self::repack_all`] cannot tell it from a declared one, which is the property that keeps
-    /// growth from becoming a third removal rule by the back door.
+    /// rules govern *retirement* — a suppression retires on unsuppress, or with its entity at the
+    /// fold that removes it, and never touches a stored structure (Rule S); a deletion retires
+    /// only at the compaction fold that executes it (Rule F) — and the hazard they exist against
+    /// is a second route by which a bit **leaves** a membership. This adds bits. A member added
+    /// here is retired by exactly the routes every other member is retired by, having no separate
+    /// provenance once it is in the set: [`Self::retire`] and [`Self::repack_all`] cannot tell it
+    /// from a declared one, which is the property that keeps growth from becoming a third removal
+    /// rule by the back door.
     ///
     /// What it must not become is a second *entry* route with its own rules, which is why it is one
     /// method and not one per caller: an unsuppress that restored a member by re-growing it, say,
@@ -1743,7 +1929,7 @@ impl ArtifactStore {
         else {
             return;
         };
-        record.members.to_mut().or_inplace(joining);
+        record.members.join(joining);
     }
 
     /// **The one way a generating set changes**, taken by the live page and by replay alike
@@ -1924,6 +2110,92 @@ impl ArtifactStore {
             .get(&(layer.to_string(), level))
             .and_then(|slots| slots.get(ordinal as usize))
             .and_then(Option::as_ref)
+    }
+
+    /// The membership an artifact is placed, counted and gated over. An artifact that declares
+    /// members has its own; an attached artifact that declares none takes its target's, as the
+    /// target's membership stands now (decision 0145, `annotations.md` §2.2).
+    ///
+    /// A label with no member rows is the label of its cluster. It is placed where the cluster is
+    /// placed, counted over the cluster's members, and served to whoever is served the cluster. A
+    /// label that declares members keeps them: they are the generating set the caller claimed
+    /// ([decision 0135](../../../docs/decisions/0135-a-generating-set-is-the-callers-claim-i8-withdrawn.md)),
+    /// and a content requirement of `all` reads them unchanged.
+    ///
+    /// [Decision 0139](../../../docs/decisions/0139-one-implementation-between-build-and-ingest-and-across-a-type-family.md)
+    /// puts the rule in one function below both entry points. The build's artifact pass, the
+    /// fold's, the flush's and the engine's row form read this rather than the record's field, so a
+    /// bundle's tile index and column describe the membership a request counts. The field is what a
+    /// writer wrote and what a fold packs.
+    ///
+    /// The answer discloses nothing. It is a set of entities, and a count over it is taken inside
+    /// the asker's own mask (**I2**). Existence is decided earlier and elsewhere: an attached
+    /// artifact is absent wherever its target is absent, on every route
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
+    /// so a principal not served the cluster is not served its label.
+    ///
+    /// Three states resolve to nothing: a hole where the target stood, an ordinal holding a
+    /// different entity from the one the edge names, and a chain longer than
+    /// [`BORROW_CHAIN_MAX`]. Each leaves the artifact with the empty membership it declared, which
+    /// is a count of zero for every viewer. They are the states the dependency prerequisite
+    /// withholds on.
+    pub fn members_of<'a>(&'a self, record: &'a ArtifactRecord) -> &'a Members {
+        if !borrows_membership(record) {
+            return &record.members;
+        }
+        self.borrowed_members(record, BORROW_CHAIN_MAX, &mut Vec::new())
+            .unwrap_or(&record.members)
+    }
+
+    /// [`Self::members_of`], reporting the `(layer, level)` of every hop the membership was
+    /// borrowed through. A cached derivation records them so it can tell when what it borrowed has
+    /// moved ([`Self::level_version`]).
+    pub fn members_of_tracked<'a>(
+        &'a self,
+        record: &'a ArtifactRecord,
+        hops: &mut Vec<(String, u32)>,
+    ) -> &'a Members {
+        if !borrows_membership(record) {
+            return &record.members;
+        }
+        // Hops are reported only where the whole chain resolved. A caller reads them as what this
+        // answer depends on, and an unresolved chain borrowed nothing.
+        let from = hops.len();
+        match self.borrowed_members(record, BORROW_CHAIN_MAX, hops) {
+            Some(members) => members,
+            None => {
+                hops.truncate(from);
+                &record.members
+            }
+        }
+    }
+
+    fn borrowed_members<'a>(
+        &'a self,
+        record: &ArtifactRecord,
+        depth: u32,
+        hops: &mut Vec<(String, u32)>,
+    ) -> Option<&'a Members> {
+        if depth == 0 {
+            return None;
+        }
+        let attachment = record.attached_to.as_ref()?;
+        let target = self.get(&attachment.layer, attachment.level, attachment.ordinal)?;
+        if target.entity != attachment.entity {
+            return None;
+        }
+        hops.push((attachment.layer.clone(), attachment.level));
+        if borrows_membership(target) {
+            return self.borrowed_members(target, depth - 1, hops);
+        }
+        Some(&target.members)
+    }
+
+    /// One level's slots by ordinal, a hole being `None`. Empty for a level nothing holds.
+    pub fn slots(&self, layer: &str, level: u32) -> &[Option<ArtifactRecord>] {
+        self.levels
+            .get(&(layer.to_string(), level))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Every artifact of one level, with its ordinal. Holes are skipped.
@@ -2138,48 +2410,34 @@ impl ArtifactStore {
 
     /// Every level's artifacts that are **not yet in a manifest**, as
     /// `(layer, level, ordinal_lo, blobs)` ready to pack — see [`encode_record`].
-    ///
-    /// **A level with a hole in its unpublished range is skipped whole and reported**, rather than
-    /// packed around: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a hole
-    /// would shift every later artifact's identity by one. A hole here means a publication landed
-    /// out of order, which nothing does today.
-    pub fn unpublished(&self) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
-        let (ranges, skipped) = self.pending_ranges();
-        let ready = ranges
+    pub fn unpublished(&self) -> Vec<PendingExtent> {
+        self.pending_ranges()
             .into_iter()
             .map(|(layer, level, ordinal_lo, count)| {
-                let blobs: Vec<Vec<u8>> = self
-                    .encode_pending(&layer, level, ordinal_lo, count)
-                    .map(|blob| blob.expect("pending_ranges returned a dense range"))
-                    .collect();
+                let blobs: Vec<Vec<u8>> =
+                    self.encode_pending(&layer, level, ordinal_lo, count).collect();
                 (layer, level, ordinal_lo, blobs)
             })
-            .collect();
-        (ready, skipped)
+            .collect()
     }
 
     /// The same levels [`Self::unpublished`] answers, as **ranges rather than blobs**:
-    /// `(layer, level, ordinal_lo, count)`, and the levels skipped for a hole.
+    /// `(layer, level, ordinal_lo, count)`.
     ///
-    /// **What a caller that means to stream them asks instead**, [`Self::encode_at`] being the
+    /// **What a caller that means to stream them asks instead**, [`Self::encode_pending`] being the
     /// other half. A build publishes every level of a corpus in one pass, so encoding them all
     /// before the first is written holds the whole corpus's memberships a second time, beside the
     /// bitmaps they came from; a level's ordinal range is enough to open the extent and take them
     /// one at a time. The online publication materialises instead, and not from preference: it
     /// reads this store under a lock it may not hold across an fsync.
-    pub fn pending_ranges(&self) -> (Vec<PendingRange>, Vec<(String, u32)>) {
+    pub fn pending_ranges(&self) -> Vec<PendingRange> {
         let mut ready = Vec::new();
-        let mut skipped = Vec::new();
         for ((layer, level), slots) in &self.levels {
             let from = *self
                 .published_through
                 .get(&(layer.clone(), *level))
                 .unwrap_or(&0) as usize;
             if from >= slots.len() {
-                continue;
-            }
-            if slots[from..].iter().any(Option::is_none) {
-                skipped.push((layer.clone(), *level));
                 continue;
             }
             ready.push((
@@ -2189,15 +2447,15 @@ impl ArtifactStore {
                 (slots.len() - from) as u32,
             ));
         }
-        (ready, skipped)
+        ready
     }
 
     /// The blobs of one pending range, **encoded as they are taken** — the other half of
     /// [`Self::pending_ranges`].
     ///
-    /// An item is `None` where the level holds no record at that ordinal. Inside a range
-    /// `pending_ranges` returned that is a bug rather than a hole: it reports a level with a hole
-    /// as skipped and never as a range.
+    /// A hole is an empty blob, as the fold writes one: an extent addresses its range densely, so
+    /// a hole left out would shift every later artifact's identity by one. Publication claims
+    /// ordinals in order, so a hole here is an artifact removed, never one still to arrive.
     ///
     /// The level is looked up once, not once an artifact: the store is keyed by an owned
     /// `(String, u32)`, so a lookup per ordinal would be a `String` allocation per artifact on the
@@ -2208,11 +2466,13 @@ impl ArtifactStore {
         level: u32,
         ordinal_lo: u32,
         count: u32,
-    ) -> impl Iterator<Item = Option<Vec<u8>>> + 'a {
+    ) -> impl Iterator<Item = Vec<u8>> + 'a {
         let slots = self.levels.get(&(layer.to_string(), level));
         (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
-            let record = slots?.get(ordinal as usize)?.as_ref()?;
-            Some(encode_record(record, self.shape_of(layer, level, ordinal)))
+            slots
+                .and_then(|slots| slots.get(ordinal as usize)?.as_ref())
+                .map(|record| encode_record(record, self.shape_of(layer, level, ordinal)))
+                .unwrap_or_default()
         })
     }
 
@@ -2296,7 +2556,7 @@ impl ArtifactStore {
         self.levels
             .values()
             .flat_map(|slots| slots.iter().flatten())
-            .map(|record| record.members.statistics().n_containers as u64)
+            .map(|record| record.members.containers())
             .sum()
     }
 
@@ -2311,19 +2571,13 @@ impl ArtifactStore {
     /// existence criterion divides by.
     ///
     /// **`retired` is the fold's executed deletions and nothing else.** A *suppressed* member stays
-    /// in the set: a suppression retires only on unsuppress and never touches a stored structure
-    /// (Rule S), so dropping its bit here would give it a second retirement route, which is
-    /// fail-open.
+    /// in the set: a suppression never touches a stored structure (Rule S), so dropping its bit
+    /// here would give a live item's suppression a second retirement route, which is fail-open.
     ///
     /// A content whose generating set lost a retired member is **dropped whole**, content and set
     /// together ([`withdraw_content_of_retired_members`], decision 0135): containment is
     /// all-or-nothing and a set that lost a member fails it for every principal for ever; the
     /// caller re-declares.
-    ///
-    /// A level with a hole is reported rather than packed around, exactly as in
-    /// [`Self::unpublished`] — but the consequence differs and the caller must not treat it as a
-    /// skip: an extent this rewrite omits is a level the new prefix does not carry at all, whose
-    /// artifacts come back registered, addressable and served as absent.
     pub fn repack_all(&self, retired: &Bitmap) -> Vec<PendingExtent> {
         let mut ready = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -2334,11 +2588,9 @@ impl ArtifactStore {
                 .iter()
                 .enumerate()
                 .map(|(ordinal, slot)| {
-                    // **An empty blob is a hole, and a hole is a real state** — an artifact this
-                    // fold retired, or one whose publication is still in flight. It has to be
-                    // *written* rather than packed around: an ordinal is identity, so closing a gap
-                    // would hand every later artifact in the level the identity of its neighbour,
-                    // and every `tessera_id` a caller holds would name the wrong cluster.
+                    // An empty blob is a hole: an artifact a fold or a view drop removed. It is
+                    // written rather than packed around, because an ordinal is identity and closing
+                    // the gap would hand every later artifact its neighbour's `tessera_id`.
                     let Some(record) = slot else {
                         return Vec::new();
                     };
@@ -2445,6 +2697,76 @@ impl ArtifactStore {
         }
         self.dependents
             .retain(|target, _| !retired.contains(target.raw() as u32));
+        moved
+    }
+
+    /// Remove every artifact of a view incarnation that `live` rejects, leaving a hole at each.
+    /// `live` is asked `(layer, view, incarnation)` for each artifact that belongs to a view.
+    ///
+    /// A view dropped and created again under the same key is a new incarnation, so this is what
+    /// keeps the predecessor's artifacts, and their keys, out of the new view. A key goes only
+    /// where it still names the removed artifact, since a republication into the new view may
+    /// hold it. An artifact attached to a removed one is removed by its own stamp: the
+    /// publication refused it unless its layer shares a view with its target's, so its view key
+    /// was dropped with its target's and its own incarnation is dead too. Returns the levels it
+    /// changed.
+    pub fn retire_dead_views(
+        &mut self,
+        live: impl Fn(&str, &str, tessera_types::view::ViewIncarnation) -> bool,
+    ) -> Vec<(String, u32)> {
+        let dead: Vec<(String, u32, u32)> = self
+            .levels
+            .iter()
+            .flat_map(|((layer, level), slots)| {
+                slots.iter().enumerate().filter_map(|(ordinal, slot)| {
+                    let record = slot.as_ref()?;
+                    let view = record.view.as_deref()?;
+                    (!live(layer, view, record.incarnation))
+                        .then(|| (layer.clone(), *level, ordinal as u32))
+                })
+            })
+            .collect();
+        let mut moved: Vec<(String, u32)> = Vec::new();
+        for (layer, level, ordinal) in dead {
+            let Some(record) = self
+                .levels
+                .get_mut(&(layer.clone(), level))
+                .and_then(|slots| slots[ordinal as usize].take())
+            else {
+                continue;
+            };
+            if let Some(key) = &record.key {
+                if let Some(keys) = self
+                    .keys
+                    .get_mut(layer.as_str())
+                    .and_then(|levels| levels.get_mut(&level))
+                    .and_then(|views| views.get_mut(&record.view))
+                {
+                    if keys.get(key.as_str()) == Some(&ordinal) {
+                        keys.remove(key.as_str());
+                    }
+                }
+            }
+            if let Some(shape) = self
+                .shapes
+                .get_mut(layer.as_str())
+                .and_then(|levels| levels.get_mut(&level))
+                .and_then(|shapes| shapes.get_mut(ordinal as usize))
+            {
+                *shape = None;
+            }
+            self.content_pending
+                .remove(&(layer.clone(), level, ordinal));
+            self.forget_dependency(&record);
+            self.dependents.remove(&record.entity);
+            if moved.last() != Some(&(layer.clone(), level)) {
+                moved.push((layer, level));
+            }
+        }
+        for (layer, level) in &moved {
+            self.bump(layer, *level);
+            self.bump_lineage(layer, *level);
+        }
         moved
     }
 
@@ -2640,9 +2962,10 @@ impl ArtifactStore {
     /// carries it.
     ///
     /// Zero on a node whose every membership has been published and read back. Above zero for a
-    /// membership a publication has not reached yet, one a growth has rewritten since, and one the
-    /// mapping refused — which is the fault the seed and the fold both alarm on. Counts only, and
-    /// no per-layer form, on [`Self::total`]'s rule.
+    /// membership a publication has not reached yet, one a retirement has rewritten since, and one
+    /// the mapping refused — which is the fault the seed and the fold both alarm on. A growth
+    /// leaves a mapped membership mapped, holding what joined beside it ([`Members::join`]).
+    /// Counts only, and no per-layer form, on [`Self::total`]'s rule.
     pub fn owned_memberships(&self) -> usize {
         self.levels
             .values()
@@ -2662,11 +2985,13 @@ impl ArtifactStore {
 /// ```text
 /// blob       := u16 LE key_len | key bytes (UTF-8)
 ///             | u16 LE view_len | view bytes (UTF-8)   -- 0 on an entity-scoped layer
+///             | u64 LE incarnation                     -- only where view_len is not 0
 ///             | u16 LE content_count
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
 ///             | attachment
 ///             | parents
+///             | access
 ///             | shape
 /// content    := digest (32 bytes, SHA-256 of the values)
 ///             | u64 LE cardinality                       -- the set's stored cardinality
@@ -2676,6 +3001,8 @@ impl ArtifactStore {
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
 /// parents    := u16 LE parent_count                      -- 0 at a root
 ///             | per parent, ascending by (level, ordinal): u32 LE level | u32 LE ordinal
+/// access     := u16 LE label_count                       -- 0 for no label
+///             | per descriptor, strictly ascending: u16 LE len | descriptor bytes
 /// shape      := u8 0                                     -- no declared shape
 ///             | u8 3 | digest (32 bytes, SHA-256 of what follows)
 ///                    | u16 LE views
@@ -2720,7 +3047,7 @@ impl ArtifactStore {
 /// mean, and the bitmap library stays on one side of the boundary.
 pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) -> Vec<u8> {
     let key = record.key.as_deref().unwrap_or_default().as_bytes();
-    let members = serialise_members(&record.members);
+    let members = serialise_members(&record.members.whole());
     let sets: Vec<Vec<u8>> = record
         .contents
         .iter()
@@ -2745,6 +3072,9 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
     out.extend_from_slice(&view_len.to_le_bytes());
     if view_len != u16::MAX {
         out.extend_from_slice(view);
+        if view_len != 0 {
+            out.extend_from_slice(&record.incarnation.to_le_bytes());
+        }
     }
     // Same argument, one level up: more contents than a `u16` can count is a publication this
     // encoding cannot read back, so it refuses rather than writing a prefix of the ranking. A
@@ -2795,6 +3125,22 @@ pub fn encode_record(record: &ArtifactRecord, shape: Option<&ArtifactShapes>) ->
             out.extend_from_slice(&parent.ordinal.to_le_bytes());
         }
     }
+    // The access label, counted as the parents are, so an unlabelled record is an explicit zero.
+    // A list or a descriptor too long to count is written as the refusal marker the decoder
+    // rejects, since a shortened label would serve the artifact to viewers it did not name.
+    let access_count = u16::try_from(record.access.len()).unwrap_or(u16::MAX);
+    let too_long = record.access.iter().any(|d| d.len() >= u16::MAX as usize);
+    if too_long {
+        out.extend_from_slice(&u16::MAX.to_le_bytes());
+    } else {
+        out.extend_from_slice(&access_count.to_le_bytes());
+        if access_count != u16::MAX {
+            for descriptor in &record.access {
+                out.extend_from_slice(&(descriptor.len() as u16).to_le_bytes());
+                out.extend_from_slice(descriptor);
+            }
+        }
+    }
     // **The shape, on the same discriminant rule** — and here the fail-closed reading is the loud
     // one. A spatial artifact restored *without* its shape has no membership rule at all, so it
     // counts zero for every viewer and is absent under any criterion; the decoder refuses such a
@@ -2833,7 +3179,7 @@ pub fn members_bytes(blob: &[u8]) -> Option<&[u8]> {
     if view_len == u16::MAX as usize {
         return None;
     }
-    let at = at + 2 + view_len;
+    let at = at + 2 + view_len + if view_len == 0 { 0 } else { 8 };
     let count = u16::from_le_bytes(blob.get(at..at + 2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
         return None;
@@ -2895,10 +3241,11 @@ pub fn decode_record(
     if view_len == u16::MAX as usize {
         return None;
     }
-    let view = if view_len == 0 {
-        None
+    let (view, incarnation) = if view_len == 0 {
+        (None, tessera_types::view::DECLARED_INCARNATION)
     } else {
-        Some(std::str::from_utf8(take(view_len)?).ok()?.to_string())
+        let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
+        (Some(view), u64::from_le_bytes(take(8)?.try_into().ok()?))
     };
     let count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
     if count == u16::MAX as usize {
@@ -2970,6 +3317,20 @@ pub fn decode_record(
         }
         parents.push(parent);
     }
+    // Strictly ascending, or a decode failure: the writer keeps the list in canonical order.
+    let access_count = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    if access_count == u16::MAX as usize {
+        return None;
+    }
+    let mut access: Vec<Vec<u8>> = Vec::with_capacity(access_count);
+    for _ in 0..access_count {
+        let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let descriptor = take(len)?.to_vec();
+        if access.last().is_some_and(|last| *last >= descriptor) {
+            return None;
+        }
+        access.push(descriptor);
+    }
     // **The shapes go through [`ArtifactShapes::new`] rather than being assembled from the
     // bytes**, so a blob carrying no view or an empty shape is a decode failure and not an artifact
     // whose membership is a region nobody wrote. One constructor, at both ends. Whether the bytes
@@ -3008,10 +3369,12 @@ pub fn decode_record(
             entity,
             key,
             view,
+            incarnation,
             members: Members::owned(members),
             contents,
             attached_to,
             parents,
+            access,
         },
         shape,
     ))
@@ -3058,6 +3421,102 @@ pub fn growth_record<'a>(
     })
 }
 
+impl ArtifactStore {
+    /// The growth that carries every membership and generating set holding an item's old entity
+    /// to its new one, for each `(old, new)` pair: one [`crate::wal::WalRecord::ArtifactGrow`] per
+    /// level that holds one. A membership gains the new entity and keeps the old, which the fold
+    /// removes with the entity. A generating set trades the old for the new, through the one
+    /// routine that changes a set, so its cardinality is unchanged and its content is never
+    /// withdrawn by the move.
+    pub fn carried_over(&self, moved: &[(EntityId, EntityId)]) -> Vec<crate::wal::WalRecord> {
+        if moved.is_empty() {
+            return Vec::new();
+        }
+        let old: Bitmap = moved.iter().map(|(old, _)| old.raw() as u32).collect();
+        let new_of: std::collections::BTreeMap<u32, u32> = moved
+            .iter()
+            .map(|(old, new)| (old.raw() as u32, new.raw() as u32))
+            .collect();
+        let replaced = |held: &Bitmap| -> (Bitmap, Bitmap) {
+            let leaving = held.and(&old);
+            let joining: Bitmap = leaving.iter().map(|e| new_of[&e]).collect();
+            (joining, leaving)
+        };
+        let mut records = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let mut growth = Vec::new();
+            for (ordinal, record) in slots.iter().enumerate() {
+                let Some(record) = record else {
+                    continue;
+                };
+                if record.members.intersect(&old) {
+                    let (joining, _) = replaced(&record.members.projected(|part| part.and(&old)));
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: Vec::new(),
+                        set: crate::wal::GrownSet::Membership,
+                    });
+                }
+                for (rank, content) in record.contents.iter().enumerate() {
+                    if !content.generated_from.intersect(&old) {
+                        continue;
+                    }
+                    let (joining, leaving) = replaced(&content.generated_from);
+                    growth.push(crate::wal::MembershipGrowth {
+                        ordinal: ordinal as u32,
+                        joining: serialise_members(&joining),
+                        leaving: serialise_members(&leaving),
+                        set: crate::wal::GrownSet::GeneratingSet {
+                            rank: rank as u16,
+                            cardinality: content.generated_from.cardinality(),
+                        },
+                    });
+                }
+            }
+            if !growth.is_empty() {
+                records.push(crate::wal::WalRecord::ArtifactGrow {
+                    layer: layer.clone(),
+                    level: *level,
+                    growth,
+                });
+            }
+        }
+        records
+    }
+}
+
+/// How many memberships `record` adds, read against `store` before the record is applied: every
+/// member of an artifact a publication creates, and every joining member a growth's artifact does
+/// not already hold. A write's `joined` is this summed over the records it appends, so an artifact
+/// created by the same request counts its members exactly as a held one counts its new ones.
+///
+/// A generating-set page and a fill add no membership and count nothing, and neither does a
+/// growth naming an ordinal the store does not hold.
+pub fn members_added(record: &crate::wal::WalRecord, store: &ArtifactStore) -> u64 {
+    match record {
+        crate::wal::WalRecord::ArtifactPublish { artifacts, .. } => artifacts
+            .iter()
+            .filter_map(|artifact| deserialise_members(&artifact.members))
+            .map(|members| members.cardinality())
+            .sum(),
+        crate::wal::WalRecord::ArtifactGrow {
+            layer,
+            level,
+            growth,
+        } => growth
+            .iter()
+            .filter(|delta| delta.set == crate::wal::GrownSet::Membership)
+            .filter_map(|delta| {
+                let joining = deserialise_members(&delta.joining)?;
+                let held = store.get(layer, *level, delta.ordinal)?;
+                Some(joining.cardinality() - held.members.and_cardinality(&joining))
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 /// A growth's **leaving** set, where no bytes at all is the empty set.
 ///
 /// The membership route writes no bytes rather than the serialisation of an empty bitmap
@@ -3089,10 +3548,12 @@ mod tests {
             entity: EntityId::new(entity),
             key: None,
             view: None,
+            incarnation: 0,
             members: Members::owned(Bitmap::of(members)),
             contents: Vec::new(),
             attached_to: None,
             parents: Vec::new(),
+            access: Vec::new(),
         }
     }
 
@@ -3137,6 +3598,72 @@ mod tests {
         );
     }
 
+    /// A label that declares no members of its own is served over its cluster's, at the cluster's
+    /// membership as it stands now (decision 0145). Each refusal leaves the label with the empty
+    /// set it declared, which is a count of zero for every viewer.
+    #[test]
+    fn a_borrowing_artifact_answers_its_targets_membership() {
+        let borrowing = |entity: u64, target: u64, layer: &str, ordinal: u32| ArtifactRecord {
+            members: Members::owned(Bitmap::new()),
+            ..attached(entity, target, layer, ordinal)
+        };
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        // One label over the cluster's members, one declaring its own, one naming an ordinal that
+        // now holds a different entity, and a label on a label.
+        store.put("topics/x", 0, 0, borrowing(200, 100, "clusters/a", 0), None);
+        store.put("topics/x", 0, 1, attached(201, 100, "clusters/a", 0), None);
+        store.put("topics/x", 0, 2, borrowing(202, 999, "clusters/a", 0), None);
+        store.put("glosses/y", 0, 0, borrowing(300, 200, "topics/x", 0), None);
+
+        let members_of = |layer: &str, ordinal: u32| {
+            let record = store.get(layer, 0, ordinal).expect("the record");
+            store.members_of(record).iter().collect::<Vec<u32>>()
+        };
+        assert_eq!(
+            members_of("topics/x", 0),
+            vec![1, 2, 3],
+            "a label with nothing of its own is the label of its cluster"
+        );
+        assert_eq!(
+            members_of("topics/x", 1),
+            vec![1],
+            "a label that declared members keeps them"
+        );
+        assert!(
+            members_of("topics/x", 2).is_empty(),
+            "an edge into an ordinal holding another entity resolves to nothing"
+        );
+        assert_eq!(
+            members_of("glosses/y", 0),
+            vec![1, 2, 3],
+            "and a label on a label follows the chain to the set at the end of it"
+        );
+
+        // A cached derivation records the hops so it can tell when what it borrowed has moved:
+        // every hop on the way, and nothing where nothing was borrowed.
+        let mut hops = Vec::new();
+        let record = store.get("glosses/y", 0, 0).expect("the record");
+        assert_eq!(
+            store
+                .members_of_tracked(record, &mut hops)
+                .iter()
+                .collect::<Vec<u32>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            hops,
+            vec![("topics/x".to_string(), 0), ("clusters/a".to_string(), 0)]
+        );
+        let mut hops = Vec::new();
+        let record = store.get("topics/x", 0, 2).expect("the record");
+        assert!(store.members_of_tracked(record, &mut hops).is_empty());
+        assert!(
+            hops.is_empty(),
+            "a borrowing that did not happen is no dependency"
+        );
+    }
+
     /// A retired artifact takes its edges with it, so a later deletion of something else does not
     /// cascade into an ordinal that is now a hole — or into whatever a republication put there.
     #[test]
@@ -3154,22 +3681,21 @@ mod tests {
     /// **The streaming route and the materialising one answer the same thing.** A build takes
     /// ranges and encodes an artifact at a time; the online publication takes the blobs. Two routes
     /// to one set of bytes is one place for them to drift, so the equality is asserted rather than
-    /// argued — including which levels are skipped for a hole, where the two must agree exactly or
-    /// a build would pack around one.
+    /// argued. A hole is an empty blob in both, at its own ordinal.
     #[test]
     fn the_ranges_and_the_blobs_describe_the_same_pending_levels() {
         let mut store = ArtifactStore::new();
         store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
         store.put("clusters/a", 0, 1, record(101, &[4]), None);
         store.put("clusters/a", 1, 0, record(102, &[]), None);
-        // A level with a hole: reported as skipped by both, and never as a range.
         store.put("holed/h", 0, 1, record(103, &[7]), None);
 
-        let (ready, skipped) = store.unpublished();
-        let (ranges, skipped_ranges) = store.pending_ranges();
-        assert_eq!(skipped, skipped_ranges);
-        assert_eq!(skipped, vec![("holed/h".to_string(), 0)]);
+        let ready = store.unpublished();
+        let ranges = store.pending_ranges();
         assert_eq!(ready.len(), ranges.len());
+        let holed = ready.iter().find(|(layer, ..)| layer == "holed/h").unwrap();
+        assert_eq!((holed.2, holed.3.len()), (0, 2));
+        assert!(holed.3[0].is_empty() && !holed.3[1].is_empty());
         for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
             ready.iter().zip(ranges.iter())
         {
@@ -3177,10 +3703,53 @@ mod tests {
             assert_eq!(blobs.len(), *count as usize);
             let streamed: Vec<Vec<u8>> = store
                 .encode_pending(r_layer, *r_level, *r_lo, *count)
-                .map(|blob| blob.expect("a range holds a record at every ordinal"))
                 .collect();
             assert_eq!(*blobs, streamed);
         }
+    }
+
+    /// A dead incarnation's artifacts leave holes and free their keys, and a key the live
+    /// incarnation already holds again stays with it. Entity-scoped records are never asked about,
+    /// and a label in the dead view goes with the artifact it is attached to.
+    #[test]
+    fn a_dead_views_artifacts_leave_holes_and_a_republished_key_stays() {
+        let scoped = |entity: u64, key: &str, incarnation| ArtifactRecord {
+            key: Some(key.into()),
+            view: Some("q2".into()),
+            incarnation,
+            ..record(entity, &[1])
+        };
+        let mut store = ArtifactStore::new();
+        store.put("clusters/q", 0, 0, scoped(100, "c1", 1), None);
+        store.put("clusters/q", 0, 1, scoped(101, "c2", 1), None);
+        store.put("clusters/q", 0, 2, scoped(102, "c1", 2), None);
+        store.put("clusters/p", 0, 0, record(103, &[1]), None);
+        // A label in the dead view on the dead c2, and one in the live view on c1.
+        let label = |entity: u64, target: u64, ordinal: u32, incarnation| ArtifactRecord {
+            view: Some("q2".into()),
+            incarnation,
+            ..attached(entity, target, "clusters/q", ordinal)
+        };
+        store.put("labels/t", 0, 0, label(200, 101, 1, 1), None);
+        store.put("labels/t", 0, 1, label(201, 102, 2, 2), None);
+        let before = store.level_version("clusters/q", 0);
+
+        let retired = store.retire_dead_views(|_, _, incarnation| incarnation == 2);
+        assert_eq!(
+            retired,
+            vec![("clusters/q".to_string(), 0), ("labels/t".to_string(), 0)]
+        );
+        assert!(store.level_version("clusters/q", 0) > before);
+        let held: Vec<u32> = store.level("clusters/q", 0).map(|(ordinal, _)| ordinal).collect();
+        assert_eq!(held, vec![2]);
+        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c1"), Some(2));
+        assert_eq!(store.ordinal_of_key("clusters/q", 0, Some("q2"), "c2"), None);
+        assert_eq!(store.next_ordinal("clusters/q", 0), 3);
+        assert_eq!(store.level("clusters/p", 0).count(), 1);
+        let labels: Vec<u32> = store.level("labels/t", 0).map(|(ordinal, _)| ordinal).collect();
+        assert_eq!(labels, vec![1]);
+        assert!(store.cascade_from(&[EntityId::new(101)]).is_empty());
+        assert!(store.retire_dead_views(|_, _, incarnation| incarnation == 2).is_empty());
     }
 
     #[test]
@@ -3351,6 +3920,51 @@ mod tests {
         assert_eq!(written.cardinality(), 6);
         assert!(written.contains(9));
         // And the bytes it viewed are untouched — the mapping is read-only by construction.
+        assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
+    }
+
+    /// **Members joining a view are held beside it, and the membership answers as the union.**
+    /// A join the view already holds adds nothing; a write through `to_mut` then materialises the
+    /// whole of it, joins included.
+    #[test]
+    fn a_mapped_membership_that_grows_answers_as_the_union() {
+        let bitmap = Bitmap::of(&[1, 3, 70_000]);
+        let bytes: Arc<Vec<u8>> = Arc::new(serialise_members(&bitmap));
+        let owner: Arc<dyn Any + Send + Sync> = bytes.clone();
+        let mut members =
+            unsafe { Members::mapped(&bytes, owner) }.expect("the bytes are a bitmap");
+        members.join(&Bitmap::of(&[3, 70_000]));
+        assert!(
+            members.joined().is_none(),
+            "what the view holds is not a join"
+        );
+        members.join(&Bitmap::of(&[2, 3, 200_000]));
+        members.join(&Bitmap::of(&[0]));
+
+        let union = Bitmap::of(&[0, 1, 2, 3, 70_000, 200_000]);
+        assert!(members.is_mapped());
+        assert_eq!(members.joined(), Some(&Bitmap::of(&[0, 2, 200_000])));
+        assert_eq!(members, union);
+        assert_eq!(members.cardinality(), 6);
+        assert_eq!(
+            members.iter().collect::<Vec<u32>>(),
+            union.iter().collect::<Vec<u32>>()
+        );
+        assert!(members.contains(2) && members.contains(1) && !members.contains(4));
+        assert_eq!(members.and_cardinality(&Bitmap::of(&[0, 1, 4])), 2);
+        assert!(members.intersect(&Bitmap::of(&[200_000])));
+        assert_eq!(
+            members.projected(|part| part.and(&Bitmap::of(&[1, 2]))),
+            Bitmap::of(&[1, 2])
+        );
+        let mut outside = Bitmap::of(&[0, 1, 4]);
+        members.remove_from(&mut outside);
+        assert_eq!(outside, Bitmap::of(&[4]));
+        assert_eq!(members.clone(), union);
+
+        members.to_mut().add(9);
+        assert!(!members.is_mapped());
+        assert_eq!(members.cardinality(), 7);
         assert_eq!(deserialise_members(&bytes).expect("still a bitmap"), bitmap);
     }
 
@@ -3562,9 +4176,16 @@ mod tests {
         let mut scoped = record(100, &[1, 2, 3]);
         scoped.key = Some("c1".into());
         scoped.view = Some("q1".into());
+        scoped.incarnation = 7;
         let (restored, _) = decode_record(scoped.entity, &encode_record(&scoped, None))
             .expect("the blob round-trips");
         assert_eq!(restored.view.as_deref(), Some("q1"));
+        assert_eq!(restored.incarnation, 7);
+        let blob = encode_record(&scoped, None);
+        assert_eq!(
+            members_bytes(&blob),
+            Some(&serialise_members(&scoped.members.whole())[..])
+        );
         assert_eq!(restored.key.as_deref(), Some("c1"));
         assert_eq!(restored.members, scoped.members);
 
@@ -3653,6 +4274,64 @@ mod tests {
                 blob.len()
             );
         }
+    }
+
+    /// An access label survives the packed extent; a list the writer could not produce, and every
+    /// truncation, refuses rather than decoding as a shorter label.
+    #[test]
+    fn an_access_label_round_trips_and_a_damaged_one_is_refused() {
+        let mut r = record(100, &[1, 2, 3]);
+        r.access = canonical_access(&[b"team-b".to_vec(), b"team-a".to_vec()]);
+        let blob = encode_record(&r, None);
+        let (back, _) = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        assert_eq!(back.access, vec![b"team-a".to_vec(), b"team-b".to_vec()]);
+
+        let plain = record(101, &[1]);
+        let (back, _) = decode_record(plain.entity, &encode_record(&plain, None)).unwrap();
+        assert!(back.access.is_empty());
+
+        let mut backwards = r.clone();
+        backwards.access.reverse();
+        assert!(decode_record(backwards.entity, &encode_record(&backwards, None)).is_none());
+        let mut twice = r.clone();
+        twice.access.push(b"team-b".to_vec());
+        assert!(decode_record(twice.entity, &encode_record(&twice, None)).is_none());
+
+        for len in 0..blob.len() {
+            assert!(decode_record(r.entity, &blob[..len]).is_none());
+        }
+    }
+
+    /// A label fills a record that has none, an identical one changes nothing, and a different
+    /// one is refused and leaves the held label in place.
+    #[test]
+    fn an_access_label_fills_once() {
+        use crate::wal::ArtifactPart;
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1]), None);
+        let a = vec![b"team-a".to_vec()];
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(a.clone())),
+            FillOutcome::Filled
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(a.clone())),
+            FillOutcome::Identical
+        );
+        assert_eq!(
+            store.fill("clusters/a", 0, 0, &ArtifactPart::Access(vec![b"team-b".to_vec()])),
+            FillOutcome::Differs
+        );
+        assert_eq!(store.get("clusters/a", 0, 0).unwrap().access, a);
+        assert_eq!(
+            store.fill(
+                "clusters/a",
+                0,
+                0,
+                &ArtifactPart::Access(vec![b"z".to_vec(), b"a".to_vec()])
+            ),
+            FillOutcome::Undecodable
+        );
     }
 
     /// **A record whose stored cardinality is not the size of the set beside it is refused.**
@@ -3795,11 +4474,13 @@ mod tests {
                 entity: EntityId::new(entity),
                 key: Some(format!("c{ordinal}")),
                 view: None,
+                incarnation: 0,
                 members: serialise_members(&Bitmap::of(members)),
                 contents: Vec::new(),
                 attached_to: None,
                 parents: Vec::new(),
                 shape: None,
+                access: Vec::new(),
             }],
         }
     }
@@ -3822,6 +4503,32 @@ mod tests {
             }];
         }
         record
+    }
+
+    /// **A write's `joined` counts every membership it adds**: all the members of an artifact the
+    /// write creates, and the members a held artifact did not already hold.
+    #[test]
+    fn members_added_counts_created_artifacts_whole_and_held_ones_by_their_new_members() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0), 0);
+
+        let minted = publication("clusters/a", 1, 101, &[4, 5, 6, 7]);
+        assert_eq!(members_added(&minted, &store), 4);
+
+        let joining = growth("clusters/a", 0, 0, &[2, 3, 8, 9]);
+        assert_eq!(members_added(&joining, &store), 2);
+
+        let restated = growth("clusters/a", 0, 0, &[1, 2, 3]);
+        assert_eq!(members_added(&restated, &store), 0);
+
+        let mut generating = growth("clusters/a", 0, 0, &[10, 11]);
+        if let crate::wal::WalRecord::ArtifactGrow { growth, .. } = &mut generating {
+            growth[0].set = crate::wal::GrownSet::GeneratingSet {
+                rank: 0,
+                cardinality: 2,
+            };
+        }
+        assert_eq!(members_added(&generating, &store), 0, "a generating set is no membership");
     }
 
     /// **`levels_moved_by` reports exactly the levels `retire` moves, and `retire` moves each by

@@ -39,7 +39,7 @@ use tessera_store::read::{tile_ranges_all, SegmentData};
 use tessera_types::MortonCode;
 
 use crate::compose::EffectiveMask;
-use crate::single_flight::CacheWeight;
+use tessera_cache::CacheWeight;
 
 /// The default `max_region_cells` — the most boundary cells a region's descent may hold at one
 /// depth before it stops and answers a cover (selection-operand §2). A box around the whole world
@@ -73,6 +73,15 @@ impl RegionVerdict {
             (RegionVerdict::Cover { depth: a }, RegionVerdict::Cover { depth: b }) => {
                 RegionVerdict::Cover { depth: a.min(b) }
             }
+        }
+    }
+
+    /// [`Self::coarser`] over two answers that may carry no verdict, where no region leaf was
+    /// evaluated.
+    pub fn coarsest(a: Option<RegionVerdict>, b: Option<RegionVerdict>) -> Option<RegionVerdict> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.coarser(b)),
+            (a, b) => a.or(b),
         }
     }
 }
@@ -289,6 +298,17 @@ mod tests {
     use super::*;
     use tessera_spatial::shape::{ShapeF64, Space};
     use tessera_spatial::Bounds;
+
+    #[test]
+    fn the_coarsest_of_several_answers_is_the_shallowest_cover_any_reached() {
+        let cover = |depth| Some(RegionVerdict::Cover { depth });
+        let exact = Some(RegionVerdict::Exact);
+        assert_eq!(RegionVerdict::coarsest(None, None), None);
+        assert_eq!(RegionVerdict::coarsest(exact, None), exact);
+        assert_eq!(RegionVerdict::coarsest(None, cover(9)), cover(9));
+        assert_eq!(RegionVerdict::coarsest(exact, cover(9)), cover(9));
+        assert_eq!(RegionVerdict::coarsest(cover(4), cover(9)), cover(4));
+    }
 
     fn extent() -> Bounds {
         Bounds {

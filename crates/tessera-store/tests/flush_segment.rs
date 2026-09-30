@@ -4,8 +4,8 @@ use std::path::Path;
 
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushOutput, FlushRow};
 use tessera_store::manifest::Quantisation;
-use tessera_store::{open_bundle, ExternalIdSidecar, MortonSlice};
-use tessera_types::{EntityId, IdentityKey, ROW_ABSENT};
+use tessera_store::MortonSlice;
+use tessera_types::{EntityId, IdentityKey};
 
 mod fixture;
 use fixture::{build_bundle, PARTITION, VIEW};
@@ -21,10 +21,10 @@ fn unit_quantisation() -> Quantisation {
     }
 }
 
-fn row(entity: u64, external_id: Option<&[u8]>, x: f64, y: f64) -> FlushRow {
+fn row(entity: u64, x: f64, y: f64) -> FlushRow {
     FlushRow {
         entity_id: EntityId::new(entity),
-        external_id: external_id.map(|id| id.to_vec()),
+        number: EntityId::new(entity),
         x,
         y,
         scalars: vec![],
@@ -46,6 +46,7 @@ fn flush(prefix_dir: &Path, seg_id: &str, rows: Vec<FlushRow>, row_base: u32) ->
             shard_id: 0,
             scalar_schema: &[],
             row_base,
+            entity_floor: 0,
         },
     )
     .unwrap()
@@ -63,10 +64,10 @@ fn a_flush_segment_is_morton_sorted_against_the_global_quantisation() {
 
     // Deliberately scattered, so an unsorted writer would be visible.
     let rows = vec![
-        row(50, Some(b"e-50"), 0.9, 0.1),
-        row(51, Some(b"e-51"), 0.1, 0.9),
-        row(52, Some(b"e-52"), 0.5, 0.5),
-        row(53, Some(b"e-53"), 0.05, 0.05),
+        row(50, 0.9, 0.1),
+        row(51, 0.1, 0.9),
+        row(52, 0.5, 0.5),
+        row(53, 0.05, 0.05),
     ];
     let out = flush(&prefix, "seg-flush", rows, 50);
 
@@ -90,66 +91,11 @@ fn the_highest_flushed_entity_is_not_left_invisible_by_the_watermark() {
     let out = flush(
         &dir.path().join("v00000"),
         "seg-flush",
-        vec![row(50, None, 0.1, 0.1), row(51, None, 0.2, 0.2)],
+        vec![row(50, 0.1, 0.1), row(51, 0.2, 0.2)],
         50,
     );
     assert_eq!(out.segment.entity_hi, 51);
     assert_eq!(out.watermark, 52, "one past the highest flushed entity");
-}
-
-/// The reverse external-id direction survives, or `/v1/items` answers a typed error for ever for
-/// every post-build item once its WAL region is reclaimed (§3.6). Both directions are asserted
-/// against the files themselves, not against a cached map.
-#[test]
-fn a_flushed_entity_resolves_in_both_external_id_directions() {
-    let dir = tempfile::tempdir().unwrap();
-    build_bundle(dir.path(), 50);
-    let prefix = dir.path().join("v00000");
-
-    let out = flush(
-        &prefix,
-        "seg-flush",
-        vec![
-            row(50, Some(b"zeta"), 0.1, 0.1),
-            row(51, None, 0.2, 0.2),
-            row(52, Some(b"alpha"), 0.3, 0.3),
-        ],
-        50,
-    );
-
-    // Forward, through the **ordinary sidecar reader**, against a manifest naming the flush's own
-    // extent. That is the assertion worth making: the reader verifies the extent's digest and its
-    // sortedness before answering, so a flush that wrote an unsorted or mis-digested extent is
-    // refused there rather than silently resolving to the wrong entity here.
-    let bundle = open_bundle(dir.path()).unwrap();
-    let mut manifest = bundle.partitions[PARTITION].manifest.clone();
-    manifest.external_id_runs = vec![out.external_id_run.clone()];
-    manifest.files.extend(out.files.clone());
-    let sidecar =
-        ExternalIdSidecar::deferred_from_manifest(&bundle.manifest, &manifest, &prefix).unwrap();
-    assert_eq!(
-        sidecar.resolve(b"alpha").unwrap(),
-        Some(EntityId::new(52)),
-        "the extent must resolve an id a flush created"
-    );
-    assert_eq!(sidecar.resolve(b"nope").unwrap(), None);
-
-    // Reverse, through the locator extent: entity → ordinal into that same extent, dense over the
-    // segment's entity range, sentinel where an item carried no external id.
-    let locator = std::fs::read(prefix.join(&out.locator_extent.path)).unwrap();
-    let slots: Vec<u32> = locator
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    assert_eq!(slots.len(), 3, "dense over [entity_lo, entity_hi]");
-    assert_eq!(out.locator_extent.entity_lo, 50);
-    assert_eq!(out.locator_extent.entity_hi, 52);
-    assert_eq!(out.locator_extent.external_id_run, out.external_id_run);
-
-    // "alpha" sorts before "zeta", so entity 52 is ordinal 0 and entity 50 is ordinal 1.
-    assert_eq!(slots[0], 1, "entity 50 -> 'zeta', the second id");
-    assert_eq!(slots[1], ROW_ABSENT, "entity 51 carried no external id");
-    assert_eq!(slots[2], 0, "entity 52 -> 'alpha', the first id");
 }
 
 /// Every file written is named and digested, or the loader refuses to open one the manifest never
@@ -162,7 +108,7 @@ fn every_file_written_is_named_and_digested() {
     let out = flush(
         &prefix,
         "seg-flush",
-        vec![row(50, Some(b"a"), 0.1, 0.1)],
+        vec![row(50, 0.1, 0.1)],
         50,
     );
 
@@ -201,9 +147,9 @@ fn the_extent_addresses_exactly_the_rows_the_segment_holds() {
         &dir.path().join("v00000"),
         "seg-flush",
         vec![
-            row(50, None, 0.9, 0.9),
-            row(51, None, 0.1, 0.1),
-            row(52, None, 0.5, 0.5),
+            row(50, 0.9, 0.9),
+            row(51, 0.1, 0.1),
+            row(52, 0.5, 0.5),
         ],
         50,
     );
@@ -229,12 +175,13 @@ fn unordered_rows_are_refused() {
         FlushInput {
             incarnation: 0,
             seg_id: "seg-bad",
-            rows: vec![row(52, None, 0.1, 0.1), row(50, None, 0.2, 0.2)],
+            rows: vec![row(52, 0.1, 0.1), row(50, 0.2, 0.2)],
             quantisation: unit_quantisation(),
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],
             row_base: 50,
+            entity_floor: 0,
         },
     );
     assert!(result.is_err());

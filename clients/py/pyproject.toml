@@ -1,28 +1,39 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "tesseradb"
 version = "0.1.0"
-description = "Tessera's Python package: the notebook widget as the [widget] extra, the SDK as the [local] one; the in-process instance joins them later (decision 0095)."
+description = "Read and map a Tessera database from Python, and make one from data frames."
+license = "Apache-2.0"
 requires-python = ">=3.10"
-# The base install has no JavaScript in it and no dependency beyond the standard library:
-# `authorise` is one HTTPS call, made with `urllib`. A consumer, never a component (CLAUDE.md).
-dependencies = []
+# Two dependencies. pyarrow carries every table the package reads or writes. The companion
+# platform wheel `tesseradb-native` carries the `tessera` binary and the `_tessera` extension
+# module, so `pip install tesseradb` can make and serve a database without a Rust toolchain. It is
+# pinned exactly, because the binary and this package change together and a stale database is
+# refused. On a platform the marker leaves out, the package installs without it, and making or
+# serving a database needs a `tessera` binary on `PATH` or named by `TESSERA_BIN`. The wheel itself
+# is pure Python, `py3-none-any`.
+#
+# `pip install tesseradb --no-deps` skips both. Install `pyarrow>=14` by hand after it, and point
+# `TESSERA_BIN` at a `tessera` binary, or put one on `PATH`, to make or serve a database.
+dependencies = [
+  "pyarrow>=14",
+  "tesseradb-native==0.1.0; platform_machine in 'x86_64 AMD64 aarch64 arm64'",
+]
 
 [project.optional-dependencies]
-# The widget: anywidget plus the components' single-file bundle, which the wheel's build hook
-# (`hatch_build.py`) builds with Node at wheel-build time and packages under `tesseradb/static/`.
-# A user installing the wheel needs no Node; a developer installing from this checkout does.
+# The notebook map: anywidget plus the components' single-file bundle, which the wheel's build
+# hook (`hatch_build.py`) builds with Node and packages under `tesseradb/static/`. A user
+# installing the wheel needs no Node; a developer installing from this checkout does.
 widget = ["anywidget>=0.9"]
-# The SDK: a database in a directory, filled from frames and files. pyarrow is the only hard
-# dependency — a pandas or polars frame reaches it through `pa.table`, so neither is required.
-local = ["pyarrow>=14"]
-# `tomli` is the TOML reader the corpus regeneration tests parse both documents with, on the
-# Pythons below 3.11 that carry no `tomllib`. It is a test dependency and reaches no other extra.
+# The tests. pandas is here because the tests compute expected answers with it; the package
+# never needs it. marimo and scikit-learn run the demo notebook; nbformat lets marimo export its
+# Jupyter copy.
+# `tomli` reads TOML on Pythons below 3.11, which have no `tomllib`.
 dev = [
-  "anywidget>=0.9", "pyarrow>=14", "pandas", "pytest", "ruff",
+  "anywidget>=0.9", "marimo", "nbformat", "pandas", "pytest", "pytest-cov", "ruff", "scikit-learn",
   "tomli>=2; python_version < '3.11'",
 ]
 

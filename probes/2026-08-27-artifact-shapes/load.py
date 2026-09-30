@@ -23,10 +23,10 @@ import pyarrow.parquet as pq
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
-DATA = os.environ.get("SHAPES_DATA", "/home/joe/code/tessera/data/notebook-2m4-live")
+DATA = os.environ.get("SHAPES_DATA", "/home/user/code/tessera/data/notebook-2m4-live")
 BUNDLE = os.environ.get(
     "SHAPES_BUNDLE",
-    "/home/joe/code/tessera/.claude/worktrees/client-corpus/clients/ts/.dev/"
+    "/home/user/code/tessera/.claude/worktrees/client-corpus/clients/ts/.dev/"
     "bundle-notebook-2m4/v00000/MANIFEST.json",
 )
 CACHE = os.path.join(HERE, "cache")

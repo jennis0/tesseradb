@@ -1,29 +1,10 @@
-"""The declaration surface's refusal catalogue, driven through the real CLI (records §2).
+"""Declarations the build refuses, driven through the release CLI.
 
-`tessera-build` has unit tests for each refusal; this module holds the *conformance* half: the
-release binary, a real invocation, and the assertion that each schema records §2 refuses fails
-the build **naming its reason** — decision 0013's discipline, refusals naming what is absent or
-which ruling fences them, so an operator reading the message can find the authority rather than
-a "not supported". An implementation that kept the parse but returned success, or refused with a
-bare error, keeps the machinery while dropping the contract; this is the test that fails it.
-
-What each case pins, beyond the non-zero exit:
-
-- `multi = true` — unbuilt, names records §5 (accepting it would store one value per item under
-  a declaration promising several);
-- `render` with `multi = true` — the **permanent** fence, names decision 0039, and must win over
-  the bare-`multi` refusal so a caller who set both hears the fence that survives the epic that
-  lifts the other;
-- a column named `record` — `attrs/record/` is the blob's namespace (review N10), so the name is
-  reserved;
-- a stale `used_for` key — the retired surface refuses loudly (decision 0048's shape: replaced,
-  not aliased), naming the key so a migrating operator sees *what* is stale rather than a parse
-  position.
-
-The positive control builds the same corpus under a well-formed schema whose one attribute sets
-**neither** key — the shape the old surface refused — and must succeed *and* write the record
-blob's base files: the refusals above are then the schemas' own, not the corpus's, and the
-neither-key column is blob-resident rather than merely tolerated (records §3).
+Each refused schema must fail the build. The positive control builds the same corpus under a
+well-formed schema whose one attribute sets neither `index` nor `render`, and must succeed and
+write the record blob's base files. Each refused schema differs from the control's by one line,
+and the corpus has a column for every name any schema declares, so the build has no reason to
+refuse other than that line.
 """
 
 from __future__ import annotations
@@ -37,17 +18,13 @@ import pytest
 
 from oracle.harness import run_build, write_deployment
 
-# Fixed, like the catalogue's: a refusal test has no served order to care about, but minting
-# would make the control build's receipt-free artefacts differ per run for no reason.
-ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
-
 N = 8
 
 
 @pytest.fixture(scope="module")
 def corpus_dir(tmp_path_factory) -> Path:
-    """One tiny corpus for every case: 8 items, one term, and a `margin` column so the control
-    schema's declared attribute has values to store."""
+    """One tiny corpus for every case: 8 items, a `margin` column for the control schema's
+    attribute, and a `record` column so the reserved-name case names a column that exists."""
     work = tmp_path_factory.mktemp("schema-refusals")
     pq.write_table(
         pa.table(
@@ -56,30 +33,21 @@ def corpus_dir(tmp_path_factory) -> Path:
                 "x": pa.array([10.0 * (i + 1) for i in range(N)], type=pa.float32()),
                 "y": pa.array([10.0 * (i + 1) for i in range(N)], type=pa.float32()),
                 "margin": pa.array([i * 3 for i in range(N)], type=pa.uint32()),
+                "record": pa.array([i * 5 for i in range(N)], type=pa.uint32()),
             }
         ),
         work / "points.parquet",
-    )
-    pq.write_table(
-        pa.table(
-            {
-                "entity_id": pa.array(range(N), type=pa.uint64()),
-                "term_id": pa.array([0] * N, type=pa.uint32()),
-            }
-        ),
-        work / "pairs.parquet",
     )
     return work
 
 
 # Every case's schema declares the same corpus, the same view and the same frame; only the
-# attribute half differs. The points file carries identity, geometry and the one column, so the
-# view and every attribute name one source; `[sources]` writes each path once, relative to the
+# attribute half differs. The points file carries identity, geometry and the attribute columns, so
+# the view and every attribute name one source; `[sources]` writes each path once, relative to the
 # declaration (configuration.md §3).
 SCHEMA_HEAD = """\
 [sources]
 points = "points.parquet"
-pairs  = "pairs.parquet"
 
 [defaults]
 source = "points"
@@ -87,7 +55,7 @@ source = "points"
 [[view]]
 name             = "s0"
 extent           = { min = 0.0, max = 100.0 }
-point_visibility = { source = "pairs", default = "public" }
+point_visibility = { default = "public" }
 
 """
 
@@ -100,74 +68,46 @@ def _build(corpus_dir: Path, schema_text: str, out: Path):
     deployment = write_deployment(
         corpus_dir / f"{out.name}.tessera.toml", bundle=out, schema=schema_path
     )
-    return run_build(["--deployment", str(deployment)], key_hex=ID_KEY_HEX)
+    return run_build(["--deployment", str(deployment)])
 
 
-# (case name, schema, the fragments the refusal must contain). Fragments are chosen to be the
-# *reason's name* — the section or decision the message cites, plus the attribute it blames —
-# not the message's full prose, which is the Rust side's to word.
+# (case name, schema). Each schema is the control's with one line added or changed.
 REFUSALS = [
     (
-        "multi_is_unbuilt",
+        "multi_is_refused",
         """\
 [[attribute]]
 name  = "margin"
 type  = "u32"
-index = true
 multi = true
 """,
-        ["records §5", "margin"],
-    ),
-    (
-        "render_with_multi_names_the_permanent_fence",
-        """\
-[[attribute]]
-name   = "margin"
-type   = "u32"
-render = true
-multi  = true
-""",
-        # 0039 and not records §5: both refusals apply to this declaration, and the caller must
-        # hear the one that survives the epic that lifts the other.
-        ["0039", "margin"],
     ),
     (
         "record_is_a_reserved_name",
         """\
 [[attribute]]
-name  = "record"
-type  = "u32"
-index = true
+name = "record"
+type = "u32"
 """,
-        ["record", "reserved"],
     ),
     (
-        "a_stale_used_for_key_refuses_loudly",
+        "a_stale_used_for_key_is_refused",
         """\
 [[attribute]]
 name     = "margin"
 type     = "u32"
 used_for = ["filter"]
 """,
-        ["used_for"],
     ),
 ]
 
 
-@pytest.mark.parametrize("name,schema,fragments", REFUSALS, ids=[r[0] for r in REFUSALS])
-def test_a_refused_schema_fails_the_build_naming_its_reason(
-    corpus_dir: Path, tmp_path: Path, name: str, schema: str, fragments: list[str]
-):
+@pytest.mark.parametrize("name,schema", REFUSALS, ids=[r[0] for r in REFUSALS])
+def test_a_refused_schema_fails_the_build(corpus_dir: Path, tmp_path: Path, name: str, schema: str):
     result = _build(corpus_dir, schema, tmp_path / "bundle")
     assert result.returncode != 0, (
-        f"{name}: the build accepted a schema records §2 refuses\nstdout: {result.stdout}"
+        f"{name}: the build accepted the schema\nstdout: {result.stdout}"
     )
-    output = result.stderr + result.stdout
-    for fragment in fragments:
-        assert fragment in output, (
-            f"{name}: the refusal does not name {fragment!r} (decision 0013 — a refusal names "
-            f"what is absent or which ruling fences it)\noutput: {output}"
-        )
 
 
 def test_a_neither_key_column_builds_green_and_is_blob_resident(

@@ -59,7 +59,7 @@
 //!    read 1,250,000 immediately. So [`ingest_round`] waits for the refresh, and what this test
 //!    pins is the honest contract rather than an instantaneous one.
 //! 2. **Identity is preserved in both directions**, sampled across every round, including rows
-//!    whose segments have since been merged and whose external-id runs have since been coalesced.
+//!    whose segments have since been merged and whose key runs have since been coalesced.
 //! 3. **Position is byte-exact.** Each round plants probe rows whose `(tessera_id, code)` pairs are
 //!    captured at the round's own flush and re-checked at the end and after the restart. A merge
 //!    that dequantised and requantised, rather than carrying the Morton code through, fails here
@@ -108,6 +108,8 @@ use tessera_engine::{Engine, EngineConfig, Session, ViewportRequest, WriteStage}
 use tessera_lifecycle::{ChangeOp, UnallocatedRow};
 use tessera_types::{EntityId, TesseraId};
 
+const WAIT: Duration = Duration::from_secs(600);
+
 /// Rows per `accept_ingest` call. Each acceptance is one WAL append and one fsync, so this is the
 /// batch size a real `/control/ingest` caller would choose; the measured knee is around 1,000
 /// (`arms::ingest`) and 10,000 is comfortably past it.
@@ -152,14 +154,6 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-}
-
-fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(600);
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
 }
 
 /// A config whose selection rules are switched off, so that every assertion here is about the
@@ -318,7 +312,7 @@ fn zoom_sweep(engine: &Engine, session: &Session) -> Vec<(u8, Duration, usize)> 
 #[derive(Clone)]
 struct Planted {
     entity: EntityId,
-    external_id: String,
+    key: String,
     x: f64,
     y: f64,
     /// Whether this row carries `SUBSET_TERM` — see [`carries_subset`]. Kept so the deny case can
@@ -370,7 +364,7 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
         let mut meta = Vec::with_capacity(n);
         for k in 0..n {
             let i = ingested + k;
-            let external_id = format!("r{round}-i{i}");
+            let key = format!("r{round}-i{i}");
             let (mut x, mut y) = position_of(round, i);
             // See `PROBE_ZOOM`: a probe goes half a unit off the integer grid every other row sits
             // on, so its own lookup can isolate it at any corpus size.
@@ -396,20 +390,19 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
                 vec![b"0".to_vec(), novel]
             };
             rows.push(UnallocatedRow {
-                external_id: Some(external_id.as_bytes().to_vec()),
                 view: "s0".to_string(),
                 join: None,
                 x,
                 y,
-                scalars: Vec::new(),
+                scalars: keyed(&key),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
                 scoped: Vec::new(),
             });
-            meta.push((external_id, x, y, i));
+            meta.push((key, x, y, i));
         }
         let entities = engine
-            .accept_ingest(rows, format!("r{round}-b{ingested}"), {
+            .ingest_rows(rows, format!("r{round}-b{ingested}"), {
                 let mut key = [0u8; 32];
                 key[0] = round as u8;
                 key[1..9].copy_from_slice(&(ingested as u64).to_le_bytes());
@@ -421,13 +414,13 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
             n,
             "every submitted row is allocated an entity"
         );
-        for (entity, (external_id, x, y, i)) in entities.into_iter().zip(meta) {
+        for (entity, (key, x, y, i)) in entities.into_iter().zip(meta) {
             // Probes are the first few of each round — enough to pin position, few enough that the
             // narrow-bbox queries stay cheap.
             if ingested == 0 && i < PROBES_PER_ROUND {
                 probes.push(Planted {
                     entity,
-                    external_id,
+                    key,
                     x,
                     y,
                     subset: carries_subset(i),
@@ -453,13 +446,14 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
     let refreshes = engine.refreshes();
     let t_publish = Instant::now();
     engine.request_flush();
-    wait_until("the round's flush to publish", || {
+    wait_until("the round's flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     let publish = t_publish.elapsed();
     let t_refresh = Instant::now();
     wait_until(
         "the background refresh to replace the session's projection",
+        WAIT,
         || engine.refreshes() > refreshes,
     );
     (
@@ -501,10 +495,10 @@ fn probe_codes(
             .unwrap_or_else(|| {
                 panic!(
                     "{} is not served in a viewport around its own coordinates ({}, {})",
-                    probe.external_id, probe.x, probe.y
+                    probe.key, probe.x, probe.y
                 )
             });
-        out.insert(probe.external_id.clone(), (tessera_id, found.1));
+        out.insert(probe.key.clone(), (tessera_id, found.1));
     }
     out
 }
@@ -515,25 +509,22 @@ fn assert_identity(engine: &Engine, samples: &[Planted]) {
     let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
     for planted in samples {
         assert_eq!(
-            engine
-                .resolve_external_id(planted.external_id.as_bytes())
-                .expect("resolvable"),
+            item_of_key(engine, &planted.key),
             Some(planted.entity),
-            "{} lost its forward binding",
-            planted.external_id
+            "{} lost its item",
+            planted.key
         );
+        let tessera_id = engine.tessera_id_of(planted.entity).expect("an opaque id");
         assert_eq!(
-            engine
-                .external_id_of(planted.entity)
-                .expect("no inconsistency"),
-            Some(planted.external_id.as_bytes().to_vec()),
-            "{} lost its reverse binding",
-            planted.external_id
+            engine.resolve_tessera_ids(&[tessera_id]).expect("resolvable")[0],
+            Some(planted.entity),
+            "{} lost its tessera_id",
+            planted.key
         );
         assert!(
             row_space.row_of(planted.entity).is_some(),
             "{} has no row",
-            planted.external_id
+            planted.key
         );
     }
 }
@@ -628,7 +619,7 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
             .len();
         // **The write-path stage split, at scale.** Zero without `bench-timing`. A microbenchmark
         // at a 1M base and this at 250M disagree about where ingest spends its time — the map
-        // occupancy and the bundle's external-id run length both move — so the attribution has to
+        // occupancy and the bundle's key-run count both move — so the attribution has to
         // be taken here rather than transferred.
         let st = engine.write_executor_stats().stage_nanos;
         let per_row = |i: usize| st[i] as f64 / 1e3 / ((round + 1) * batch) as f64;
@@ -686,13 +677,12 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
     let manifest = &partition.manifest;
     let stats = engine.write_executor_stats();
     eprintln!(
-        "  settled: segments={}, deltas={}, runs={}, dict extents={}, locators={} \
+        "  settled: segments={}, deltas={}, key runs={}, dict extents={} \
          (merges={}, coalesces={}, refreshes={}, full builds={})",
         partition.views["s0"].segments.len(),
         manifest.deltas.len(),
-        manifest.external_id_runs.len(),
+        manifest.unique_indexes.iter().map(|i| i.live.len()).sum::<usize>(),
         manifest.dict_extents.len(),
-        manifest.locator_extents.len(),
         stats.merges,
         stats.coalesces,
         engine.refreshes(),
@@ -826,10 +816,10 @@ fn millions_of_ingested_rows_become_correctly_queryable() {
 
     // Every probe but the suppressed one still carries its original code.
     let mut expected_codes = codes;
-    expected_codes.remove(&suppressed.external_id);
+    expected_codes.remove(&suppressed.key);
     let surviving: Vec<Planted> = probes
         .iter()
-        .filter(|p| p.external_id != suppressed.external_id)
+        .filter(|p| p.key != suppressed.key)
         .cloned()
         .collect();
     assert_eq!(
@@ -947,7 +937,7 @@ fn the_flip_costs_what_the_resident_population_costs() {
         })
         .expect("five rounds all flushed themselves mid-ingest — nothing is left to time");
     engine.request_flush();
-    wait_until("the flush to publish", || {
+    wait_until("the flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
     let t_refresh = Instant::now();
@@ -987,9 +977,11 @@ fn the_flip_costs_what_the_resident_population_costs() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    wait_until("the refresh pass to produce every resident entry", || {
-        engine.refreshes() >= refreshes_before + sessions as u64
-    });
+    wait_until(
+        "the refresh pass to produce every resident entry",
+        WAIT,
+        || engine.refreshes() >= refreshes_before + sessions as u64,
+    );
     let derive_pass = t_refresh.elapsed();
 
     // ---- `cold`: what a fold makes every entry pay ------------------------------------------
@@ -1058,7 +1050,7 @@ fn ingest_and_publish(engine: &Engine, round: usize, batch: usize) {
     ingest_rows(engine, round, batch);
     let flushes = engine.write_executor_stats().flushes;
     engine.request_flush();
-    wait_until("the round's flush to publish", || {
+    wait_until("the round's flush to publish", WAIT, || {
         engine.write_executor_stats().flushes > flushes
     });
 }
@@ -1074,7 +1066,6 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
             let (x, y) = position_of(round, i);
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
-                external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 x,
@@ -1092,7 +1083,7 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
         key[1] = round as u8;
         key[2..10].copy_from_slice(&(ingested as u64).to_le_bytes());
         engine
-            .accept_ingest(rows, format!("p{round}-b{ingested}"), key)
+            .ingest_rows(rows, format!("p{round}-b{ingested}"), key)
             .expect("ingest is accepted");
         ingested += n;
     }
@@ -1416,8 +1407,7 @@ const P1_TEST: &str = "a_fold_over_a_multi_segment_corpus_at_two_sizes";
 /// `/proc/self/status`'s three resident figures in bytes: total, anonymous, file-backed.
 ///
 /// **The split is the measurement, not a decoration.** `compaction.md` §3's budget is three named
-/// terms, and two of them — `permutation.bin` and `ext-locator.u32` — are *written through a
-/// mapping*. §3's first draft called those page cache and therefore free; r1 corrected it, because
+/// terms, and one of them — `permutation.bin` — is *written through a mapping*. §3's first draft called those page cache and therefore free; r1 corrected it, because
 /// a dirty shared file mapping is resident and cgroup-charged. Which of the two readings is right
 /// is visible only if the probe reports `RssFile` beside `RssAnon`: a fold whose growth is all
 /// anonymous has a streaming defect, and one whose growth is all file-backed is spending it exactly
@@ -1518,8 +1508,8 @@ impl RssSampler {
 ///
 /// `compaction.md` §14 lists the fold's peak RSS as **modelled** and marks it *"the design's
 /// central claim and nothing measures it"*. §3 is the claim: a budget of three named terms —
-/// `PostingsSpool`'s offsets buffer (dictionary), `permutation.bin` and `ext-locator.u32` (entity
-/// space, both written through a mapping), plus the widest term's encode — summing to **~9–10 GB at
+/// `PostingsSpool`'s offsets buffer (dictionary), `permutation.bin` (entity space, written through a
+/// mapping), plus the widest term's encode — summing to **~9–10 GB at
 /// 10⁹**, and explicitly *not* the merge's measured 4.4–4.9× of its inputs' bytes, which applied to
 /// a corpus would be 200+ GB on a 47 GB bundle. This probe measures the budget.
 ///
@@ -1707,9 +1697,7 @@ fn p1_across_scales() {
     // bytes, and spec §3 forbids the fold to inherit it. But a total-RSS bound alone is a weak
     // test, because a fold that maps everything correctly *still* reads near 1× as its inputs and
     // outputs become resident page cache. What separates a streaming fold from a decoding one is
-    // the **anonymous** half: page cache is reclaimable and a `Vec` is not. Pass 3 held the whole
-    // corpus's external ids in the heap until `RunCursor` was made to map them, and the total
-    // barely moved (0.95× → 0.99×) while the anonymous term fell by two thirds.
+    // the **anonymous** half: page cache is reclaimable and a `Vec` is not.
     for r in &results {
         let input = r.get("input_bytes");
         let (peak, anon) = (r.get("peak_delta"), r.get("anon_delta"));
@@ -1790,7 +1778,7 @@ fn p1_one_scale(base: u64) {
     {
         let flushes = engine.write_executor_stats().flushes;
         engine.request_flush();
-        wait_until("the deletion round's flush to publish", || {
+        wait_until("the deletion round's flush to publish", WAIT, || {
             engine.write_executor_stats().flushes > flushes
         });
     }
@@ -1798,7 +1786,7 @@ fn p1_one_scale(base: u64) {
         .iter()
         .map(|&entity| {
             engine
-                .submit_change(entity, ChangeOp::Delete)
+                .submit_changes(vec![(entity, ChangeOp::Delete)])
                 .expect("the deny lane accepts a delete")
         })
         .collect();
@@ -1812,10 +1800,10 @@ fn p1_one_scale(base: u64) {
         .len();
     let on_disc_before = bundle_bytes(&root);
     let live_before = live_bytes(&engine);
-    // **The entity-space bound, which is the axis §3's two mapped arrays scale on** — the highest
-    // entity id the bundle's row geometry covers, which is what `permutation.bin` and
-    // `ext-locator.u32` are sized by. Row count is the axis they explicitly do *not* scale on, and
-    // reporting both is how a reader tells the two apart when a corpus has one row per entity.
+    // **The entity-space bound, which is the axis §3's mapped array scales on** — the highest
+    // entity id the bundle's row geometry covers, which is what `permutation.bin` is sized by. Row
+    // count is the axis it explicitly does *not* scale on, and reporting both is how a reader tells
+    // the two apart when a corpus has one row per entity.
     let entities = engine.generation().watermark;
 
     // **The input the coefficient is against is the bytes the fold reads**, which is what the live
@@ -1826,7 +1814,7 @@ fn p1_one_scale(base: u64) {
 
     // **Split at the fold's own seam, because the two halves are budgeted by different documents
     // and only one of them is budgeted at all.** Spec §3's table is about the five passes; what
-    // happens after them is publication — opening the new prefix, pruning the live external-id map,
+    // happens after them is publication — opening the new prefix,
     // rebasing, the flip — and it runs on the executor, not the fold thread. A single figure over
     // both would attribute the publication's memory to the passes and quietly exonerate a table
     // that never modelled it. `set_fold_paused_for_test` is the seam: the fold thread holds after
@@ -1840,7 +1828,7 @@ fn p1_one_scale(base: u64) {
     let before = engine.write_executor_stats();
     let t_fold = Instant::now();
     engine.request_fold();
-    wait_until("the fold's passes to finish", || {
+    wait_until("the fold's passes to finish", WAIT, || {
         engine.fold_is_holding_for_test()
     });
     let passes_wall = t_fold.elapsed();
@@ -1853,7 +1841,7 @@ fn p1_one_scale(base: u64) {
     let sampler = RssSampler::start();
     let t_publish = Instant::now();
     engine.set_fold_paused_for_test(false);
-    wait_until("the fold to publish", || {
+    wait_until("the fold to publish", WAIT, || {
         let now = engine.write_executor_stats();
         assert_eq!(
             now.fold_failures, before.fold_failures,
@@ -1984,7 +1972,6 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
             let (x, y) = position_of(round, i);
             let descriptors = vec![b"0".to_vec()];
             rows.push(UnallocatedRow {
-                external_id: Some(format!("p{round}-i{i}").into_bytes()),
                 view: "s0".to_string(),
                 join: None,
                 x,
@@ -2000,7 +1987,7 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
         key[1] = round as u8;
         key[2..10].copy_from_slice(&(ingested as u64).to_le_bytes());
         let ids = engine
-            .accept_ingest(rows, format!("p{round}-b{ingested}"), key)
+            .ingest_rows(rows, format!("p{round}-b{ingested}"), key)
             .expect("ingest is accepted");
         for id in ids {
             if kept.len() < keep {

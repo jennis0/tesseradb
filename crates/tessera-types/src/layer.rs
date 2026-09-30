@@ -591,6 +591,11 @@ impl<'de> Deserialize<'de> for ContentDeclaration {
 /// the principal reaches. A layer may not be registered under it ([`DeclarationError::ReservedName`]).
 pub const RESERVED_LAYER_SELECTION: &str = "all";
 
+/// The column beside a scalar member key that places it at a level: `uint32`, a null being level 0.
+/// A list's positions carry its levels, so it reads no such column. No attribute or layer may take
+/// the name, so a column under it is always a level.
+pub const LEVEL: &str = "level";
+
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
 /// a tiered geography — or whose levels are independent analyses. **A treed layer declares
 /// none** and sits entirely at level 0 (decision 0082).
@@ -1069,15 +1074,16 @@ pub enum DeclarationError {
     /// Carries the two spellings, so the message names what to remove.
     TwoDrawnGeometries(String),
     /// An attribute layer declares something its derived artifacts cannot carry — content, a
-    /// dependency, levels, its own access labels, or a layout pin — or a spatial layer names its
-    /// own access-label field. Carries the spelling, so the message names the key an operator has
-    /// to remove.
+    /// dependency, levels, its own access labels, or a layout pin. Carries the spelling, so the
+    /// message names the key an operator has to remove.
     PredicateDeclares(String),
+    /// A layer's `visibility`, `artifact_visibility.default` or `artifact_visibility.field` is not
+    /// a word that can be read. Carries the refusal.
+    Label(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
-    /// A layer named `all`, which the viewport request's `layers` field reserves for *every layer
-    /// this principal reaches* (contracts §3.2; owner ruling 2026-08-25). Refused at registration
-    /// so the word can never be ambiguous on the wire.
+    /// A layer named `all`, which a viewport request's `layers` field reserves for every layer the
+    /// principal reaches, or `level`, the column that places a batch's member keys.
     ReservedName(String),
     /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
@@ -1097,8 +1103,8 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::EmptyName => write!(f, "a layer name may not be empty"),
             DeclarationError::ReservedName(name) => write!(
                 f,
-                "'{name}' is reserved: a viewport request's `layers: \"{RESERVED_LAYER_SELECTION}\"` \
-                 names every layer the principal reaches, so no layer may carry that name"
+                "'{name}' is reserved, since `layers: \"{RESERVED_LAYER_SELECTION}\"` names every \
+                 layer and a `{LEVEL}` column places member keys; give the layer another name"
             ),
             DeclarationError::TreeWithLevels => write!(
                 f,
@@ -1141,6 +1147,7 @@ impl std::fmt::Display for DeclarationError {
                  `shape_x`/`shape_y` column pair, so a layer declares at most one of a derived \
                  hull, a membership shape and an authored shape content"
             ),
+            DeclarationError::Label(detail) => write!(f, "{detail}"),
             DeclarationError::PredicateDeclares(what) => write!(
                 f,
                 "a layer whose membership is a predicate declares {what}, which its artifacts \
@@ -1173,6 +1180,18 @@ impl std::fmt::Display for DeclarationError {
 impl std::error::Error for DeclarationError {}
 
 impl LayerDeclaration {
+    /// Whether this layer's artifacts are drawn on `view`, a view id. Every route serving an
+    /// artifact asks this, and so does the publication of an artifact attached to another.
+    pub fn draws_on(&self, view: &str) -> bool {
+        self.views.iter().any(|drawn| drawn == view)
+    }
+
+    /// Whether some view this layer is drawn on is one `other` is drawn on: the only views where
+    /// an artifact of this layer attached to one of `other` can be served.
+    pub fn shares_a_view_with(&self, other: &LayerDeclaration) -> bool {
+        self.views.iter().any(|view| other.draws_on(view))
+    }
+
     /// Checks the declaration is internally coherent. **Everything here is a refusal a caller can
     /// fix**, checked once at registration rather than at every request — the request-time
     /// invariants (containment, the criterion) are evaluated per request and live elsewhere.
@@ -1201,7 +1220,9 @@ impl LayerDeclaration {
         }
     }
 
-    pub fn validate(&self) -> Result<(), DeclarationError> {
+    /// Check the declaration, and store its labels as the label rule reads them: trimmed, with a
+    /// `visibility` of `public` stored as no gate. The build and a running service both call it.
+    pub fn validate(&mut self) -> Result<(), DeclarationError> {
         if self.name.trim().is_empty() {
             return Err(DeclarationError::EmptyName);
         }
@@ -1209,6 +1230,7 @@ impl LayerDeclaration {
             .name
             .trim()
             .eq_ignore_ascii_case(RESERVED_LAYER_SELECTION)
+            || self.name == LEVEL
         {
             return Err(DeclarationError::ReservedName(self.name.clone()));
         }
@@ -1331,10 +1353,9 @@ impl LayerDeclaration {
         // computed content, `depends_on`, levels, any hierarchy and a layout pin are all things
         // its rows can carry. Computed content is cheap there because the flush resolves every
         // row's membership into a per-row source; the pin selects between the same forms it
-        // selects between for an enumerated layer. What stays refused on both is the
-        // proportional criterion (above) and, on a spatial layer, naming its own access-label
-        // field: a shape's row carries no label column the registry reads, so the field would
-        // withhold every artifact of the layer for every principal.
+        // selects between for an enumerated layer, and a label of its own is carried on its
+        // record as an enumerated artifact's is. What stays refused on both is the proportional
+        // criterion (above).
         let refuse = |what: &str| Err(DeclarationError::PredicateDeclares(what.to_string()));
         if matches!(self.membership, MembershipSource::Attribute(_)) {
             if !self.content.supplied.is_empty() {
@@ -1366,14 +1387,33 @@ impl LayerDeclaration {
                 return refuse("a layout pin");
             }
         }
-        if matches!(
-            self.membership,
-            MembershipSource::Spatial | MembershipSource::Attribute(_)
-        ) && self.artifact_visibility.carries_own_labels()
+        if matches!(self.membership, MembershipSource::Attribute(_))
+            && self.artifact_visibility.carries_own_labels()
         {
-            // A derived artifact carries no row of its own to read a label off, so naming the
-            // field would withhold every artifact of the layer for every principal.
+            // A derived artifact carries no record of its own to read a label off.
             return refuse("`artifact_visibility.field`");
+        }
+        let label = |key: &str, word: &str| {
+            crate::label::declared_label(key, word)
+                .map(str::to_string)
+                .map_err(DeclarationError::Label)
+        };
+        if let Some(visibility) = &self.visibility {
+            let visibility = label("visibility", visibility)?;
+            self.visibility = (!crate::label::is_public(&visibility)).then_some(visibility);
+        }
+        if let MemberDefault::Label(default) = &self.artifact_visibility.default {
+            self.artifact_visibility.default =
+                MemberDefault::Label(label("artifact_visibility.default", default)?);
+        }
+        if let Some(field) = &self.artifact_visibility.field {
+            if field.trim().is_empty() {
+                return Err(DeclarationError::Label(
+                    "`artifact_visibility.field` is empty. Name the column each artifact's own \
+                     access label is read from, or omit the field"
+                        .to_string(),
+                ));
+            }
         }
 
         let mut views: BTreeSet<&str> = BTreeSet::new();
@@ -1530,9 +1570,105 @@ pub fn parent_edges<T>(entries: &[Option<T>]) -> impl Iterator<Item = (&T, &T)> 
         })
 }
 
+/// The views a layer is drawn on, from the names its `views` gives: a group's name is every view
+/// of the group, and any other name is one view. `group` answers a group's views, `None` where the
+/// name is no group, and `view` whether a name is a view. `Err` is a name that is neither.
+pub fn expand_views(
+    declared: &[String],
+    group: impl Fn(&str) -> Option<Vec<String>>,
+    view: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut expanded = Vec::with_capacity(declared.len());
+    for name in declared {
+        match group(name) {
+            Some(views) => expanded.extend(views),
+            None if view(name) => expanded.push(name.clone()),
+            None => return Err(name.clone()),
+        }
+    }
+    Ok(expanded)
+}
+
+/// A name a group-scoped layer's `views` gives outside the scope's key set, and the groups that
+/// hold that key set, for a refusal to name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideScope {
+    pub view: String,
+    pub sharing: Vec<String>,
+}
+
+/// Refuse a layer scoped to `group` whose `views` names anything outside `group`'s key set. Its
+/// artifacts are a set per view of that key set, so a view holding no key of it would draw none.
+/// A name is admitted where it is `group`, a group declaring `members` of `group`, or a view of
+/// either. `groups` is every group's name with the group it declares `members` of, and
+/// `view_group` answers the group a view belongs to, `None` for a plain view or any other name.
+pub fn check_scoped_views<'a>(
+    declared: &[String],
+    group: &str,
+    groups: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    view_group: impl Fn(&str) -> Option<String>,
+) -> Result<(), OutsideScope> {
+    let sharing: Vec<&str> = groups
+        .into_iter()
+        .filter(|(name, members_of)| *name == group || *members_of == Some(group))
+        .map(|(name, _)| name)
+        .collect();
+    let admitted = |name: &str| {
+        sharing.contains(&name) || view_group(name).is_some_and(|g| sharing.contains(&g.as_str()))
+    };
+    match declared.iter().find(|name| !admitted(name)) {
+        None => Ok(()),
+        Some(view) => Err(OutsideScope {
+            view: view.clone(),
+            sharing: sharing.iter().map(|name| name.to_string()).collect(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_group_is_every_view_of_it_and_a_name_that_is_neither_is_refused() {
+        let group = |name: &str| (name == "years").then(|| vec!["years:1".into(), "years:2".into()]);
+        let view = |name: &str| name == "papers";
+        let declared = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            expand_views(&declared(&["papers", "years"]), group, view),
+            Ok(declared(&["papers", "years:1", "years:2"]))
+        );
+        assert_eq!(
+            expand_views(&declared(&["papers", "nowhere"]), group, view),
+            Err("nowhere".to_string())
+        );
+    }
+
+    #[test]
+    fn a_scoped_layer_names_only_its_key_sets_groups_and_their_views() {
+        let groups = [("years", None), ("decades", Some("years")), ("regions", None)];
+        let view_group = |name: &str| name.split_once(':').map(|(group, _)| group.to_string());
+        let check = |names: &[&str]| {
+            let declared: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            check_scoped_views(&declared, "years", groups, view_group)
+        };
+        assert_eq!(check(&["years", "decades", "years:2010", "decades:2010"]), Ok(()));
+        let sharing = vec!["years".to_string(), "decades".to_string()];
+        assert_eq!(
+            check(&["years", "papers"]),
+            Err(OutsideScope {
+                view: "papers".to_string(),
+                sharing: sharing.clone()
+            })
+        );
+        assert_eq!(
+            check(&["regions:north"]),
+            Err(OutsideScope {
+                view: "regions:north".to_string(),
+                sharing
+            })
+        );
+    }
 
     fn decl(kind: HierarchyKind, levels: Vec<u32>) -> LayerDeclaration {
         LayerDeclaration {
@@ -1670,6 +1806,16 @@ mod tests {
     }
 
     #[test]
+    fn the_member_level_column_is_refused_as_a_name() {
+        let mut d = decl(HierarchyKind::Flat, Vec::new());
+        d.name = LEVEL.into();
+        assert!(matches!(
+            d.validate(),
+            Err(DeclarationError::ReservedName(_))
+        ));
+    }
+
+    #[test]
     fn the_pin_vocabulary_round_trips_and_admits_nothing_else() {
         for layout in [
             ServingLayout::ArtifactMajor,
@@ -1781,7 +1927,7 @@ mod tests {
 
     /// **A spatial layer may declare what an attribute layer may not** (ruling (b)): its artifacts
     /// are published rows, so content, a dependency, levels, a hierarchy and a pin all have a row
-    /// to sit on. The one refusal it shares is naming its own access-label field.
+    /// to sit on, and so does an access label of its own.
     #[test]
     fn a_spatial_layer_may_declare_content_levels_and_a_hierarchy() {
         let base = || {
@@ -1817,10 +1963,58 @@ mod tests {
 
         let mut d = base();
         d.artifact_visibility = ArtifactVisibility::carried("visibility");
-        assert!(matches!(
-            d.validate(),
-            Err(DeclarationError::PredicateDeclares(_))
-        ));
+        assert!(d.validate().is_ok());
+    }
+
+    /// A layer's labels are checked where the declaration is, so the build and a running service
+    /// refuse the same words: an empty label, `inherited` where a label is expected, and an empty
+    /// field.
+    #[test]
+    fn a_layers_labels_are_refused_where_they_cannot_be_read() {
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" ".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some("inherited".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.default = MemberDefault::Label("inherited".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.field = Some("".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.artifact_visibility.default = MemberDefault::Label(" inherited ".into());
+        assert!(matches!(d.validate(), Err(DeclarationError::Label(_))));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some("team".into());
+        d.artifact_visibility = ArtifactVisibility {
+            field: Some("team".into()),
+            default: MemberDefault::Label("public".into()),
+        };
+        assert!(d.validate().is_ok());
+    }
+
+    /// A layer's labels are stored trimmed, and a `visibility` of `public` is stored as no gate,
+    /// however either was padded.
+    #[test]
+    fn a_layers_labels_are_stored_trimmed() {
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" team ".into());
+        d.artifact_visibility.default = MemberDefault::Label(" red ".into());
+        d.validate().unwrap();
+        assert_eq!(d.visibility.as_deref(), Some("team"));
+        assert_eq!(d.artifact_visibility.default, MemberDefault::Label("red".into()));
+
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.visibility = Some(" public ".into());
+        d.validate().unwrap();
+        assert_eq!(d.visibility, None);
     }
 
     /// **What an attribute layer may not declare.** Each of these would register a layer that is

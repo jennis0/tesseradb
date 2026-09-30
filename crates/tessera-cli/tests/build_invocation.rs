@@ -19,8 +19,6 @@ use arrow::array::{Float64Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-
-const KEY: &str = "000102030405060708090a0b0c0d0e0f";
 const N: u64 = 64;
 
 fn tessera() -> Command {
@@ -54,6 +52,8 @@ control = "127.0.0.1:45721"
     std::fs::write(
         dir.join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
+         source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = \"auto\"\nsource = \"points\"\n\
          point_visibility = { source = \"pairs\", default = \"public\" }\n",
     )
@@ -112,7 +112,6 @@ fn build_in(cwd: &Path, args: &[&str]) -> Output {
         .arg("build")
         .args(args)
         .current_dir(cwd)
-        .env("TESSERA_IDENTITY_KEY", KEY)
         .output()
         .expect("failed to run tessera")
 }
@@ -200,7 +199,6 @@ fn a_missing_deployment_config_names_what_to_create() {
     for expected in [
         "[bundle]",
         "[build]",
-        "[identity]",
         "[serve]",
         "--deployment",
     ] {
@@ -285,6 +283,8 @@ fn a_margin_is_a_fraction_of_the_data_span_on_each_side() {
     std::fs::write(
         tmp.path().join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
+         source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = { auto = true, margin = 0.25 }\n\
          source = \"points\"\n\
          point_visibility = { source = \"pairs\", default = \"public\" }\n",
@@ -307,6 +307,8 @@ fn a_stated_extent_is_used_verbatim() {
     std::fs::write(
         tmp.path().join("schema.toml"),
         "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+         [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
+         source = \"points\"\n\
          [[view]]\nname = \"s0\"\nextent = { min = -5.0, max = 2000.0 }\n\
          source = \"points\"\n\
          point_visibility = { source = \"pairs\", default = \"public\" }\n",
@@ -409,6 +411,8 @@ fn declare_extent(dir: &Path, extent: &str) {
         dir.join("schema.toml"),
         format!(
             "[sources]\npoints = \"points.parquet\"\npairs = \"pairs.parquet\"\n\
+             [[attribute]]\nname = \"id\"\ntype = \"u64\"\nunique = true\nfield = \"entity_id\"\n\
+             source = \"points\"\n\
              [[view]]\nname = \"s0\"\nextent = {extent}\nsource = \"points\"\n\
              point_visibility = {{ source = \"pairs\", default = \"public\" }}\n"
         ),
@@ -416,37 +420,32 @@ fn declare_extent(dir: &Path, extent: &str) {
     .unwrap();
 }
 
-/// **The notebook's own failure, and the reason this report exists.** A grid-shaped extent was
-/// declared over projection coordinates, every point folded into a nineteen-cell corner, the
-/// bundle came out well-formed with the geometry wrong — and the build said nothing at all.
-///
-/// It must now say all three things: how many points land on the frame's edge, what the frame is,
-/// and what the data's own bounds are. And past half the corpus it must refuse rather than report,
-/// because a frame that misplaces the majority of a corpus is not that corpus's frame.
+/// **A frame that clamps most of the corpus builds, and the report counts the clamps**, with the
+/// frame and the data's own bounds beside them. A clamp is reported and never refused, at a build
+/// as at an ingest.
 #[test]
-fn the_notebook_failure_is_loud() {
+fn a_majority_of_clamped_points_is_reported_and_built() {
     let tmp = tempfile::tempdir().unwrap();
     project(tmp.path());
     write_projection_points(&tmp.path().join("points.parquet"));
     declare_extent(tmp.path(), "{ min = 0.0, max = 65536.0 }");
 
-    let stderr = refusal(tmp.path(), &[]);
-    // The clamp count, as a count and as a share.
-    assert!(stderr.contains("CLAMP onto the frame's edge"), "{stderr}");
-    assert!(stderr.contains("of 64 point(s)"), "{stderr}");
-    // The frame it was given, and the data's own bounds beside it — the pair is the diagnosis.
-    assert!(
-        stderr.contains("quantising against x [0, 65536]"),
-        "{stderr}"
-    );
-    assert!(stderr.contains("the data spans x [-17"), "{stderr}");
-    // And how little of the grid that leaves, which is the number the degenerate map needed.
-    assert!(stderr.contains("of the 65536 x 65536 cells"), "{stderr}");
-    // A refusal, not a warning: the build wrote nothing.
-    assert!(
-        !tmp.path().join("bundles/corpus/CURRENT").is_file(),
-        "a refused build must not have written a bundle"
-    );
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(tmp.path().join("bundles/corpus/CURRENT").is_file());
+    let text = stderr(&output);
+    // Against a frame of 0..65536, every point below zero on either axis clamps: all but the two
+    // whose x and y are both past zero. The clamp line leads with the count and the total.
+    let line = text
+        .lines()
+        .find(|line| line.contains("CLAMP"))
+        .unwrap_or_else(|| panic!("no clamp line: {text}"));
+    let counts: Vec<u64> = line
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .take(2)
+        .collect();
+    assert_eq!(counts, [62, 64], "{line}");
 }
 
 /// **A tail of clamped points is reported and built.** Outliers, or headroom a caller left for
@@ -720,165 +719,6 @@ fn an_override_without_a_key_is_refused() {
         "{}",
         stderr(&output)
     );
-}
-
-// -------------------------------------------------------------------------------------------
-// The identity key
-// -------------------------------------------------------------------------------------------
-
-/// **There is no flag that takes a key.** One on a command line reaches shell history, process
-/// listings and CI logs, so `--id-key` is gone and is not aliased to anything.
-#[test]
-fn a_key_on_the_command_line_is_not_accepted() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    for flag in ["--id-key", "--id-key-file"] {
-        let output = build_in(tmp.path(), &[flag, KEY]);
-        assert!(!output.status.success(), "{flag} must not be accepted");
-        assert!(
-            stderr(&output).contains("unexpected argument"),
-            "{flag}: {}",
-            stderr(&output)
-        );
-    }
-}
-
-/// A `.env` beside `tessera.toml` supplies the variable, for the working copy that would rather
-/// not export one per shell.
-#[test]
-fn a_dot_env_beside_the_deployment_config_supplies_the_key() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    std::fs::write(
-        tmp.path().join(".env"),
-        format!("# this deployment's lineage\nTESSERA_IDENTITY_KEY=\"{KEY}\"\n"),
-    )
-    .unwrap();
-    let output = tessera()
-        .arg("build")
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
-}
-
-/// **The process environment wins over the `.env`.** An operator who exported a variable for one
-/// invocation has said something more specific than a file sitting beside the config.
-#[test]
-fn the_process_environment_wins_over_the_dot_env() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    std::fs::write(
-        tmp.path().join(".env"),
-        "TESSERA_IDENTITY_KEY=0f0e0d0c0b0a09080706050403020100\n",
-    )
-    .unwrap();
-    // Build once from the environment, then rebuild carrying the first bundle's key forward. The
-    // two agree only if the environment was the source; the `.env`'s different key would refuse.
-    assert!(build_in(tmp.path(), &[]).status.success());
-    let output = build_in(
-        tmp.path(),
-        &[
-            "--out",
-            tmp.path().join("second").to_str().unwrap(),
-            "--carry-id-key-from",
-            tmp.path().join("bundles/corpus").to_str().unwrap(),
-        ],
-    );
-    assert!(output.status.success(), "{}", stderr(&output));
-}
-
-/// With no key anywhere the build refuses **before any work**, naming the variable this
-/// deployment's own file asked for rather than a variable it did not.
-#[test]
-fn no_key_anywhere_refuses_naming_this_deployments_variable() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let deployment = std::fs::read_to_string(tmp.path().join("tessera.toml")).unwrap();
-    std::fs::write(
-        tmp.path().join("tessera.toml"),
-        format!("{deployment}\n[identity]\nenv = \"ACME_TESSERA_KEY\"\n"),
-    )
-    .unwrap();
-    let output = tessera()
-        .arg("build")
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .env_remove("ACME_TESSERA_KEY")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = stderr(&output);
-    assert!(stderr.contains("no identity key decision"), "{stderr}");
-    assert!(stderr.contains("$ACME_TESSERA_KEY"), "{stderr}");
-    assert!(stderr.contains("--identity-file"), "{stderr}");
-    assert!(
-        !tmp.path().join("bundles").exists(),
-        "N-1: the refusal must precede every scrap of work"
-    );
-}
-
-/// **The key itself never goes in `tessera.toml`**, which belongs in git. Refused with its own
-/// message, because the mistake is a reasonable one — `--identity-file` does spell it `key`.
-#[test]
-fn a_key_written_into_the_deployment_config_is_refused() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let deployment = std::fs::read_to_string(tmp.path().join("tessera.toml")).unwrap();
-    std::fs::write(
-        tmp.path().join("tessera.toml"),
-        format!("{deployment}\n[identity]\nkey = \"{KEY}\"\n"),
-    )
-    .unwrap();
-    let stderr = refusal(tmp.path(), &[]);
-    assert!(stderr.contains("[identity] carries `key`"), "{stderr}");
-    assert!(stderr.contains("never appears in this file"), "{stderr}");
-    assert!(stderr.contains("--identity-file"), "{stderr}");
-}
-
-/// The environment is a *source*, not a fallback: a key that disagrees with a carried lineage
-/// refuses, exactly as two flags disagreeing would.
-#[test]
-fn an_environment_key_disagreeing_with_a_carried_one_refuses() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    assert!(build_in(tmp.path(), &[]).status.success());
-    let output = tessera()
-        .arg("build")
-        .args(["--out", tmp.path().join("second").to_str().unwrap()])
-        .args([
-            "--carry-id-key-from",
-            tmp.path().join("bundles/corpus").to_str().unwrap(),
-        ])
-        .current_dir(tmp.path())
-        .env("TESSERA_IDENTITY_KEY", "0f0e0d0c0b0a09080706050403020100")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        stderr(&output).contains("identity key sources disagree"),
-        "{}",
-        stderr(&output)
-    );
-}
-
-/// `--identity-file` is the `0600`-file route, for the deployment that would rather not have the
-/// key readable from `/proc`.
-#[test]
-fn an_identity_file_supplies_the_key() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let key_file = tmp.path().join("identity.toml");
-    std::fs::write(&key_file, format!("[identity]\nkey = \"{KEY}\"\n")).unwrap();
-    let output = tessera()
-        .arg("build")
-        .args(["--identity-file", key_file.to_str().unwrap()])
-        .current_dir(tmp.path())
-        .env_remove("TESSERA_IDENTITY_KEY")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
 }
 
 /// The declaration's own path is where the schema comes from, and `--config` overrides it.

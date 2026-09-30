@@ -1,89 +1,45 @@
-//! Map projections: a place on the Earth to a coordinate in a view's frame
-//! (`projections.md` §5).
+//! Map projections: a place on the Earth to a coordinate in a view's frame.
 //!
 //! The enumerated set, forward and inverse, and nothing else. A projection here is a pure
-//! function of two `f64`s — it does not read a declaration, does not know an extent, and does not
-//! quantise. `morton.rs` takes it from there.
+//! function of two `f64`s: it reads no declaration, knows no extent, and does not quantise.
 //!
-//! A view declares its projection, and both entry points transform every coordinate through it: a
-//! *build* at the read of a points file (`projections.md` §2, §4; `tessera_build::config`) and an
-//! *ingest* at the decode of an Arrow batch, whose coordinate columns are `lon`/`lat` for a
-//! projected view and whose write-ahead log holds the frame coordinates this module produced (§3;
-//! `tessera_server`'s `control` module). The build's frame report names the projection and the
-//! snap (§8), `/v1/meta` publishes the projection, the world aspect and the tile scheme a client
-//! needs to decide whether a basemap may be drawn (§9), a shape may be declared in longitude and
-//! latitude and is densified before it is projected (§10), and both built geographic corpora are
-//! on a declared projection with nothing outside the build placing a point.
+//! Every projection's output is the unit square, x east and y south. An XYZ tile `y = 0` is the
+//! northernmost row and cell y increases with tile y, while EPSG:3857's northing increases north.
 //!
-//! **Every projection's output is the unit square, x east and y south** (§4). The frame is
-//! `[0, 1]` on both axes whatever the projection, so tile addressing is integer arithmetic and a
-//! declaration carries no magic constant; for [`Projection::WebMercator`] a 16-bit cell is then
-//! exactly an XYZ tile at zoom 16. The southward y is applied here, at the definition, and never
-//! left to a caller: an XYZ tile `y = 0` is the northernmost row and this system's cell y
-//! increases with tile y (measured against deck.gl's own tileset implementation —
-//! `clients/ts/core/src/coords.ts`), while EPSG:3857's northing increases *northward*. A frame
-//! that gets this wrong is mirrored against every basemap, and `Bounds::validate` requires
-//! `y_max > y_min`, so it cannot be repaired by inverting the extent afterwards.
+//! [`Projection::None`] performs no transform, so there is no unit square and no north.
 //!
-//! [`Projection::None`] is the exception that proves the axis rule rather than breaking it: it
-//! performs no transform at all, so there is no unit square and no north, and coordinates keep
-//! exactly the meaning they have today.
+//! Clipping is not clamping: a latitude beyond a projection's domain is moved onto the frame's
+//! edge, which the quantisation rule does not clamp, so [`Projection::is_clipped`] tests the
+//! input latitude before the transform discards the evidence.
 //!
-//! **Clipping is not clamping, and that is why [`Projection::is_clipped`] exists separately**
-//! (§7). A latitude beyond a projection's own domain is moved onto the frame's edge — and a point
-//! *on* the edge is not clamped by the quantisation rule (`contracts.md` §2.5), which says
-//! `v = max` lands in the top cell. So the build's clamp counter structurally cannot see a single
-//! clipped point, however many there are, and a count that is taken at all has to be taken here.
-//! The predicate is over the input latitude for that reason: after the transform the evidence is
-//! gone.
-//!
-//! **This module is checked against the incumbent it replaces.** The vectors both are held to live
-//! in `test_corpora/common/projection-vectors.json` — one description that two languages read —
-//! and [`tests::agrees_with_the_python_reference`] runs the Python module over a sample and
-//! requires the same stored position, not merely a similar number.
+//! The tests hold this module and the Python reference to the same vectors, in
+//! `test_corpora/common/projection-vectors.json`.
 
 use std::f64::consts::PI;
 
 /// The latitude at which Web Mercator's projected northing reaches half the projected world:
-/// `degrees(2·atan(exp(π)) − π/2)`. Beyond it the world is no longer square, so every tile scheme
-/// cuts here.
-///
-/// A literal rather than a computation because `atan` and `exp` are not `const`; it is the exact
-/// `f64` that expression produces, pinned by [`tests::max_latitude_is_the_computed_one`].
+/// `degrees(2·atan(exp(π)) − π/2)`. Beyond it the world is no longer square. A literal because
+/// `atan` and `exp` are not `const`; it is the exact `f64` the expression produces.
 pub const WEB_MERCATOR_MAX_LATITUDE_DEG: f64 = 85.0511287798066;
 
-/// A view's projection, from the closed set of `projections.md` §5.
-///
-/// The set is closed and stays cylindrical: longitude maps linearly to x and latitude
-/// monotonically to y, which is what lets an extent be written in degrees (§4.2). A conic or an
-/// azimuthal entry would break that, and neither is in the set.
+/// A view's projection, from a closed set that stays cylindrical: longitude maps linearly to x
+/// and latitude monotonically to y, which is what lets an extent be written in degrees.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Projection {
-    /// The pseudo-Mercator of every slippy-map tile scheme (§5.1). Conformal to about 0.7% — it
-    /// puts a geodetic latitude through the spherical formula with the ellipsoid's semi-major
-    /// axis as the sphere radius — which is the one every basemap uses, and the only entry here
-    /// under which a drawn circle is a circle on the ground.
+    /// The pseudo-Mercator of every slippy-map tile scheme: a geodetic latitude put through the
+    /// spherical formula with the ellipsoid's semi-major axis as the sphere radius.
     WebMercator,
 
-    /// Equidistant cylindrical: latitude and longitude used directly as coordinates (§5.2). No
-    /// transcendental function appears in the transform, so it is bit-exact on every platform,
-    /// and unlike Web Mercator it reaches the poles.
-    ///
-    /// **The standard parallel does not appear in the transform.** Normalised to the unit square
-    /// every member of the family stores *identical* positions, and φ₁ survives only as
-    /// [`Projection::world_aspect`] — the shape a client draws the world at. It is carried on the
-    /// variant because the name a caller writes chooses it, not because the arithmetic reads it;
-    /// a build in which it reached a stored coordinate would have made the parallel part of the
-    /// format, which is precisely what makes this family one entry rather than five.
+    /// Equidistant cylindrical: latitude and longitude used directly as coordinates, bit-exact,
+    /// and unlike Web Mercator reaching the poles. The standard parallel does not appear in the
+    /// transform: `standard_parallel_deg` survives only in [`Projection::world_aspect`].
     Equirectangular {
         /// φ₁ in degrees.
         standard_parallel_deg: f64,
     },
 
-    /// No projection (§5.3). Coordinates are whatever produced them — an embedding layout, a
-    /// synthetic corpus, any space that is not the Earth — the axes are `x` and `y`, and no
-    /// basemap or inversion is offered. The default, so a corpus with no geography is never asked
-    /// to name a projection.
+    /// No projection: axes are `x` and `y`, with no basemap or inversion offered. The default,
+    /// so a corpus with no geography names none.
     None,
 }
 
@@ -98,11 +54,10 @@ impl Projection {
         standard_parallel_deg: 45.0,
     };
 
-    /// The names a declaration may write, resolved. `None` for anything else — the caller decides
-    /// what a name outside the set costs, and the configuration surface refuses it.
+    /// The names a declaration may write, resolved; `None` for anything else.
     ///
-    /// `plate_carree`, `gall_isographic` and `equirectangular` are three names for one transform
-    /// and differ only in the aspect they publish, per the table in §5.2.
+    /// `plate_carree`, `gall_isographic` and `equirectangular` are three names for one transform,
+    /// differing only in the aspect they publish.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "web_mercator" => Some(Projection::WebMercator),
@@ -113,11 +68,8 @@ impl Projection {
         }
     }
 
-    /// The name a declaration writes for this projection — [`Projection::from_name`]'s inverse.
-    ///
-    /// `plate_carree` and `equirectangular` are one transform *and* one aspect, so both come back
-    /// as `equirectangular`; `gall_isographic` is distinguishable because its standard parallel
-    /// is, and it is the aspect a client draws the world at.
+    /// The name a declaration writes for this projection, [`Projection::from_name`]'s inverse:
+    /// `plate_carree` and `equirectangular` both come back as `equirectangular`.
     pub fn name(&self) -> &'static str {
         match *self {
             Projection::WebMercator => "web_mercator",
@@ -129,19 +81,13 @@ impl Projection {
         }
     }
 
-    /// Longitude and latitude in degrees to the frame: `[0, 1]` on both axes, x east, **y south**.
+    /// Longitude and latitude in degrees to the frame: `[0, 1]` on both axes, x east, y south.
     ///
-    /// Defined for finite inputs. A latitude outside the projection's domain is clipped — moved
-    /// onto the edge, never wrapped — and [`Projection::is_clipped`] is how a caller counts that;
-    /// a longitude outside ±180° is likewise held at the edge rather than wrapped, since a
-    /// wrapped one would place a point on the far side of the world from where it was written.
+    /// Defined for finite inputs. A latitude outside the domain is clipped to the edge, never
+    /// wrapped ([`Projection::is_clipped`] counts that); longitude outside ±180° is held too.
     ///
-    /// **The result is then held inside the frame, which is not the same operation and is not
-    /// cosmetic.** [`WEB_MERCATOR_MAX_LATITUDE_DEG`] is itself the output of `atan` and `exp`, so
-    /// projecting it recovers π to a relative 1e-16 rather than to the bit, and the projected pole
-    /// lands an ULP *outside* `[0, 1]`. Without the hold, every clipped point would then be
-    /// reported as clamped — a real number attributed to the wrong cause, in the one report an
-    /// operator reads to judge whether the frame is right.
+    /// The hold is a separate step: [`WEB_MERCATOR_MAX_LATITUDE_DEG`] projects to a pole an ulp
+    /// outside `[0, 1]`, and without it a clipped point would be reported as clamped.
     pub fn forward(&self, lon: f64, lat: f64) -> (f64, f64) {
         match *self {
             Projection::WebMercator => {
@@ -160,8 +106,8 @@ impl Projection {
         }
     }
 
-    /// The frame back to longitude and latitude in degrees. The exact inverse of
-    /// [`Projection::forward`] for an unclipped input.
+    /// The frame back to longitude and latitude: the exact inverse of [`Projection::forward`]
+    /// for an unclipped input.
     pub fn inverse(&self, x: f64, y: f64) -> (f64, f64) {
         match *self {
             Projection::WebMercator => {
@@ -176,8 +122,7 @@ impl Projection {
         }
     }
 
-    /// The largest latitude this projection is defined at. `None` for [`Projection::None`], which
-    /// has no latitude at all.
+    /// The largest latitude this projection is defined at, `None` for [`Projection::None`].
     pub fn max_latitude_deg(&self) -> Option<f64> {
         match *self {
             Projection::WebMercator => Some(WEB_MERCATOR_MAX_LATITUDE_DEG),
@@ -186,12 +131,9 @@ impl Projection {
         }
     }
 
-    /// Whether this latitude falls outside the projection's domain, so that
-    /// [`Projection::forward`] will move it onto the frame's edge and lose the difference.
-    ///
-    /// The clamp report cannot answer this — see the clipping paragraph in the module docs — so a
-    /// caller that wants the count takes it here, before projecting. A latitude at *exactly* the
-    /// domain boundary is inside it.
+    /// Whether this latitude falls outside the projection's domain, so [`Projection::forward`]
+    /// moves it onto the frame's edge and loses the difference. The clamp report cannot answer
+    /// this; the boundary itself is inside the domain.
     pub fn is_clipped(&self, lat: f64) -> bool {
         match self.max_latitude_deg() {
             Some(max) => lat > max || lat < -max,
@@ -199,13 +141,9 @@ impl Projection {
         }
     }
 
-    /// The shape a client draws this projection's world at, as width ÷ height, or `None` where
-    /// there is no world to draw.
-    ///
-    /// For the equirectangular family this is `2·cos φ₁` and is the *only* place the standard
-    /// parallel is observable: 2:1 at the equator, √2:1 at 45°, square at 60°, taller than wide
-    /// beyond. Web Mercator's world is square by construction — that is what cutting the domain at
-    /// [`WEB_MERCATOR_MAX_LATITUDE_DEG`] buys.
+    /// The shape a client draws this projection's world at, as width ÷ height, `None` where
+    /// there is no world to draw. For the equirectangular family this is `2·cos φ₁`; Web
+    /// Mercator's world is square, from cutting the domain at [`WEB_MERCATOR_MAX_LATITUDE_DEG`].
     pub fn world_aspect(&self) -> Option<f64> {
         match *self {
             Projection::WebMercator => Some(1.0),
@@ -217,8 +155,8 @@ impl Projection {
     }
 }
 
-/// Hold a projected pair inside the unit square. See [`Projection::forward`] for why this is
-/// separate from the domain clip and why both are needed.
+/// Hold a projected pair inside the unit square; see [`Projection::forward`] for why this is
+/// separate from the domain clip.
 fn hold(x: f64, y: f64) -> (f64, f64) {
     (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
 }
@@ -230,12 +168,10 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    /// The vectors are compiled in rather than read at runtime: moving or renaming the file then
-    /// fails the build loudly instead of skipping the test that reads it.
+    /// Compiled in rather than read at runtime, so a moved or renamed file fails the build.
     const VECTORS_JSON: &str = include_str!("../../../test_corpora/common/projection-vectors.json");
 
-    /// The repository root, from this crate's own location — the Python reference is outside the
-    /// Cargo workspace and there is no other way to reach it.
+    /// The repository root: the Python reference is outside the Cargo workspace.
     const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
     fn vectors() -> Value {
@@ -248,8 +184,7 @@ mod tests {
             .unwrap_or_else(|| panic!("vector has no numeric {key}: {v}"))
     }
 
-    /// A deterministic generator, so a sample that passes today is the same sample tomorrow and a
-    /// failure is reproducible from the seed alone. SplitMix64, which needs no dependency.
+    /// SplitMix64: deterministic, so a failing sample reproduces from the seed alone.
     struct Rng(u64);
 
     impl Rng {
@@ -277,11 +212,7 @@ mod tests {
         assert_eq!(half, PI * f(&vectors()["constants"], "earth_radius_m"));
     }
 
-    /// Published Web Mercator figures in EPSG:3857 metres, normalised to the unit square by the
-    /// affine map the file states. None of these values came from this code.
-    ///
-    /// The tolerance is on the metre figure, so `1e-6` is a micrometre on the ground: far tighter
-    /// than the 9.3 mm the finest frame §4.1 permits can even represent.
+    /// Published Web Mercator figures in EPSG:3857 metres, normalised to the unit square.
     #[test]
     fn published_web_mercator_figures() {
         let v = vectors();
@@ -301,13 +232,8 @@ mod tests {
         assert!(checked >= 8, "only {checked} vectors read — the file has at least eight");
     }
 
-    /// XYZ tile addresses at zoom 1, 2, 10 and 16.
-    ///
-    /// **The test of the y direction.** A frame mirrored north-south round-trips perfectly and
-    /// agrees on every vector whose latitude is zero, while putting London in Antarctica. Two of
-    /// the published metre figures do catch a mirror, because they are off the equator; a tile
-    /// address catches it whatever the vector set happens to hold, and says which way is north in
-    /// the vocabulary a basemap uses.
+    /// XYZ tile addresses; catches a frame mirrored north-south, which would put London in
+    /// Antarctica while still round-tripping on latitude-zero vectors.
     #[test]
     fn xyz_tile_addresses() {
         let v = vectors();
@@ -335,12 +261,7 @@ mod tests {
         assert!(zooms.len() >= 3, "several zooms, got {zooms:?}");
     }
 
-    /// The inverse recovers the input across the whole domain, to **1e-12 degrees**.
-    ///
-    /// That is about 0.1 µm on the ground — five orders below the 9.3 mm cell of the finest frame
-    /// §4.1 permits, so an error at this scale cannot move a point between cells. Measured worst
-    /// case over this sample is 4.26e-14 degrees, and the Python reference reports the same figure
-    /// over its own; 1e-12 is the claim, with the room a different libm needs.
+    /// The inverse recovers the input to 1e-12 degrees, far below one grid cell.
     #[test]
     fn inverse_recovers_the_input() {
         let mut rng = Rng(0x7E55_E4A0_0000_0001);
@@ -365,20 +286,11 @@ mod tests {
         assert!(worst < 1e-12, "worst round-trip error {worst:e} degrees");
     }
 
-    /// Equirectangular is exact arithmetic: no `tan`, `ln`, `exp` or `atan` appears in its
-    /// transform, so it produces the same bits on every platform and on every run.
-    ///
-    /// A test cannot read the source to see that, so it pins the consequence instead: the forward
-    /// equals the four-operation closed form *to the bit*, a second evaluation is bit-identical to
-    /// the first, and on the dyadic corners — where every step is exactly representable — forward
-    /// and inverse are equalities rather than approximations. A transcendental sneaking into the
-    /// transform, a `cos φ₁` factor being the one that would, breaks the first of those on the
-    /// first sample.
+    /// No `tan`, `ln`, `exp` or `atan` appears, so it produces the same bits on every platform.
     #[test]
     fn equirectangular_is_exact_arithmetic() {
         let mut rng = Rng(0x9111_1E5A_0000_0002);
-        // Every member of the family, not just the one whose parallel is 0°: a `cos φ₁` factor in
-        // the transform is invisible at φ₁ = 0, where the cosine is exactly 1.
+        // Every member of the family: a `cos φ₁` factor would be invisible at φ₁ = 0.
         for proj in [Projection::PLATE_CARREE, Projection::GALL_ISOGRAPHIC] {
             for _ in 0..100_000 {
                 let lon = rng.range(-180.0, 180.0);
@@ -393,7 +305,7 @@ mod tests {
             }
         }
 
-        // Exact on the dyadic rationals, where every step of the transform is representable.
+        // Exact on the dyadic rationals.
         for (lon, lat, want) in [
             (-180.0, 90.0, (0.0, 0.0)),
             (0.0, 0.0, (0.5, 0.5)),
@@ -408,7 +320,6 @@ mod tests {
         }
     }
 
-    /// The three names are one transform and differ only in the aspect they publish (§5.2).
     #[test]
     fn the_aliases_are_one_transform() {
         let names = ["equirectangular", "plate_carree", "gall_isographic"];
@@ -435,20 +346,15 @@ mod tests {
         assert_eq!(Projection::None.world_aspect(), Option::None);
         assert_eq!(Projection::from_name("lambert_cylindrical"), Option::None);
 
-        // `name` round-trips through `from_name` for every name the surface accepts, which is
-        // what lets a declaration be echoed back to a caller from the resolved projection alone.
+        // `name` round-trips through `from_name` for every name the surface accepts.
         for name in ["web_mercator", "equirectangular", "gall_isographic", "none"] {
             assert_eq!(Projection::from_name(name).unwrap().name(), name);
         }
         assert_eq!(Projection::PLATE_CARREE.name(), "equirectangular");
     }
 
-    /// The clip predicate at the boundary and past it, and the reason it cannot be a clamp count.
-    ///
-    /// A point at exactly ±[`WEB_MERCATOR_MAX_LATITUDE_DEG`] is inside the domain. A point beyond
-    /// it lands on the frame's edge, where `contracts.md` §2.5 says `v = max` is in the top cell
-    /// and `v = min` in cell zero — neither clamped. That is the whole argument for a separate
-    /// predicate, and this asserts both halves of it: clipped, and invisible to the clamp rule.
+    /// A point at exactly ±[`WEB_MERCATOR_MAX_LATITUDE_DEG`] is inside the domain; beyond it, it
+    /// lands on the frame's edge, which the quantisation rule does not clamp.
     #[test]
     fn clipping_is_not_clamping() {
         let m = WEB_MERCATOR_MAX_LATITUDE_DEG;
@@ -485,15 +391,8 @@ mod tests {
         assert_eq!(Projection::None.inverse(-7.5, 1e6), (-7.5, 1e6));
     }
 
-    /// **The incumbent, over a large sample.** `test_corpora/common/projection.py` placed both
-    /// built geographic corpora — 87 million points — so a disagreement is a finding whichever
-    /// side is wrong, and the assertion is on the *stored* position rather than on the float: two
-    /// implementations that quantise a point to different 32-bit fixed-point coordinates have
-    /// placed it in different cells, which is the only difference this system can observe.
-    ///
-    /// The interpreter is required rather than optional. The repository's gate already runs
-    /// `python3 scripts/check-doc-links.py`, so an absent `python3` is a broken checkout and not a
-    /// reason to pass a cross-language agreement test without comparing anything.
+    /// Checked against `test_corpora/common/projection.py`. The assertion is on the stored
+    /// position: two implementations quantising to different coordinates placed a point wrongly.
     #[test]
     fn agrees_with_the_python_reference() {
         const N: usize = 100_000;
@@ -501,10 +400,7 @@ mod tests {
         let mut points = Vec::with_capacity(N);
         let mut input = String::with_capacity(N * 40);
         for _ in 0..N {
-            // Drawn past the domain on purpose — about 8% of latitudes beyond ±85.05° and 5% of
-            // longitudes beyond ±180°. The clip and the hold are part of the transform, so the two
-            // implementations have to agree on where an out-of-domain point lands as much as on
-            // where an ordinary one does.
+            // Drawn past the domain on purpose: the implementations must agree there too.
             let lon = rng.range(-190.0, 190.0);
             let lat = rng.range(-92.0, 92.0);
             points.push((lon, lat));
@@ -547,7 +443,7 @@ print("\n".join(out))
             let py: f64 = it.next().unwrap().parse().unwrap();
             let (rx, ry) = Projection::WebMercator.forward(lon, lat);
             worst = worst.max((rx - px).abs()).max((ry - py).abs());
-            // The stored form: 32-bit fixed point over the unit frame (`contracts.md` §2.5).
+            // The stored form: 32-bit fixed point over the unit frame.
             let q = |v: f64| crate::morton::fixed32(v, 0.0, 1.0);
             assert_eq!(
                 (q(rx), q(ry)),
@@ -557,11 +453,8 @@ print("\n".join(out))
             n += 1;
         }
         assert_eq!(n, N, "the reference returned {n} of {N} points");
-        // Measured, not assumed: over this sample the two agree to the *bit*, on glibc's libm and
-        // CPython 3.10 — worst difference exactly zero, clipped points included. The assertion is
-        // looser than the measurement on purpose: a different `tan`, `ln` or `atan` may round a
-        // last place differently, and 1e-15 of the unit square is still four orders below one step
-        // of the 32-bit fixed-point grid, so it cannot move a stored position.
+        // The assertion is looser than measured agreement: a different `tan`, `ln` or `atan` may
+        // round a last place differently, well below one step of the fixed-point grid.
         assert!(worst < 1e-15, "worst float disagreement {worst:e}");
     }
 }

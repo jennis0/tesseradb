@@ -60,12 +60,14 @@ cosmetic.
 
 | What changed | What it means for a held view |
 |---|---|
-| A different viewer authorises (a new token for a different viewer) | The replica, held artifacts, the selection and per-column state drop. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per deployment, not per viewer. |
-| The deployment is rebuilt (a key rotation, or the id space advancing) | Every `tessera_id` the client holds is meaningless. Start over. |
+| A different viewer authorises (a new token for a different viewer) | The host calls `clear()` or makes a new store, which drops the replica, held artifacts, the selection and per-column state and reads meta again. Every `tessera_id` the client already holds stays valid, because the permutation is keyed per bundle, not per viewer. |
+| An answer carries another identity key | The store detects a new viewer by the identity key, which hashes the exact credential bytes presented at authorisation, the identity of the viewer's visible-set fragment, and the view. An ingest or a suppression does not change it. The store drops everything the server answered, reads meta again and asks again, and keeps the host's own inputs. A renewal that presents different credential bytes, such as a freshly signed token, changes the key, so the store redraws from scratch at that renewal even for the same person. The check runs on answers; the `Store` reference says how long a host that changes viewer without `clear()` shows the previous viewer's data. |
+| A compaction is published | A compaction rotates the fragment identity the identity key hashes, so every store sees a new key on its next answer: it drops what it holds, reads meta again and draws afresh. Every `tessera_id` stays valid. |
+| The deployment is rebuilt | The new bundle has a new key, so every `tessera_id` the client holds is meaningless. Read the items again, by a unique field's values or afresh. |
 | The content behind the current identity (an item added, denied, or unsuppressed) | The client's counts and marks may be older than the corpus. Mark the view stale and offer refresh. |
 
-Segments merging and compaction moving rows never reach a client, because nothing it holds is
-addressed by row.
+Segments merging never reaches a client, because nothing it holds is addressed by row. A
+compaction reaches it only through the identity key, as the table says.
 
 Marking a view stale is built: the store compares content keys on every answer and flips a flag a
 display reads. Fetching fresh geometry on its own, without a person asking for it, is not: a
@@ -95,13 +97,13 @@ area just outside what is on screen once the view has settled and nothing else i
 for. None of this is visible from outside the store: a host tells it where the camera is and
 reads what it publishes.
 
-Annotation layers are requested on their own, naming the layers that are on, rather than read off
-cached point geometry. Artifacts are clusters, boundaries, hierarchy nodes and their labels, as
-[annotations](annotations.md#what-an-artifact-is) defines them. A cache holds geometry it has
-already fetched and does not ask again for a tile it already holds, and such a tile carries no
-artifacts, so a client reading them off the point path would watch clusters disappear from a
-view that had not moved, for no reason a person could see. Asking on its own avoids that at the
-cost of one extra request once a view has settled.
+Annotation layers are requested on their own, naming the layers drawn and the layer the points
+are coloured by, rather than read off cached point geometry. Artifacts are clusters, boundaries,
+hierarchy nodes and their labels, as [annotations](annotations.md#what-an-artifact-is) defines
+them. A cache holds geometry it has already fetched and does not ask again for a tile it already
+holds, and such a tile carries no artifacts, so a client reading them off the point path would
+watch clusters disappear from a view that had not moved, for no reason a person could see. Asking
+on its own avoids that at the cost of one extra request once a view has settled.
 
 ```mermaid
 flowchart LR
@@ -197,6 +199,47 @@ next view. Between views that use different layouts, a switch drops the selectio
 camera to the new view's own extent, because a shape or a camera position in one layout means
 nothing in another.
 
+## Reading in bulk
+
+The bulk reads, `POST /v1/items` and `POST /v1/artifacts`, do not pass through the store. Each
+client follows each response's cursor until the read ends, and passes the caller's request through
+as given, choosing no fields and no order on the caller's behalf.
+
+| Client | Call | What it gives back |
+|---|---|---|
+| TypeScript | `client.items(token, request)` and `client.artifacts(token, request)` | an async iterator of Arrow tables, one per page, with the cursor after each; a caller who stops, or whose read is cut or refused part-way, resumes from that cursor |
+| Python | `db.items`, `db.artifacts` and `selection.items`, and the same reads on a `Viewer` | one `pyarrow` table of the whole read, or with `batches=True` the pages one at a time; a read that stops part-way raises `PartialRead`, which holds the rows read and the cursor to read on from |
+| CLI | `tessera items` and `tessera artifacts` | Arrow IPC or Parquet, to a file or to standard output, written page by page; a read cut short leaves whole pages and names the cursor to read on from |
+
+`selection.items` sends the selection's own filters and box as the read's filter, so its rows are
+the items the selection counts.
+
+## Counts by group
+
+`POST /v1/aggregate` answers how a set is distributed, one table of counts per grouping.
+
+| Client | Call | What it gives back |
+|---|---|---|
+| TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
+| TypeScript store | `store.setAggregate(id, {groupings, reference, without})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
+| Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
+
+The store sends a reference only where the component registered one, as a filter expression or as
+the whole visible set. It chooses no grouping. A registration can name one column in `without`, as
+the filter draft keys its controls, and the store then sends its filters less that column's
+control. A category control uses this to list its own values: with its clause set, the values it
+excludes are still counted, and every other clause, the `member_of` clauses and the selected
+region still narrow them. A registration can also name one layer in `withoutMembersOf`, and the
+store then leaves out that layer's `member_of` clauses in the filter position; a cluster control
+uses this to keep counting the clusters its own clauses exclude. The region is always sent, and
+nothing is left out unless a registration names it. A `429` or `503`
+is sent again as the map's own requests are, after the same backoff or the server's
+`Retry-After` where that is longer, and a newer change cancels the wait. `selection.aggregate` sends the selection's filters
+and box as the request's `filters`, so every grouping's total is the selection's count.
+
+There is no command-line command for this route. It is reached over HTTP and through the
+TypeScript and Python clients.
+
 ## Not built
 
 Switching between two views that use different layouts refits the camera without animating an
@@ -226,6 +269,9 @@ inside a notebook widget rather than reimplementing any of this in Python. An ac
 drives the built components against a running deployment and checks nine claims against rules 1
 to 5 and 7 through what is actually on screen, not through a transcript of what was sent. Rule 6
 is covered by unit tests; rules 8 to 12 are not screen-checkable and are not covered there.
+
+The bulk reads live in `@tesseradb/client`'s `records` module, in the Python package's viewer
+reader, and in the CLI's `records` module.
 
 ## Sources
 

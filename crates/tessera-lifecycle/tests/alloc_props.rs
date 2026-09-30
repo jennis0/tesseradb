@@ -1,12 +1,13 @@
-//! I9 allocator property tests: monotonicity, no reuse across simulated
-//! crashes, and `assign_sorted`'s contiguous-signature grouping.
+//! Allocator property tests: monotonicity without freed ids, no id live twice across simulated
+//! crashes and folds that free ids, and `assign_sorted`'s contiguous-signature grouping.
 
 use std::collections::HashSet;
 
 use proptest::prelude::*;
 
+use croaring::Bitmap;
 use tessera_lifecycle::alloc::{
-    allocator_floor, assign_sorted, high_water_from, Allocator, PendingItem,
+    allocator_floor, assign_sorted, entities_named, high_water_from, Allocator, PendingItem,
 };
 use tessera_lifecycle::wal::{WalRecord, WalRow};
 use tessera_types::{EntityId, TermId};
@@ -21,13 +22,12 @@ proptest! {
         let mut seen: HashSet<u64> = HashSet::new();
 
         for n in sizes {
-            let range = alloc.allocate(n).unwrap();
-            prop_assert_eq!(range.start, expected_next);
-            prop_assert_eq!(range.end, expected_next + n);
-            for id in range.clone() {
+            let ids = alloc.allocate(n).unwrap();
+            prop_assert_eq!(&ids, &(expected_next..expected_next + n).collect::<Vec<_>>());
+            for id in ids {
                 prop_assert!(seen.insert(id), "id {} allocated twice in one session", id);
             }
-            expected_next = range.end;
+            expected_next += n;
             prop_assert_eq!(alloc.high_water(), expected_next);
         }
     }
@@ -64,10 +64,11 @@ proptest! {
                     prop_assert!(!used.contains(&id), "id {} reused across a simulated crash", id);
                     used.insert(id);
                     wal_records.push(WalRecord::IngestBatch {
+                        edits: Vec::new(),
+                        receipt: Vec::new(),
                         batch_id: format!("batch-{id}"),
                         body_hash: [0u8; 32],
                         rows: vec![WalRow {
-                            external_id: Some(id.to_le_bytes().to_vec()),
                             entity_id: EntityId::new(id),
                             view: "default".to_string(),
                             join: false,
@@ -129,10 +130,11 @@ proptest! {
                 prop_assert!(!used.contains(&id), "entity id {} reissued", id);
                 used.insert(id);
                 wal.push(WalRecord::IngestBatch {
+                    edits: Vec::new(),
+                    receipt: Vec::new(),
                     batch_id: format!("batch-{id}"),
                     body_hash: [0u8; 32],
                     rows: vec![WalRow {
-                        external_id: Some(id.to_le_bytes().to_vec()),
                         entity_id: EntityId::new(id),
                         view: "default".to_string(),
                         join: false,
@@ -162,6 +164,64 @@ proptest! {
         }
     }
 
+    /// **No id holds two items**, across fuzzed rounds of allocation, folds that free ids an edit
+    /// left, publications that record the allocator's sets, rotations that reclaim the log, and
+    /// crashes. A restart seeds the freed ids from the last publication and removes every id a
+    /// kept log record names, which is what stops an id issued after the publication and recorded
+    /// only in the log being issued again.
+    #[test]
+    fn no_id_holds_two_items_across_folds_that_free_ids(
+        rounds in prop::collection::vec(
+            (1u64..16, 0usize..8, any::<bool>(), any::<bool>(), any::<bool>()),
+            1..24,
+        ),
+    ) {
+        // Ids holding an item, and ids an edit left that a fold may free.
+        let mut live: HashSet<u64> = HashSet::new();
+        let mut left: Vec<u64> = Vec::new();
+        // The last publication's sets and high-water, and the log since the last rotation.
+        let mut published: (u64, Bitmap, Vec<(u64, Bitmap)>) = (0, Bitmap::new(), Vec::new());
+        let mut wal: Vec<WalRecord> = Vec::new();
+        let mut position = 0u64;
+        let mut retained_from = 0u64;
+        let mut alloc = Allocator::new(0);
+
+        for (n, edits, fold, publish, crash) in rounds {
+            for id in alloc.allocate(n).unwrap() {
+                prop_assert!(live.insert(id), "entity id {} holds two items", id);
+                position += 1;
+                wal.push(row(id));
+            }
+            // An edit leaves an id; the item it held moves to one allocated above.
+            let moved: Vec<u64> = live.iter().copied().take(edits).collect();
+            for id in moved {
+                live.remove(&id);
+                left.push(id);
+            }
+            if fold && !left.is_empty() {
+                let freed = Bitmap::of(&left.drain(..).map(|id| id as u32).collect::<Vec<_>>());
+                alloc.release_after(position, freed);
+            }
+            if publish {
+                published = (alloc.high_water(), alloc.free().clone(), alloc.held().to_vec());
+                // The rotation after a publication reclaims the log.
+                wal.clear();
+                retained_from = position;
+                alloc.promote(retained_from);
+            }
+            if crash {
+                let mut next = Allocator::new(published.0.max(high_water_from(&wal)));
+                next.seed_freed(
+                    published.1.clone(),
+                    published.2.clone(),
+                    retained_from,
+                    &entities_named(&wal),
+                );
+                alloc = next;
+            }
+        }
+    }
+
     /// `assign_sorted` gives every item a distinct ID from a dense range, and items that share a
     /// signature (sorted, deduplicated term-ID list) land on a contiguous run of IDs.
     #[test]
@@ -170,9 +230,7 @@ proptest! {
     ) {
         let mut items: Vec<PendingItem> = signatures
             .iter()
-            .enumerate()
-            .map(|(i, sig)| PendingItem {
-                external_id: Some(format!("ext-{i:05}").into_bytes()),
+            .map(|sig| PendingItem {
                 terms: sig.iter().map(|&t| TermId::new(t)).collect(),
                 entity_id: None,
             })
@@ -214,5 +272,24 @@ proptest! {
                 current = Some(sig);
             }
         }
+    }
+}
+
+fn row(id: u64) -> WalRecord {
+    WalRecord::IngestBatch {
+        edits: Vec::new(),
+        receipt: Vec::new(),
+        batch_id: format!("batch-{id}"),
+        body_hash: [0u8; 32],
+        rows: vec![WalRow {
+            entity_id: EntityId::new(id),
+            view: "default".to_string(),
+            join: false,
+            descriptors: Vec::new(),
+            x: 0.0,
+            y: 0.0,
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+        }],
     }
 }

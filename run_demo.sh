@@ -301,6 +301,8 @@ items_of() {
   esac
 }
 prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+# The column the viewer titles a record by: `title` wherever the scale declares it, else none.
+title_of()   { case "$1" in 2m4|25m|notebook*) echo 'title' ;; *) echo '' ;; esac; }
 viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; *) echo 0 ;; esac; }
 session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; *) echo 0 ;; esac; }
 control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; *) echo 0 ;; esac; }
@@ -322,6 +324,7 @@ m = sorted(b.glob('v*/MANIFEST.json'))
 print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 " 2>/dev/null || echo 0; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  title_of()   { echo ''; }
   schema_of()  { echo ''; }
   # **Its own ports, not 2m4's.** Sharing them meant a `--bundle` run beside an already-running
   # 2m4 bound nothing, found that port ready anyway, and measured its principals against the other
@@ -337,10 +340,9 @@ fi
 # names of the variables holding its credentials, and none of that is the demo's to overwrite.
 #
 # The secrets are read from a `.env` beside that file when the environment does not already carry
-# them. `tessera serve` reads credentials from the process environment alone (the `.env` route in
-# the binary is the *identity key*'s, and that key is the build's rather than the server's), so a
-# rung whose credentials live only in its `.env` would otherwise refuse to start with nothing said
-# about where its secret was.
+# them. `tessera serve` reads credentials from the process environment alone, so a rung whose
+# credentials live only in its `.env` would otherwise refuse to start with nothing said about where
+# its secret was.
 if [[ -n "$deployment_override" ]]; then
   [[ -n "$bundle_override" ]] && { echo "--deployment and --bundle name the same thing twice" >&2; exit 2; }
   [[ -f "$deployment_override" ]] || { echo "no such deployment: $deployment_override" >&2; exit 1; }
@@ -374,8 +376,7 @@ if [[ -n "$deployment_override" ]]; then
   [[ -d "$bundle_override" ]] || { echo "$deployment_override names a bundle that is not there: $bundle_override" >&2; exit 1; }
 
   # The credentials this deployment declares, taken from the environment first and from the `.env`
-  # beside the file second — the same precedence the binary gives the identity key, and for the
-  # same reason: an exported variable is more specific than a file.
+  # beside the file second: an exported variable is more specific than a file.
   for role in session operator; do
     var="$(toml_scalar serve "${role}_credential_env")"
     [[ -n "$var" ]] || continue
@@ -419,6 +420,7 @@ m = sorted(b.glob('v*/MANIFEST.json'))
 print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
 " 2>/dev/null || echo 0; }
   prose_of()   { if [[ -n "$prose_override" ]]; then printf '"%s"' "${prose_override//,/\",\"}"; fi; }
+  title_of()   { echo ''; }
   schema_of()  { echo ''; }
   # This deployment's own ports, whatever they are: two rungs served at once are two files, and
   # the picker offers both.
@@ -531,21 +533,6 @@ build_scale() {
   mkdir -p "$DEMO"
   write_deployment "$scale"
 
-  # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
-  # reach.** `pipeline.rs`' own table bounds three passes by the corpus rather than by the plan:
-  # `source_ids` at 8N, minted external ids at 20N, and geometry + tiler + segment at 28N. Only
-  # the per-batch and per-band rows answer to `--memory-budget`, so at 250,000,000 items the
-  # minting pass alone is ~5 GB on top of the ~7 GB the geometry pass needs, and no batch size
-  # moves either — measured, by four builds at four budgets all dying at the same 4.8 GB of
-  # output. Minting is off by default in the binary for an unrelated and better reason
-  # (contracts §2.4: an external id is not manufactured for an item whose caller supplied none),
-  # and the demo wants none of it — the viewer addresses items by `tessera_id`. It stays on at
-  # the small scales only to keep those bundles comparable with the bench fixtures.
-  local mint_external="--mint-external-ids"
-  if [[ "$(items_of "$scale")" -gt 100000000 ]]; then
-    mint_external=""
-    echo "minting no external ids at this scale (the 20N pass; see build_scale)"
-  fi
   # Timed, and the peak RSS kept alongside the wall clock. A build that runs for hours at the
   # upper scales should say how long it took without the operator having to have watched it, and
   # peak RSS is the figure that decides whether the *next* scale fits on the machine at all —
@@ -557,10 +544,6 @@ build_scale() {
   # files are all one corpus, so it takes no limit.
   local -a limit=(--limit "$(items_of "$scale")")
   [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
-  # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
-  # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
-  # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
-  # in the environment (`TESSERA_IDENTITY_KEY`, or a `.env` beside `tessera.toml`) instead.
   # `TESSERA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
   # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
   # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
@@ -601,7 +584,7 @@ build_scale() {
     --deployment "$(deployment_of "$scale")" \
     "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
-    $mint_external --mint-id-key --no-oracle-pairs
+    --no-oracle-pairs
   local peak
   peak=$(awk '/Maximum resident set size/ {printf "%.1f GiB", $NF / 1048576}' "$DEMO/build-$scale.time")
   printf 'built %s in %dm%02ds, peak %s, %s on disk\n' \
@@ -754,6 +737,8 @@ fresh="$DEMO/presets/datasets-this-run.json"
     esac
     printf '{"id":"%s","label":"%s","items":%s,"prose":[%s],' \
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
+    title="$(title_of "$scale")"
+    if [[ -n "$title" ]]; then printf '"titleField":"%s",' "$title"; fi
     printf '"viewerUrl":"http://127.0.0.1:%s","sessionUrl":"http://127.0.0.1:%s","presets":' \
       "$(viewer_of "$scale")" "$(session_of "$scale")"
     cat "$DEMO/presets/$scale.json"

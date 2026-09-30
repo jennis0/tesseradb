@@ -18,18 +18,19 @@ at the executor's tick. The driver therefore sequences by eligibility (§12.3):
   buffered, which is what makes an empty-buffer tick a pure maintenance dispatch;
 - **a pulled tick dispatches everything currently eligible**, so a stage is isolated by arranging
   that only it is eligible when its tick is pulled. That arrangement is the *plan's* job (the
-  writes are counted so no write's own tick makes a merge or coalesce eligible), and each tick
-  stage's barrier asserts the flush counter did not move — a plan that mis-counted fails loudly as
-  a broken plan, not quietly as a mis-attributed delta.
+  writes are counted so no write's own tick makes a merge or coalesce eligible), and every stage
+  that pulls a tick asserts in its barrier that no flush, merge, coalesce or fold counter moved
+  but its own. A plan that mis-counted fails loudly as a broken plan, not quietly as a
+  mis-attributed delta.
 
-Two of §12.3's named knobs did not survive contact with the running system. ``serve.tier_width``
-and ``serve.segment_floor_bytes`` are parsed by the server's config and **never reach the
-engine** — `tessera_engine::session::merge_policy` hard-codes 4 and 16 MiB — and the coalesce's
-width is a `CoalescePolicy` default (8) with no config key at all. So the driver takes the ladder
-as found: merge eligibility is four same-tier segments, coalesce eligibility is eight same-tier
-delta-axis entries, and the one knob that *does* reach selection — ``max_merged_segment_bytes``,
-set here below the base segment's size — is what keeps the base segment out of every merge window
-(its own size bound is the exclusion; `tessera-store::merge`'s module doc).
+``serve.tier_width`` and ``serve.coalesce_width`` reach the engine's merge and coalesce policies
+through `tessera-config`. The config written below sets them only when a harness asks
+(`merge_tier_width`, `coalesce_width`); otherwise the defaults hold, four and eight, with a 16 MiB
+merge floor: merge eligibility is four same-tier segments, coalesce eligibility eight same-tier
+entries on each axis. The coalesce takes unique-index key runs four at a time under a 16 MiB floor
+whatever the config says, so at fixture size a merge tick at the default width also dispatches
+that coalesce. The base segment is in no merge window whatever ``max_merged_segment_bytes`` says:
+a merge selects from the flushed segments only.
 
 ## Barriers
 
@@ -38,7 +39,7 @@ Each stage's barrier is wire- or filesystem-observable, never a sleep:
 | stage | barrier |
 |---|---|
 | build, load | the spawn's own health wait, then `/control/status` readiness |
-| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up — the second half is decision 0044 D1: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
+| write (ingest + flush) | ``flush.flushes`` up, then ``flush.refreshes`` up and ``flush.refresh_in_flight`` false: an established session serves its old projection until the background refresh replaces it, so a recording after the version bump alone is short by exactly the batch |
 | merge | ``merges`` up, ``segments_version`` bumped, ``refreshes`` up (a merge's publication runs the same refresh pass) |
 | coalesce | ``coalesces`` up — the one stage that moves no row and bumps no version (write-path §7), so its barrier must be a counter; the version is asserted *unchanged* |
 | deny | the 200 acknowledgement itself — a deny is fail-closed at acceptance (write-path §5.4), so there is nothing later to wait for |
@@ -86,6 +87,7 @@ that completed with a wrong answer.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import re
@@ -234,6 +236,30 @@ _SCOPE_SEQ = itertools.count()
 _SCOPE_KEEPER_WRAP = 'sleep 7200 >/dev/null 2>&1 & exec "$0" "$@"'
 
 
+@functools.cache
+def _scope_oom_policy() -> list[str]:
+    """``OOMPolicy=continue`` where the user manager applies an OOM policy to scopes (253 on).
+
+    Its default there is ``stop``: the kernel's kill of the server makes systemd stop the scope,
+    which kills the keeper and removes ``memory.events`` before the harness reads it. Before 253
+    a scope has no OOM policy and is not stopped. The version is the running manager's, which
+    is the one that takes or refuses the property.
+    """
+    try:
+        shown = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "Version", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    version = re.match(r"(\d+)", shown.strip())
+    if version is None or int(version[1]) < 253:
+        return []
+    return ["-p", "OOMPolicy=continue"]
+
+
 def _advise_out_of_page_cache(*roots: Path) -> None:
     """Advise every file under `roots` out of the page cache — the cold boundary's eviction.
 
@@ -296,6 +322,9 @@ def _suite_config(
     control_port: int,
     compute_threads: int | None = None,
     big_batches: bool = False,
+    automatic_folds: bool = True,
+    tier_width: int | None = None,
+    coalesce_width: int | None = None,
 ) -> str:
     # θ and both caps above any *fixture* total, so at fixture size every tile is saturated and
     # the diff compares exact membership. No cap clears every corpus — saturation is observed per
@@ -305,6 +334,22 @@ def _suite_config(
     # from selection (module doc); the config loader refuses the value if the base ever shrinks
     # under it, which is the loud failure this suite wants.
     threads_line = "" if compute_threads is None else f"compute_threads = {compute_threads}\n"
+    tier_line = "" if tier_width is None else f"tier_width = {tier_width}\n"
+    coalesce_line = "" if coalesce_width is None else f"coalesce_width = {coalesce_width}\n"
+    # The window being off leaves the schedule's gauge triggers armed; these turn them off too.
+    fold_lines = (
+        ""
+        if automatic_folds
+        else "\n".join(
+            f'{key} = "off"'
+            for key in (
+                "compaction_max_segments",
+                "compaction_after_deletions",
+                "compaction_dead_rows_fraction",
+                "compaction_dead_bytes_ratio",
+            )
+        )
+    )
     # A plan asking for large batches raises both ceilings together: rows alone would leave the
     # byte ceiling binding first, and the pair is what the WAL-headroom relation is stated over.
     batch_lines = (
@@ -336,34 +381,29 @@ k_min = 2
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
 max_merged_segment_bytes = 1048576
-{threads_line}
+{threads_line}{tier_line}{coalesce_line}
 [ingest]
 flush_max_age_secs = 86400
 compaction_window_start = "off"
+{fold_lines}
 {batch_lines}
 """
 
 #: How large a single `/control/ingest` batch may be, when a plan asks for one.
 #:
-#: **Two ceilings bound this, and the tighter one is not the obvious one.** The WAL-headroom
-#: relation — `ingest_queue_bound × ingest_max_batch_bytes` plus the reserved deny headroom under
-#: `wal_hard_limit_bytes` — allows about 224 MiB at the shipped defaults. It is not what binds. A
-#: **64 MiB per-connection ceiling** is, and its argument is sharper: an ingest body is buffered in
-#: full before any handler runs, so this key is what *one* credentialed connection costs, and
-#: nothing bounds how many arrive — the resident relation bounds the admitted window, not the queue
-#: of uploads in front of it. Measured, not read: 200 MiB was refused at startup by that ceiling
-#: while satisfying the WAL relation comfortably.
+#: An ingest body is buffered in full before any handler runs, so this key is what *one*
+#: credentialed connection costs, and nothing bounds how many arrive.
 #:
 #: **What a plan may then pose is bounded by the row's width on the wire, not by the row count**,
 #: and the refusal is a 422 at the door — before decoding, so it costs no queue slot and no WAL
 #: append. Measured against this corpus: 500,000 rows overflow 32 MiB, so a row exceeds 67 B
-#: encoded. The byte cap therefore sits at the ceiling and the row count is chosen to fit under it
-#: with margin, which is the order these two must be reasoned in.
+#: encoded. The byte cap is therefore set first and the row count is chosen to fit under it with
+#: margin, which is the order these two must be reasoned in.
 BIG_BATCH_ROWS = 250_000
 BIG_BATCH_BYTES = 64 * 1024 * 1024
 
 
-def _poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
+def poll(predicate: Callable[[], bool], what: str, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -540,6 +580,16 @@ class SuiteHarness:
     underlay_offset: int = 2
     #: The resource regime this walk runs in (§7, §12.5). The default is no regime at all.
     profile: Profile = Profile()
+    #: Whether the schedule may dispatch a fold on its own; False leaves `/control/compact` as the
+    #: only way one runs.
+    automatic_folds: bool = True
+    #: Segments a merge takes; None leaves the engine's default of four.
+    merge_tier_width: int | None = None
+    #: Entries a coalesce takes on every axis but the key runs; None leaves eight.
+    coalesce_width: int | None = None
+    #: Whether a stage that pulls a tick must be the only publication on it. A plan that lets
+    #: merges, coalesces and folds ride its ticks turns this off; a stray flush still fails.
+    isolated_ticks: bool = True
 
     server: Server | None = None
     proc: subprocess.Popen | None = None
@@ -594,6 +644,9 @@ class SuiteHarness:
                 control_port,
                 compute_threads=self.profile.compute_threads,
                 big_batches=os.environ.get("TESSERA_SUITE_BIG_BATCHES") == "1",
+                automatic_folds=self.automatic_folds,
+                tier_width=self.merge_tier_width,
+                coalesce_width=self.coalesce_width,
             )
         )
         env = os.environ.copy()
@@ -613,6 +666,7 @@ class SuiteHarness:
                 f"MemoryMax={self.profile.memory_max}",
                 "-p",
                 "MemorySwapMax=0",
+                *_scope_oom_policy(),
                 "--",
                 "sh",
                 "-c",
@@ -703,7 +757,7 @@ class SuiteHarness:
         _advise_out_of_page_cache(self.bundle_root, self.run_dir)
         self.spawn()
         self.authorise()
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in self.status()["partitions"]),
             "the cold-booted bundle never became ready",
             timeout=30.0,
@@ -853,7 +907,7 @@ class SuiteHarness:
             timeout=10,
         )
         resp.raise_for_status()
-        _poll(
+        poll(
             lambda: self.executor()["flush"]["ticks"] > before,
             "the pulled tick was never consumed",
             timeout=30.0,
@@ -888,6 +942,54 @@ class SuiteHarness:
 
 
 # -- stages ------------------------------------------------------------------------------------
+
+
+def _publication_counts(h: SuiteHarness) -> dict:
+    """The counter each kind of tick-driven publication moves: flush, merge, coalesce, fold."""
+    status = h.status()
+    executor = status["write_executor"]
+    return {
+        "flushes": executor["flush"]["flushes"],
+        "merges": executor["merges"],
+        "coalesces": executor["coalesces"],
+        "folds": status["compaction"]["folds"],
+    }
+
+
+def _settled(executor: dict) -> bool:
+    """No work-lane job queued, no flush, merge or coalesce running or finished and not yet
+    published, and no refresh running. A publication arms its refresh as it lands, and a request made before the
+    refresh ends may be refused with 429."""
+    flush = executor["flush"]
+    return (
+        executor["work_depth"] == 0
+        and not flush["in_flight"]
+        and not executor["merge_in_flight"]
+        and not executor["coalesce_in_flight"]
+        and not flush["refresh_in_flight"]
+    )
+
+
+def _assert_isolated(h: SuiteHarness, label: str, before: dict, own: tuple[str, ...]) -> None:
+    """Fail as a broken plan if anything other than the stage's `own` publications moved. A plan
+    without isolated ticks is held to no stray flush only."""
+    # A job the tick queued must land before the counters are read, or it rides unseen.
+    poll(
+        lambda: _settled(h.executor()),
+        f"{label}: the executor never went idle after the stage's tick",
+    )
+    now = _publication_counts(h)
+    watched = before if h.isolated_ticks else ("flushes",)
+    moved = [
+        f"{key} {before[key]} -> {now[key]}"
+        for key in watched
+        if key not in own and now[key] != before[key]
+    ]
+    if moved:
+        raise RuntimeError(
+            f"{label}: another publication rode this stage's tick ({', '.join(moved)}); the plan "
+            f"must leave only this stage eligible"
+        )
 
 
 class Stage:
@@ -930,7 +1032,7 @@ class Build(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the built bundle never became ready",
             timeout=30.0,
@@ -953,7 +1055,7 @@ class Load(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             "the reopened bundle never became ready",
             timeout=30.0,
@@ -976,23 +1078,24 @@ class Write(Stage):
         self._batch_id = batch_id
         self._fx_keys = tuple(fx_keys)
         self._snap: dict | None = None
+        self._counts: dict | None = None
 
     def _ingest(self, h: SuiteHarness) -> None:
         resp = h.server.ingest(self._body, self._batch_id)
         if resp.status_code != 200:
             raise RuntimeError(f"ingest refused ({resp.status_code}): {resp.text}")
-        accepted = resp.json().get("accepted")
-        if accepted != len(self._fx_keys):
+        created = resp.json().get("created")
+        if created != len(self._fx_keys):
             raise RuntimeError(
-                f"ingest accepted {accepted} rows where the batch carried {len(self._fx_keys)}"
+                f"ingest created {created} items where the batch carried {len(self._fx_keys)} rows"
             )
 
     def apply(self, h: SuiteHarness) -> None:
         self._ingest(h)
-        executor = h.executor()
+        self._counts = _publication_counts(h)
         self._snap = {
-            "flushes": executor["flush"]["flushes"],
-            "refreshes": executor["flush"]["refreshes"],
+            "flushes": self._counts["flushes"],
+            "refreshes": h.executor()["flush"]["refreshes"],
         }
         h.pull_tick()
 
@@ -1003,15 +1106,20 @@ class Write(Stage):
         _post_flush(h.server)
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["flushes"] > self._snap["flushes"],
             f"{self.label}: the flush never published",
         )
-        _poll(
-            lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
-            f"{self.label}: the background refresh never replaced the resident projection — "
-            f"a recording now would be short by exactly this batch (decision 0044 D1)",
+        # A merge riding the same tick publishes its own generation with its own refresh, and
+        # either refresh can raise the counter first. Until the newest one ends, a request may be
+        # answered from the previous generation's projection, which lacks this batch, while a
+        # later request in the same recording has it. So wait for the newest refresh to end too.
+        poll(
+            lambda: (flush := h.executor()["flush"])["refreshes"] > self._snap["refreshes"]
+            and not flush["refresh_in_flight"],
+            f"{self.label}: the background refresh never replaced the resident projection",
         )
+        _assert_isolated(h, self.label, self._counts, own=("flushes",))
 
     def entitlement(self) -> Delta:
         return Rows(self._fx_keys)
@@ -1020,14 +1128,18 @@ class Write(Stage):
 class _TickStage(Stage):
     """A stage with no control route, driven by pulling a tick while only it is eligible.
 
-    The barrier asserts isolation as well as completion: the tick must not have published a flush
-    (the plan schedules these against an empty commit window), so a mis-arranged plan fails as a
-    plan defect rather than shipping a composite delta under one stage's name.
+    The barrier asserts isolation as well as completion: the tick must have published nothing
+    but this stage (no flush, and no merge beside a coalesce or the reverse), so a mis-arranged
+    plan fails as a plan defect rather than shipping a composite delta under one stage's name.
     """
+
+    #: The `_publication_counts` keys this stage moves.
+    own: tuple[str, ...]
 
     def __init__(self, label: str):
         self.label = label
         self._snap: dict | None = None
+        self._counts: dict | None = None
 
     def _snapshot(self, h: SuiteHarness) -> dict:
         executor = h.executor()
@@ -1041,30 +1153,29 @@ class _TickStage(Stage):
 
     def apply(self, h: SuiteHarness) -> None:
         self._snap = self._snapshot(h)
+        self._counts = _publication_counts(h)
         h.pull_tick()
 
     def provoke(self, h: SuiteHarness) -> None:
         """Request the tick that dispatches this stage, and wait for nothing (base doc)."""
         _post_flush(h.server)
 
-    def _assert_no_flush(self, h: SuiteHarness) -> None:
-        flushes = h.executor()["flush"]["flushes"]
-        if flushes != self._snap["flushes"]:
-            raise RuntimeError(
-                f"{self.label}: the pulled tick also published a flush "
-                f"({self._snap['flushes']} -> {flushes}) — the plan did not isolate this stage"
-            )
+    def _assert_isolated(self, h: SuiteHarness) -> None:
+        _assert_isolated(h, self.label, self._counts, own=self.own)
 
 
 class Merge(_TickStage):
-    """The row-space merge: eligible once four same-tier segments exist, dispatched at the pulled
-    tick, published with its own `segments_version` bump — and entitled to change nothing."""
+    """The row-space merge: eligible once the harness's merge width of same-tier segments exist
+    (four by default), dispatched at the pulled tick, published with its own `segments_version`
+    bump, and entitled to change nothing."""
+
+    own = ("merges",)
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["merges"] > self._snap["merges"],
             f"{self.label}: no merge published — either the ladder was not eligible "
-            f"(four same-tier segments) or the tick never dispatched it",
+            f"(tier_width same-tier segments) or the tick never dispatched it",
         )
         version = h.status()["partitions"][0]["segments_version"]
         if version <= self._snap["segments_version"]:
@@ -1074,19 +1185,21 @@ class Merge(_TickStage):
             )
         # A merge's publication runs the refresh pass; without this wait the after-recording
         # would compare the *old* projection with itself and the stage would test nothing.
-        _poll(
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             f"{self.label}: the post-merge refresh never replaced the resident projection",
         )
-        self._assert_no_flush(h)
+        self._assert_isolated(h)
 
 
 class Coalesce(_TickStage):
     """The entity-space coalesce: moves no row and bumps no version by design (write-path §7),
     which is why its barrier must be the counter — and why the version is asserted still."""
 
+    own = ("coalesces",)
+
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: h.executor()["coalesces"] > self._snap["coalesces"],
             f"{self.label}: no coalesce published — either no axis reached its width "
             f"(eight same-tier entries) or the tick never dispatched it",
@@ -1098,7 +1211,22 @@ class Coalesce(_TickStage):
                 f"({self._snap['segments_version']} -> {version}), which write-path §7 says it "
                 f"never does"
             )
-        self._assert_no_flush(h)
+        self._assert_isolated(h)
+
+
+class MergeAndCoalesce(Merge):
+    """A merge and a coalesce published on one tick, as every deployment at the default widths
+    meets them: the segments and the key runs both come due every fourth flush. One
+    stage, entitled to change nothing."""
+
+    own = ("merges", "coalesces")
+
+    def barrier(self, h: SuiteHarness) -> None:
+        poll(
+            lambda: h.executor()["coalesces"] > self._snap["coalesces"],
+            f"{self.label}: no coalesce published beside the merge",
+        )
+        super().barrier(h)
 
 
 class Deny(Stage):
@@ -1122,8 +1250,8 @@ class Deny(Stage):
         self._fx: int | None = None
 
     def apply(self, h: SuiteHarness) -> None:
-        external_id_b64, self._fx = self._pick(h)
-        resp = h.server.change(external_id_b64, self.op)
+        tessera_id, self._fx = self._pick(h)
+        resp = h.server.change(tessera_id, self.op)
         if resp.status_code != 200:
             raise RuntimeError(f"{self.op} refused ({resp.status_code}): {resp.text}")
 
@@ -1141,6 +1269,7 @@ class Fold(Stage):
     def __init__(self, label: str = "fold"):
         self.label = label
         self._snap: dict | None = None
+        self._counts: dict | None = None
 
     @staticmethod
     def _request(h: SuiteHarness) -> None:
@@ -1152,6 +1281,7 @@ class Fold(Stage):
         resp.raise_for_status()
 
     def apply(self, h: SuiteHarness) -> None:
+        self._counts = _publication_counts(h)
         compaction = h.status()["compaction"]
         self._snap = {
             "folds": compaction["folds"],
@@ -1171,11 +1301,12 @@ class Fold(Stage):
                 raise RuntimeError(f"the fold failed rather than landed: {compaction}")
             return compaction["folds"] > self._snap["folds"]
 
-        _poll(landed, "no compaction fold landed", timeout=300.0)
-        _poll(
+        poll(landed, "no compaction fold landed", timeout=300.0)
+        poll(
             lambda: h.executor()["flush"]["refreshes"] > self._snap["refreshes"],
             "the post-fold refresh never carried the resident session across the flip",
         )
+        _assert_isolated(h, self.label, self._counts, own=("folds",))
 
 
 class Rotate(Stage):
@@ -1202,29 +1333,23 @@ class Rotate(Stage):
     def __init__(self, grow: Callable[[SuiteHarness], None] | None = None):
         self._grow = grow
         self._snap: dict | None = None
+        self._counts: dict | None = None
 
     def apply(self, h: SuiteHarness) -> None:
-        self._snap = {
-            "member": _wal_member_index(h.wal_path),
-            "flushes": h.executor()["flush"]["flushes"],
-        }
+        self._snap = {"member": _wal_member_index(h.wal_path)}
         if self._grow is not None:
             self._grow(h)
+        self._counts = _publication_counts(h)
         h.pull_tick()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: _wal_member_index(h.wal_path) > self._snap["member"],
             "the WAL never rotated — was there growth since the last rotation for the tick "
             "to see?",
             timeout=30.0,
         )
-        flushes = h.executor()["flush"]["flushes"]
-        if flushes != self._snap["flushes"]:
-            raise RuntimeError(
-                f"rotate: the pulled tick also published a flush — the plan did not isolate "
-                f"this stage ({self._snap['flushes']} -> {flushes})"
-            )
+        _assert_isolated(h, self.label, self._counts, own=())
 
 
 # -- the kill modifier (§10.1, §12.3) ----------------------------------------------------------
@@ -1284,6 +1409,7 @@ class Killed(Stage):
         return {
             "flushes": executor["flush"]["flushes"],
             "merges": executor["merges"],
+            "coalesces": executor["coalesces"],
             "segments_version": status["partitions"][0]["segments_version"],
             "folds": status["compaction"]["folds"],
             "fold_failures": status["compaction"]["fold_failures"],
@@ -1296,7 +1422,7 @@ class Killed(Stage):
         now = self._published_counters(h)
         watched = {
             "before_manifest_publish": ("flushes",),
-            "before_merge_publish": ("merges", "segments_version", "flushes"),
+            "before_merge_publish": ("merges", "coalesces", "segments_version", "flushes"),
             "before_current_flip": ("folds", "fold_failures", "flushes"),
         }[self.kill_at]
         for key in watched:
@@ -1310,7 +1436,7 @@ class Killed(Stage):
     def apply(self, h: SuiteHarness) -> None:
         h.stop()
         h.spawn(faults=True)
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the faults build never became ready",
             timeout=30.0,
@@ -1319,7 +1445,7 @@ class Killed(Stage):
         self._snap = self._published_counters(h)
         h.arm(self.kill_at)
         self.stage.provoke(h)
-        _poll(
+        poll(
             lambda: h.arrivals(self.kill_at) >= 1,
             f"{self.label}: the executor never reached {self.kill_at}",
             timeout=300.0,
@@ -1341,7 +1467,7 @@ class Killed(Stage):
         h.authorise()
 
     def barrier(self, h: SuiteHarness) -> None:
-        _poll(
+        poll(
             lambda: all(p["readiness"] for p in h.status()["partitions"]),
             f"{self.label}: the restarted bundle never became ready",
             timeout=30.0,
@@ -1434,6 +1560,7 @@ __all__ = [
     "Killed",
     "Load",
     "Merge",
+    "MergeAndCoalesce",
     "OutOfMemory",
     "Profile",
     "Rotate",
@@ -1443,6 +1570,7 @@ __all__ = [
     "SuiteHarness",
     "Write",
     "check",
+    "poll",
     "ensure_faults_cli_built",
     "run_plan",
     "scope_runner_unavailable",

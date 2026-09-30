@@ -6,13 +6,14 @@
 # `pip install tesseradb[widget]` and a widget with no JavaScript in it, and a hook that fails
 # silently (npm absent, a dist path renamed, hatchling dropping the untracked file) produces a wheel
 # that installs cleanly and raises at the first `Map()`. So this builds the wheel and reads its
-# listing. Cargo-free: it needs Python >= 3.10, `uv` or `python3 -m venv`, and Node for the hook —
-# the same Node `check-clients.sh` already needs.
+# listing. It needs Python >= 3.10, `uv` or `python3 -m venv`, Node for the hook — the same Node
+# `check-clients.sh` already needs — and a cargo toolchain for the companion wheel below.
 #
 # The demo notebooks are in the pytest step: `tests/test_sdk_examples.py` executes the cells of
-# `examples/notebook_marimo.py` against a real build and a real server, and checks the Jupyter twin
-# beside it, so the walk a reader is pointed at cannot drift from the package. It skips, naming
-# what is missing, where `data/notebook/` or the `tessera` binary is absent.
+# `examples/notebook_marimo.py` against a real build and a real server, and checks that the
+# Jupyter notebook beside it is the marimo file's export, so the walk a reader is pointed at cannot
+# drift from the package. It skips, naming what is missing, where `data/notebook-sample/` or the
+# `tessera` binary is absent.
 #
 # The venv is `clients/py/.venv` (gitignored); it is made on the first run and reused after. Set
 # TESSERADB_CHECK_FRESH=1 to rebuild it.
@@ -39,6 +40,14 @@ install() {
     "$py" -m pip install -q "$@"
   fi
 }
+
+# `tesseradb` depends on the companion platform wheel, `tesseradb-native`, which carries the
+# `tessera` binary and the `_tessera` extension module. It is not published, so from a checkout it
+# comes from beside this package — and its own hook runs cargo, which is why this script is no
+# longer cargo-free. An editable install leaves both artifacts in `clients/py-native`'s source
+# tree, where the package finds them.
+echo "check-python: installing tesseradb-native editable (runs cargo)"
+install -e ../py-native
 
 # An editable install runs the build hook (hatchling builds an editable as a wheel), so this is
 # the first run of the hook: `tesseradb/static/tessera-components.js` exists after it or the

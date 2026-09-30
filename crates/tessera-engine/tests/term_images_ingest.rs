@@ -10,12 +10,12 @@
 //! compared against the corpus's own definition and not only between the two bundles, so two paths
 //! agreeing on a wrong answer would still fail.
 //!
-//! **Through the external id, reached from the `tessera_id` each response carries.** The two
-//! bundles assign different entity ids to the same item: a build assigns in term-signature order
-//! and an ingest assigns in arrival order, and `tessera_id` is a permutation of the entity id, so
-//! the two responses cannot be compared as identities. The external id is the caller's own name
-//! for the item and is the same on both sides, so each served `tessera_id` is resolved through
-//! `Engine::item` and the sets of names compared.
+//! **Through a unique `id`, reached from the `tessera_id` each response carries.** The two bundles
+//! assign different entity ids to the same item: a build assigns in term-signature order and an
+//! ingest assigns in arrival order, and `tessera_id` is a permutation of the entity id, so the two
+//! responses cannot be compared as identities. The `id` is the caller's own name for the item and
+//! is the same on both sides, so each served `tessera_id` is resolved through `Engine::item` and
+//! the sets of names compared.
 //!
 //! Term ids differ for the same reason: a build interns the corpus's descriptors in its own order
 //! and an ingest mints them as rows arrive. So the kept-term sets are compared by descriptor
@@ -39,6 +39,8 @@ use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
 use tessera_types::TesseraId;
+
+const WAIT: Duration = Duration::from_secs(180);
 
 /// The one view both paths carry.
 const VIEW: &str = "s0";
@@ -102,12 +104,6 @@ fn credential(terms: &[u32]) -> Vec<u8> {
     format!("{{\"terms\": [{}]}}", named.join(", ")).into_bytes()
 }
 
-/// The external id both paths name entity `i` by: the eight little-endian bytes a build mints from
-/// an integer identity column, which is what the ingest supplies for itself.
-fn external_id(i: u64) -> Vec<u8> {
-    i.to_le_bytes().to_vec()
-}
-
 fn x_of(i: u64) -> f64 {
     ((i * 37) % 1000) as f64
 }
@@ -127,14 +123,13 @@ fn principals() -> Vec<(&'static str, Vec<u32>)> {
     ]
 }
 
-/// The external ids a principal holding `terms` is entitled to, from the corpus's own definition.
+/// The `id`s a principal holding `terms` is entitled to, from the corpus's own definition.
 ///
 /// The comparison below is against this rather than only between the two bundles: two paths that
 /// agreed on the wrong set would otherwise pass.
-fn entitled(terms: &[u32]) -> BTreeSet<Vec<u8>> {
+fn entitled(terms: &[u32]) -> BTreeSet<u64> {
     (0..ENTITIES)
         .filter(|i| terms_of(*i).iter().any(|term| terms.contains(term)))
-        .map(external_id)
         .collect()
 }
 
@@ -199,6 +194,7 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
     write_points(&points, entities);
     write_pairs(&pairs, entities);
     let out = dir.join(name);
+    let schema = id_schema();
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -213,22 +209,20 @@ fn build_bundle(dir: &Path, name: &str, entities: u64) -> std::path::PathBuf {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.clone(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Default::default(),
+        schema,
     };
     build(&args).expect("the bundle builds");
     out
@@ -259,14 +253,6 @@ fn open(root: &Path, dir: &Path, name: &str) -> Engine {
     .expect("the engine opens")
 }
 
-fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(180);
-    while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// Send the whole corpus through `/control/ingest`, in batches, each row naming its own
 /// descriptors.
 fn ingest_corpus(engine: &Engine) {
@@ -276,12 +262,11 @@ fn ingest_corpus(engine: &Engine) {
             .map(|i| {
                 let descriptors: Vec<Vec<u8>> = terms_of(i).into_iter().map(label).collect();
                 UnallocatedRow {
-                    external_id: Some(external_id(i)),
                     view: VIEW.to_string(),
                     join: None,
                     x: x_of(i),
                     y: y_of(i),
-                    scalars: Vec::new(),
+                    scalars: vec![tessera_lifecycle::wal::WalScalar::U64(i)],
                     terms: engine.resolve_terms(&descriptors),
                     descriptors,
                     scoped: Vec::new(),
@@ -289,7 +274,7 @@ fn ingest_corpus(engine: &Engine) {
             })
             .collect();
         engine
-            .accept_ingest(rows, format!("batch-{start}"), [0u8; 32])
+            .ingest_rows(rows, format!("batch-{start}"), [0u8; 32])
             .expect("the batch is accepted");
     }
 }
@@ -331,9 +316,9 @@ fn authorise(engine: &Engine, credential: &[u8]) -> tessera_engine::Session {
     }
 }
 
-/// The external ids one principal is served over the whole extent, reached from the `tessera_id`
-/// of each served point.
-fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<Vec<u8>> {
+/// The `id`s one principal is served over the whole extent, reached from the `tessera_id` of each
+/// served point.
+fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<u64> {
     let session = authorise(engine, credential);
     let response = engine
         .viewport(
@@ -347,11 +332,16 @@ fn served_ids(engine: &Engine, credential: &[u8]) -> BTreeSet<Vec<u8>> {
         .iter()
         .map(|id| {
             engine
-                .item(&session, TesseraId::new(*id), None)
+                .item(&session, TesseraId::new(*id))
                 .expect("the drill-down answers")
                 .expect("a served point is an item this principal may reach")
-                .external_id
-                .expect("every item in this corpus carries the external id the caller supplied")
+                .fields
+                .into_iter()
+                .find_map(|field| match (field.name.as_str(), field.value) {
+                    ("id", tessera_engine::ScalarOut::U64(id)) => Some(id),
+                    _ => None,
+                })
+                .expect("every item in this corpus carries the `id` the caller supplied")
         })
         .collect()
 }
@@ -406,7 +396,7 @@ fn a_built_corpus_and_the_same_corpus_ingested_and_folded_agree() {
     // Before the fold: the flush's rows are served, and no image exists to serve them from.
     let flushes = ingested.write_executor_stats().flushes;
     ingested.request_flush();
-    wait_until("the first flush to publish", || {
+    wait_until("the first flush to publish", WAIT, || {
         ingested.write_executor_stats().flushes > flushes
     });
     {

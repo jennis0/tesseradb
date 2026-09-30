@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/tessera-types",
     "crates/tessera-roaring",
+    "crates/tessera-cache",
     "crates/tessera-analyse",
     "crates/tessera-plugin",
+    "crates/tessera-catalogue",
     "crates/tessera-authz",
     "crates/tessera-filter",
     "crates/tessera-store",
@@ -12,13 +14,19 @@ members = [
     "crates/tessera-lifecycle",
     "crates/tessera-engine",
     "crates/tessera-wire",
+    "crates/tessera-config",
     "crates/tessera-server",
     "crates/tessera-filter-write",
     "crates/tessera-build",
     "crates/tessera-corpus",
     "crates/tessera-cli",
     "crates/tessera-bench",
+    "crates/tessera-python",
+    "crates/tessera-docgen",
 ]
+
+[workspace.package]
+license = "Apache-2.0"
 
 [workspace.dependencies]
 croaring = "2"
@@ -49,12 +57,19 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 postcard = { version = "1", features = ["use-std"] }
 crc32fast = "1"
+# Keyword keys in the key index are the XXH3-128 hash of the string (`tessera_store::key_index`).
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_128"] }
 arc-swap = "1"
 parking_lot = "0.12"
 # Facade only, no subscriber: a no-op wherever nothing attaches one. Promoted here on its
 # second consumer (tessera-store's step-down warn, tessera-server's request logging) per the
 # workspace convention that a dependency taken by two crates is versioned in one place.
 tracing = "0.1"
+# The paged-records cursor's seal: XChaCha20-Poly1305, whose 24-byte nonce is drawn at random per
+# cursor without a counter to keep.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+# The paged-records cursor's text form, base64url without padding.
+base64 = "0.22"
 
 # Debug info in dev and test builds is line tables only. The 161 integration-test binaries each
 # statically link the engine; with full debug info they ran 300–600 MB apiece, every upstream

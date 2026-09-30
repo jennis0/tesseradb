@@ -25,7 +25,7 @@ fidelity is not judged.
    measures what 2.33×10⁸ rows do to one without them.
 
 ```bash
-export TESSERA_LADDER=/home/joe/code/tessera/data/ladder
+export TESSERA_LADDER="$PWD/data/ladder"
 
 # the join track's two passes over the share — see README-join.md
 ~/venvs/projection/bin/python -m test_corpora.treeoflife.stage --scan --combine

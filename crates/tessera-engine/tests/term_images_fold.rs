@@ -184,18 +184,16 @@ fn build_fixture(tmp: &Path, root: &Path) {
         anchor: 0,
         groups: Vec::new(),
         scoped_attributes: Vec::new(),
-        attribute_sources: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &id_schema()),
         out: root.to_path_buf(),
-        schema: Default::default(),
+        schema: id_schema(),
         limit: None,
+        strict: false,
         identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: 1,
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
         scoped_layers: Default::default(),
-        mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
@@ -220,28 +218,6 @@ fn engine_over_fixture(tmp: &Path, root: &Path) -> Engine {
     engine.start_write_executor(8).expect("the executor starts");
     engine.set_background_refresh_for_test(false);
     engine
-}
-
-/// Request a fold and block until it has published, asserting it was not discarded.
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// The ordinal the dictionary gives one of the fixture's descriptors.
@@ -321,8 +297,8 @@ fn posting_bitmap(postings: &PostingsReader, term: u32) -> Option<Bitmap> {
         None => None,
         Some(PostingRef::Array(bytes)) => {
             let mut bitmap = Bitmap::new();
-            for chunk in bytes.chunks_exact(4) {
-                bitmap.add(u32::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in bytes.as_chunks::<4>().0 {
+                bitmap.add(u32::from_le_bytes(*chunk));
             }
             Some(bitmap)
         }
@@ -563,7 +539,6 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
     let mut rows = Vec::new();
     for i in 0..64u64 {
         rows.push(UnallocatedRow {
-            external_id: Some(format!("flushed-{i}").into_bytes()),
             view: "s0".to_string(),
             join: None,
             descriptors: vec![b"0".to_vec()],
@@ -575,7 +550,7 @@ fn a_flush_before_the_fold_is_in_the_folds_images() {
         });
     }
     let flushed: Vec<EntityId> = engine
-        .accept_ingest(rows, "flush-before-the-fold".to_string(), [0u8; 32])
+        .ingest_rows(rows, "flush-before-the-fold".to_string(), [0u8; 32])
         .expect("the ingest is accepted");
     assert_eq!(flushed.len(), 64);
     let flushes_before = engine.write_executor_stats().flushes;

@@ -89,14 +89,15 @@ hierarchy  = { kind = "nested" }
 
 [layer.members]
 source = "cluster_assignments"
-fields = { key = "cluster_id", entity = "point_id" }
+fields = { key = "cluster_id", doi = "paper_doi" }
 
 [layer.content]
 computed = ["centroid", "hull"]
 ```
 
 *A trimmed layer declaration: an enumerated clustering, drawn on one view, whose artifacts each
-carry a computed centroid and hull.*
+carry a computed centroid and hull. Each row of the members file names its point by `doi`, an
+attribute declared `unique`, kept in the file's `paper_doi` column.*
 
 The three sources age differently. An enumerated membership is fixed at whatever a member table or
 column last said: a newly ingested point sits on the map, visible as a point, until the layer is
@@ -182,10 +183,44 @@ cannot know the layer exists at all: a request naming it behaves exactly as a re
 layer that was never declared.
 
 A layer can also declare that each artifact carries its own access label, independent of its
-layer's and independent of any of its members'; an artifact whose own label a viewer does not
-satisfy does not exist for them, whatever they can see of its membership. **Not built yet:** no
-route sets this label on an artifact today, so a layer declaring one withholds every artifact in
-it, fail-closed.
+layer's and independent of any of its members': `artifact_visibility = { field = "team", default =
+"inherited" }`. An artifact whose own label a viewer does not hold does not exist for them,
+whatever they can see of its membership. On every viewer route it is answered exactly as an
+artifact that was never published: no row, no count, no parent or target naming it, a `404` by
+identifier, an empty operand for `member_of` and the artifact region leaf, and no gap in a browse
+page. A label attached to it is withheld with it. An artifact's label narrows its layer's and never
+widens it.
+
+At a build the label is read from the artifact source's column the field names, a string, a list of
+strings or a dictionary of strings, or from an inline row's `access`. At a running service each
+record of a publication, and each row of a growth, carries its labels: `"access": ["team-a",
+"team-b"]` on a JSON row, or an `access` column in the Arrow form of a growth, read as a points
+file's access column is: a string, a list of strings or a dictionary of strings. A record carrying
+labels on a layer that names no field is refused, and so are labels the plugin maps to no term.
+
+Every artifact created on a layer whose field is named states its labels, at a build and at a
+running service alike. At a build the artifact source carries the field's column, and an inline row
+carries `access`, `[]` for no label of its own. At a running service a publication record carries
+`access`, `null` or `[]` for no label of its own. A label that is empty once trimmed is no label, so
+`[""]` states no label too. A record without `access` is refused, as is a source without the column,
+and so is a key that a build's member file or an ingest's layer column would mint without an
+artifact row, since a minted artifact carries nothing but its name. A record that only adds members
+to an artifact that exists, or a growth, need not state labels. The Python client refuses an
+artifacts insert that names no `access=` column into a layer that reads labels, and before the
+layer's first commit a `key=` or `members=` insert naming a key no artifacts insert declares; after
+the first commit the server refuses the artifact that insert would create.
+
+On a layer scoped to a group a growth names the view its artifact belongs to, as a publication
+does: `view` on a JSON row, or a `view` column in the Arrow form. A viewer is admitted by holding
+any one of the labels. An artifact with no label takes the layer's `default`: `inherited` leaves it
+to the layer's own label and membership requirement, and a label treats it as carrying that label.
+A label is set once: an artifact published with none may be given one later, the same label again
+changes nothing, and a different one is refused. It takes effect when the level is next published,
+as every fill does. Changing a label means deleting the artifact and publishing it again, under a
+new identifier.
+
+A label is compared with the terms the viewer's credential resolved to, so a label no item
+carries is still one a credential can hold. A layer's own label is compared the same way.
 
 Separately, a layer declares a membership requirement: how much of an artifact's declared
 membership a viewer must already be able to see before the artifact itself is served.
@@ -306,9 +341,24 @@ rather than evaluated per request.
 | Merge | Segments are combined and rows renumbered within the merged span. No membership or content changes | Nothing |
 | Deletion of a member | At accept, the member leaves every masked count, for every membership source alike. Content generated from it stops serving at the same moment: its generating set no longer matches every member a viewer can see, so containment fails for everyone | The count falls, and any content generated from the deleted point disappears, on the next request after the deletion is accepted |
 | Compaction | The deleted member's bit is dropped from the row form. What happens to content generated from it follows the layer's own declaration (below) | For content that was already withdrawn at the deletion, nothing changes; content declared permissive, and generated from more than the one deleted point, resumes serving |
-| A point deleted and re-ingested (the only way to edit one) | The old point's membership and generating-set participation lapse exactly as an ordinary deletion's do. The re-ingested point has a new identity and only rejoins an artifact if the new batch names it as a member | The count falls when the deletion is accepted, and rises again only if the re-ingested point is named as a member and flushed |
+| An edit of a member: an ingest row changing its values, label or position ([edits](write-path.md#edits)) | The item moves to a new entity and keeps its `tessera_id`. The new entity joins every enumerated artifact the old one was a member of, and every generating set it took part in; the old entity leaves them | Nothing changes in its memberships. The item leaves every view, and so every count, until the flush that places its new rows, and is counted again from the publication the edit's receipt names |
 | Suppression of the artifact itself | The artifact stops being served immediately. Nothing about it is stored differently; it resumes only on an explicit unsuppress | The artifact disappears the moment the suppression is accepted, and stays gone until an explicit unsuppress |
 | Deletion of the artifact itself | The artifact stops being served immediately. Its record, and every edge naming it, are removed at the next fold. Deleting it does not lift a suppression already on it: only an [explicit unsuppress](write-path.md#denies) does | The artifact disappears the moment the deletion is accepted, and never returns |
+
+An ingested point's membership column carries the layer's edges as well as its memberships, exactly
+as a member file's does at a build: consecutive keys in one point's list name a parent and a child.
+Where the child does not exist, it is created holding that parent. Where it exists and holds no
+parent, the edge is recorded on it, durably, with the batch. This is the case of a roster published
+with names before any point named the tree. Where it holds the same parent, the column restates what is already there.
+Where it holds a different one the batch is refused, because there is no correct output and choosing
+would publish a hierarchy nobody declared. A `dag` layer's list is memberships alone; its several
+parents are declared on the artifact itself. A recorded edge reaches a response when the level's
+row form is next published, which is the terms every other change to an artifact is served on.
+
+A scalar key sits at level 0 unless the batch carries a `level` column of `uint32`, which places
+each row's scalar keys at that level, as a member file's `level` column does at a build. A null
+level is level 0. A list's positions carry its levels, so a `level` column beside a list is not
+read. No attribute or layer may be named `level`, so the column always means this.
 
 A layer's supplied content declares, once, how it behaves when a point behind it is deleted.
 Either way the content stops serving the moment the deletion is accepted, because a generating set

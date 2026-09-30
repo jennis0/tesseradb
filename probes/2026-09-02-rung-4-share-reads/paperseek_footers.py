@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-BASE = "/mnt/nas/joe/tessera/datasets/paperseek-openalex/2026-08-27"
+BASE = "/mnt/nas/tessera/datasets/paperseek-openalex/2026-08-27"
 OUT = Path(__file__).parent
 
 

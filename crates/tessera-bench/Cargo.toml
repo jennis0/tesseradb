@@ -2,6 +2,7 @@
 name = "tessera-bench"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 
 # The measurement harness. NOTHING may depend on this crate — `scripts/check-layers.sh` asserts
@@ -36,6 +37,7 @@ tessera-plugin = { path = "../tessera-plugin" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-store = { path = "../tessera-store" }
+tessera-roaring = { path = "../tessera-roaring" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-build = { path = "../tessera-build" }

@@ -29,8 +29,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,10 +40,11 @@ use rustc_hash::FxHashSet;
 use tempfile::TempDir;
 
 use tessera_authz::{write_postings, FragmentCache, PostingsReader};
-use tessera_engine::compose::{compose, EffectiveMask, RowProjection};
+use tessera_engine::compose::{compose, EffectiveMask};
 use tessera_engine::occupancy::{
     for_each_occupied_tile, occupied_tiles_ladder_with_precision, TileSketch,
 };
+use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::unsplit32;
@@ -261,6 +262,7 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
         let temp = TempDir::new().expect("a temp dir for the segment");
         write_segment(temp.path(), &items, &written, &[]).expect("write_segment");
         let data = SegmentData {
+            entities: tessera_store::edited::RowEntities::Numbers,
             seg_id: format!("bench-{g}"),
             row_count: items.len() as u32,
             morton: MortonSlice::load(&temp.path().join("morton.u32")).expect("morton"),
@@ -302,7 +304,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
 
     let cache = FragmentCache::new(&temp.path().join("cache"), [1u8; 32], [2u8; 32]);
     let fragment = cache
-        .get_or_build(&[TermId::new(0)], [3u8; 32], 0, &postings, &[], bound)
+        .get_or_build(&[TermId::new(0)], &postings, &[], bound)
         .expect("fragment");
 
     let perm_path = temp.path().join("permutation.bin");
@@ -318,7 +320,7 @@ fn mask_over(visible_rows: &[u32], row_count: u32) -> (TempDir, EffectiveMask) {
     let overlay = Overlay::default();
     let buffer = IngestBuffer::default();
     let denied = tessera_engine::denied_rows_of(&overlay, &perm);
-    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied);
+    let mask = compose(&satisfied, &overlay, &buffer, base, &perm, &denied, Some(&[]));
     (temp, mask)
 }
 

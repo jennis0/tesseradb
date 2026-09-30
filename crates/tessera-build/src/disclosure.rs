@@ -91,6 +91,8 @@ pub struct AttributeDisclosure {
     pub placement: &'static str,
     /// The value set this column draws on, for a category.
     pub vocabulary: Option<String>,
+    /// No two items hold one value, and the build writes the column's unique index.
+    pub unique: bool,
     /// The group whose views this column is one value per (`views.md` §5); `None` is the
     /// entity-scoped default, one value per entity under every view.
     ///
@@ -207,12 +209,12 @@ impl Disclosure {
                 let vocabulary = &config.schema.vocabularies[name];
                 VocabularyDisclosure {
                     name: vocabulary.name.clone(),
-                    visibility: vocabulary.visibility.as_str(),
+                    visibility: vocabulary.visibility().as_str(),
                     value_set: match vocabulary.value_set {
                         ValueSet::Closed => "closed",
                         ValueSet::Open => "open",
                     },
-                    declared_values: vocabulary.codes.len(),
+                    declared_values: vocabulary.values.bindings().count(),
                     reserved: vocabulary.reserved.clone(),
                 }
             })
@@ -227,12 +229,13 @@ impl Disclosure {
                 field: attribute.column().to_string(),
                 ty: attribute.ty.arrow_type_name(),
                 placement: match (attribute.render, attribute.index) {
-                    (true, true) => "hot+index",
-                    (true, false) => "hot",
+                    (true, true) => "render+index",
+                    (true, false) => "render",
                     (false, true) => "index",
                     (false, false) => "blob",
                 },
                 vocabulary: attribute.vocabulary.clone(),
+                unique: attribute.unique,
                 scope,
             }
         };

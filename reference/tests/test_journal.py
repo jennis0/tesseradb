@@ -15,8 +15,6 @@ implementation of the thing the journal exists to observe.
 
 from __future__ import annotations
 
-import base64
-
 import pytest
 
 from oracle.journal import AckedJournal, IngestOp
@@ -42,32 +40,32 @@ class _StubServer:
         self.ingest_calls: list = []
         self.next_change = _Response(200, {})
         self.next_batch = _Response(200, {})
-        self.next_ingest = _Response(200, {"accepted": 0})
+        self.next_ingest = _Response(200, {"created": 0})
 
     def status(self):
         return {"entity_id_high_water": self.high_water}
 
-    def change(self, external_id_b64, op, access=None):
-        self.change_calls.append((external_id_b64, op, access))
+    def change(self, tessera_id, op, *, strict=False):
+        self.change_calls.append((tessera_id, op))
         return self.next_change
 
-    def changes(self, items):
+    def changes(self, items, *, strict=False):
         self.batch_calls.append(items)
         return self.next_batch
 
-    def ingest(self, body, batch_id):
+    def ingest(self, body, batch_id, *, strict=False):
         self.ingest_calls.append((body, batch_id))
         return self.next_ingest
 
 
 class _StubBundle:
-    """Just enough `Bundle` for the journal: external ids and a term dictionary."""
+    """Just enough `Bundle` for the journal: tessera ids and a term dictionary."""
 
     dictionary = {0: b"term-zero", 1: b"term-one"}
 
     @staticmethod
-    def external_id_of(entity_id: int) -> bytes:
-        return f"ext-{entity_id}".encode()
+    def tessera_id_of(entity_id: int) -> int:
+        return 1000 + entity_id
 
 
 @pytest.fixture
@@ -77,7 +75,7 @@ def stub():
 
 
 def test_a_refused_batch_journals_nothing_at_all(stub):
-    """Contracts §3.4: a duplicate is a 409 and **the batch has no effect**.
+    """A strict request with a refused row is refused whole, and **the batch has no effect**.
 
     So a non-200 journals nothing — not even the items that would individually have been fine. A
     per-item journal on a refused batch is the exact fail-open the type exists to prevent, and it
@@ -85,7 +83,7 @@ def test_a_refused_batch_journals_nothing_at_all(stub):
     the differential would go red, and the engine would be blamed for it.
     """
     server, journal = stub
-    server.next_batch = _Response(409, text='{"duplicate": ["ext-7"]}')
+    server.next_batch = _Response(409, text='{"duplicate": ["1007"]}')
 
     response = journal.changes([(7, "delete", None), (8, "suppress", None)])
 
@@ -100,7 +98,8 @@ def test_a_refused_batch_journals_nothing_at_all(stub):
 
 
 def test_an_acked_batch_journals_every_item_in_order(stub):
-    """The other arm, and the label grammar the batch path builds for a predicate change."""
+    """The other arm: every item is journalled, and each carries only the fields the server
+    defines."""
     server, journal = stub
 
     journal.changes([(7, "delete", None), (8, "suppress", None), (9, "predicate", {0, 1})])
@@ -114,11 +113,8 @@ def test_an_acked_batch_journals_every_item_in_order(stub):
     assert not journal.refused
 
     sent = server.batch_calls[0]
-    assert sent[0]["external_id"] == base64.b64encode(b"ext-7").decode()
-    assert "access" not in sent[0], "only a predicate change carries an access label"
-    assert sent[2]["access"] == "term-zero,term-one", (
-        "the plugin's label is the comma-joined descriptors from the bundle's own dictionary"
-    )
+    assert sent[0]["match"] == {"tessera_id": "1007"}
+    assert all(set(item) == {"op", "match"} for item in sent)
 
     # `predicate` with an empty term set removes the item from any session's mask via `L`, which is
     # the `\\ L` arm — not a deny, and not the same code path.
@@ -136,14 +132,14 @@ def test_an_acked_ingest_is_not_an_applied_one(stub):
     """
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"accepted": 3, "tessera_ids": [11, 12, 13]})
+    server.next_ingest = _Response(200, {"created": 3, "tessera_ids": ["11", "12", "13"]})
 
     journal.ingest(b"arrow-bytes", "batch-1")
 
     assert len(journal.ingests) == 1
     op = journal.ingests[0]
-    assert (op.batch_id, op.accepted, op.applied) == ("batch-1", 3, False)
-    assert op.required_high_water == 103, "the barrier waits for `before + accepted`"
+    assert (op.batch_id, op.created, op.applied) == ("batch-1", 3, False)
+    assert op.required_high_water == 103, "the barrier waits for `before + created`"
     assert journal.acked_count == 1
     # Acked-but-unapplied contributes nothing to the composed mask, which is correct twice over:
     # the entities postdate the bundle, and nothing has said they are visible.
@@ -154,7 +150,7 @@ def test_the_barrier_waits_for_the_watermark_and_then_marks_applied(stub):
     """`barrier` is the only thing that may set `applied`, and it may only do so on evidence."""
     server, journal = stub
     server.high_water = 100
-    server.next_ingest = _Response(200, {"accepted": 3})
+    server.next_ingest = _Response(200, {"created": 3})
     journal.ingest(b"arrow", "batch-1")
 
     server.high_water = 102  # short by one row
@@ -189,8 +185,8 @@ def test_the_barrier_is_a_no_op_with_nothing_pending(stub):
 def test_reflects_is_all_of_them_not_any_of_them(stub):
     """Two acked batches, one reflected: the barrier must not release."""
     pending = [
-        IngestOp(sequence=1, batch_id="a", accepted=2, required_high_water=102),
-        IngestOp(sequence=2, batch_id="b", accepted=5, required_high_water=107),
+        IngestOp(sequence=1, batch_id="a", created=2, required_high_water=102),
+        IngestOp(sequence=2, batch_id="b", created=5, required_high_water=107),
     ]
     assert not AckedJournal._reflects({"entity_id_high_water": 102}, pending)
     assert not AckedJournal._reflects({"entity_id_high_water": 106}, pending)

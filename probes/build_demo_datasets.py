@@ -169,7 +169,9 @@ SCHEMA_HEAD = '''# The demo bundle's declaration — {scale}, {rows:,} items. Ge
 # the files it names (configuration.md §3). The points file carries identity, geometry and every
 # declared column, so the view and every attribute name one source; the exploded
 # `(entity_id, term_id)` relation is the shared one two directories over, and the two vocabularies
-# name their own.
+# name their own. The relation covers the largest scale, so a build of a smaller one counts the
+# rows naming a paper its points file does not hold as refused; `tessera build --limit` with the
+# scale's row count leaves them out instead.
 #
 # `extent`: the points file stores Morton codes rather than coordinates, and codes are exact only
 # against the grid's own extent (contracts §2.5).
@@ -180,7 +182,7 @@ archive          = "archive.parquet"
 primary_category = "primary_category.parquet"
 
 [defaults]
-source = "points"
+source     = "points"
 
 [[view]]
 name             = "s0"
@@ -206,6 +208,14 @@ width      = "u16"
 value_set  = "closed"
 visibility = "public"
 source     = "primary_category"
+
+# Each paper's row number, which the points file and the label relation both carry as
+# `entity_id` and name the paper by.
+[[attribute]]
+name   = "id"
+type   = "u32"
+unique = true
+field  = "entity_id"
 
 [[attribute]]
 name       = "archive"
@@ -331,6 +341,8 @@ def write_points(scale: str, total: int) -> None:
         "scale": scale,
         "items": total,
         "prose": (["title", "abstract"] if with_abstract else ["title"] if with_title else []),
+        # The column the viewer titles a record by, where the bundle declares one.
+        **({"titleField": "title"} if with_title else {}),
         "archive_codes": len(archive_codes),
         "primary_codes": len(primary_codes),
         "submitted_at_min": int(stamps.min()),

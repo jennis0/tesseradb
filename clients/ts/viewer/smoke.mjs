@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// Drive the viewer in a headless browser and report what it actually did.
+// Drive the viewer in a headless browser and report what it did.
 //
-// Not a test suite — the instrument's assertion is the owner looking at it. This exists so that
-// "it builds" can be upgraded to "it authorised, fetched tiles, and drew marks" without a human
-// in the loop, and so a screenshot lands somewhere reviewable.
+// It checks that the viewer authorised, fetched tiles and drew marks, and writes a screenshot. It
+// is not part of the test suites.
 //
 //   node clients/ts/viewer/smoke.mjs [--url http://localhost:5173] [--shot /tmp/viewer.png]
 //     [--headed] [--executable /path/to/chrome]
@@ -29,14 +28,13 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 page.on('response', (r) => {
   const u = new URL(r.url());
   if (!u.pathname.startsWith('/v1/') && !u.pathname.startsWith('/session/')) return;
-  // **Which channel asked**, because the viewer has two that both post to `/v1/viewport`: the
-  // point path, and the annotation channel that asks for artifacts alone (`k = 0`, a named layer).
-  // Counting them together made a layer's own request read as a colour change refetching marks.
+  // Which channel asked: the point path and the artifact channel (`k = 0`, a named layer) both
+  // post to `/v1/viewport`, and are counted apart.
   let artifacts = false;
   try {
     const body = JSON.parse(r.request().postData() ?? '{}');
-    // The channel's ask: counts only, a named layer. The point path names the layers too (§5.10)
-    // but always asks for points.
+    // The artifact channel asks for counts only with a named layer; the point path names layers
+    // too but always asks for points.
     artifacts = body.k === 0 && Array.isArray(body.layers) && body.layers.length > 0;
   } catch {
     // A GET, or a body that is not JSON. Neither is the artifact channel.
@@ -48,13 +46,8 @@ await page.goto(url, {waitUntil: 'load'});
 await page.waitForTimeout(settleMs);
 
 /**
- * Wait until the picture stops changing, rather than for a fixed interval.
- *
- * **Every figure this script compares is only meaningful once the load has settled.** A broad
- * principal on a large bundle streams bands for tens of seconds, so a fixed wait samples a mark
- * count that is still climbing — and the colour check then reads a load in progress as "the
- * encoding changed the selection", which is a false report of the one property it exists to
- * protect. `__tesseraProbe.marks` is published for exactly this.
+ * Wait until the probe's mark count stops changing. A broad principal on a large bundle streams
+ * bands for tens of seconds, and a count read mid-load would make the colour check misreport.
  */
 const settled = async (limitMs = 45_000) => {
   const started = Date.now();
@@ -74,9 +67,7 @@ const settled = async (limitMs = 45_000) => {
 };
 await settled();
 
-/** Pixels on the canvas that are not the page background — "did it draw anything". */
-// The canvas is inside the map's shadow root: found by the locator, which pierces, and read
-// through its handle — `document.querySelector` would report no canvas at all.
+/** Pixels on the canvas that are not the page background. The canvas is in a shadow root, so the locator finds it. */
 const litPixels = () =>
   page.locator('canvas').first().evaluate((canvas) => {
     if (!(canvas instanceof HTMLCanvasElement)) return 0;
@@ -94,9 +85,9 @@ const litPixels = () =>
   });
 
 /**
- * The three counts, read through the status strip's parts — shadow-piercing locators, never an
- * id in a panel's markup (design §9). `shown` renders its figure with the total on `data-total`;
- * the other two are one figure each. A count that rendered nothing (stale, inexact, not shown) reads as null.
+ * The three counts, read through the status strip's parts. `shown` renders its figure with the
+ * total on `data-total`; the other two are one figure each. A count that rendered nothing reads
+ * as null.
  */
 const counts = async () => {
   const text = async (part) => {
@@ -104,7 +95,6 @@ const counts = async () => {
     if ((await el.count()) === 0) return '';
     return (await el.textContent()) ?? '';
   };
-  // The shown cell renders its figure with the total on `data-total` (the visible cell's number).
   const shownEl = page.locator('tessera-status [part="count-shown"] [part="count"]').first();
   const served = (await text('count-shown')).trim();
   const visible = (await shownEl.count()) > 0 ? await shownEl.getAttribute('data-total') : null;
@@ -112,8 +102,7 @@ const counts = async () => {
   return served && visible ? {served, visible, matched} : null;
 };
 
-// Success criterion 3, checked rather than asserted by eye: a different principal must produce a
-// different picture and different masked counts.
+// A different principal must produce a different picture and different masked counts.
 const principals = [];
 const options = await page.locator('#principal option').count().catch(() => 0);
 for (let i = 0; i < options; i++) {
@@ -126,7 +115,7 @@ for (let i = 0; i < options; i++) {
   });
 }
 
-// Success criterion 1, partially: zooming in must add marks, never remove them (§7.2 nesting).
+// Zooming in must add marks and not remove them.
 const zoomSeries = [];
 if (options > 0) {
   await page.selectOption('#principal', String(options - 1));
@@ -141,14 +130,9 @@ if (options > 0) {
   }
 }
 
-// **Colour is presentation, not selection.** Switching the encoding must repaint the canvas and
-// must NOT change the mark count — and must issue no `/v1/viewport` at all, since every declared
-// column is already in the held response. The count is the I7 property, observable from outside;
-// the request count is what proves the switch is a layer rebuild rather than a refetch.
-// **Look-ahead off for this section, and only this one.** The ring issues its requests while the
-// view is *still*, which is exactly when a colour switch is measured — so with it on, a request
-// nobody made lands inside the window and reads as the encoding refetching. The knob is the same
-// A/B the cache measurements use; the principal and zoom sections above ran with it on.
+// Switching the encoding must repaint without changing the mark count or issuing a
+// `/v1/viewport` request, since every declared column is already held. Look-ahead is off for this
+// section only: it sends requests while the view is still, which is when the switch is measured.
 await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 await page.waitForTimeout(settleMs);
 await settled();
@@ -181,10 +165,7 @@ if (categoryOption) {
   await settled();
 }
 
-// Both columns: what you change is on the left, what came back is on the right, and a report
-// that read only one of them would omit half of what the run did.
-// The instruments and the explorer's panels alike: what you change and what came back, read
-// through shadow roots by the locator rather than by an id the shadow DOM hides.
+// The text of the instruments and the explorer's panels, read through shadow roots by the locator.
 const panelText = await Promise.all([
   page.locator('#instruments').innerText(),
   page.locator('tessera-status').first().innerText(),
@@ -208,12 +189,10 @@ const canvasPixels = await page.locator('canvas').first().evaluate((canvas) => {
   return {found: true, width: off.width, height: off.height, lit, total: data.length / 4};
 });
 
-// The strip's state, read before the browser goes: the smoke's last word on whether the page
-// ended `shown`, through the part, which is the only way the shadow DOM offers.
+// The strip's final state, through its part.
 const stripState = await page.locator('tessera-status [part="state"]').first().getAttribute('data-state').catch((e) => `error: ${e.message.slice(0, 120)}`);
 
-// A minute, not the default thirty seconds: a screenshot waits for a frame, and this page draws
-// ~10^6 marks under a software rasteriser in CI-like conditions.
+// A minute: a screenshot waits for a frame, and a software rasteriser draws about 10^6 marks slowly.
 await page.screenshot({path: shot, timeout: 60_000});
 await browser.close();
 
@@ -266,16 +245,8 @@ console.log('--- the status strip’s state ---');
 console.log(`  data-state=${stripState}`);
 console.log('--- canvas ---');
 console.log(' ', JSON.stringify(canvasPixels));
-// **`/v1/categories` no longer refuses a `derived` column, so a 500 here is breakage.** This block
-// used to tolerate them, and to excuse the browser's "Failed to load resource" beside them, on the
-// grounds that the visibility predicate was ⊘ unbuilt and serving the set empty would be
-// indistinguishable from a computed empty answer. The predicate is built: a `derived` vocabulary's
-// values are derived from inside `M_auth` per request (`Engine::categories`), and the route answers
-// 200 for a `derived` column and a `public` one alike. What a 500 means now is that the column's
-// membership could not be read at all — a real fault with nothing contractual behind it.
-//
-// So there is nothing left to excuse, and every console error counts. The 500s are still listed
-// separately, because a run that fails wants to say *which* of the two it was.
+// `/v1/categories` answers 200 for `derived` and `public` columns alike, so a 500 is a fault and
+// every console error counts. The 500s are listed separately, to say which kind of failure it was.
 const categoryFaults = requests.filter(
   (r) => r.path.startsWith('/v1/categories/') && r.status === 500
 );
@@ -304,7 +275,7 @@ if (!maskingVisible) failures.push('every principal reported the same visible co
 if (categoryFaults.length)
   failures.push(`${categoryFaults.length} 500(s) from /v1/categories — the derived predicate is built, so this is a fault`);
 if (unexplained.length) failures.push(`${unexplained.length} console error(s)`);
-// Colour is presentation. If either of these moves, the encoding has become a selection rule.
+// If either of these changes, the encoding changed what is drawn.
 const servedAcrossEncodings = new Set(colourSeries.map((c) => c.counts?.served));
 if (servedAcrossEncodings.size > 1) failures.push('changing the colour column changed the mark count');
 if (colourSeries.some((c) => c.viewportRequests > 0)) failures.push('a colour change refetched');

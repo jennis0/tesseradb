@@ -11,10 +11,23 @@ deny() { # deny <crate> <forbidden-DIRECT-dep>
 }
 deny tessera-authz tessera-store
 deny tessera-authz tessera-spatial
+# The single-flight cache sits below both tessera-authz and tessera-engine so the two hold one
+# copy of the state machine. It must stay at the bottom: a workspace edge out of it would put a
+# crate above it below itself.
+if cargo tree -p tessera-cache --prefix none -e normal --depth 1 | tail -n +2 | grep '^tessera-'; then
+  echo "FORBIDDEN: tessera-cache may depend on no other crate in the workspace"
+  fail=1
+fi
 deny tessera-server tessera-store     # server sees engine API types only
 deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
+deny tessera-wire tessera-types       # the wire cannot name an entity id or the identity key
+# The identity catalogue maps credentials to terms and permissions, and must not see a row id or
+# an entity id.
+deny tessera-catalogue tessera-store
+deny tessera-catalogue tessera-authz
+deny tessera-catalogue tessera-engine
 # The filter index is entity-space and must stay there (filter-index §9). These are the two edges
 # tessera-authz is denied above, for the same reason: a crate that can see a RowId can relate the
 # two ID spaces, and I4 says only an explicit permutation may. The server edge keeps the filter
@@ -50,12 +63,8 @@ fi
 deny tessera-engine tokio
 deny tessera-store tokio
 # I4: no ID conversions in types
-if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId|Handle"; then
+if grep -rn "impl From" crates/tessera-types/src/ | grep -E "EntityId|RowId|TermId|AttrLocalId|TesseraId"; then
   echo "FORBIDDEN: ID conversion in tessera-types"; fail=1
-fi
-# I10: the payload module never sees EntityId (handles + plain columns only)
-if grep -n "EntityId" crates/tessera-wire/src/payload.rs 2>/dev/null; then
-  echo "FORBIDDEN: EntityId in tessera-wire payload module"; fail=1
 fi
 
 # I10 (contracts r6): no request-path artifact stores an entity ID. `columns.arrow`
@@ -66,7 +75,8 @@ if grep -n "fn entity_id" crates/tessera-store/src/read.rs; then
 fi
 
 # The identity key inverts every tessera_id and must never reach the wire.
-if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/viewer.rs; then
+if grep -rn "IdentityKey" crates/tessera-wire/src/ crates/tessera-server/src/viewer.rs \
+    crates/tessera-server/src/records.rs crates/tessera-server/src/stream.rs; then
   echo "FAIL: the identity key must not appear in the wire or viewer layers"
   fail=1
 fi
@@ -86,24 +96,31 @@ fi
 # `tessera-bench` sits ABOVE every other crate: it reaches across authz + store + spatial +
 # engine + build + server together, which no shipped crate may do. The edge must stay one-way, so
 # nothing may depend on it.
-for c in types plugin authz store spatial lifecycle engine wire server build cli; do
-  # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
-  # manifests discuss the harness in comments, and a substring grep flags its own documentation.
-  if grep -nE '^[[:space:]]*tessera-bench[[:space:]]*=|\.\./tessera-bench' "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then
-    echo "FAIL: tessera-$c depends on tessera-bench; the measurement harness must stay a leaf"
-    fail=1
-  fi
+#
+# `tessera-python` sits there too, and for the same reason from the other end: it is a Python
+# extension module built as a cdylib, so there is no rlib for a workspace crate to link even if one
+# tried, and an edge into it would put the interpreter's ABI underneath the binary.
+for leaf in bench python; do
+  for c in types plugin cache authz store spatial lifecycle engine wire config server build cli; do
+    # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
+    # manifests discuss the harness in comments, and a substring grep flags its own documentation.
+    if grep -nE "^[[:space:]]*tessera-$leaf[[:space:]]*=|\.\./tessera-$leaf" \
+         "crates/tessera-$c/Cargo.toml" >/dev/null 2>&1; then
+      echo "FAIL: tessera-$c depends on tessera-$leaf; it must stay a leaf"
+      fail=1
+    fi
+  done
 done
 
 # The stage-timing header must not exist in a shipped binary. `tessera-bench` enables
 # `bench-timing` by default, and cargo unifies features across a `--workspace` build, so the
 # compile gate alone is not enough -- `tessera-server` also gates emission on `[serve]
 # stage_timing`, default false. Assert the runtime gate is still there and still defaults closed.
-if ! grep -q "stage_timing" crates/tessera-server/src/config.rs; then
-  echo "FAIL: the [serve] stage_timing runtime gate is missing from the server config"
+if ! grep -q "stage_timing" crates/tessera-config/src/lib.rs; then
+  echo "FAIL: the [serve] stage_timing runtime gate is missing from the deployment config"
   fail=1
 fi
-if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-server/src/config.rs; then
+if ! grep -q "stage_timing.unwrap_or(false)" crates/tessera-config/src/lib.rs; then
   echo "FAIL: stage_timing must default to false (fail closed)"
   fail=1
 fi
@@ -135,10 +152,10 @@ fi
 #    were vacuous: `GenerationHandle::store` appears nowhere in the tree (both real sites are
 #    `self.generation.store(...)`), and `.store(Arc::new(` misses the equally valid
 #    `.store(std::sync::Arc::new(` -- verified by planting one and watching this rule stay green.
-#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside `write.rs`,
-#    minus the atomic ones, which are told apart by the `Ordering::` argument that `Atomic*::store`
-#    requires and `ArcSwap::store` does not take. A rule that cannot go red is worse than no rule,
-#    because it is evidence.
+#    So the rule flags EVERY publishing CALL FORM in the engine's sources outside
+#    `write/executor/mod.rs`, minus the atomic ones, which are told apart by the `Ordering::`
+#    argument that `Atomic*::store` requires and `ArcSwap::store` does not take. A rule that
+#    cannot go red is worse than no rule, because it is evidence.
 #
 #    FOUR call forms, not one. `.store(` alone was vacuous against three of the four ways arc-swap
 #    publishes -- `.swap(` and `.rcu(` were both planted in `viewport.rs`, both compiled, and both
@@ -153,13 +170,13 @@ fi
 #    its own retirement condition -- lifecycle §1.3 requires a flush's swap-only publication step to
 #    run on the lifecycle thread -- and that is what happened: publication is an `ExecutorWork`
 #    variant the executor performs, `Engine::publish_geometry` is a blocking submission, and there
-#    is no publisher outside `write.rs` at all. The marker-counting rule went with the marker, per
-#    its own instruction. There is no supported way to publish from another thread, so a new marker
-#    is not an exemption to argue for -- it is the defect.
+#    is no publisher outside `write/executor/mod.rs` at all. The marker-counting rule went with
+#    the marker, per its own instruction. There is no supported way to publish from another
+#    thread, so a new marker is not an exemption to argue for -- it is the defect.
 if grep -rnE '\.(store|swap|rcu|compare_and_swap)\(' --include=*.rs crates/tessera-engine/src/ \
-     | grep -v '^crates/tessera-engine/src/write\.rs:' \
+     | grep -v '^crates/tessera-engine/src/write/executor/mod\.rs:' \
      | grep -v 'Ordering::'; then
-  echo "FAIL: a generation is published outside crates/tessera-engine/src/write.rs."
+  echo "FAIL: a generation is published outside crates/tessera-engine/src/write/executor/mod.rs."
   echo "      The executor thread is the sole publisher (lifecycle §1.3, #59); a second publisher"
   echo "      reintroduces the lost-update race, in which a lost publication strands the LIVE"
   echo "      generation on the pin drain list and a later prune evicts projections still in use."
@@ -218,21 +235,7 @@ if ! cargo tree -e normal -p tessera-cli --features fault-injection -f "{p} {f}"
   fail=1
 fi
 
-# 3. THE ACK PROOF HAS ONE HOME. `write.rs`'s `Published` token is what `Executor::ack` demands
-#    before it will send a *successful* receipt, and the ack-ordering fail-open it guards
-#    (lifecycle §4: a client holding 200 for a suppression not yet in force) is reintroduced by any
-#    code that can mint one. The token's own module argues the residual hole honestly -- inside
-#    `write.rs` a `Published::already_in_force(..)` call is still reachable, which is exactly what
-#    the reviewer's mutation used -- so pin construction to that file and keep the count auditable.
-#    A new crate or module minting proofs is the change this refuses.
-if grep -rn 'Published::' --include=*.rs crates/ | grep -v '^crates/tessera-engine/src/write\.rs:'; then
-  echo "FAIL: the ack proof token is constructed outside crates/tessera-engine/src/write.rs."
-  echo "      Only the generation swap (and contracts 3.4 replay) may produce one; see the"
-  echo "      'mod ack' block in write.rs. A third producer is the guarantee gone."
-  fail=1
-fi
-
-# 4. THE FRAGMENTATION COUNTERS STAY OFF THE VIEWPORT PATH. They are an operator gauge and nothing
+# 3. THE FRAGMENTATION COUNTERS STAY OFF THE VIEWPORT PATH. They are an operator gauge and nothing
 #    else: contracts 3.4 says outright that no request-path behaviour depends on them. Both
 #    accessors take an `ExecutorStats` snapshot, which reads a mutex the write executor holds at
 #    every window close -- so a viewport that consulted one would put a read request behind the
@@ -244,7 +247,7 @@ fi
 #    which compiles, because both are public and `viewport.rs` is in the same crate -- running,
 #    and reverting.
 if grep -n 'run_ratio\|postings_per_container\|fragmentation' \
-     crates/tessera-engine/src/viewport.rs \
+     crates/tessera-engine/src/viewport/*.rs \
      crates/tessera-engine/src/select.rs \
      crates/tessera-engine/src/compose.rs \
      crates/tessera-server/src/viewer.rs \

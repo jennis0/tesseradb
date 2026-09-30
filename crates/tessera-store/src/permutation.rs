@@ -425,18 +425,14 @@ fn emit_window(
         // O(rows) rather than O(width), which sounds better and is 250 million scattered writes
         // at 10⁹ against 122 MB of sequential ones. Also not separately measured, and stated as
         // reasoning rather than as a result.
-        for (container, words) in stamp.chunks_exact_mut(WORDS).enumerate() {
+        for (container, words) in stamp.as_chunks_mut::<WORDS>().0.iter_mut().enumerate() {
             if occupied & (1u64 << container) == 0 {
                 continue;
             }
             let cardinality: u32 = words.iter().map(|word| word.count_ones()).sum();
             let key = u16::try_from((base >> 16) + container as u32)
                 .expect("a row below 2^32 has a container key below 2^16");
-            sink.push_block(
-                key,
-                cardinality,
-                (&*words).try_into().expect("a bucket is whole containers"),
-            );
+            sink.push_block(key, cardinality, words);
             words.fill(0);
         }
     }
@@ -558,6 +554,30 @@ const DECODE_WINDOW: usize = 8192;
 /// of the turn, so this figure is the bound's and not an optimum's.
 const PROJECT_WINDOW_ROWS: usize = (64 << 20) / 4;
 
+/// Add to `out` the entities of `page` whose slot holds a row. A page's tail past the bound holds
+/// only [`ROW_ABSENT`], which `validate_directory` checks, so no bound test is needed here.
+fn add_page_entities(
+    out: &mut croaring::Bitmap,
+    page: usize,
+    slots: &[u32],
+    scratch: &mut Vec<u32>,
+) {
+    let first = (page << PAGE_SHIFT) as u32;
+    scratch.clear();
+    scratch.extend(
+        slots
+            .iter()
+            .enumerate()
+            .filter(|(_, &slot)| slot != ROW_ABSENT)
+            .map(|(offset, _)| first + offset as u32),
+    );
+    if scratch.len() == PAGE_ENTRIES {
+        out.add_range(first..=first + (PAGE_ENTRIES as u32 - 1));
+    } else {
+        out.add_many(scratch);
+    }
+}
+
 /// A memory-mapped `permutation.bin`. `row_of` and `project` are the only ways to cross from
 /// entity space to row space anywhere in the codebase (I4) — no other module may open this
 /// file or otherwise derive a row ID from an entity ID.
@@ -583,6 +603,9 @@ pub struct Permutation {
     /// premise is that this process wrote the file.
     /// Unset means neither has spoken, and the walk answers everything.
     dense_rows: std::sync::OnceLock<u32>,
+    /// Every entity holding a row here, filled by [`Self::validate_rows`] where it runs and on
+    /// first use elsewhere.
+    present_entities: std::sync::OnceLock<croaring::Bitmap>,
 }
 
 impl Permutation {
@@ -626,6 +649,7 @@ impl Permutation {
             payload_start: len,
             path: PathBuf::from("<empty permutation>"),
             dense_rows: std::sync::OnceLock::new(),
+            present_entities: std::sync::OnceLock::new(),
         })
     }
 
@@ -724,6 +748,7 @@ impl Permutation {
             payload_start,
             path: path.to_path_buf(),
             dense_rows: std::sync::OnceLock::new(),
+            present_entities: std::sync::OnceLock::new(),
         };
         permutation.validate_directory()?;
         Ok(permutation)
@@ -843,10 +868,13 @@ impl Permutation {
         let row_count_usize = row_count as usize;
         let mut seen = RowsSeen::new(row_count_usize);
         let mut claimed: u64 = 0;
+        let mut present = croaring::Bitmap::new();
+        let mut scratch: Vec<u32> = Vec::new();
         for page in 0..self.page_count {
             let Some(slots) = self.page_of(page) else {
                 continue;
             };
+            add_page_entities(&mut present, page, slots, &mut scratch);
             for (offset, &slot) in slots.iter().enumerate() {
                 if slot == ROW_ABSENT {
                     continue;
@@ -875,6 +903,8 @@ impl Permutation {
         if claimed == u64::from(row_count) {
             let _ = self.dense_rows.set(row_count);
         }
+        present.run_optimize();
+        let _ = self.present_entities.set(present);
         Ok(())
     }
 
@@ -917,6 +947,31 @@ impl Permutation {
     pub fn whole_domain_rows(&self, mask: &croaring::Bitmap) -> Option<u32> {
         let rows = self.dense_rows()?;
         self.covers_domain(mask).then_some(rows)
+    }
+
+    /// Every entity that holds a row here, as a bitmap.
+    ///
+    /// Held for the life of the mapping. Where the mapping is known to be onto `[0, bound)` it is
+    /// that range and reads no page; otherwise it is one walk of the present pages, which
+    /// [`Self::validate_rows`] makes anyway and fills this from.
+    pub fn present_entities(&self) -> &croaring::Bitmap {
+        self.present_entities.get_or_init(|| {
+            if let Some(rows) = self
+                .dense_rows()
+                .filter(|&rows| u64::from(rows) == self.bound)
+            {
+                return croaring::Bitmap::from_range(0..rows);
+            }
+            let mut present = croaring::Bitmap::new();
+            let mut scratch: Vec<u32> = Vec::new();
+            for page in 0..self.page_count {
+                if let Some(slots) = self.page_of(page) {
+                    add_page_entities(&mut present, page, slots, &mut scratch);
+                }
+            }
+            present.run_optimize();
+            present
+        })
     }
 
     /// Every entity that holds a row here, ascending, with the row it holds.
@@ -1323,11 +1378,16 @@ impl Permutation {
 /// row space its rows live.
 ///
 /// `rows` is **dense over `[entity_lo, entity_hi]`** and holds each entity's row *relative to*
-/// `row_base`, or [`ROW_ABSENT`] for an entity the segment never got a row for — a
-/// deleted-at-flush entity, whose ID stays burned (I9) while no row is created for it. Dense
-/// rather than sparse because the range is contiguous by construction: entity IDs are issued
-/// monotonically from the high-water, so a flush segment covers a contiguous ascending range
-/// (§2.1), and one `u32` per entity is smaller than any keyed form over the same span.
+/// `row_base`, or [`ROW_ABSENT`] for an entity in the span with no row here: one deleted before
+/// its flush, or one whose row is in another extent's `below`. Dense rather than keyed because
+/// ids above everything a view holds are issued in ascending runs from the high-water, and one
+/// `u32` per entity is smaller than any keyed form over such a span.
+///
+/// `below` holds the rows of entities under `entity_lo`, as `(entity, row)` pairs ascending by
+/// entity. An existing item added to a view keeps its entity, and the allocator issues ids a fold
+/// freed before new ones, so a flush can carry an entity older than rows the view already holds.
+/// Those rows cannot join the dense span without widening it across the whole view, so they are
+/// listed. `entity_hi + 1 == entity_lo` for an extent whose every row is listed.
 ///
 /// It is not a `permutation.bin`. That file's length is the *bundle's* whole entity space, which
 /// is the wrong shape for a segment covering a few thousand ids at the top of it; an extent's rows
@@ -1341,9 +1401,64 @@ pub struct SegmentExtent {
     pub row_base: u32,
     /// `rows[e - entity_lo]`, relative to `row_base`; [`ROW_ABSENT`] where the entity has no row.
     pub rows: Vec<u32>,
+    /// `(entity, row)` for each entity below `entity_lo` with a row here, ascending by entity,
+    /// the row relative to `row_base`.
+    pub below: Vec<(u32, u32)>,
 }
 
 impl SegmentExtent {
+    /// An extent over `entities`, where `entities[i]` holds row `i` relative to `row_base`: an
+    /// entity in `[entity_lo, entity_hi]` takes its slot in the dense span, one below it is
+    /// listed. `None` where an entity appears twice or lies above `entity_hi`, or where the span
+    /// is inverted or too wide to address.
+    pub fn from_rows(
+        seg_id: &str,
+        row_base: u32,
+        (entity_lo, entity_hi): (u64, u64),
+        entities: impl IntoIterator<Item = u64>,
+    ) -> Option<Self> {
+        let span = usize::try_from((entity_hi + 1).checked_sub(entity_lo)?).ok()?;
+        let mut rows = vec![ROW_ABSENT; span];
+        let mut below: Vec<(u32, u32)> = Vec::new();
+        for (row, entity) in entities.into_iter().enumerate() {
+            let row = u32::try_from(row).ok()?;
+            if entity < entity_lo {
+                below.push((u32::try_from(entity).ok()?, row));
+                continue;
+            }
+            let slot = rows.get_mut(usize::try_from(entity - entity_lo).ok()?)?;
+            if *slot != ROW_ABSENT {
+                return None;
+            }
+            *slot = row;
+        }
+        below.sort_unstable();
+        let extent = SegmentExtent {
+            entity_lo,
+            entity_hi,
+            seg_id: seg_id.to_string(),
+            row_base,
+            rows,
+            below,
+        };
+        extent.is_well_formed().then_some(extent)
+    }
+
+    /// The dense span a flush gives `entities` in a view whose rows reach up to `floor`: from the
+    /// lowest entity at or above `floor` to the highest, or the empty span at `floor` where every
+    /// entity is below it.
+    pub fn flush_span(floor: u64, entities: impl IntoIterator<Item = u64>) -> (u64, u64) {
+        let mut span: Option<(u64, u64)> = None;
+        for entity in entities.into_iter().filter(|&e| e >= floor) {
+            span = Some(match span {
+                Some((lo, hi)) => (lo.min(entity), hi.max(entity)),
+                None => (entity, entity),
+            });
+        }
+        // An empty span exists only where some entity lies below `floor`, so `floor` is above 0.
+        span.unwrap_or((floor, floor.saturating_sub(1)))
+    }
+
     /// Recover a flush or merge segment's extent from the segment itself, at open.
     ///
     /// **Why this exists rather than a file.** §2.1 describes an extent as four scalars —
@@ -1354,10 +1469,11 @@ impl SegmentExtent {
     ///
     /// The alternative was to write `rows` beside `morton.u32` (4 bytes × entities in the segment,
     /// one more file, one more manifest field, a contracts §2.1 change). This construction stores
-    /// **nothing**: `columns.arrow` already carries `tessera_id` at the row, the identity is a
-    /// bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]), and `MANIFEST.json` already carries the
-    /// key — so the mapping is derivable from artefacts that must exist anyway. Ruled on
-    /// 2026-08-02 in favour of adding no artefact.
+    /// only the rows an edit moved: `columns.arrow` already carries `tessera_id` at the row, the
+    /// identity is a bijection over 2⁶⁴ ([`tessera_types::IdentityKey`]) from an item's number,
+    /// and `MANIFEST.json` already carries the key, so a row's entity is its number's unless the
+    /// segment's edited rows list another ([`crate::edited`]). An entity under `entity_lo` goes to
+    /// [`Self::below`], as the flush that wrote the segment put it.
     ///
     /// **The invariant it spends, stated so it is not spent again silently.** Row space above the
     /// build bound is now recoverable *only* while the identity permutation is invertible at open.
@@ -1370,94 +1486,92 @@ impl SegmentExtent {
     /// what merge leaves unmerged rather than by the corpus. Deliberately not parallelised: it runs
     /// once at open, inside a loop that is already mapping and digest-verifying files.
     pub fn rebuild(
-        seg_id: &str,
+        segment: &crate::read::SegmentData,
         entity_lo: u64,
         entity_hi: u64,
         row_base: u32,
-        tessera_ids: &[u64],
         key: &tessera_types::IdentityKey,
         shard_id: u32,
     ) -> Result<Self> {
-        let malformed = |detail: String| StoreError::MalformedBundle { detail };
-        let span = entity_hi
-            .checked_sub(entity_lo)
-            .and_then(|d| d.checked_add(1))
-            .and_then(|d| usize::try_from(d).ok())
-            .ok_or_else(|| {
-                malformed(format!(
-                    "segment '{seg_id}': entity span {entity_lo}..={entity_hi} is inverted or too \
-                     wide to address"
-                ))
-            })?;
-
-        let mut rows = vec![ROW_ABSENT; span];
+        let (seg_id, tessera_ids) = (segment.seg_id.as_str(), segment.columns.tessera_id());
+        let mut entities = Vec::with_capacity(tessera_ids.len());
         for (local, &raw) in tessera_ids.iter().enumerate() {
-            let (shard, entity) = key.invert(tessera_types::TesseraId::new(raw));
             // A wrong shard means this segment was written under a different identity
             // configuration than the manifest declares — corruption, not a row to skip. Serving
             // past it would put a row under an entity id that names a different item.
-            if shard != shard_id {
-                return Err(malformed(format!(
-                    "segment '{seg_id}': row {local}'s tessera_id inverts to shard {shard}, but \
-                     the manifest declares shard {shard_id}"
-                )));
-            }
-            let raw_entity = entity.raw();
-            if raw_entity < entity_lo || raw_entity > entity_hi {
-                return Err(malformed(format!(
-                    "segment '{seg_id}': row {local} belongs to entity {raw_entity}, outside the \
-                     descriptor's range {entity_lo}..={entity_hi}"
-                )));
-            }
-            let slot = &mut rows[(raw_entity - entity_lo) as usize];
-            if *slot != ROW_ABSENT {
-                return Err(malformed(format!(
-                    "segment '{seg_id}': entity {raw_entity} is claimed by rows {} and {local} — \
-                     the identity is a bijection, so two rows cannot invert to one entity",
-                    *slot
-                )));
-            }
-            *slot = local as u32;
+            let entity = segment
+                .entities
+                .entity_of(local as u32, raw, key, shard_id, seg_id)?;
+            entities.push(entity.raw());
         }
-
-        let extent = SegmentExtent {
-            entity_lo,
-            entity_hi,
-            seg_id: seg_id.to_string(),
-            row_base,
-            rows,
-        };
-        // The same check `with_extent` applies to an extent arriving from a flush. Applied here
-        // too rather than left to the caller, so a rebuild that produced a malformed extent says
-        // which segment it was reading rather than surfacing as "does not continue row space".
-        if !extent.is_well_formed() {
-            return Err(malformed(format!(
-                "segment '{seg_id}': the extent rebuilt from its tessera_id column is not a \
-                 bijection onto its own rows"
-            )));
-        }
-        Ok(extent)
+        // The same check `with_extent` applies to an extent arriving from a flush, applied here
+        // too so a malformed extent names the segment it was read from.
+        SegmentExtent::from_rows(seg_id, row_base, (entity_lo, entity_hi), entities).ok_or_else(
+            || StoreError::MalformedBundle {
+                detail: format!(
+                    "segment '{seg_id}': the extent rebuilt from its tessera_id column is not a \
+                     bijection onto its own rows at or below the descriptor's entity \
+                     {entity_hi}"
+                ),
+            },
+        )
     }
 
-    /// How many rows this extent actually owns — the non-absent slots, not the entity span.
+    /// How many rows this extent actually owns: the non-absent slots and the listed rows.
     pub fn row_count(&self) -> u32 {
-        self.rows.iter().filter(|&&r| r != ROW_ABSENT).count() as u32
+        (self.rows.iter().filter(|&&r| r != ROW_ABSENT).count() + self.below.len()) as u32
+    }
+
+    /// The lowest entity holding a row here, where any does.
+    pub fn lowest(&self) -> Option<u64> {
+        self.below.first().map(|&(e, _)| u64::from(e)).or_else(|| {
+            self.rows
+                .iter()
+                .position(|&r| r != ROW_ABSENT)
+                .map(|i| self.entity_lo + i as u64)
+        })
+    }
+
+    /// Every `(entity, row)` this extent holds, the row relative to `row_base`: the listed rows,
+    /// then the dense span's, each ascending by entity.
+    pub fn pairs(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        let dense = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, &row)| row != ROW_ABSENT)
+            .map(|(i, &row)| (self.entity_lo + i as u64, row));
+        self.below
+            .iter()
+            .map(|&(e, row)| (u64::from(e), row))
+            .chain(dense)
+    }
+
+    /// Every entity holding a row here, listed or in the dense span.
+    pub fn entities(&self) -> croaring::Bitmap {
+        let mut out = croaring::Bitmap::of(&self.below.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+        for (i, _) in self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, &row)| row != ROW_ABSENT)
+        {
+            out.add((self.entity_lo + i as u64) as u32);
+        }
+        out.run_optimize();
+        out
     }
 
     /// Whether this extent is internally well-formed: its `rows` cover its entity span exactly,
-    /// and the non-absent slots are a bijection onto `[0, row_count)`.
+    /// `below` ascends strictly under `entity_lo`, and the rows of both are a bijection onto
+    /// `[0, row_count)`.
     ///
     /// The same property [`Permutation::validate_rows`] enforces for the base, and for the same
     /// reason: a slot outside the range, or two entities aliased onto one row, would let `row_of`
     /// hand out a `RowId` that indexes the segment's `columns.arrow` out of bounds (I4/I11).
     fn is_well_formed(&self) -> bool {
-        if self.entity_hi < self.entity_lo {
-            return false;
-        }
-        let Some(span) = self
-            .entity_hi
+        let Some(span) = (self.entity_hi + 1)
             .checked_sub(self.entity_lo)
-            .and_then(|d| d.checked_add(1))
             .and_then(|d| usize::try_from(d).ok())
         else {
             return false;
@@ -1465,12 +1579,23 @@ impl SegmentExtent {
         if self.rows.len() != span {
             return false;
         }
+        if !self.below.windows(2).all(|w| w[0].0 < w[1].0)
+            || self
+                .below
+                .last()
+                .is_some_and(|&(e, _)| u64::from(e) >= self.entity_lo)
+        {
+            return false;
+        }
         let count = self.row_count();
         let mut seen = RowsSeen::new(count as usize);
-        for &row in &self.rows {
-            if row == ROW_ABSENT {
-                continue;
-            }
+        for row in self
+            .rows
+            .iter()
+            .copied()
+            .filter(|&r| r != ROW_ABSENT)
+            .chain(self.below.iter().map(|&(_, r)| r))
+        {
             if row >= count || seen.claim(row as usize) {
                 return false;
             }
@@ -1482,39 +1607,204 @@ impl SegmentExtent {
     /// inside it. Nothing else in `mask` can be answered here, so nothing else is looked at.
     ///
     /// **It seeks to `entity_lo` rather than skipping up to it, and the difference is the whole
-    /// cost of a flush's patch.** An extent's entities are the newest in the partition, so they
-    /// sit at the top of the mask; a walk from the mask's start pays O(mask cardinality) to reach
-    /// them — *measured* 79 ms per extent against a 25 M-entity grant at 10⁸
+    /// cost of a flush's patch.** An extent's dense entities are the newest in the partition, so
+    /// they sit at the top of the mask; a walk from the mask's start pays O(mask cardinality) to
+    /// reach them — *measured* 79 ms per extent against a 25 M-entity grant at 10⁸
     /// (`probes/2026-08-04-refresh-ladder/`), which is the patch's cost being a function of the
     /// grant's width rather than of the flush's size. `reset_at_or_after` costs O(containers
     /// skipped), which is the cost model this index is designed against
     /// (`CLAUDE.md`: bitmap operations cost O(containers touched), not O(cardinality)).
+    ///
+    /// The listed rows are reached from whichever side is smaller: the mask's entities within the
+    /// listed ones' range, each looked up, or the listed rows, each tested against the mask. A
+    /// stored level projects each of its artifacts through the extent a flush wrote, and most
+    /// artifacts are far smaller than the flush.
     fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         let mut rows: Vec<u32> = Vec::new();
+        if let (Some(&(first, _)), Some(&(last, _))) = (self.below.first(), self.below.last()) {
+            if mask.range_cardinality(first..=last) <= self.below.len() as u64 {
+                let mut iter = mask.iter();
+                iter.reset_at_or_after(first);
+                for entity in iter.take_while(|&entity| entity <= last) {
+                    if let Ok(at) = self.below.binary_search_by_key(&entity, |&(e, _)| e) {
+                        rows.push(self.row_base + self.below[at].1);
+                    }
+                }
+            } else {
+                rows.extend(
+                    self.below
+                        .iter()
+                        .filter(|&&(entity, _)| mask.contains(entity))
+                        .map(|&(_, row)| self.row_base + row),
+                );
+            }
+        }
         // `entity_hi` is inclusive and the range end is exclusive; both ends are already inside
         // `u32` because a `mask` is entity-space and entity ids are capped at `u32::MAX` (I9).
-        let lo = u32::try_from(self.entity_lo).unwrap_or(u32::MAX);
-        let hi = u32::try_from(self.entity_hi).unwrap_or(u32::MAX);
-        let mut iter = mask.iter();
-        iter.reset_at_or_after(lo);
-        for entity in iter {
-            if entity > hi {
-                break;
-            }
-            let slot = self.rows[(entity - lo) as usize];
-            if slot != ROW_ABSENT {
-                rows.push(self.row_base + slot);
+        if !self.rows.is_empty() {
+            let lo = u32::try_from(self.entity_lo).unwrap_or(u32::MAX);
+            let hi = u32::try_from(self.entity_hi).unwrap_or(u32::MAX);
+            let mut iter = mask.iter();
+            iter.reset_at_or_after(lo);
+            for entity in iter {
+                if entity > hi {
+                    break;
+                }
+                let slot = self.rows[(entity - lo) as usize];
+                if slot != ROW_ABSENT {
+                    rows.push(self.row_base + slot);
+                }
             }
         }
         croaring::Bitmap::of(&rows)
     }
 
-    fn row_of(&self, entity: u64) -> Option<RowId> {
+    /// The row `entity` holds in the dense span, where it holds one there.
+    fn dense_row_of(&self, entity: u64) -> Option<RowId> {
         if entity < self.entity_lo || entity > self.entity_hi {
             return None;
         }
         let slot = self.rows[(entity - self.entity_lo) as usize];
         (slot != ROW_ABSENT).then(|| RowId::new(self.row_base + slot))
+    }
+
+    /// The row `entity` holds among the listed rows, where it holds one there.
+    fn below_row_of(&self, entity: u64) -> Option<RowId> {
+        let entity = u32::try_from(entity).ok()?;
+        let at = self.below.binary_search_by_key(&entity, |&(e, _)| e).ok()?;
+        Some(RowId::new(self.row_base + self.below[at].1))
+    }
+}
+
+/// A row set's entities grouped by their high 16 bits, from [`RowSpace::entity_buckets`].
+pub struct EntityBuckets {
+    pieces: Vec<Buckets16>,
+    keys: Vec<u16>,
+}
+
+impl EntityBuckets {
+    /// Every key holding an entity, ascending.
+    pub fn keys(&self) -> &[u16] {
+        &self.keys
+    }
+
+    /// How many entities `key` holds.
+    pub fn count(&self, key: u16) -> u32 {
+        self.pieces.iter().map(|p| p.lows(key).len() as u32).sum()
+    }
+
+    /// The low 16 bits of `key`'s entities, a piece's bucket at a time, in no particular order.
+    pub fn for_each_bucket(&self, key: u16, mut f: impl FnMut(&[u16])) {
+        for piece in &self.pieces {
+            let lows = piece.lows(key);
+            if !lows.is_empty() {
+                f(lows);
+            }
+        }
+    }
+}
+
+/// One piece of a row set's entities, bucketed by their high 16 bits: each key present, ascending,
+/// with where its low 16 bits start in `lows`.
+struct Buckets16 {
+    keys: Vec<(u16, u32)>,
+    lows: Vec<u16>,
+}
+
+impl Buckets16 {
+    /// Count each key, then place each entity's low bits in its key's bucket, reading the rows'
+    /// entities twice rather than holding them.
+    fn of(
+        rows: &croaring::Bitmap,
+        piece: std::ops::Range<u32>,
+        tables: RowEntities<'_>,
+        keys_below: usize,
+    ) -> Self {
+        let mut at = vec![0u32; keys_below.min(1 << 16)];
+        tessera_roaring::for_each_run_in(rows, piece.clone(), &mut |run| {
+            tables.for_each_slice(run, |slice| {
+                for &e in slice {
+                    at[(e >> 16) as usize] += 1;
+                }
+            });
+        });
+        let mut keys = Vec::new();
+        let mut total = 0u32;
+        for (key, slot) in at.iter_mut().enumerate() {
+            if *slot > 0 {
+                keys.push((key as u16, total));
+                let n = *slot;
+                *slot = total;
+                total += n;
+            }
+        }
+        let mut lows = vec![0u16; total as usize];
+        tessera_roaring::for_each_run_in(rows, piece, &mut |run| {
+            tables.for_each_slice(run, |slice| {
+                for &e in slice {
+                    let slot = &mut at[(e >> 16) as usize];
+                    lows[*slot as usize] = e as u16;
+                    *slot += 1;
+                }
+            });
+        });
+        Buckets16 { keys, lows }
+    }
+
+    /// The low bits bucketed under `key`, empty where the piece has none.
+    fn lows(&self, key: u16) -> &[u16] {
+        match self.keys.binary_search_by_key(&key, |&(k, _)| k) {
+            Ok(i) => {
+                let start = self.keys[i].1 as usize;
+                let end = self
+                    .keys
+                    .get(i + 1)
+                    .map_or(self.lows.len(), |&(_, next)| next as usize);
+                &self.lows[start..end]
+            }
+            Err(_) => &[],
+        }
+    }
+}
+
+/// A view's row-to-entity direction: the base's `row-entity.u32` for rows below the base's row
+/// count, and the extents' inverse above it.
+#[derive(Debug, Clone, Copy)]
+pub struct RowEntities<'a> {
+    base: &'a [u32],
+    tail: &'a [u32],
+}
+
+impl RowEntities<'_> {
+    /// How many rows the tables cover.
+    pub fn len(&self) -> u32 {
+        (self.base.len() + self.tail.len()) as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The entity at `row`. Panics where `row` is past [`Self::len`].
+    #[inline]
+    pub fn entity_of(&self, row: u32) -> u32 {
+        match self.base.get(row as usize) {
+            Some(&entity) => entity,
+            None => self.tail[row as usize - self.base.len()],
+        }
+    }
+
+    /// The entities of `rows` as at most two slices, in row order: the base's part, then the
+    /// extents'. Panics where `rows` runs past [`Self::len`].
+    #[inline]
+    pub fn for_each_slice(&self, rows: std::ops::Range<u32>, mut f: impl FnMut(&[u32])) {
+        let (start, end, split) = (rows.start as usize, rows.end as usize, self.base.len());
+        if start < split {
+            f(&self.base[start..end.min(split)]);
+        }
+        if end > split {
+            f(&self.tail[start.max(split) - split..end - split]);
+        }
     }
 }
 
@@ -1525,10 +1815,11 @@ impl SegmentExtent {
 /// return a new value sharing the base by `Arc`, because re-opening it would re-pay
 /// `Permutation::load`'s `O(bound)` `validate_rows` — more than the flush that prompted it.
 ///
-/// The extent list is ordered, ascending and disjoint, and each extent begins exactly where row
-/// space currently ends. That is what makes `total_rows` a running sum rather than a scan, and it
-/// is what a merge preserves: a merge emits exactly as many rows as it consumed, so no later
-/// extent's `row_base` ever moves.
+/// The extents' dense spans are ordered, ascending and disjoint, and each extent begins exactly
+/// where row space currently ends. That is what makes `total_rows` a running sum rather than a
+/// scan, and it is what a merge preserves: a merge emits exactly as many rows as it consumed, so
+/// no later extent's `row_base` ever moves. An entity below an extent's span is listed in its
+/// `below` and has a row nowhere else in the view.
 #[derive(Debug, Clone)]
 pub struct RowSpace {
     base: Arc<Permutation>,
@@ -1545,8 +1836,13 @@ pub struct RowSpace {
     /// The build segment's row count — the base owns `[0, base_rows)`. Not derivable from the
     /// permutation, whose `bound` is an entity-space width and may exceed its row count.
     base_rows: u32,
-    /// Ordered, ascending, disjoint.
+    /// Dense spans ordered, ascending, disjoint.
     extents: Vec<SegmentExtent>,
+    /// `extents[i].entities()`, built when the extent joins.
+    extent_entities: Vec<Arc<croaring::Bitmap>>,
+    /// Every entity an extent lists below its span, so a lookup that finds no row in the base or
+    /// a span answers from one bitmap probe rather than a search of every extent's list.
+    listed: Arc<croaring::Bitmap>,
     /// `base_rows` plus every extent's `row_count`, maintained rather than recomputed.
     total_rows: u64,
 }
@@ -1559,6 +1855,8 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows,
             extents: Vec::new(),
+            extent_entities: Vec::new(),
+            listed: Arc::new(croaring::Bitmap::new()),
             total_rows: base_rows as u64,
         }
     }
@@ -1571,6 +1869,11 @@ impl RowSpace {
     pub fn with_row_entity(mut self, table: Arc<crate::row_entity::RowToEntity>) -> Self {
         self.base_inverse = Some(table);
         self
+    }
+
+    /// The base's row-to-entity table, where it published one.
+    pub fn row_entity(&self) -> Option<&Arc<crate::row_entity::RowToEntity>> {
+        self.base_inverse.as_ref()
     }
 
     /// Can this row space cross row→entity at all?
@@ -1609,38 +1912,50 @@ impl RowSpace {
     /// Invert every extent's `rows` into one flat table covering `[base_rows, total_rows)`.
     ///
     /// Extents are disjoint and their `row_base`s continue row space exactly (`with_extent`
-    /// enforces both), so the flat table is dense and each extent writes only its own span.
+    /// enforces both), so the flat table is dense and each extent writes only its own rows.
     fn build_extent_inverse(&self) -> Vec<u32> {
         let span = (self.total_rows - self.base_rows as u64) as usize;
         let mut out = vec![0u32; span];
         for extent in &self.extents {
-            for (offset, &row) in extent.rows.iter().enumerate() {
-                if row == ROW_ABSENT {
-                    continue;
-                }
+            for (entity, row) in extent.pairs() {
                 let absolute = extent.row_base as u64 + row as u64;
                 let at = (absolute - self.base_rows as u64) as usize;
-                out[at] = (extent.entity_lo + offset as u64) as u32;
+                out[at] = entity as u32;
             }
         }
         out
     }
 
+    /// Where the next extent's dense span may begin: one past the newest extent's span, or the
+    /// base's bound. A flush lists the rows of entities below it in the extent's `below`.
+    pub fn entity_floor(&self) -> u64 {
+        self.extents
+            .last()
+            .map_or(self.base.bound(), |extent| extent.entity_hi + 1)
+    }
+
     /// This row space plus one more segment, sharing the base.
     ///
-    /// `None` if `extent` is malformed, does not begin strictly above the last extent's
-    /// `entity_hi`, does not begin at or above the base's bound, or does not continue row space
-    /// exactly (`row_base == total_rows()`). Every one of those is corruption rather than a state
-    /// to tolerate: a gap or an overlap makes some other segment's rows unreachable or aliased.
+    /// `None` if `extent` is malformed, its dense span does not begin strictly above the last
+    /// extent's `entity_hi` and at or above the base's bound, one of its listed entities already
+    /// has a row in this view, or it does not continue row space exactly
+    /// (`row_base == total_rows()`). Every one of those is corruption rather than a state to
+    /// tolerate: a gap or an overlap makes some other segment's rows unreachable or aliased.
     pub fn with_extent(&self, extent: SegmentExtent) -> Option<Self> {
         if !extent.is_well_formed() {
             return None;
         }
-        let entity_floor = match self.extents.last() {
-            Some(last) => last.entity_hi + 1,
-            None => self.base.bound(),
-        };
-        if extent.entity_lo < entity_floor {
+        if extent.entity_lo < self.entity_floor() {
+            return None;
+        }
+        // An item is added to a view only where it has no row there, and a fold frees an id only
+        // once it has removed every row of the id's previous holder, so a listed entity with a row
+        // here is corruption rather than a race.
+        if extent
+            .below
+            .iter()
+            .any(|&(entity, _)| self.row_of(EntityId::new(u64::from(entity))).is_some())
+        {
             return None;
         }
         if u64::from(extent.row_base) != self.total_rows {
@@ -1652,6 +1967,15 @@ impl RowSpace {
         if total_rows > u64::from(u32::MAX) {
             return None;
         }
+        let listed = if extent.below.is_empty() {
+            Arc::clone(&self.listed)
+        } else {
+            let mut listed = (*self.listed).clone();
+            listed.add_many(&extent.below.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+            Arc::new(listed)
+        };
+        let mut extent_entities = self.extent_entities.clone();
+        extent_entities.push(Arc::new(extent.entities()));
         let mut extents = self.extents.clone();
         extents.push(extent);
         Some(RowSpace {
@@ -1662,6 +1986,8 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
+            extent_entities,
+            listed,
             total_rows,
         })
     }
@@ -1697,10 +2023,19 @@ impl RowSpace {
         {
             return None;
         }
+        let mut extent_entities = Vec::with_capacity(self.extents.len() - seg_ids.len() + 1);
+        extent_entities.extend_from_slice(&self.extent_entities[..start]);
+        extent_entities.push(Arc::new(merged.entities()));
+        extent_entities.extend_from_slice(&self.extent_entities[start + seg_ids.len()..]);
         let mut extents = Vec::with_capacity(self.extents.len() - seg_ids.len() + 1);
         extents.extend_from_slice(&self.extents[..start]);
         extents.push(merged);
         extents.extend_from_slice(&self.extents[start + seg_ids.len()..]);
+        // A listed row the merged span now holds leaves the lists.
+        let mut listed = croaring::Bitmap::new();
+        for extent in &extents {
+            listed.add_many(&extent.below.iter().map(|&(e, _)| e).collect::<Vec<_>>());
+        }
         Some(RowSpace {
             base: Arc::clone(&self.base),
             base_inverse: self.base_inverse.clone(),
@@ -1709,29 +2044,166 @@ impl RowSpace {
             extent_inverse: std::sync::OnceLock::new(),
             base_rows: self.base_rows,
             extents,
+            extent_entities,
+            listed: Arc::new(listed),
             total_rows: self.total_rows,
         })
     }
 
+    /// The members of `set` holding a row in the base or in an extent up to and including the one
+    /// whose `seg_id` is `through`; the base alone where `through` is `None`.
+    ///
+    /// `through` is the last extent a caller's rows were projected over, so the answer is the
+    /// entities of those rows and not of rows a flush has added since. Segment ids are never
+    /// reused. `None` where no extent here has that id: a merge has collapsed it, and which of the
+    /// merged extent's entities the caller's rows cover is not known here. `O(containers of set)`
+    /// per part.
+    pub fn restrict_to_view(
+        &self,
+        set: &croaring::Bitmap,
+        through: Option<&str>,
+    ) -> Option<croaring::Bitmap> {
+        let covered = match through {
+            None => 0,
+            Some(seg_id) => self.extents.iter().position(|e| e.seg_id == seg_id)? + 1,
+        };
+        let mut out = set.and(self.base.present_entities());
+        for entities in &self.extent_entities[..covered] {
+            out.or_inplace(&set.and(entities));
+        }
+        Some(out)
+    }
+
+    /// The row-to-entity tables of this row space, or `None` where the base published no
+    /// `row-entity.u32` and so cannot be inverted.
+    pub fn row_entities(&self) -> Option<RowEntities<'_>> {
+        let base: &[u32] = match &self.base_inverse {
+            Some(table) if table.row_count() >= self.base_rows => table.slice(0..self.base_rows),
+            None if self.base_rows == 0 => &[],
+            _ => return None,
+        };
+        let tail: &[u32] = if self.total_rows > u64::from(self.base_rows) {
+            self.extent_inverse
+                .get_or_init(|| self.build_extent_inverse())
+                .as_slice()
+        } else {
+            &[]
+        };
+        Some(RowEntities { base, tail })
+    }
+
+    /// The entities of `rows` grouped by their high 16 bits, the Roaring container key, keeping
+    /// the low 16; `None` where the base published no `row-entity.u32` and so cannot be inverted.
+    /// Rows at or past [`Self::total_rows`] have no entity and contribute nothing.
+    ///
+    /// The rows are cut into pieces of equal cardinality on the current rayon pool, and each
+    /// piece reads its entities a run at a time as slices of the row-to-entity tables, twice: once
+    /// to count each key and once to place each entity in its key's bucket. Two bytes per row are
+    /// held, and nothing is sorted. The entities of a view's rows are distinct.
+    pub fn entity_buckets(&self, rows: &croaring::Bitmap) -> Option<EntityBuckets> {
+        use rayon::prelude::*;
+        let tables = self.row_entities()?;
+        // Every entity with a row here is below the floor, so its key is below this.
+        let keys_below = (self.entity_floor().min(1 << 32) >> 16) as usize + 1;
+        let pieces = tessera_roaring::split_by_cardinality(
+            rows,
+            0..tables.len(),
+            rayon::current_num_threads() * 4,
+        );
+        let pieces: Vec<Buckets16> = pieces
+            .par_iter()
+            .map(|piece| Buckets16::of(rows, piece.clone(), tables, keys_below))
+            .collect();
+        let mut keys: Vec<u16> = pieces
+            .iter()
+            .flat_map(|b| b.keys.iter().map(|&(key, _)| key))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        Some(EntityBuckets { pieces, keys })
+    }
+
+    /// The entities of `rows`, or `None` where the base published no `row-entity.u32` and so
+    /// cannot be inverted. Rows at or past [`Self::total_rows`] have no entity and contribute
+    /// nothing.
+    ///
+    /// Built from [`Self::entity_buckets`] on the current rayon pool, one container per key: a
+    /// bitset stamped directly from the key's buckets, or a sorted array where it holds
+    /// [`tessera_roaring::ARRAY_MAX`] members or fewer.
+    pub fn entities_of_rows(&self, rows: &croaring::Bitmap) -> Option<croaring::Bitmap> {
+        use rayon::prelude::*;
+        let buckets = self.entity_buckets(rows)?;
+        let keys = buckets.keys();
+        let groups = (rayon::current_num_threads() * 4).clamp(1, keys.len().max(1));
+        let parts: Vec<croaring::Bitmap> = keys
+            .par_chunks(keys.len().div_ceil(groups).max(1))
+            .map(|keys| {
+                let mut sink = tessera_roaring::Sink::new();
+                let mut words = [0u64; tessera_roaring::WORDS];
+                let mut members: Vec<u32> = Vec::new();
+                for &key in keys {
+                    let card = buckets.count(key);
+                    if card > tessera_roaring::ARRAY_MAX {
+                        words.fill(0);
+                        buckets.for_each_bucket(key, |lows| {
+                            for &low in lows {
+                                words[usize::from(low >> 6)] |= 1 << (low & 63);
+                            }
+                        });
+                        debug_assert_eq!(
+                            words.iter().map(|w| w.count_ones()).sum::<u32>(),
+                            card,
+                            "the entities of a view's rows are distinct"
+                        );
+                        sink.push_block(key, card, &words);
+                    } else {
+                        members.clear();
+                        buckets.for_each_bucket(key, |lows| {
+                            members.extend(lows.iter().map(|&low| u32::from(low)));
+                        });
+                        members.sort_unstable();
+                        debug_assert!(
+                            members.windows(2).all(|pair| pair[0] < pair[1]),
+                            "the entities of a view's rows are distinct"
+                        );
+                        sink.push_members(key, &members);
+                    }
+                }
+                sink.finish()
+            })
+            .collect();
+        let refs: Vec<&croaring::Bitmap> = parts.iter().collect();
+        Some(croaring::Bitmap::fast_or(&refs))
+    }
+
     /// How many rows the base permutation covers — the boundary below which no flush and no merge
     /// moves a row, which is what makes an extents-only re-projection exact
-    /// (`tessera_engine::compose::RowProjection::rebase_extents`).
+    /// (`tessera_engine::projection::RowProjection::rebase_extents`).
     pub fn base_rows(&self) -> u32 {
         self.base_rows
     }
 
-    /// Row ID currently occupied by `e`, or `None` if it has none — the base lookup below the
-    /// build bound, otherwise a binary search over the extent list, `O(log k)`.
+    /// Row ID currently occupied by `e`, or `None` if it has none: the base lookup below the
+    /// build bound, otherwise a binary search over the extents' dense spans, `O(log k)`, and
+    /// where neither holds it and it is listed, the extent that lists it.
     pub fn row_of(&self, e: EntityId) -> Option<RowId> {
-        if e.raw() < self.base.bound() {
-            return self.base.row_of(e);
-        }
         let raw = e.raw();
-        let i = self
-            .extents
-            .partition_point(|extent| extent.entity_lo <= raw)
-            .checked_sub(1)?;
-        self.extents[i].row_of(raw)
+        let found = if raw < self.base.bound() {
+            self.base.row_of(e)
+        } else {
+            self.extents
+                .partition_point(|extent| extent.entity_lo <= raw)
+                .checked_sub(1)
+                .and_then(|i| self.extents[i].dense_row_of(raw))
+        };
+        found.or_else(|| {
+            let listed = u32::try_from(raw).is_ok_and(|e| self.listed.contains(e));
+            listed.then(|| {
+                self.extents
+                    .iter()
+                    .find_map(|extent| extent.below_row_of(raw))
+            })?
+        })
     }
 
     /// Project an entity-space bitmap into this view's row space: the base projection unioned
@@ -1750,8 +2222,7 @@ impl RowSpace {
 
     /// Project into the **base** rows alone, ignoring every extent above them.
     ///
-    /// **What the fold writes, and what a *generating set* is projected through**
-    /// (`annotation-write-cycle.md` §4.1). A durable derived structure — a row-major column, a tile
+    /// **What the fold writes.** A durable derived structure — a row-major column, a tile
     /// index's extents — is written over the rows the fold folded and describes nothing above them,
     /// so this is the projection that produces one and the projection a reader must compare it
     /// against.
@@ -1760,9 +2231,8 @@ impl RowSpace {
     /// is extended by each flush in place (`tessera_engine::artifacts`); what base-only bought was
     /// that a form survived a flush and a merge untouched, and what it cost was that a member
     /// ingested since the last fold contributed nothing to its artifact's masked count — fail-closed
-    /// and hours wide under the nightly compaction gate. A generating set stays here, because the
-    /// containment partition composed beside it is a function of the level's records and knows
-    /// nothing of the geometry.
+    /// and hours wide under the nightly compaction gate. A generating set is projected through the whole
+    /// row space too.
     pub fn project_base(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.base.project(mask)
     }
@@ -1790,8 +2260,20 @@ impl RowSpace {
 
     /// The rows contributed by the extents at or after `from` — the only part a flush recomputes.
     pub fn project_extents_from(&self, mask: &croaring::Bitmap, from: usize) -> croaring::Bitmap {
+        let extents = &self.extents[from.min(self.extents.len())..];
+        // An extent maps only the entities it holds, so a mask whose highest entity is below the
+        // lowest of them projects to nothing at all. One `maximum` against an iterator, a `Vec`
+        // and a bitmap per extent: a stored level's held form asks this of every artifact it
+        // holds at every flush, and on a corpus whose artifacts are hundreds of thousands of admin
+        // divisions almost every one of them has nothing in the extent a flush just wrote.
+        let floor = extents.iter().filter_map(SegmentExtent::lowest).min();
+        if let (Some(floor), Some(highest)) = (floor, mask.maximum()) {
+            if u64::from(highest) < floor {
+                return croaring::Bitmap::new();
+            }
+        }
         let mut rows = croaring::Bitmap::new();
-        for extent in &self.extents[from.min(self.extents.len())..] {
+        for extent in extents {
             rows.or_inplace(&extent.project(mask));
         }
         rows
@@ -1848,6 +2330,232 @@ mod tests {
         let path = dir.join("permutation.bin");
         crate::write::write_permutation(&path, &entities, bound).expect("write_permutation");
         Permutation::load(&path).expect("load permutation")
+    }
+
+    /// A base over `bound` entities at `density`, its `row-entity.u32`, and two extents: the first
+    /// holding ids above the bound and one listed entity below it that the base has no row for,
+    /// the second above the first. Returns the row space and each extent in the order it joined.
+    fn row_space_fixture(
+        dir: &Path,
+        bound: u64,
+        density: f64,
+        rng: &mut StdRng,
+    ) -> (RowSpace, Vec<SegmentExtent>) {
+        let mut order: Vec<u32> = (0..bound as u32)
+            .filter(|_| rng.gen_bool(density))
+            .collect();
+        order.shuffle(rng);
+        let entities: Vec<EntityId> = order.iter().map(|&e| EntityId::new(u64::from(e))).collect();
+        let perm_path = dir.join("permutation.bin");
+        crate::write::write_permutation(&perm_path, &entities, bound).expect("write_permutation");
+        let table_path = dir.join(crate::row_entity::ROW_ENTITY_FILE);
+        crate::row_entity::write_row_entity(&table_path, &order).expect("write_row_entity");
+        let base_rows = order.len() as u32;
+        let space = RowSpace::new(
+            Arc::new(Permutation::load(&perm_path).expect("load")),
+            base_rows,
+        )
+        .with_row_entity(Arc::new(
+            crate::row_entity::RowToEntity::load(&table_path).expect("load table"),
+        ));
+        let absent = (0..bound)
+            .find(|&e| space.row_of(EntityId::new(e)).is_none())
+            .expect("the base leaves some entity without a row");
+
+        let mut first: Vec<u64> = (bound..bound + 300).filter(|_| rng.gen_bool(0.8)).collect();
+        first.push(absent);
+        first.shuffle(rng);
+        let span = SegmentExtent::flush_span(space.entity_floor(), first.iter().copied());
+        let one = SegmentExtent::from_rows("s1", base_rows, span, first).expect("extent one");
+        let space = space.with_extent(one.clone()).expect("extent one joins");
+
+        let floor = space.entity_floor();
+        let mut second: Vec<u64> = (floor..floor + 200).filter(|_| rng.gen_bool(0.5)).collect();
+        second.shuffle(rng);
+        let span = SegmentExtent::flush_span(floor, second.iter().copied());
+        let row_base = space.total_rows() as u32;
+        let two = SegmentExtent::from_rows("s2", row_base, span, second).expect("extent two");
+        let space = space.with_extent(two.clone()).expect("extent two joins");
+        (space, vec![one, two])
+    }
+
+    /// `present_entities` holds exactly the entities `row_of` finds a row for, whether it was
+    /// filled by `validate_rows`, on first use, or from a declared row count.
+    #[test]
+    fn present_entities_are_the_entities_with_a_row() {
+        const BOUND: u64 = (3 << PAGE_SHIFT) + 1_000;
+        for (seed, density) in [(1u64, 0.6), (2, 1.0)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut rng = StdRng::seed_from_u64(seed);
+            let perm = fixture(dir.path(), BOUND, density, &mut rng);
+            let want: croaring::Bitmap = (0..BOUND)
+                .filter(|&e| perm.row_of(EntityId::new(e)).is_some())
+                .map(|e| e as u32)
+                .collect();
+            assert_eq!(
+                perm.present_entities(),
+                &want,
+                "density {density}, on first use"
+            );
+
+            let validated = Permutation::load(&dir.path().join("permutation.bin")).expect("load");
+            validated
+                .validate_rows(want.cardinality() as u32)
+                .expect("the fixture is a bijection");
+            assert_eq!(
+                validated.present_entities(),
+                &want,
+                "density {density}, validated"
+            );
+
+            let declared = Permutation::load(&dir.path().join("permutation.bin")).expect("load");
+            declared.declare_dense_rows(want.cardinality() as u32);
+            assert_eq!(
+                declared.present_entities(),
+                &want,
+                "density {density}, declared"
+            );
+        }
+    }
+
+    /// `restrict_to_view(set, through)` keeps the members of `set` with a row in the base or in the
+    /// extents up to `through`, and nothing else; after a merge it keeps them up to the merged
+    /// extent, and it has no answer for an extent the merge collapsed.
+    #[test]
+    fn restricting_to_a_view_keeps_the_entities_with_a_row_in_the_covered_extents() {
+        const BOUND: u64 = (2 << PAGE_SHIFT) + 500;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(3);
+        let (space, extents) = row_space_fixture(dir.path(), BOUND, 0.7, &mut rng);
+        let top = space.entity_floor() + 50;
+        let set: croaring::Bitmap = (0..top)
+            .filter(|_| rng.gen_bool(0.5))
+            .map(|e| e as u32)
+            .collect();
+        let want = |covered: &[SegmentExtent]| -> croaring::Bitmap {
+            set.iter()
+                .filter(|&e| {
+                    let e = u64::from(e);
+                    space.base().row_of(EntityId::new(e)).is_some()
+                        || covered
+                            .iter()
+                            .any(|extent| extent.pairs().any(|(held, _)| held == e))
+                })
+                .collect()
+        };
+        assert_eq!(
+            space.restrict_to_view(&set, None),
+            Some(want(&[])),
+            "the base"
+        );
+        for (i, extent) in extents.iter().enumerate() {
+            assert_eq!(
+                space.restrict_to_view(&set, Some(&extent.seg_id)),
+                Some(want(&extents[..=i])),
+                "through {}",
+                extent.seg_id
+            );
+        }
+        assert_eq!(space.restrict_to_view(&set, Some("no-such-segment")), None);
+
+        // A merge of both extents into one: rows projected through the first no longer say which
+        // of the merged extent's entities they hold.
+        let mut by_row: Vec<(u32, u64)> = extents
+            .iter()
+            .flat_map(|extent| {
+                extent
+                    .pairs()
+                    .map(move |(entity, row)| (extent.row_base + row, entity))
+            })
+            .collect();
+        by_row.sort_unstable();
+        let merged = SegmentExtent::from_rows(
+            "m",
+            extents[0].row_base,
+            (extents[0].entity_lo, extents[1].entity_hi),
+            by_row.into_iter().map(|(_, entity)| entity),
+        )
+        .expect("the merged extent is well formed");
+        let seg_ids: Vec<String> = extents.iter().map(|e| e.seg_id.clone()).collect();
+        let merged_space = space
+            .collapsing(&seg_ids, merged)
+            .expect("the merge applies");
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some(&extents[0].seg_id)),
+            None
+        );
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some(&extents[1].seg_id)),
+            None
+        );
+        assert_eq!(
+            merged_space.restrict_to_view(&set, Some("m")),
+            Some(want(&extents))
+        );
+        assert_eq!(merged_space.restrict_to_view(&set, None), Some(want(&[])));
+    }
+
+    /// `entities_of_rows` is `entity_of` over every row of the set: across the base and the
+    /// extents, over sets dense, scattered and in runs, and ignoring rows past row space. One
+    /// key holding exactly 4,096 entities is an array container and one holding 4,097 a bitset,
+    /// and both come back whole.
+    #[test]
+    fn the_entities_of_rows_are_each_rows_entity() {
+        const BOUND: u64 = (1 << 20) + (3 << PAGE_SHIFT);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(4);
+        let (space, _) = row_space_fixture(dir.path(), BOUND, 0.98, &mut rng);
+        let total = space.total_rows() as u32;
+        let base = space.base_rows();
+        let mut sets = vec![
+            croaring::Bitmap::new(),
+            croaring::Bitmap::from_range(0..total),
+            croaring::Bitmap::from_range(base - 10..total + 10),
+        ];
+        let rows_of_key_zero: Vec<u32> = (0..total)
+            .filter(|&row| {
+                space
+                    .entity_of(RowId::new(row))
+                    .is_some_and(|e| e.raw() < 1 << 16)
+            })
+            .collect();
+        for members in [4_096usize, 4_097] {
+            sets.push(croaring::Bitmap::of(&rows_of_key_zero[..members]));
+        }
+        sets.push((0..total + 5).filter(|_| rng.gen_bool(0.01)).collect());
+        let mut runs = croaring::Bitmap::new();
+        for _ in 0..40 {
+            let start = rng.gen_range(0..total);
+            runs.add_range(start..(start + rng.gen_range(1..5_000)).min(total));
+        }
+        sets.push(runs);
+        for rows in &sets {
+            let want: croaring::Bitmap = rows
+                .iter()
+                .filter_map(|row| space.entity_of(RowId::new(row)))
+                .map(|e| e.raw() as u32)
+                .collect();
+            assert_eq!(
+                space.entities_of_rows(rows),
+                Some(want),
+                "{} rows",
+                rows.cardinality()
+            );
+        }
+    }
+
+    /// Without a base `row-entity.u32` the crossing has no answer, and says so.
+    #[test]
+    fn the_entities_of_rows_need_the_base_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut rng = StdRng::seed_from_u64(5);
+        let perm = fixture(dir.path(), 1_000, 0.5, &mut rng);
+        let rows = perm.present_entities().cardinality() as u32;
+        let space = RowSpace::new(Arc::new(perm), rows);
+        assert_eq!(
+            space.entities_of_rows(&croaring::Bitmap::from_range(0..rows)),
+            None
+        );
     }
 
     /// `count` entities drawn from `[0, bound)`, plus a handful above it — which a real mask holds

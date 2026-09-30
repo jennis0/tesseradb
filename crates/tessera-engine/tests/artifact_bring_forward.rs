@@ -19,14 +19,13 @@ mod common;
 
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
+use tessera_engine::Engine;
+use tessera_lifecycle::{ChangeOp, IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource, ServingLayout,
 };
 use tessera_types::EntityId;
 
-const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 const LAYER: &str = "clusters/a";
 const LABELS: &str = "topics/a";
 
@@ -82,29 +81,6 @@ fn open_declaration(name: &str, layout: Option<ServingLayout>) -> LayerDeclarati
     }
 }
 
-struct Fixture {
-    _tmp: tempfile::TempDir,
-    root: std::path::PathBuf,
-    cache: std::path::PathBuf,
-    wal: std::path::PathBuf,
-}
-
-fn fixture() -> Fixture {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("bundle");
-    build_fixture(
-        &root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    Fixture {
-        root,
-        cache: tmp.path().join("cache"),
-        wal: tmp.path().join("wal.log"),
-        _tmp: tmp,
-    }
-}
-
 impl Fixture {
     fn open(&self) -> Engine {
         let engine = open_engine_publishing(&self.root, &self.cache, &self.wal);
@@ -125,21 +101,15 @@ impl Fixture {
     }
 }
 
-fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
-    let session = engine.authorise(&full_coverage_credential()).unwrap();
-    engine
-        .viewport(
-            &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
-        )
-        .expect("a viewport over the whole map")
-        .artifacts
-}
-
 /// Every served artifact's key and masked count, ascending by key — what a viewer is told, which
 /// is what every assertion here is finally about.
 fn served(engine: &Engine) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = artifacts_of(engine)
+    counts_for(engine, &full_coverage_credential())
+}
+
+/// [`served`], to the principal `credential` authorises.
+fn counts_for(engine: &Engine, credential: &[u8]) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = artifacts_of(engine, credential)
         .into_iter()
         .map(|a| (a.key.unwrap_or_default(), a.masked_count))
         .collect();
@@ -161,6 +131,18 @@ fn publish(engine: &Engine, key: &str, members: Vec<EntityId>) {
         )
         .expect("a publication into a registered layer");
     tick(engine);
+}
+
+/// Release a flush held by `set_flush_paused_for_test` and wait for it to publish.
+fn release_held_flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.set_flush_paused_for_test(false);
+    tick_until(
+        engine,
+        "the held flush to publish",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().flushes > before,
+    );
 }
 
 fn grow(engine: &Engine, key: &str, members: Vec<EntityId>) {
@@ -225,14 +207,13 @@ fn page(engine: &Engine, fx: &Fixture, key: &str, rank: u16, joining: Vec<u64>, 
 
 /// One ingested point, under a batch key used once — a second ingest under a key already seen is
 /// *replayed* rather than accepted, so a fixed key would silently ingest nothing the second time.
-fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
+fn ingest(engine: &Engine, batch: &[u8]) -> EntityId {
     let descriptors = vec![b"0".to_vec()];
     let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(external_id) {
+    for (slot, byte) in key.iter_mut().zip(batch) {
         *slot = *byte;
     }
     let row = tessera_lifecycle::command::UnallocatedRow {
-        external_id: Some(external_id.to_vec()),
         view: "s0".to_string(),
         join: None,
         descriptors: descriptors.clone(),
@@ -243,9 +224,9 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         scoped: Vec::new(),
     };
     engine
-        .accept_ingest(
+        .ingest_rows(
             vec![row],
-            String::from_utf8_lossy(external_id).into_owned(),
+            String::from_utf8_lossy(batch).into_owned(),
             key,
         )
         .expect("the ingest is accepted")[0]
@@ -261,9 +242,7 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
     }
     let rows: Vec<_> = names
         .iter()
-        .enumerate()
-        .map(|(i, _)| tessera_lifecycle::command::UnallocatedRow {
-            external_id: Some(format!("{batch}-{i}").into_bytes()),
+        .map(|_| tessera_lifecycle::command::UnallocatedRow {
             view: "s0".to_string(),
             join: None,
             descriptors: descriptors.clone(),
@@ -280,12 +259,13 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         .map(|(i, key)| tessera_lifecycle::BatchMembership {
             layer: LAYER.to_string(),
             level: 0,
+            view: None,
             key: (*key).to_string(),
             rows: vec![i as u32],
         })
         .collect();
     let (_, minted) = engine
-        .accept_ingest_joining(
+        .ingest_rows_joining(
             rows,
             batch.to_string(),
             hash,
@@ -297,40 +277,6 @@ fn ingest_naming(engine: &Engine, batch: &str, names: &[&str]) -> u64 {
         .expect("points naming artifacts of an open layer are an ordinary write");
     tick(engine);
     minted
-}
-
-fn flush(engine: &Engine) {
-    let before = engine.write_executor_stats().flushes;
-    engine.request_flush();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while engine.write_executor_stats().flushes == before {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-fn fold(engine: &Engine) {
-    let before = engine.write_executor_stats();
-    engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded rather than published"
-        );
-        if now.folds > before.folds {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
 }
 
 /// Flush enough times to fill the merge policy's tier, then let one merge publish — the one
@@ -347,11 +293,11 @@ fn merge(engine: &Engine) -> Vec<EntityId> {
         b"merge-d".as_slice(),
     ] {
         ingested.push(ingest(engine, batch));
-        flush(engine);
+        publish_buffered(engine);
     }
     engine.set_merge_for_test(true);
     ingested.push(ingest(engine, b"merge-e"));
-    flush(engine);
+    publish_buffered(engine);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while engine.write_executor_stats().merges == merges {
         assert!(
@@ -545,7 +491,9 @@ fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
     let warm = engine.artifact_cache_builds().0;
 
     // One batch, two rows: the first names the artifact that exists (a growth), the second a key
-    // no artifact holds (a mint, which publishes). One window, two records, one level.
+    // no artifact holds (a mint, which publishes). One window, two records, one level. The tick
+    // that publishes them also flushes the rows, so the flush is held while they are buffered.
+    engine.set_flush_paused_for_test(true);
     assert_eq!(
         ingest_naming(&engine, "mixed", &["a0", "made-by-a-point"]),
         1,
@@ -565,7 +513,7 @@ fn a_window_that_mints_and_grows_one_level_rebuilds_nothing() {
 
     // And the rows the window ingested reach both artifacts at their flush, still without a
     // rebuild: the mint's delta and the growth's are both in the form the flush then extends.
-    flush(&engine);
+    release_held_flush(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 101), ("made-by-a-point".to_string(), 1)],
@@ -592,6 +540,9 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
     let engine = fx.open();
     engine.register_layer(declaration(LAYER, None)).unwrap();
 
+    // The tick that publishes the artifact also flushes the buffered row, so the flush is held
+    // until the buffered count has been read.
+    engine.set_flush_paused_for_test(true);
     let fresh = ingest(&engine, b"joins-a0");
     let mut members = fx.members(0..100);
     members.push(fresh);
@@ -603,7 +554,7 @@ fn an_ingested_member_counts_at_its_flush_and_the_fold_changes_nothing() {
         "buffered: the member has no row anywhere, so it is in no count"
     );
 
-    flush(&engine);
+    release_held_flush(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 101)],
@@ -628,7 +579,7 @@ fn a_member_that_joins_after_its_flush_counts_at_the_growth() {
     publish(&engine, "a0", fx.members(0..100));
 
     let fresh = ingest(&engine, b"joins-later");
-    flush(&engine);
+    publish_buffered(&engine);
     assert_eq!(
         served(&engine),
         vec![("a0".to_string(), 100)],
@@ -723,7 +674,7 @@ fn a_merge_is_applied_to_the_warm_form_rather_than_rebuilding_it() {
         // A member on an extent row before the merge, so the span the merge renumbers holds a
         // labelled row and not only unclaimed ones.
         let fresh = ingest(&engine, b"pre-merge");
-        flush(&engine);
+        publish_buffered(&engine);
         grow(&engine, "a0", vec![fresh]);
         assert_eq!(
             served(&engine),
@@ -832,13 +783,13 @@ fn an_amended_form_equals_one_built_from_scratch() {
         publish(&engine, "a1", fx.members(500..600));
         grow(&engine, "a0", fx.members(100..150));
         let fresh = ingest(&engine, b"differential");
-        flush(&engine);
+        publish_buffered(&engine);
         grow(&engine, "a1", vec![fresh]);
         // **A publication *after* the flush**, so the ordinal it places is placed into a form whose
         // row space carries an extent — the case `publish_at` takes and a pre-flush publication
         // does not reach.
         let later = ingest(&engine, b"differential-later");
-        flush(&engine);
+        publish_buffered(&engine);
         publish(&engine, "a2", vec![later]);
 
         let maintained_answers = served(&engine);
@@ -961,6 +912,395 @@ fn an_amended_form_equals_one_built_from_scratch() {
     }
 }
 
+/// **Points flushed and merged after a fold, joining nothing, leave the level served from its
+/// column at a restart.** The level has not moved, so the fold's column is current for the base
+/// rows; the row space has extents it does not reach, and the restart brings it over them rather
+/// than transposing it into per-artifact rows, which at billions of rows is more memory than the
+/// server has.
+#[test]
+fn a_restart_over_flushed_and_merged_rows_serves_the_level_from_its_column() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    fold(&engine);
+    merge(&engine);
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(
+        !form.membership().rows_held(),
+        "the level is served from its column and holds no rows"
+    );
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A restart after writes serves a row-major level from the fold's column, brought forward,
+/// and never from rows it transposes or projects.**
+///
+/// After a fold the level takes a growth and a publication over base rows, which move it past the
+/// column the fold wrote, and flushes and a merge, which give the row space extents the column
+/// does not reach; members join on both sides of the merge. A restart then has the fold's column
+/// and records that say more. It completes the column with the base rows it misses and brings it
+/// over every extent, the amendments the live engine made as the writes arrived, so it holds the
+/// pairs those writes added and no row of the level. The form it serves is compared with one built
+/// from scratch over the same records and row space, extent for extent and declared size for
+/// declared size.
+#[test]
+fn a_restart_after_writes_brings_the_folds_column_forward_without_holding_rows() {
+    // The two layouts that hold a column.
+    for layout in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+        let fx = fixture();
+        let engine = fx.open();
+        engine
+            .register_layer(declaration(LAYER, Some(layout)))
+            .unwrap();
+        publish(&engine, "a0", fx.members(0..100));
+        publish(&engine, "a1", fx.members(500..600));
+        // Read before the fold reclaims the prefix the map is read from.
+        let (joining, later) = (fx.members(100..150), fx.members(700..720));
+        fold(&engine);
+
+        grow(&engine, "a0", joining);
+        publish(&engine, "a2", later);
+        let merged = merge(&engine);
+        engine.set_merge_for_test(false);
+        grow(&engine, "a1", vec![merged[0], merged[2]]);
+        let fresh = ingest(&engine, b"after-the-merge");
+        publish_buffered(&engine);
+        grow(&engine, "a2", vec![fresh]);
+        let before = served(&engine);
+        assert_eq!(
+            before,
+            vec![
+                ("a0".to_string(), 150),
+                ("a1".to_string(), 102),
+                ("a2".to_string(), 21)
+            ],
+            "{layout:?}: the writes reached the live engine"
+        );
+        drop(engine);
+
+        let reopened = fx.open();
+        assert_eq!(
+            served(&reopened),
+            before,
+            "{layout:?}: the restart serves what the live engine served"
+        );
+        let form = reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held");
+        assert!(
+            !form.membership().rows_held(),
+            "{layout:?}: the level is served from its column and holds no rows"
+        );
+        assert_eq!(
+            form.layout(),
+            layout,
+            "{layout:?}: and in the layout the fold wrote"
+        );
+        assert!(reopened.columns_adopted() > 0);
+        assert_eq!(
+            reopened.columns_composed(),
+            0,
+            "{layout:?}: the fold's column was brought forward and nothing was composed"
+        );
+        // Everything but the per-artifact bitmaps, which a column-only form does not hold.
+        let without_rows = |form: Vec<String>| -> Vec<String> {
+            form.into_iter()
+                .map(|line| match (line.find(" rows="), line.find(" extent=")) {
+                    (Some(from), Some(to)) => format!("{}{}", &line[..from], &line[to..]),
+                    _ => line,
+                })
+                .collect()
+        };
+        let brought = without_rows(form_of(&reopened, LAYER));
+
+        reopened.forget_artifact_forms_for_test(LAYER);
+        assert_eq!(served(&reopened), before);
+        let rebuilt = without_rows(form_of(&reopened, LAYER));
+        assert_eq!(brought.len(), rebuilt.len());
+        for (brought, built) in brought.iter().zip(&rebuilt) {
+            assert_eq!(
+                brought, built,
+                "{layout:?}: the restart's form and one built from scratch describe different \
+                 levels"
+            );
+        }
+    }
+}
+
+/// **A deletion and a suppression written between a fold and a restart are served to a viewer who
+/// sees part of the level, before the restart and after it.** The level has also taken a growth,
+/// so the restart completes the fold's column; the denied members are on both sides of it, in the
+/// rows the column labels and in the rows the growth added.
+#[test]
+fn a_restart_serves_denials_written_since_the_fold_to_a_restricted_viewer() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let member = |source: u64| fx.members(source..source + 1)[0];
+    let (joining, denied) = (
+        fx.members(100..150),
+        [
+            (member(3), ChangeOp::Delete),
+            (member(6), ChangeOp::Suppress),
+            (member(102), ChangeOp::Delete),
+            (member(105), ChangeOp::Suppress),
+            (member(501), ChangeOp::Suppress),
+        ],
+    );
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    for (entity, op) in denied {
+        engine
+            .accept_change(entity, op)
+            .expect("the change is accepted");
+    }
+    tick(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 and 33 of a1's
+    // 100, each less the denials among them. Every denial above is one of those.
+    let subset = vec![("a0".to_string(), 46), ("a1".to_string(), 32)];
+    let whole = vec![("a0".to_string(), 146), ("a1".to_string(), 99)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset);
+    assert_eq!(served(&reopened), whole);
+    assert!(
+        !reopened
+            .held_artifact_form_for_test("s0", LAYER, 0)
+            .expect("the level's form is held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column"
+    );
+}
+
+/// **A growth into rows another artifact's base already labels, between a fold and a restart,
+/// takes the label column past a partition.** The restart brings the column over the joined
+/// rows, cannot hold them in the label form, and recomposes the level as a list, as the live
+/// engine did when the growth arrived. The answers are the same on both sides of the restart.
+#[test]
+fn a_restart_after_a_growth_into_anothers_base_rows_serves_the_level_as_a_list() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(50..60);
+    fold(&engine);
+    grow(&engine, "a1", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 100), ("a1".to_string(), 110)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert_eq!(
+        form.layout(),
+        ServingLayout::RowMajorList,
+        "a row carrying two artifacts is held by the list form"
+    );
+    assert!(
+        !form.membership().rows_held(),
+        "and the level is still served from its column"
+    );
+    assert_eq!(counts_for(&reopened, &subset_credential()), {
+        // 0, 3, ... 99 is 34; 501 ... 597 is 33, and 51 ... 57 joined it.
+        vec![("a0".to_string(), 34), ("a1".to_string(), 36)]
+    });
+}
+
+/// **A layer that derives a hull holds its level's rows, so a restart does not complete a column
+/// the level has moved past: it projects the level and composes the column over what it built.**
+/// Taking the fold's column would have transposed it into rows that lack the growth.
+#[test]
+fn a_restart_of_a_hull_level_behind_its_column_projects_the_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    let mut hulled = declaration(LAYER, Some(ServingLayout::RowMajorLabel));
+    hulled.content.computed = vec!["hull".into()];
+    engine.register_layer(hulled).unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..130);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    let before = served(&engine);
+    assert_eq!(
+        before,
+        vec![("a0".to_string(), 130), ("a1".to_string(), 100)]
+    );
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(served(&reopened), before);
+    let form = reopened
+        .held_artifact_form_for_test("s0", LAYER, 0)
+        .expect("the level's form is held");
+    assert!(form.membership().rows_held(), "a hull level holds its rows");
+    assert_eq!(form.layout(), ServingLayout::RowMajorLabel);
+    let restarted = form_of(&reopened, LAYER);
+    reopened.forget_artifact_forms_for_test(LAYER);
+    assert_eq!(served(&reopened), before);
+    assert_eq!(
+        form_of(&reopened, LAYER),
+        restarted,
+        "the restart's form is the one built from scratch"
+    );
+}
+
+/// **Members joining a mapped membership are held beside the mapping, on the live engine and when
+/// a restart replays them.** Holding the membership whole on the heap for every join is what a
+/// taxonomy whose every top rank gains a member cannot afford; the join is what is held.
+#[test]
+fn a_growth_over_a_mapped_membership_keeps_it_mapped_live_and_after_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let joining = fx.members(100..150);
+    let mut expected: Vec<u32> = fx
+        .members(0..150)
+        .iter()
+        .map(|entity| entity.raw() as u32)
+        .collect();
+    expected.sort_unstable();
+    fold(&engine);
+    grow(&engine, "a0", joining);
+
+    let held = |engine: &Engine, when: &str| {
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        let (_, members, mapped) = &level[0];
+        assert_eq!(
+            members, &expected,
+            "{when}: a0 holds its members and the joined"
+        );
+        assert!(
+            *mapped,
+            "{when}: a0's membership is still read through its extent"
+        );
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    held(&engine, "live");
+    let before = served(&engine);
+    drop(engine);
+
+    let reopened = fx.open();
+    held(&reopened, "replayed");
+    assert_eq!(served(&reopened), before);
+    assert_eq!(reopened.columns_composed(), 0);
+}
+
+/// **A fold after members joined a mapped membership carries the joins, and a deletion among
+/// them, into the membership it maps back.** The first fold maps a0; the joins are held beside
+/// the mapping; the second fold retires the deleted one and reads a0 back through its own pack,
+/// leaving nothing on the heap. Served to the subset viewer and the full viewer, before a restart
+/// and after it.
+#[test]
+fn a_fold_after_joins_to_a_mapped_membership_maps_back_their_union() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (joining, deleted) = (fx.members(100..150), fx.members(102..103)[0]);
+    fold(&engine);
+    grow(&engine, "a0", joining);
+    engine
+        .accept_change(deleted, ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+
+    // The subset viewer sees the source ids divisible by three: 50 of a0's 150 less the deleted
+    // 102, and 33 of a1's 100.
+    let subset = vec![("a0".to_string(), 49), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 149), ("a1".to_string(), 100)];
+    let check = |engine: &Engine, when: &str| {
+        assert_eq!(counts_for(engine, &subset_credential()), subset, "{when}");
+        assert_eq!(served(engine), whole, "{when}");
+        let level = engine.level_memberships_for_test(LAYER, 0);
+        assert_eq!(level[0].1.len(), 149, "{when}: a0 holds its joins less the deleted");
+        assert!(level[0].2, "{when}: a0 is read through the pack the fold wrote");
+        assert_eq!(engine.owned_memberships_for_test(), 0, "{when}");
+    };
+    check(&engine, "after the fold");
+    drop(engine);
+    check(&fx.open(), "after a restart");
+}
+
+/// **Members joining while a fold is in flight survive the fold and a restart.** The fold packed
+/// a0 before the join, so what it wrote is short of the membership the store holds; the swap
+/// that would map a0 back through that pack is refused and the joins stay held.
+#[test]
+fn a_join_while_a_fold_is_in_flight_survives_the_fold_and_a_restart() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(LAYER, Some(ServingLayout::RowMajorLabel)))
+        .unwrap();
+    publish(&engine, "a0", fx.members(0..100));
+    publish(&engine, "a1", fx.members(500..600));
+    let (first, second) = (fx.members(100..130), fx.members(130..150));
+    fold(&engine);
+    grow(&engine, "a0", first);
+
+    let folds = engine.write_executor_stats().folds;
+    engine.set_fold_paused_for_test(true);
+    engine.request_fold();
+    wait_until("the fold holds", std::time::Duration::from_secs(60), || {
+        engine.fold_is_holding_for_test()
+    });
+    grow(&engine, "a0", second);
+    engine.set_fold_paused_for_test(false);
+    wait_until(
+        "the fold publishes",
+        std::time::Duration::from_secs(60),
+        || engine.write_executor_stats().folds > folds,
+    );
+    tick(&engine);
+
+    let subset = vec![("a0".to_string(), 50), ("a1".to_string(), 33)];
+    let whole = vec![("a0".to_string(), 150), ("a1".to_string(), 100)];
+    assert_eq!(counts_for(&engine, &subset_credential()), subset);
+    assert_eq!(served(&engine), whole);
+    drop(engine);
+
+    let reopened = fx.open();
+    assert_eq!(counts_for(&reopened, &subset_credential()), subset, "after a restart");
+    assert_eq!(served(&reopened), whole, "after a restart");
+}
+
 /// **A level whose generating sets are paged is maintained into the form a build produces.**
 ///
 /// The differential above moves memberships; this one moves the other set an artifact carries. A
@@ -1032,4 +1372,235 @@ fn a_paged_generating_set_is_maintained_into_the_form_a_build_produces() {
          the eighty it was published with plus the ten its own page joined — {}",
         maintained[1]
     );
+}
+
+// ---- a merge under a generating set ----------------------------------------------------------
+
+/// The merge policy's shipped width: how many adjacent same-tier extents select a merge.
+const TIER_WIDTH: usize = 4;
+/// Points per interleaved segment. Above [`TIER_WIDTH`], so the merged order cycles through every
+/// segment more than once and no row's position is a coincidence of the first cycle.
+const ROWS_EACH: usize = 8;
+
+/// Flush [`TIER_WIDTH`] segments of [`ROWS_EACH`] points each, laid out so that the segments
+/// **interleave in Morton order**, and return the entities by `[segment][t]`.
+///
+/// Segment `s` takes the x positions congruent to `s` modulo [`TIER_WIDTH`], at one y. Morton
+/// order over a constant y is monotone in x, so the merged extent orders the rows
+/// `s0t0, s1t0, s2t0, s3t0, s0t1, …`: point `(s, t)` holds row `ROWS_EACH·s + t` inside the span
+/// before the merge and `TIER_WIDTH·t + s` after it. A point per flush at ascending x would give
+/// extents already in Morton order, which the merged segment concatenates unchanged, and every
+/// assertion about a moved row is then true of the identity.
+///
+/// `descriptors_of` gives each point its access descriptors by `(s, t)`.
+fn flush_interleaved(
+    engine: &Engine,
+    descriptors_of: impl Fn(usize, usize) -> Vec<Vec<u8>>,
+) -> Vec<Vec<EntityId>> {
+    let mut by_segment = Vec::new();
+    for s in 0..TIER_WIDTH {
+        let rows: Vec<_> = (0..ROWS_EACH)
+            .map(|t| {
+                let descriptors = descriptors_of(s, t);
+                tessera_lifecycle::command::UnallocatedRow {
+                    view: "s0".to_string(),
+                    join: None,
+                    x: ((t * TIER_WIDTH + s) * 20) as f64,
+                    y: 5.0,
+                    scalars: Vec::new(),
+                    terms: engine.resolve_terms(&descriptors),
+                    descriptors,
+                    scoped: Vec::new(),
+                }
+            })
+            .collect();
+        by_segment.push(
+            engine
+                .ingest_rows(rows, format!("interleaved-{s}"), [s as u8 + 1; 32])
+                .expect("the ingest is accepted"),
+        );
+        publish_buffered(engine);
+    }
+    by_segment
+}
+
+/// One entity's row, or `None` while it is buffered.
+fn row_of(engine: &Engine, entity: EntityId) -> Option<u32> {
+    engine.generation().bundle.partitions["default"].views["s0"]
+        .row_space
+        .row_of(entity)
+        .map(|row| row.raw())
+}
+
+/// Let one merge publish over the extents [`flush_interleaved`] wrote, and return each watched
+/// entity's row before and after it. Merge is turned off again on the way out, so the ticks that
+/// follow do not take the policy's next chance and move the rows an assertion holds fixed.
+fn run_merge(engine: &Engine, watched: &[EntityId]) -> (Vec<Option<u32>>, Vec<Option<u32>>) {
+    let before: Vec<Option<u32>> = watched.iter().map(|e| row_of(engine, *e)).collect();
+    let merges = engine.write_executor_stats().merges;
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().merges == merges {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    engine.set_merge_for_test(false);
+    let after: Vec<Option<u32>> = watched.iter().map(|e| row_of(engine, *e)).collect();
+    (before, after)
+}
+
+/// Every artifact key this principal is served, ascending. A viewer who contains no content's
+/// generating set entirely receives no artifact at all rather than one with the content dropped
+/// (`ArtifactOut::content`), so a key absent here is a content withheld.
+fn served_to(engine: &Engine, credential: &[u8]) -> Vec<String> {
+    let session = engine.authorise(credential).unwrap();
+    let mut keys: Vec<String> = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+        .into_iter()
+        .filter_map(|a| a.key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Publish one artifact of `LABELS` whose one content is generated from `generated_from`, and tick.
+fn publish_generated_from(
+    engine: &Engine,
+    key: &str,
+    members: Vec<EntityId>,
+    generated_from: Vec<EntityId>,
+) {
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some(key.into()),
+                members,
+                vec![tessera_lifecycle::membership::IncomingContent::new(
+                    vec![format!("{key} label 0")],
+                    generated_from,
+                )],
+            )],
+        )
+        .expect("a publication carrying a content and its set");
+    tick(engine);
+}
+
+/// **A merge that moves a generating set's member gives the set the row the member now holds.**
+///
+/// A generating set is a set of *rows*, and a merge renumbers the rows inside the span it
+/// collapses. The rebase clears each set over the span and re-projects it from the record's
+/// entities, so the set names the same entities afterwards. Carry the rows across instead and the
+/// set keeps its cardinality while naming whatever the merge put at those rows — which serves an
+/// all-gated content to a principal who holds the new occupant and not the member, and withholds
+/// it from the principal who holds the member.
+///
+/// So this asserts both directions at the serving level, over a span whose merged order is
+/// **provably** not the concatenation: the member's row before the merge is the successor's row
+/// after it, asserted here rather than assumed of the fixture.
+#[test]
+fn a_merge_that_moves_a_generating_sets_member_re_projects_the_set() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(label_declaration(LABELS)).unwrap();
+    engine.set_merge_for_test(false);
+
+    // The content's one member, and the point that takes its row: `(1, 1)` holds row `8·1 + 1`
+    // inside the span before the merge and `4·1 + 1` after it, and `(1, 2)` holds `4·2 + 1`
+    // after — the row `(1, 1)` gave up. See [`flush_interleaved`] for the layout.
+    const MEMBER: (usize, usize) = (1, 1);
+    const SUCCESSOR: (usize, usize) = (1, 2);
+    let segments = flush_interleaved(&engine, |s, t| match (s, t) {
+        // The member is visible to the broad principal alone, its successor to the narrow
+        // principal alone; every other point to both.
+        MEMBER => vec![b"0".to_vec()],
+        SUCCESSOR => vec![b"1".to_vec()],
+        _ => vec![b"0".to_vec(), b"1".to_vec()],
+    });
+    let member = segments[MEMBER.0][MEMBER.1];
+    let successor = segments[SUCCESSOR.0][SUCCESSOR.1];
+
+    // Thirty built members, of which the narrow principal sees ten, so this artifact has a
+    // non-zero masked count for both principals and an absence below is the content's gate rather
+    // than an empty membership.
+    publish_generated_from(&engine, "m0", fx.members(0..30), vec![member]);
+
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the broad principal holds the set's one member and is served the content"
+    );
+    assert_eq!(
+        served_to(&engine, &subset_credential()),
+        Vec::<String>::new(),
+        "the narrow principal lacks that member and is served nothing"
+    );
+
+    let builds = engine.artifact_cache_builds().0;
+    let (before, after) = run_merge(&engine, &[member, successor]);
+
+    assert!(
+        before.iter().chain(&after).all(Option::is_some),
+        "both watched points must hold a row on each side of the merge: {before:?} -> {after:?}"
+    );
+    assert_ne!(
+        before[0], after[0],
+        "the merge left the member where it was, so the rest of this case is about the identity \
+         permutation — see flush_interleaved"
+    );
+    assert_eq!(
+        before[0], after[1],
+        "the successor must occupy the member's old row, or the two principals below are not \
+         separated by the rebase: {before:?} -> {after:?}"
+    );
+
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the set holds the member at the row it now holds, so the principal who holds the member \
+         is still served"
+    );
+    assert_eq!(
+        served_to(&engine, &subset_credential()),
+        Vec::<String>::new(),
+        "the narrow principal holds the point that now occupies the member's old row and not the \
+         member itself, and must be served nothing"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds().0,
+        builds,
+        "the merge was taken by the held form, so those two answers are the maintained form's \
+         rather than a rebuild's"
+    );
+
+    // And the maintained form is the built form, generating set for generating set.
+    let maintained = form_of(&engine, LABELS);
+    engine.forget_artifact_forms_for_test(LABELS);
+    assert_eq!(
+        served_to(&engine, &full_coverage_credential()),
+        vec!["m0".to_string()],
+        "the form built from scratch over the merged row space agrees"
+    );
+    let rebuilt = form_of(&engine, LABELS);
+    assert_eq!(
+        maintained.len(),
+        rebuilt.len(),
+        "the two forms cover the same ordinals"
+    );
+    for (amended, built) in maintained.iter().zip(&rebuilt) {
+        assert_eq!(
+            amended, built,
+            "the rebased form and the built one describe different levels"
+        );
+    }
 }

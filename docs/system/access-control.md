@@ -37,6 +37,13 @@ the unit of access the corpus indexes: the term index maps each term to the item
 A credential resolves to the terms it satisfies, and an item is visible to a token when the two
 sets intersect.
 
+A label is trimmed wherever it is read, at a build and at a running service, before the plugin
+sees it. A label that is empty after trimming is no label, so a list holding only such labels is
+an item with no label, which takes its view's default. A label written in a declaration, such as a
+view's or a layer's `visibility` or a default, is stored trimmed, and one that is empty after
+trimming is refused. The shipped plugin trims a credential's terms the same way, so a credential
+matches the label it names however either was padded.
+
 At authorise, the service resolves a credential to its satisfied terms and looks each one up in
 the term index. The union of the items those terms carry, one bitmap over item identity, is the
 authorised set: the whole of what that credential grants, independent of any later request.
@@ -120,7 +127,7 @@ A request loads one generation, one version of the corpus published as a whole
 ([write path](write-path.md#generations)), once, at the start, and answers entirely from what it
 names: the tiles, the columns and the overlay a request reads all come from that one generation. A
 filter then narrows which of the visible set is drawn or counted, and can only remove from it,
-never add to it ([queries](queries.md#the-authorised-set-and-the-filtered-set)).
+never add to it ([queries](queries.md#the-visible-set-and-the-filtered-set)).
 
 Composing the visible set touches only the items a session's authorised set could ever contain,
 not the whole corpus, so the work stays cheap on every request even though the overlay itself can
@@ -145,34 +152,24 @@ current has to re-authorise on its own schedule, bounded only by the token's con
 The signal that does exist on the wire is a `403 expired-token` refusal once a token has expired
 or been revoked; a corpus change on its own produces no such refusal.
 
-## Key rotation
+## The identity key
 
 The `tessera_id` a client holds for an item is derived from the item's
 [entity id](data-model.md#what-an-item-carries) by a keyed permutation
-([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). Rotating the
-key changes what every `tessera_id` in the corpus resolves to. A rotation is a build-time
-operation, `tessera build --rotate-id-key`: it produces a new bundle and takes effect on the
-restart that loads it, not while a service keeps running against the old one.
-
-The service tracks which key produced the identifiers currently live as a single counter, the
-idset, published on the metadata a client can read. A client may present the idset an identifier
-was minted under alongside that identifier; if the two no longer match, the request is refused
-rather than resolved against an identifier that has since come to name a different item.
-Presenting the idset is optional: a caller who omits it accepts that a `tessera_id` from a past
-idset may now name a different item. The check is the same whichever item is named, so it cannot
-be used to learn how identifiers moved across a rotation.
-
-**Not built yet:** binding a token to the idset it was issued under. A rotation does not end a
-live session on its own. An operator ending or revoking every open session is what makes a
-rotation take effect for identifiers already handed out.
+([security](security.md#a-client-never-sees-an-entity-id) covers what that hides). The key is
+drawn at random by `tessera build` each time it creates a bundle and is stored in the bundle's
+manifest. Nobody configures, supplies or changes it. A rebuild creates a new bundle with a new key,
+so every `tessera_id` changes, and one from the old bundle does not name an item in the new one.
+The change takes effect on the restart that loads the new bundle. A client holding `tessera_id`s
+from the old bundle reads its items again, by a unique field's values or afresh.
 
 ## Where this is tested and where it lives
 
 The plugin trait and its one built-in implementation live in `tessera-plugin`. The term index,
 authorised-set construction, and the on-disk cache live in `tessera-authz`. Session composition
 against the overlay, the row-space projection it feeds, and the background refresh that keeps a
-resident projection current live in `tessera-engine`. The session plane's two verbs, and the idset
-check on identifier lookups, live in `tessera-server`.
+resident projection current live in `tessera-engine`. The session plane's two verbs live in
+`tessera-server`.
 
 ## Sources
 

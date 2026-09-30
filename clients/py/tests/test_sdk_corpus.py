@@ -1,16 +1,19 @@
-"""The proof python-sdk.md asks for: a corpus declaration regenerated from calls.
+"""A corpus declaration regenerated from calls, and what it discloses.
 
-`tessera check` prints its disclosure table on stdout and the schemas it read, with their paths, on
-stderr. The declarations name the same files by different paths: one reads `data/notebook/`
-directly, the other reads it through a relative path from a temporary directory. **Stdout is
-compared whole, and stderr by its file names.** That is the whole normalisation: the disclosure table carries no
-path, which is what makes it the thing to compare.
+`tessera check` prints one page: the schemas it read, with their paths, then what the declaration
+discloses. It is run here over both declarations: the committed one and the one the verbs wrote.
+The two name the same files by different paths, one reading `data/notebook/` directly and one
+reading it through a relative path from a temporary directory. **The lines that name a path are
+compared by file name, and the rest of the page whole, but for the `[sources]` key a line names**:
+the SDK names each file after the target it was inserted into, and the committed declaration
+chose its own names.
 
 Beside it, the first commit through `tessera build`.
 """
 
 import json
 import os
+import re
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -25,35 +28,15 @@ pytest.importorskip("pyarrow")
 
 
 def declare_notebook(db, corpus: Path) -> None:
-    """python-sdk.md §10.2: `data/notebook/schema.toml` as calls, the files staged as paths."""
-    db.stage("points", str(corpus / "points.parquet"), default=True)
-    for name, file in [
-        ("archive", "archive"),
-        ("primary_category", "primary_category"),
-        ("kmeans", "clusters-kmeans"),
-        ("kmeans_members", "clusters-kmeans-members"),
-        ("kmeans_topics", "topics-kmeans"),
-        ("kmeans_topic_members", "topics-kmeans-members"),
-        ("hdbscan", "clusters-hdbscan"),
-        ("hdbscan_members", "clusters-hdbscan-members"),
-        ("hdbscan_topics", "topics-hdbscan"),
-        ("hdbscan_topic_members", "topics-hdbscan-members"),
-        ("taxonomy", "taxonomy-arxiv"),
-        ("taxonomy_members", "taxonomy-arxiv-members"),
-    ]:
-        db.stage(name, str(corpus / f"{file}.parquet"))
-
-    db.declare_view("s0", source="points", access="categories", title="arXiv, 50,000 papers")
+    """python-sdk.md §10.2: `data/notebook/schema.toml` as calls, the files read in place."""
+    db.declare_view("s0", title="arXiv, 50,000 papers")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
     db.declare_vocabulary(
-        "archive", source="archive", closed=True, width="u8", title="arXiv archive"
+        "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
-    db.declare_vocabulary(
-        "primary_category",
-        source="primary_category",
-        closed=True,
-        width="u16",
-        title="arXiv subject class",
-    )
+    # Unique, so every table names its paper by it: the points carry it as `entity_id` and the
+    # member tables as `entity`, which each insert's `columns=` says.
+    db.declare_attribute("id", type="u64", unique=True)
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
     )
@@ -73,45 +56,116 @@ def declare_notebook(db, corpus: Path) -> None:
     db.declare_layer(
         "clusters/kmeans",
         kind="flat",
-        source="kmeans",
-        members="kmeans_members",
         require_member_visibility={"count": 50},
         title="k-means clusters",
     )
     db.declare_labels(
         "topics/kmeans",
         of="clusters/kmeans",
-        source="kmeans_topics",
-        members="kmeans_topic_members",
         content_requires="all",
         title="k-means topics",
     )
     db.declare_layer(
         "clusters/hdbscan",
         kind="nested",
-        source="hdbscan",
-        members="hdbscan_members",
         require_member_visibility={"fraction": 0.05},
         title="HDBSCAN clusters",
     )
     db.declare_labels(
         "topics/hdbscan",
         of="clusters/hdbscan",
-        source="hdbscan_topics",
-        members="hdbscan_topic_members",
         content_requires="all",
         title="HDBSCAN topics",
     )
     db.declare_layer(
         "taxonomy/arxiv",
         kind="tiered",
-        source="taxonomy",
-        members="taxonomy_members",
         levels=[(0, "archive"), (1, "subject class")],
         require_member_visibility={"count": 1},
         computed=("centroid", "box"),
         title="arXiv classification",
     )
+
+    insert_notebook(db, corpus)
+
+
+def insert_notebook(db, corpus: Path) -> None:
+    """The tables, each naming the columns its target reads (§3, §10.2)."""
+    db.insert("archive", str(corpus / "archive.parquet"), key="key", title="title", code="code")
+    db.insert(
+        "primary_category",
+        str(corpus / "primary_category.parquet"),
+        key="key",
+        title="title",
+        code="code",
+    )
+    # The six attribute columns are read by name from the frame inserted into the allocation view.
+    db.insert(
+        "s0",
+        str(corpus / "points.parquet"),
+        x="x",
+        y="y",
+        access="categories",
+        columns={"id": "entity_id"},
+    )
+    for layer, name in [
+        ("clusters/kmeans", "clusters-kmeans"),
+        ("clusters/hdbscan", "clusters-hdbscan"),
+        ("taxonomy/arxiv", "taxonomy-arxiv"),
+    ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
+        db.insert(
+            layer,
+            artifacts=str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            parent="parent",
+            contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            layer,
+            members=str(corpus / f"{name}-members.parquet"),
+            key="key",
+            level="level",
+            rank="rank",
+            columns={"id": "entity"},
+        )
+    for labels, name in [
+        ("topics/kmeans", "topics-kmeans"),
+        ("topics/hdbscan", "topics-hdbscan"),
+    ]:
+        db.insert(
+            labels,
+            str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            contents="contents",
+            parent="parent",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            labels,
+            members=str(corpus / f"{name}-members.parquet"),
+            key="key",
+            level="level",
+            rank="rank",
+            columns={"id": "entity"},
+        )
+
+
+def page_without_sources(page: str) -> list[str]:
+    """The check's page but the lines that name a path, with the `[sources]` key cut from the
+    lines naming one: what two declarations must agree on."""
+    return [
+        re.sub(r"source '[^']*'", "source", line)
+        for line in page.splitlines()
+        if "read schema" not in line and "no source" not in line
+    ]
 
 
 def read_schema_lines(stderr: str) -> list[str]:
@@ -120,20 +174,25 @@ def read_schema_lines(stderr: str) -> list[str]:
     The two declarations name one set of files by two paths, one relative to `data/notebook/` and
     one relative to a temporary directory, so the file name is what can be compared. What is being
     compared is which object reads which file, which the name carries.
+
+    A `[sources]` key is the caller's own name for a file and the SDK names each after the target
+    its insert bound it to, so the key is cut from the `source` lines and the file name compared.
     """
     lines = []
     for line in stderr.splitlines():
         if "read schema" not in line and "no source" not in line:
             continue
         head, _, path = line.rpartition(" ")
+        if head.lstrip().startswith("read schema  source"):
+            head = "read schema source"
         # The object column is padded to a width the longer object names overflow, so the spacing
         # is collapsed before the two runs are compared.
         lines.append(" ".join(head.split()) + "  " + Path(path.strip()).name)
     return lines
 
 
-def check_committed(tessera: str, declaration: Path, directory: Path) -> tuple[str, str]:
-    """`tessera check` over a declaration this repository holds, and its disclosure table."""
+def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
+    """`tessera check` over a declaration this repository holds, and the page it printed."""
     (directory / "cache").mkdir(parents=True, exist_ok=True)
     (directory / "tessera.toml").write_text(
         "[bundle]\n"
@@ -148,7 +207,7 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> tuple[s
         text=True,
     )
     assert done.returncode == 0, done.stderr
-    return done.stdout, done.stderr
+    return done.stdout + done.stderr
 
 
 def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_discloses(tmp_path):
@@ -157,16 +216,14 @@ def test_the_notebook_declaration_regenerated_discloses_what_the_committed_one_d
     db = create(tmp_path / "db")
     declare_notebook(db, corpus)
     report = db.check()
-    assert report.ok, report.output
-    committed, committed_stderr = check_committed(
-        tessera, corpus / "schema.toml", tmp_path / "committed"
-    )
-    generated = report.output[: report.output.index("  read schema")]
-    assert generated.strip() == committed.strip()
+    assert report.ok, report.log
+    committed = check_committed(tessera, corpus / "schema.toml", tmp_path / "committed")
+    generated = check_committed(tessera, db.path / "schema.toml", tmp_path / "generated")
+    assert page_without_sources(generated) == page_without_sources(committed)
     # And the same files read by the same objects: the paths differ, the file names do not.
-    read = read_schema_lines(report.output)
+    read = read_schema_lines(generated)
     assert len(read) == 12
-    assert read == read_schema_lines(committed_stderr)
+    assert read == read_schema_lines(committed)
 
 
 def test_the_regenerated_declaration_states_what_the_committed_one_leaves_to_a_default(tmp_path):
@@ -209,36 +266,11 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     if "clusters/toponymy" in declaration.read_text():
         pytest.skip("this rung's copy carries the spliced Toponymy layer, which §10.2 does not")
     db = create(tmp_path / "db")
-    db.stage("points", str(corpus / "points.parquet"), default=True)
-    db.stage("points_pca64", str(corpus / "points-pca64.parquet"))
-    for name, file in [
-        ("archive", "archive"),
-        ("primary_category", "primary_category"),
-        ("kmeans", "clusters-kmeans"),
-        ("kmeans_members", "clusters-kmeans-members"),
-        ("hdbscan", "clusters-hdbscan"),
-        ("hdbscan_members", "clusters-hdbscan-members"),
-    ]:
-        db.stage(name, str(corpus / f"{file}.parquet"))
-    db.declare_view(
-        "knn", source="points", access="categories", extent="auto", title="Topic map"
-    )
-    db.declare_view(
-        "pca64",
-        source="points_pca64",
-        access="categories",
-        extent="auto",
-        title="Topic map (PCA-64)",
-    )
+    db.declare_view("knn", extent="auto", title="Topic map")
+    db.declare_view("pca64", extent="auto", title="Topic map (PCA-64)")
+    db.declare_vocabulary("archive", closed=True, width="u8", title="arXiv archive")
     db.declare_vocabulary(
-        "archive", source="archive", closed=True, width="u8", title="arXiv archive"
-    )
-    db.declare_vocabulary(
-        "primary_category",
-        source="primary_category",
-        closed=True,
-        width="u16",
-        title="arXiv subject class",
+        "primary_category", closed=True, width="u16", title="arXiv subject class"
     )
     db.declare_attribute(
         "archive", type="category", vocabulary="archive", render=True, index=True, title="Archive"
@@ -258,46 +290,82 @@ def test_the_arxiv_declaration_regenerated_discloses_what_the_committed_one_disc
     db.declare_attribute("abstract", type="text", index=True)
     db.declare_attribute("authors", type="text", index=True, title="Authors")
     db.declare_attribute("arxiv_id", type="keyword", index=True, title="arXiv ID")
-    for name, source, members, kind, requirement in [
-        ("clusters/kmeans", "kmeans", "kmeans_members", "flat", {"count": 50}),
-        ("clusters/hdbscan", "hdbscan", "hdbscan_members", "nested", {"fraction": 0.05}),
+    db.declare_attribute("entity_id", type="u64", unique=True)
+    for name, kind, requirement in [
+        ("clusters/kmeans", "flat", {"count": 50}),
+        ("clusters/hdbscan", "nested", {"fraction": 0.05}),
     ]:
         db.declare_layer(
             name,
             kind=kind,
-            source=source,
-            members=members,
             views=["knn", "pca64"],
             require_member_visibility=requirement,
             supplied=[("topic", "text", "all")],
             title="k-means clusters" if kind == "flat" else "HDBSCAN clusters",
         )
+    db.insert(
+        "archive", str(corpus / "archive.parquet"), key="key", title="title", code="code"
+    )
+    db.insert(
+        "primary_category",
+        str(corpus / "primary_category.parquet"),
+        key="key",
+        title="title",
+        code="code",
+    )
+    db.insert(
+        "knn", str(corpus / "points.parquet"), x="x", y="y", access="categories"
+    )
+    db.insert(
+        "pca64",
+        str(corpus / "points-pca64.parquet"),
+        x="x",
+        y="y",
+        access="categories",
+    )
+    for layer, name in [
+        ("clusters/kmeans", "clusters-kmeans"),
+        ("clusters/hdbscan", "clusters-hdbscan"),
+    ]:
+        # Every column these tables carry is named, canonical or not: the build reads a
+        # canonical column under its own name whatever the call says, so one passed over is
+        # refused rather than read silently (§3).
+        db.insert(
+            layer,
+            artifacts=str(corpus / f"{name}.parquet"),
+            key="key",
+            level="level",
+            parent="parent",
+            contents="contents",
+            attached_layer="attached_layer",
+            attached_key="attached_key",
+        )
+        db.insert(
+            layer,
+            members=str(corpus / f"{name}-members.parquet"),
+            key="key",
+            level="level",
+            columns={"entity_id": "entity"},
+        )
     report = db.check()
-    assert report.ok, report.output
-    committed, committed_stderr = check_committed(tessera, declaration, tmp_path / "committed")
-    generated = report.output[: report.output.index("  read schema")]
-    assert generated.strip() == committed.strip()
-    assert read_schema_lines(report.output) == read_schema_lines(committed_stderr)
+    assert report.ok, report.log
+    committed = check_committed(tessera, declaration, tmp_path / "committed")
+    assert page_without_sources(report.log) == page_without_sources(committed)
+    assert read_schema_lines(report.log) == read_schema_lines(committed)
 
 
-def test_the_first_commit_builds_a_bundle_and_mints_every_external_id(tmp_path):
+def test_the_first_commit_builds_a_bundle(tmp_path):
     binary()
     corpus = notebook_corpus()
     db = create(tmp_path / "db")
     declare_notebook(db, corpus)
     try:
         report = db.commit()
-        assert report.ok, report.output
+        assert report.ok, report.log
     finally:
         db.close()
     bundle = db.path / "bundle"
     assert (bundle / "CURRENT").exists()
-    entities = bundle / "v00000" / "partitions" / "default" / "entities"
-    # The points file names its rows by an integer `entity_id`, which the build writes the
-    # external-id sidecar from when it is asked to: so every built row is addressable afterwards,
-    # on the ingest and values routes and in `remove()` (§3, configuration.md §8).
-    assert (entities / "ext-locator.u32").exists()
-    assert list(entities.glob("external-ids-*.arrow"))
     # The regeneration proved through the build: the bundle's own disclosure report, which carries
     # no path, is what the committed declaration's build writes.
     built = build_committed(binary(), corpus / "schema.toml", tmp_path / "committed")
@@ -315,8 +383,6 @@ def build_committed(tessera: str, declaration: Path, directory: Path) -> Path:
             "build",
             "--deployment",
             str(directory / "tessera.toml"),
-            "--mint-external-ids",
-            "--mint-id-key",
         ],
         capture_output=True,
         text=True,
@@ -333,7 +399,7 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
     declare_notebook(db, corpus)
     report = db.commit()
     try:
-        assert report.ok, report.output
+        assert report.ok, report.log
         # The addresses are the child's own, read from the line it printed: the SDK declared port
         # 0 on each plane, so nothing here was guessed.
         for address in (report.viewer, report.session, report.control):
@@ -359,6 +425,7 @@ def test_the_committed_database_is_served_and_close_stops_the_child(tmp_path):
             "title",
             "abstract",
             "arxiv_id",
+            "id",
         }
         # The render flags the first commit froze, and the vocabulary a category names.
         assert [c for c in columns.values() if c["render"]] and columns["title"]["render"] is False

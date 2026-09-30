@@ -1,0 +1,17 @@
+[package]
+name = "labeldag"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone: not a workspace member. It models code that does not exist yet and depends on no
+# workspace crate.
+[workspace]
+
+[dependencies]
+croaring = "2"
+rand = "0.8"
+rustc-hash = "2"
+
+[profile.release]
+opt-level = 3
+debug = false

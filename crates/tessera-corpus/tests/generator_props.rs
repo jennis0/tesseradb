@@ -1,6 +1,4 @@
-//! The four generator properties (`correctness-suite.md` §8), each pinned by a test that fails on
-//! the past defect it exists to rule out — most pointedly the fixed-modulus position collapse,
-//! which is the reason this crate replaced the previous fixture.
+//! The four generator properties, each checked by a test.
 
 use proptest::prelude::*;
 use tessera_corpus::{Corpus, Grant, TERM_SPACE};
@@ -26,10 +24,8 @@ fn full_grant() -> Grant {
 }
 
 proptest! {
-    /// **Prefix-stable.** Item *e*'s properties depend on *e* and the seed, never on *n*: two
-    /// corpora differing only in *n* agree on every item and every term list. Without this a
-    /// smaller run is a different corpus rather than a prefix, and a failure at 10⁹ cannot be
-    /// reduced (spec §15).
+    /// Prefix-stable: item `e`'s properties depend on `e` and the seed, never on `n`. Two corpora
+    /// differing only in `n` agree on every item and every term list.
     #[test]
     fn n_appears_in_no_derivation(
         seed in any::<u64>(),
@@ -42,12 +38,8 @@ proptest! {
         prop_assert_eq!(a.terms(e), b.terms(e));
     }
 
-    /// **Prefix-stable, the partition arm included.** The partition value is the one item column
-    /// whose *population* legitimately scales with *n* (`partition.rs`), and until 2026-08-30 the
-    /// stride was derived from that population, so an entity moved to a different artifact as the
-    /// corpus grew — a re-assignment, not the truncation the generator's rule promises. The stride
-    /// is a constant now and the count is derived from it, which is this: entity *e* is in the same
-    /// artifact at every *n*, on every layer.
+    /// Prefix-stable, the partition value included: entity `e` is in the same artifact at every
+    /// `n`, on every layer.
     #[test]
     fn the_partition_arm_is_prefix_stable_too(
         seed in any::<u64>(),
@@ -63,9 +55,8 @@ proptest! {
         );
     }
 
-    /// **Named in its own row.** `fx_key` is a bijection of *e* under the seed: it inverts
-    /// exactly, in both directions, for every value — which is what lets `tessera corpus items`
-    /// take served keys and answer with items, holding no table.
+    /// Named in its own row: `fx_key` is a bijection of `e` under the seed. It inverts exactly, in
+    /// both directions, for every value.
     #[test]
     fn fx_key_inverts_exactly(seed in any::<u64>(), e in any::<u64>(), fx in any::<u64>()) {
         let c = corpus(seed, 0);
@@ -74,11 +65,7 @@ proptest! {
     }
 }
 
-/// **Spread at any size** — the regression test for the defect being fixed. The previous fixture
-/// placed item *e* at `((e·37) mod 1000, (e·53) mod 1000)`: exactly 1000 distinct positions at
-/// every corpus size, measured as a probe-lookup failure at a 250M base. Here 100,000 items must
-/// occupy (essentially) 100,000 distinct positions — a fixed modulus of any size up to ~10,000
-/// fails this instantly, and so does any axis carrying fewer than ~2²⁴ reachable values.
+/// Spread at any size: 100,000 items must occupy essentially 100,000 distinct positions.
 #[test]
 fn positions_spread_at_any_size() {
     let c = corpus(1, 0);
@@ -93,7 +80,7 @@ fn positions_spread_at_any_size() {
         }
         assert!(
             seen.len() >= 99_900,
-            "window at {window}: {} distinct positions in 100,000 items — a modulus is back",
+            "window at {window}: {} distinct positions in 100,000 items, a modulus is back",
             seen.len()
         );
         let worst = per_position_max.values().max().copied().unwrap_or(0);
@@ -104,11 +91,8 @@ fn positions_spread_at_any_size() {
     }
 }
 
-/// **Decorrelated across dimensions**, three ways.
-///
-/// The two axes are independent: under the old fixture both axes were functions of `e mod 1000`,
-/// so every item sat on a correlated lattice. Independent axes put an item on the `cell_x ==
-/// cell_y` diagonal about once per 65,536 items; a shared period puts a large fraction there.
+/// Decorrelated across dimensions: independent axes put an item on the `cell_x == cell_y`
+/// diagonal about once per 65,536 items.
 #[test]
 fn the_two_axes_are_independent() {
     let c = corpus(2, 0);
@@ -122,15 +106,12 @@ fn the_two_axes_are_independent() {
         .count();
     assert!(
         on_diagonal < 32,
-        "{on_diagonal} of 65,536 items share an x/y cell — the axes are correlated"
+        "{on_diagonal} of 65,536 items share an x/y cell, the axes are correlated"
     );
 }
 
 /// Position does not track the grant structure: a single term's carriers land uniformly across
-/// the four depth-1 quadrants. A generator whose position function shared a period with its term
-/// function would pass every cross-principal count while testing nothing (spec §8), and this is
-/// the check spec §18.12 asks the harness to make — made here first, against the generator's own
-/// account.
+/// the four depth-1 quadrants.
 #[test]
 fn terms_do_not_track_position() {
     for seed in [3u64, 4, 5] {
@@ -148,16 +129,15 @@ fn terms_do_not_track_position() {
             let deviation = count.abs_diff(expected);
             assert!(
                 deviation < 120,
-                "seed {seed}: quadrant {tile} holds {count} of {total} carriers — position is \
+                "seed {seed}: quadrant {tile} holds {count} of {total} carriers, position is \
                  correlated with the grant structure"
             );
         }
     }
 }
 
-/// The planted key is not an affine encoding of *e* (the conformance suite asserts the same of
-/// the fixture's keys, for the same reason): consecutive keys must not differ by a near-constant
-/// amount, or the column is the entity id wearing a disguise.
+/// `fx_key` is not an affine encoding of `e`: consecutive keys must not differ by a near-constant
+/// amount.
 #[test]
 fn fx_keys_are_not_affine_in_e() {
     let c = corpus(6, 0);
@@ -172,8 +152,7 @@ fn fx_keys_are_not_affine_in_e() {
 }
 
 /// The term-width spectrum the level construction promises: some terms are two orders of
-/// magnitude wider than others, which is what lets a harness build head, tail and crossover
-/// principals as plain term sets.
+/// magnitude wider than others.
 #[test]
 fn term_widths_span_a_spectrum() {
     let c = corpus(7, 0);
@@ -191,12 +170,7 @@ fn term_widths_span_a_spectrum() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
-// The census
-// ---------------------------------------------------------------------------------------------
-
-/// Zoom 0 is one tile holding exactly the visible count, and the full grant sees every item —
-/// the "nothing missing or extra" halves of spec §9.2, checked against a direct loop.
+/// Zoom 0 is one tile holding exactly the visible count, and the full grant sees every item.
 #[test]
 fn census_totals_agree_with_direct_visibility() {
     let c = corpus(8, 10_000);
@@ -215,8 +189,7 @@ fn census_totals_agree_with_direct_visibility() {
     );
 }
 
-/// Each depth-*z* tile's count is the sum of its four depth-*z+1* children — the counts nest the
-/// way the quadtree does, so a disagreement at a coarse zoom localises by descending.
+/// Each depth-`z` tile's count is the sum of its four depth-`z+1` children.
 #[test]
 fn census_counts_nest_across_zooms() {
     let c = corpus(9, 8_192);
@@ -232,9 +205,7 @@ fn census_counts_nest_across_zooms() {
 }
 
 /// The census's tile assignment agrees with the Morton code route: every counted tile holds
-/// exactly the visible items whose `morton_of` code falls in its `code_range`. Two independent
-/// paths to the same bucketing — shifted cells through `interleave_bits`, against the full code
-/// through the tile's range — so a bit-order defect in either shows as a disagreement.
+/// exactly the visible items whose `morton_of` code falls in its `code_range`.
 #[test]
 fn census_tiles_agree_with_morton_code_ranges() {
     let c = corpus(10, 4_096);
@@ -261,14 +232,8 @@ fn census_tiles_agree_with_morton_code_ranges() {
     }
 }
 
-/// **The partition arm truncates, exhaustively over a prefix.** The proptest above samples the
-/// property; this walks it — every entity of the smaller corpus, its artifact and its artifact's
-/// membership, checked against the larger one. The forward direction is checked too, because a
-/// reverse answer that agreed while the member lists disagreed would be a partition of nothing:
-/// the smaller corpus's artifacts are the larger's clipped to `n`, with no entity gained, lost or
-/// moved. Against the pre-2026-08-30 formulation — stride derived from an *n*-derived count — the
-/// units differ (≈103 against ≈100 at these two sizes) and this fails at the first entity past the
-/// first artifact.
+/// The partition truncates, exhaustively over a prefix: every entity of the smaller corpus, its
+/// artifact and its artifact's membership, checked against the larger one.
 #[test]
 fn a_smaller_corpus_is_the_partition_truncated() {
     let small = corpus(0x5EED, 4_000);
@@ -283,7 +248,6 @@ fn a_smaller_corpus_is_the_partition_truncated() {
         );
     }
 
-    // The forward direction: every artifact of the smaller corpus is the larger's, clipped.
     let count = small.partition_count(layer);
     assert!(
         count > 1,
@@ -301,17 +265,14 @@ fn a_smaller_corpus_is_the_partition_truncated() {
             "artifact {a}'s membership is not the larger corpus's clipped to n"
         );
     }
-    // And nothing past the smaller corpus's own count is claimed by it.
     assert!(
         small.partition_members(layer, count).is_empty(),
         "an artifact past the truncation point still holds members"
     );
 }
 
-/// **Total over `u64`, because `tessera corpus items` is.** A served `fx_key` inverts to an
-/// arbitrary entity id, so the partition lookup is asked about entities far past any corpus — the
-/// top of the range included, where the artifact above holds a boundary that does not fit in a
-/// `u64`. Every one of them answers, and the answer contains the entity it was asked about.
+/// Total over `u64`: a served `fx_key` inverts to an arbitrary entity id, so the partition lookup
+/// is asked about entities far past any corpus, the top of the range included.
 #[test]
 fn the_partition_lookup_answers_at_the_top_of_entity_space() {
     let c = corpus(0x5EED, 0);

@@ -27,6 +27,7 @@ PYPROJECT = ORACLE.parent / "pyproject.toml"
 # `tessera tokenise` subprocess it makes is a declared echo (decision 0070) reached by a path it is
 # handed, not an import of a driver.
 DEFINITIONAL = (
+    "aggregate",
     "viewport",
     "occupancy",
     "mask",
@@ -37,9 +38,13 @@ DEFINITIONAL = (
     "filters",
     "record_blob",
     "text",
+    "naming",
+    "access",
 )
 DRIVERS = ("harness", "journal")
-FIXTURE_BUILDERS = ("catalogue", "canary_fixture", "label_fixture", "multiview")
+FIXTURE_BUILDERS = (
+    "catalogue", "canary_fixture", "label_fixture", "multiview", "artifact_label_fixture",
+)
 CLASSIFIED = set(DEFINITIONAL) | set(DRIVERS) | set(FIXTURE_BUILDERS)
 
 # Distribution name -> the name it is imported as, where they differ.

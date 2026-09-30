@@ -14,11 +14,12 @@
 //! The four gaps, and the case that holds each open:
 //!
 //! 1. the identity and its fragment cache move onto the generation —
-//!    `a_rotation_moves_the_prefix_the_postings_the_identity_and_the_sidecar_together`;
+//!    `a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_together`;
 //! 2. a session's held fragment is valid only while the identity matches —
 //!    `a_session_fragment_is_rebuilt_across_a_rotation_not_reused` and
 //!    `a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment`;
-//! 3. the signature carries postings, identity, cache and sidecar — case 1 again, on the far side;
+//! 3. the signature carries postings, identity, cache and unique indexes — case 1 again, on the far
+//!    side;
 //! 4. `prefix_dir` rotates — `a_deny_published_after_a_flip_writes_into_the_new_prefix`, which is
 //!    the silent data-loss path and the only one here whose failure leaves no wrong *answer*, just
 //!    an acked deny missing from the restore path.
@@ -161,33 +162,30 @@ fn engine_over_fixture(tmp: &tempfile::TempDir, root: &Path, cache: &str, wal: &
 }
 
 /// **Gaps 1 and 3: one swap carries the prefix, the base postings, the bundle identity, the
-/// fragment cache and the external-id sidecar.**
+/// fragment cache and the unique indexes.**
 ///
 /// Each of the five is asserted through an observable a caller has, because none of the fields is
 /// public: the prefix and `segments_version` off the generation; the identity through
-/// `fragment_canonical_key`, which hashes it; the sidecar by resolving an external id, which after
-/// the flip can only be answered by a sidecar opened against the *new* prefix's manifest; and the
+/// `fragment_canonical_key`, which hashes it; the unique indexes by looking up a value, which after
+/// the flip can only be answered by runs opened against the *new* prefix's manifest; and the
 /// postings and cache by the rows a session still sees, which would be empty had the term index
 /// been dropped rather than rotated.
 ///
 /// **Mutations this kills:** carrying the live postings forward on a rotation (the counts go to
 /// zero only if the new prefix's postings differ — so instead the identity assertion carries it:
-/// a rotation that left `fragments` alone leaves the canonical key unchanged); leaving the sidecar
-/// on the engine (the resolve below would answer through the superseded prefix's files, which the
-/// `provenance` edit does not disturb — see the reclamation note in the test body).
+/// a rotation that left `fragments` alone leaves the canonical key unchanged).
 #[test]
-fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_sidecar_together() {
+fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_unique_indexes_together() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let before = engine.generation();
     let key_before = engine.fragment_canonical_key(&satisfied);
     let baseline = visible(&engine, &session);
     let probe_entity = entity_of_source(&root, 7);
-    let probe_external = engine.external_id_of(probe_entity).unwrap().unwrap();
 
     clone_prefix_and_flip(&root, "v00000", "v00001");
     engine
@@ -215,16 +213,9 @@ fn a_rotation_moves_the_prefix_the_postings_the_identity_and_the_sidecar_togethe
         "the dictionary is carried forward, never renumbered or shrunk (compaction §3, pass 4)"
     );
 
-    // The sidecar was re-opened against the new prefix's manifest: the paths it holds are under
-    // `v00001`, which is what makes reclaiming `v00000` safe. Resolving both ways is the check.
-    assert_eq!(
-        engine.external_id_of(probe_entity).unwrap().unwrap(),
-        probe_external
-    );
-    assert_eq!(
-        engine.resolve_external_id(&probe_external).unwrap(),
-        Some(probe_entity)
-    );
+    // The unique indexes were re-opened against the new prefix's manifest: the paths they hold
+    // are under `v00001`, which is what makes reclaiming `v00000` safe.
+    assert_eq!(item_of_id(&engine, 7).unwrap(), Some(probe_entity));
 
     // And the rotated term index still answers: a session established after the flip sees exactly
     // what one established before it saw.
@@ -310,7 +301,7 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     let engine = engine_over_fixture(&tmp, &root, "cache", "wal.log");
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let satisfied: Vec<_> = session.satisfied.iter().copied().collect();
+    let satisfied: Vec<_> = session.satisfied_for_test().iter().copied().collect();
     let key_before = engine.fragment_canonical_key(&satisfied);
     let frag_before = cache_dir.join(format!("{}.frag", hex(&key_before)));
     assert!(
@@ -366,7 +357,8 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
     )
     .expect("the new prefix opens on its own");
     let restarted_session = restarted.authorise(&full_coverage_credential()).unwrap();
-    let restarted_satisfied: Vec<_> = restarted_session.satisfied.iter().copied().collect();
+    let restarted_satisfied: Vec<_> =
+        restarted_session.satisfied_for_test().iter().copied().collect();
     assert_eq!(
         restarted.fragment_canonical_key(&restarted_satisfied),
         key_after,
@@ -456,7 +448,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
 
     let entity = entity_of_source(&root, 5);
     let id = engine.tessera_id_of(entity).unwrap();
-    assert!(engine.item(&session, id, None).unwrap().is_some());
+    assert!(engine.item(&session, id).unwrap().is_some());
 
     let before = engine.generation();
     clone_prefix_and_flip(&root, "v00000", "v00001");
@@ -473,7 +465,7 @@ fn a_drill_down_after_a_rotation_does_not_reuse_the_superseded_prefixs_fragment(
 
     assert_eq!(engine.fragment_cache_rebuilds(), 0);
     assert!(
-        engine.item(&session, id, None).unwrap().is_some(),
+        engine.item(&session, id).unwrap().is_some(),
         "the item is still there — the rotation preserved the data"
     );
     assert_eq!(

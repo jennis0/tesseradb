@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tessera: the layer in a host's deck</title>
+    <link rel="icon" href="data:," />
+    <!-- The map labels and elements fetch no font; this page loads Instrument Sans, their default face. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+      html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; background: #111; color: #ddd; }
+      body { display: grid; grid-template-rows: auto 1fr; }
+      header { display: flex; gap: 1.5rem; align-items: center; padding: 0.4rem 1rem; }
+      #map { position: relative; min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>TesseraLayer in the host's own Deck</strong>
+      <label>signed in as <select id="principal"></select></label>
+    </header>
+    <div id="map"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

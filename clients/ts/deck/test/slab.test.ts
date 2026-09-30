@@ -50,8 +50,7 @@ describe('MarkSlab', () => {
     const first = slab.sync([a], 2, UNIFORM_ENCODING, null);
     const second = slab.sync([a], 2, UNIFORM_ENCODING, null);
 
-    // Identical object, so deck.gl compares references, finds them equal and uploads nothing. This
-    // is the whole mechanism — a defensive copy here would silently undo it.
+    // The same object, so deck.gl's reference comparison uploads nothing; a copy would upload.
     expect(second).toBe(first);
     expect(drawnIds(slab, first)).toEqual([1000n, 1001n, 1002n]);
   });
@@ -77,8 +76,8 @@ describe('MarkSlab', () => {
     const b = band(2, 2);
     slab.sync([a, b], 2, UNIFORM_ENCODING, null);
 
-    // b leaves the render rectangle. It keeps its slot and keeps being drawn — off screen, since
-    // the frame's exact set is by construction everything at this depth inside the rectangle.
+    // b leaves the render rectangle. It keeps its slot and is still drawn, off screen, since the
+    // frame's exact set is every band at this depth inside the rectangle.
     const away = slab.sync([a], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, away)).toEqual([1000n, 1001n, 1002n, 2000n, 2001n]);
     expect(slab.departed).toBe(2);
@@ -133,7 +132,7 @@ describe('MarkSlab', () => {
     expect(drawnIds(slab, deeper)).toEqual([2000n, 2001n]);
     expect(slab.holds(shallow)).toBe(false); // holds() answers for the active partition
 
-    // Flipping back returns the identical draw object — nothing rebuilt, nothing re-uploaded.
+    // Flipping back returns the same draw object, so nothing is rebuilt or re-uploaded.
     expect(slab.sync([shallow], 2, UNIFORM_ENCODING, null)).toBe(first);
     expect(slab.holds(shallow)).toBe(true);
   });
@@ -159,7 +158,7 @@ describe('MarkSlab', () => {
     const shallow = band(1, 3);
     slab.sync([shallow], 2, UNIFORM_ENCODING, null); // depth 2
     slab.sync([band(2, 2, 'ik', 3)], 3, UNIFORM_ENCODING, null); // depth 3
-    slab.sync([band(3, 1, 'ik', 4)], 4, UNIFORM_ENCODING, null); // depth 4 — depth 2 goes
+    slab.sync([band(3, 1, 'ik', 4)], 4, UNIFORM_ENCODING, null); // depth 4; depth 2 is evicted
     // Coming back to depth 2 is now a rebuild, not a reuse.
     const back = slab.sync([shallow], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, back)).toEqual([1000n, 1001n, 1002n]);
@@ -188,7 +187,7 @@ describe('MarkSlab', () => {
 
   it('colours a band as it is written, from its own values', () => {
     const slab = new MarkSlab();
-    const encoding: Encoding = {kind: 'category', column: 'c', rankOfCode: {1: 0, 2: 1}};
+    const encoding: Encoding = {kind: 'category', column: 'c', rankOfCode: {1: 0, 2: 1}, palette: 'tableau10', chosen: new Map()};
     const draw = slab.sync([band(1, 2), band(2, 1)], 2, encoding, 'c');
 
     expect([...draw.colours.subarray(0, 4)]).toEqual([...colourOfRank(0)]);
@@ -210,16 +209,16 @@ describe('MarkSlab', () => {
   it('does not recolour when a sticky domain has merely been re-supplied', () => {
     const slab = new MarkSlab();
     const a = band(1, 1);
-    const first = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
-    const second = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}}, 'c');
-    // Same colouring, freshly constructed object — comparing by reference would re-upload the
-    // whole colour buffer on every response.
+    const first = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}, ramp: 'viridis', scale: 'linear', reverse: false}, 'c');
+    const second = slab.sync([a], 2, {kind: 'numeric', column: 'c', domain: {min: 0, max: 9}, ramp: 'viridis', scale: 'linear', reverse: false}, 'c');
+    // The same colouring in a new object; a reference comparison would re-upload the colour
+    // buffer on every response.
     expect(second).toBe(first);
   });
 
   it('gives every mark a colour even where the band lacks the column', () => {
     const slab = new MarkSlab();
-    const draw = slab.sync([band(1, 2)], 2, {kind: 'category', column: 'absent', rankOfCode: {}}, 'absent');
+    const draw = slab.sync([band(1, 2)], 2, {kind: 'category', column: 'absent', rankOfCode: {}, palette: 'tableau10', chosen: new Map()}, 'absent');
     expect([...draw.colours.subarray(0, 8)]).toEqual([...UNMAPPED, ...UNMAPPED]);
   });
 
@@ -245,7 +244,7 @@ describe('MarkSlab', () => {
     slab.sync([first, band(2, 2)], 2, UNIFORM_ENCODING, null);
 
     // The same tile, refetched: a new band object with the same served set. Its slot is reused, so
-    // the tile is drawn once — keying slots by band object would have drawn it twice.
+    // the tile is drawn once; slots keyed by band object would draw it twice.
     const refetched = {...first, ids: BigUint64Array.from([7n, 8n, 9n])};
     const draw = slab.sync([refetched, band(2, 2)], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, draw)).toEqual([7n, 8n, 9n, 2000n, 2001n]);
@@ -258,7 +257,7 @@ describe('MarkSlab', () => {
     slab.sync([first], 2, UNIFORM_ENCODING, null);
 
     // A larger band cannot reuse the slot, so the slab compacts rather than leaving the old marks
-    // in the draw range — they are a subset of the new ones and would be drawn twice.
+    // in the draw range, where they would be drawn twice as a subset of the new ones.
     const bigger = {...first, ids: BigUint64Array.from([7n, 8n, 9n]), served: 3};
     const draw = slab.sync([bigger], 2, UNIFORM_ENCODING, null);
     expect(drawnIds(slab, draw)).toEqual([7n, 8n, 9n]);
@@ -285,10 +284,8 @@ describe('MarkSlab', () => {
 
 describe('the highlight bit', () => {
   /**
-   * §5.3's dulling rides the slab's dirty-span path beside the ordinal, and the value where a
-   * band carries none is **1** — *matched* — so a map with no highlight draws exactly what it drew
-   * before the attribute existed, with the shader's switch a uniform rather than a per-point test
-   * of whether the question was put.
+   * The highlight bit is written through the slab's dirty-span path beside the ordinal, and is 1
+   * (matched) where a band carries none, so a map with no highlight draws every mark lit.
    */
   it('writes ones for a band fetched under no highlight', () => {
     const slab = new MarkSlab();

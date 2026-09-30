@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, ScalarValues, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -13,26 +13,14 @@ function u64Column(table: Table, name: string): BigUint64Array {
 type Ring = {length: number; get(v: number): number | null};
 /** One part's rings on one axis. */
 type Rings = {length: number; get(r: number): Ring | null};
-/** One artifact's parts on one axis — the outer list of `list<list<list<uint32>>>`. */
+/** One artifact's parts on one axis: the outer list of `list<list<list<uint32>>>`. */
 type Parts = {length: number; get(p: number): Rings | null};
 
 /**
- * A shape axis column, checked to be `list<list<list<uint32>>>` before a row is read — or `null`
- * where the schema carries no such column at all.
- *
- * **Absence is a schema fact, not a version skew** (contracts §3.2 r44): the two shape columns
- * trail the fixed prefix and are omitted entirely when no served layer draws a shape, an absent
- * column being distinguishable from a null one so decision 0076's rule — a null means *this
- * layer declares no such property*, never *withheld* — gains no third reading.
- *
- * **Where the column is present, the nesting is the contract, and it is verified at the schema
- * rather than discovered at the first row** (contracts §3.2 item 4, `polygon-membership.md`
- * §7.1): parts, then rings, then vertices. A server from before the shape columns sends two
- * levels — rings of vertices — and read three levels deep that column yields a number where a
- * ring is expected; a hole and a second part are different things to a renderer, and the flatter
- * shape read as this one would draw a second group as a hole of the first. That mismatch is a
- * version skew between this client and the service it is talking to, so it is a refusal with the
- * two types named and not a shape to accommodate.
+ * A shape axis column, checked to be `list<list<list<uint32>>>` (parts, rings, vertices) before a
+ * row is read, or `null` where the schema has no such column. The shape columns are omitted when no
+ * served layer draws a shape. A column two levels deep comes from an older server; read three
+ * levels deep it would draw a second part as a hole of the first, so it is refused.
  */
 function partsColumn(table: Table, name: string): {get(i: number): Parts | null} | null {
   const col = table.getChild(name);
@@ -41,39 +29,43 @@ function partsColumn(table: Table, name: string): {get(i: number): Parts | null}
   const innermost = (inner as {children?: {type: DataType}[]} | undefined)?.children?.[0]?.type;
   if (col.type.typeId !== Type.List || inner?.typeId !== Type.List || innermost?.typeId !== Type.List) {
     throw new Error(
-      `viewport payload column "${name}" is ${col.type} — a served shape is parts of rings of ` +
-        'vertices, so the column is list<list<list<uint32>>> (contracts §3.2 item 4). Two levels ' +
-        'is a server older than the shape columns.'
+      `viewport artifacts column "${name}" is ${col.type}; a shape column is ` +
+        'list<list<list<uint32>>> (parts, rings, vertices), which a server older than this client does not send.'
     );
   }
   return col as unknown as {get(i: number): Parts | null};
 }
 
 /**
- * One declared-scalar column, as the type the manifest declared plus the buffer Arrow already
- * holds.
+ * One declared scalar column: the declared type and the buffer Arrow already holds.
  *
- * **`toArray()`, not a spread.** Arrow's numeric children are typed arrays already; `[...child]`
- * boxes every element, which at 5 × 10⁴ marks across the wide fixture's eighteen columns is close
- * to a million throwaway heap objects per response. `bool` and `utf8` have no typed form — a
- * bitmap and an offset table respectively — so those two, and only those two, materialise.
- *
- * **A type the manifest cannot declare is a decoder bug, not a column to skip.** Silently dropping
- * it would shift nothing (the map is keyed by name) but would make the column vanish from the
- * legend with no error, so it throws instead. The thirteen arms mirror
- * `tessera_wire::payload::ScalarColumn`; the two must be changed together.
+ * Numeric columns use `toArray()`, which returns Arrow's typed array; a spread would box every
+ * element. `bool` and `utf8` have no typed form and are materialised. A type the manifest cannot
+ * declare throws, since skipping it would drop the column with no error. The arms mirror
+ * `tessera_wire::payload::ScalarColumn`, and the two change together. Nulls are read into
+ * `present`; `toArray()` gives a null number's slot as `0`, and that value means nothing.
  */
 function scalarColumn(name: string, vector: Vector<DataType>): ScalarColumn {
+  const column: ScalarColumn = scalarValues(name, vector);
+  if (vector.nullCount > 0) {
+    const present = new Uint8Array(vector.length);
+    for (let i = 0; i < vector.length; i++) present[i] = vector.isValid(i) ? 1 : 0;
+    column.present = present;
+  }
+  return column;
+}
+
+function scalarValues(name: string, vector: Vector<DataType>): ScalarValues {
   const type = vector.type;
   switch (type.typeId) {
     case Type.Bool:
-      return {arrowType: 'bool', values: [...vector] as boolean[]};
+      return {arrowType: 'bool', values: Array.from(vector, (v: boolean | null) => v === true)};
     case Type.Utf8:
-      return {arrowType: 'utf8', values: [...vector] as string[]};
+      return {arrowType: 'utf8', values: Array.from(vector, (v: string | null) => v ?? '')};
     case Type.Timestamp:
       return {arrowType: 'timestamp_us', values: vector.toArray() as BigInt64Array};
     case Type.Int: {
-      // `Int` covers all eight widths; the bit width and signedness are on the type, not the id.
+      // `Int` covers all eight widths; the bit width and signedness are on the type.
       const {bitWidth, isSigned} = type as unknown as {bitWidth: number; isSigned: boolean};
       const key = `${isSigned ? 'i' : 'u'}${bitWidth}`;
       switch (key) {
@@ -108,12 +100,8 @@ function scalarColumn(name: string, vector: Vector<DataType>): ScalarColumn {
 }
 
 /**
- * Concatenate one declared column's per-frame pieces into a single [`ScalarColumn`].
- *
- * All pieces carry the same `arrowType` by construction — every frame serialises the same
- * manifest schema — asserted rather than assumed, because a mismatch would mean the fill below
- * silently mixed two columns' values. Typed-array families allocate once and `set`; `bool` and
- * `utf8` are plain JS arrays and concat.
+ * Concatenates one declared column's per-frame pieces into one {@link ScalarColumn}. Every frame
+ * has the same schema; a mismatch is refused rather than mixing two columns' values.
  */
 function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColumn {
   const first = pieces[0]!;
@@ -125,20 +113,33 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
       );
     }
   }
+  const column: ScalarColumn = concatScalarValues(pieces, total);
+  if (pieces.some((p) => p.present)) {
+    const present = new Uint8Array(total).fill(1);
+    let offset = 0;
+    for (const piece of pieces) {
+      if (piece.present) present.set(piece.present, offset);
+      offset += piece.values.length;
+    }
+    column.present = present;
+  }
+  return column;
+}
+
+function concatScalarValues(pieces: ScalarColumn[], total: number): ScalarValues {
+  const first = pieces[0]!;
   if (first.arrowType === 'bool' || first.arrowType === 'utf8') {
     return {
       arrowType: first.arrowType,
       values: pieces.flatMap((p) => p.values as (boolean | string)[])
-    } as ScalarColumn;
+    } as ScalarValues;
   }
-  // The typed families share the `set`-into-a-preallocated-buffer shape; the switch is what
-  // names each concrete constructor for the type checker. Mirrors `scalarColumn`'s arms — the
-  // two must be changed together.
+  // The switch names each typed-array constructor for the type checker. It mirrors `scalarColumn`'s
+  // arms, and the two change together.
   const fill = <A extends {set(a: A, o: number): void; length: number}>(out: A): A => {
     let offset = 0;
     for (const piece of pieces) {
-      // Same `arrowType` (asserted above) means same concrete typed-array class; the checker
-      // cannot see through the union, hence the `unknown` step.
+      // The same `arrowType` means the same typed-array class, which the checker cannot see.
       const values = piece.values as unknown as A;
       out.set(values, offset);
       offset += values.length;
@@ -171,40 +172,30 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
   }
 }
 
-/** The points-frame column name prefix a membership column carries (contracts §3.2, r39). */
+/** The name prefix of a points-frame membership column, `membership:<layer>`. @internal */
 export const MEMBERSHIP_PREFIX = 'membership:';
 
 /**
- * The per-point highlight column (`highlight-and-hierarchy.md` §2), after the render scalars and
- * before the `membership:<layer>` columns, present only where the request carried a `highlight`.
- *
- * A **reserved column name, refused at the build**, beside `region` and `member_of`: a corpus
- * declaring a render column of this name would put two columns of one name on the points frame
- * and a by-name reader would take the wrong one. So it is skipped by name below rather than
- * decoded as a declared scalar.
+ * The per-point highlight column, present only where the request carried a `highlight`. The name is
+ * reserved at the build, so no declared render column shares it, and it is skipped by name when
+ * decoding declared scalars.
  */
 export const HIGHLIGHTED_COLUMN = 'highlighted';
 
 /**
- * The per-point membership column, hashed to a **response-local index** (design §5.10).
+ * Hashes a per-point membership column to a response-local index.
  *
- * The decoder runs in a worker lane that shares nothing with the other lanes, so it cannot name
- * an artifact with a session ordinal; what it can do is the per-point work. Each distinct
- * `tessera_id` the column carries — at most the response's served artifacts, ≤ 10⁴ — gets a
- * local index from 1, `0` standing for null, and the main thread maps the short distinct list to
- * session ordinals and remaps the index array with a tight loop (`bands.ts`).
+ * The decoder runs in a worker that cannot see the session's artifact ordinals, so it does the
+ * per-point work: each distinct `tessera_id` gets a local index from 1, with `0` for null, and the
+ * main thread maps the short distinct list to session ordinals (`bands.ts`).
  *
- * **Hashed on the two `u32` halves, never on a `BigInt`.** Arrow's `u64` column is little-endian
- * words already; a `Map<bigint, …>` would allocate a `BigInt` per point, which at 10⁶ points is
- * the same per-point allocation `decode.ts` refuses for the position code. Open addressing over a
- * power-of-two table sized to the point count, so the probe sequence is bounded by load.
- *
- * Nulls are read from each chunk's validity bitmap; a chunk with no bitmap is all valid.
+ * Hashed on the two `u32` halves, because a `Map<bigint, …>` allocates a `BigInt` per point. Open
+ * addressing over a power-of-two table. Nulls come from each chunk's validity bitmap; a chunk
+ * with no bitmap is all valid.
  */
 function hashMembership(vectors: Vector<DataType>[], total: number): MembershipColumn {
   const index = total > 0xffff ? new Uint32Array(total) : new Uint16Array(total);
-  // Distinct ids as their halves; `capacity` is a power of two at most half full for ≤ 10⁴
-  // distinct, and grown when a response defies that.
+  // At most half full; grown when a response has more distinct ids than expected.
   let capacity = 1 << 12;
   let slotsLo = new Uint32Array(capacity);
   let slotsHi = new Uint32Array(capacity);
@@ -253,7 +244,7 @@ function hashMembership(vectors: Vector<DataType>[], total: number): MembershipC
       for (let i = 0; i < chunk.length; i++, o++) {
         if (bitmap) {
           const bit = offset + i;
-          if (((bitmap[bit >> 3]! >> (bit & 7)) & 1) === 0) continue; // null → 0, already
+          if (((bitmap[bit >> 3]! >> (bit & 7)) & 1) === 0) continue; // null stays 0
         }
         const at = (offset + i) * 2;
         index[o] = indexOf(halves[at]!, halves[at + 1]!);
@@ -268,8 +259,8 @@ function hashMembership(vectors: Vector<DataType>[], total: number): MembershipC
 }
 
 /**
- * Gather the even bits of a `u32` into the low 16 bits — the inverse of the Morton spread, and the
- * mirror of `tessera_build::input::compact`.
+ * Gathers the even bits of a `u32` into the low 16 bits: the inverse of the Morton spread, as
+ * `tessera_build::input::compact`.
  */
 function compact(v: number): number {
   let x = v & 0x55555555;
@@ -281,12 +272,9 @@ function compact(v: number): number {
 }
 
 /**
- * The point half of a response, decoded from one or more kind-3 frames.
- *
- * Separated from {@link ViewportResult} because the points are the part that arrives in pieces:
- * a wide response is dozens of frames, each a complete Arrow stream over whole tiles, and the
- * streaming client decodes them one at a time as the wire delivers them. A batch decode is the
- * same function over every frame at once.
+ * The point half of a response, decoded from one or more kind-3 frames. Each frame is a complete
+ * Arrow stream over whole tiles, so the streaming client decodes frames as they arrive; a batch
+ * decode is the same function over every frame.
  */
 export type PointsPart = {
   ids: BigUint64Array;
@@ -295,16 +283,13 @@ export type PointsPart = {
   world: Float32Array;
   scalars: Record<string, ScalarColumn>;
   membership: Record<string, MembershipColumn>;
-  /** See {@link ViewportResult.highlighted} — null where the frames carried no such column. */
+  /** See {@link ViewportResult.highlighted}; null where the frames carried no such column. */
   highlighted: Uint8Array | null;
   /**
-   * Which projection the frames were in, read off their schema
-   * (`highlight-and-hierarchy.md` §2; contracts §3.2 r74).
-   *
-   * `'highlight'` means `(tessera_id, highlighted)` and nothing else: `codes`, `positions`,
-   * `world` and `scalars` are **empty**, and the caller joins the bits to points it already holds
-   * by `tessera_id`. A caller holding nothing meets identifiers it cannot draw, knows it from
-   * this, and re-asks with `'full'`.
+   * Which projection the frames were in, read from their schema. `'highlight'` carries
+   * `(tessera_id, highlighted)` only: `codes`, `positions`, `world` and `scalars` are empty, and
+   * the caller joins the bits to points it holds by `tessera_id`. A caller holding nothing asks
+   * again with `'full'`.
    */
   projection: PointsProjection;
 };
@@ -313,29 +298,22 @@ export type PointsPart = {
 export type PointsProjection = 'full' | 'highlight';
 
 /**
- * Decode kind-3 frames into one point block.
+ * Decodes kind-3 frames into one point block.
  *
- * Each frame is a complete Arrow stream; Arrow JS reads the batches of one stream into one Table,
- * and concatenating the frames' streams byte-wise would decode only the first — so frames decode
- * separately and their tables concatenate as row groups. Zero frames (an empty response carries no
- * points schema at all — contracts §3.2) decodes to zero points.
+ * Arrow JS reads only the first stream of concatenated bytes, so each frame decodes separately and
+ * the tables are joined. Zero frames decode to zero points.
  *
- * **Positions are deinterleaved here, once**, into the layout deck.gl's `getPosition` wants. The
- * server ships one `code: uint64` per point — the Morton interleave of two 32-bit fixed-point
- * axes — so this is where the axes come apart. The output is **cell space**, `[0, 65536)` per axis
- * with a fraction below the cell, which is the grid's own units and needs no quantisation extent to
- * interpret; the raw `codes` are returned alongside, because a client that wants the containing
- * tile at any depth gets it by shifting rather than by re-quantising.
+ * Each point's `code: uint64` is the Morton interleave of two 32-bit fixed-point axes, and it is
+ * de-interleaved here once, into cell space: `[0, 65536)` per axis with a sub-cell fraction, which
+ * needs no quantisation extent. The raw `codes` are returned too, since shifting one gives the
+ * containing tile at any depth.
  */
 export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   const pointTables = payloads.map((frame) => tableFromIPC(frame));
   const totalPoints = pointTables.reduce((n, t) => n + t.numRows, 0);
   const ids = new BigUint64Array(totalPoints);
-  // **The projection is read off the frame's own schema, never off the request** — the rule
-  // `decodeArtifactsFrame` already follows. `point_rows = "highlight"` answers
-  // `(tessera_id, highlighted)` and carries **no `code`** (contracts §3.2 r74), so a decoder that
-  // demanded one refused the projection this client can already ask for; the field was on the
-  // request surface and unusable, which a live serve found and no fixture could have.
+  // The projection is read from the frame's schema, not the request: the highlight projection
+  // carries no `code`.
   const projection: PointsProjection = pointTables.length > 0 && pointTables[0]!.getChild('code') == null ? 'highlight' : 'full';
   const codes = new BigUint64Array(projection === 'full' ? totalPoints : 0);
   {
@@ -346,23 +324,16 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
       offset += t.numRows;
     }
   }
-  // **`f64`, and not because it is convenient.** A cell coordinate is 32 bits per axis, so the
-  // de-interleaved value needs a 32-bit mantissa to round-trip; `f32` has 24 and loses the
-  // sub-cell part. `decode.test.ts` re-interleaves these back into the server's `code` and would
-  // catch it. The narrowing to the renderer's `f32` world space happens later, per band, where the
-  // precision is no longer needed.
+  // `f64`: a cell coordinate is 32 bits per axis, and `f32`'s 24-bit mantissa loses the sub-cell
+  // part. Narrowing to `f32` world space happens per band, where that precision is not needed.
   const positions = new Float64Array(projection === 'full' ? ids.length * 2 : 0);
   const world = new Float32Array(projection === 'full' ? ids.length * 2 : 0);
-  // **The halves are read as `u32`s over the same bytes, never as `BigInt`s.** Arrow's `u64` column
-  // is little-endian, so each code is already two 32-bit words in the order this loop wants them,
-  // and a `Uint32Array` view costs nothing. Taking them off the `BigUint64Array` instead — one read
-  // plus a shift plus a mask — is three `BigInt` allocations per point, which at 2.5 × 10^6 points
-  // measured 2.5 s of decode on the main thread and was the largest single cost in the client.
+  // Each little-endian `u64` code is read as two `u32` words through a view over the same bytes;
+  // reading it as a `BigInt` costs three allocations per point.
   const halves = new Uint32Array(codes.buffer, codes.byteOffset, codes.length * 2);
   for (let i = 0; i < positions.length / 2; i++) {
-    // JS bitwise operators are int32, so the spread/compact arithmetic happens 32 bits at a time.
-    // The halves recombine by multiplication rather than by shifting, which would overflow int32
-    // at the top of the axis.
+    // JS bitwise operators are int32, so the arithmetic runs 32 bits at a time. The halves recombine
+    // by multiplication, since a shift would overflow int32 at the top of the axis.
     const lo = halves[i * 2]!;
     const hi = halves[i * 2 + 1]!;
     const qx = compact(lo) + compact(hi) * 65536;
@@ -375,23 +346,15 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
     world[i * 2 + 1] = y / CELLS_PER_WORLD_UNIT;
   }
 
-  // Scalars concatenate per column across the frames' tables. Every frame carries the full
-  // declared schema (each is a complete stream over the same manifest), so the first table's
-  // field list is the response's.
+  // Every frame carries the full declared schema, so the first table's fields are the response's.
   const scalars: Record<string, ScalarColumn> = {};
   const membership: Record<string, MembershipColumn> = {};
   if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
       if (field.name === 'tessera_id' || field.name === 'code') continue;
-      // The highlight bit is not a declared scalar either — it is the request's second
-      // expression answered per served point, and decoding it as one would put it on the palette
-      // and in the tooltip's field list.
+      // The highlight bit and the membership columns are not declared scalars; decoded as scalars
+      // they would reach the palette and the tooltip.
       if (field.name === HIGHLIGHTED_COLUMN) continue;
-      // **The per-point membership column is not a declared scalar** — it is the deepest served
-      // artifact per named layer (D12, §5.10), a nullable `u64` named `membership:<layer>` after
-      // the render scalars. It is hashed below into a response-local index; here it is skipped by
-      // name so it is never coloured by, ranked, or shown as a column. Decoding it as a scalar
-      // would put a `tessera_id` on the palette.
       if (field.name.startsWith(MEMBERSHIP_PREFIX)) continue;
       const perFrame = pointTables.map((t) => scalarColumn(field.name, t.getChild(field.name)!));
       scalars[field.name] = concatScalarColumns(perFrame, totalPoints);
@@ -404,8 +367,7 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
       );
     }
   }
-  // One byte a point, concatenated across the frames in the order they arrived — the same order
-  // `ids` is in, which is what makes the join to a band a slice.
+  // One byte a point, in the same order as `ids`, so the join to a band is a slice.
   let highlighted: Uint8Array | null = null;
   if (pointTables.length > 0 && pointTables[0]!.schema.fields.some((f) => f.name === HIGHLIGHTED_COLUMN)) {
     highlighted = new Uint8Array(totalPoints);
@@ -419,16 +381,14 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
   return {ids, codes, positions, world, scalars, membership, highlighted, projection};
 }
 
-/** Decode the kind-1 frame: every tile's counts, in the response's own tile order. */
+/** Decodes the kind-1 frame: every tile's counts, in the response's tile order. */
 export function decodeTiles(payload: Uint8Array): TileCounts[] {
   const tileTable = tableFromIPC(payload);
   const tile = u64Column(tileTable, 'tile');
   const visible = u64Column(tileTable, 'visible');
   const matched = u64Column(tileTable, 'matched');
   const served = u64Column(tileTable, 'served');
-  // Fifth, after `served`, and **always present** — equal to `matched` where the request carried
-  // no highlight (`highlight-and-hierarchy.md` §2), so this is read as a column and never as an
-  // option.
+  // Always present; equal to `matched` where the request carried no highlight.
   const highlighted = u64Column(tileTable, 'highlighted');
   const tiles: TileCounts[] = [];
   for (let i = 0; i < tile.length; i++) {
@@ -443,7 +403,7 @@ export function decodeTiles(payload: Uint8Array): TileCounts[] {
   return tiles;
 }
 
-/** Decode the kind-2 frame: the underlay's per-cell counts. */
+/** Decodes the kind-2 frame: the underlay's per-cell counts. */
 export function decodeSubCells(payload: Uint8Array): SubCell[] {
   const t = tableFromIPC(payload);
   const cell = u64Column(t, 'cell');
@@ -456,12 +416,9 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
 }
 
 /**
- * Decode the kind-5 frame, in whichever projection the server sent.
- *
- * The projection is read off the frame's own schema, never off the request: the identity frame is
- * exactly the five columns `(layer, tessera_id, rung, matched, highlighted)` (contracts §3.2 r74 —
- * four until `highlighted` joined them), the full frame's fixed prefix is fifteen with the two
- * shape columns trailing.
+ * Decodes the kind-5 frame in whichever projection the server sent, read from the frame's schema.
+ * The identity frame is exactly `(layer, tessera_id, rung, matched, highlighted)`; the full frame
+ * has sixteen fixed columns with the two shape columns after them.
  */
 export function decodeArtifactsFrame(payload: Uint8Array): {
   artifacts: Artifact[];
@@ -469,18 +426,13 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
 } {
   const artifacts: Artifact[] = [];
   const t = tableFromIPC(payload);
-  // `layer` is dictionary-encoded (u16 keys over utf8, contracts §3.2 r44) in both projections.
-  // apache-arrow resolves the dictionary on `.get()` — the vector hands back the utf8 value,
-  // never the key — so the column reads exactly as the plain-utf8 encoding did; verified by
-  // test rather than assumed (`artifacts-frame.test.ts`).
+  // `layer` is dictionary-encoded (u16 keys over utf8); apache-arrow resolves the dictionary on
+  // `.get()`.
   const layer = t.getChild('layer')!;
   if (t.schema.fields.length === 5) {
     const tesseraId = u64Column(t, 'tessera_id');
     const rung = t.getChild('rung');
     const matched = t.getChild('matched');
-    // Fifth since `highlight-and-hierarchy.md` §2: the row set, the two bits and the `rung` values
-    // are identical under either projection, so the identity frame carries the highlight's bit for
-    // the reason it carries the filter's — it is the one field a second expression moves.
     const highlighted = t.getChild('highlighted');
     if (rung == null || matched == null || highlighted == null) {
       throw new Error(
@@ -502,80 +454,62 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   const key = t.getChild('key')!;
   const tesseraId = u64Column(t, 'tessera_id');
   const maskedCount = u64Column(t, 'masked_count');
-  // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
-  // *this layer declares none*, never *withheld*: an artifact whose content could not be served
-  // does not appear at all.
+  // Derived geometry, in the same grid units as `codes`. A null means the layer declares none; an
+  // artifact whose content could not be served is absent.
   const centroidX = t.getChild('centroid_x')!;
   const centroidY = t.getChild('centroid_y')!;
   const boxMinX = t.getChild('box_min_x')!;
   const boxMinY = t.getChild('box_min_y')!;
   const boxMaxX = t.getChild('box_max_x')!;
   const boxMaxY = t.getChild('box_max_y')!;
-  // `shape_x` and `shape_y` are `list<list<list<uint32>>>` — parts, rings, vertices (contracts
-  // §3.2 item 4, `polygon-membership.md` §7.1) — and **trail the fixed prefix, absent from the
-  // schema entirely when no served layer draws a shape** (r44). Read by name, tolerating absence:
-  // an absent pair reads as no artifact carrying a shape, and a per-row null in a present pair
-  // keeps its one meaning (the layer draws none). Where a column is present, the nesting is
-  // checked at the schema, so a body from a server that still sends rings of vertices is refused
-  // rather than misread.
-  // **A body carrying the columns' old names is refused, not read as shapeless.** There is no
-  // compatibility to keep (decision 0048), and reading `hull_x`/`hull_y` as *no drawn geometry*
-  // would draw every cluster as its box and look like a layer that declares none.
+  // `shape_x` and `shape_y` are read by name and may be absent, which reads as no artifact having a
+  // shape; a null row in a present pair means the layer draws none. The old `hull_x`/`hull_y`
+  // names are refused: read as absent, every cluster would draw as its box.
   if (t.getChild('hull_x') || t.getChild('hull_y')) {
     throw new Error(
-      'viewport artifacts frame carries `hull_x`/`hull_y`: this client requires a server that serves `shape_x`/`shape_y` (contracts §3.2 r45 renamed the pair and deepened it to parts of rings)'
+      'viewport artifacts frame carries `hull_x`/`hull_y` from a server older than this client; it expects `shape_x`/`shape_y` as parts of rings.'
     );
   }
   const shapeX = partsColumn(t, 'shape_x');
   const shapeY = partsColumn(t, 'shape_y');
-  // The two travel together by contract; one without the other has no reading.
+  // The two travel together; one alone has no reading.
   if ((shapeX === null) !== (shapeY === null)) {
     throw new Error('viewport artifacts frame carries one shape column and not the other');
   }
-  // One content, entire, positional to the layer's declared kinds. Empty means the layer
-  // declares no supplied content — never that content was withheld, because an artifact whose
-  // content this principal may not read does not appear at all.
+  // The content, positional to the layer's declared kinds. Empty means the layer declares no
+  // supplied content: an artifact whose content this principal may not read is absent.
   const content = t.getChild('content')!;
-  // **An entry only where that parent is also in this response** (contracts §3.2 r71; decision
-  // 0117), ascending by `tessera_id`. An empty list is a root, a flat artifact *or* a parent this
-  // principal was not served, and the three are deliberately one value: naming the last would
-  // disclose that a coarser artifact exists which they may not see. Read it as "no parent
-  // here", never as "no parent". A tree serves at most one entry; a `dag` layer several.
+  // A parent appears only where it is also in this response, ascending by `tessera_id`. An empty
+  // list is a root, a flat artifact or a parent this principal was not served, and these are one
+  // value: telling the last apart would disclose an artifact they may not see. A tree serves at
+  // most one entry, a `dag` layer several.
   const parentIds = t.getChild('parent_ids');
-  // **The rung a client draws this artifact at**, non-nullable, computed the right way for the
-  // layer's kind (contracts §3.2 r44): the declared level on a levelled layer, the
-  // response-local parent-chain depth on a treed one, 0 on a flat one. Read by name like every
-  // other column here; the schema's *position* is contract for a decoder that indexes
-  // positionally, which this one deliberately is not.
+  // The rung the client draws this artifact at: the declared level on a levelled layer, the
+  // parent-chain depth in this response on a treed one, 0 on a flat one.
   const rung = t.getChild('rung');
-  // **The filter bit, and null is a value**: the column is all-null where the request carried no
-  // filter, which is *there was no question* rather than *no matches* (decision 0104). A missing
-  // column reads the same way, and unlike `rung` there is nothing to refuse over — a client that
-  // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
-  // is what it drew before the column existed.
+  // The filter bit. All null, or absent, where the request carried no filter, meaning no question
+  // was asked rather than no matches.
   const matched = t.getChild('matched');
-  // The highlight bit, fifteenth and after `matched` (`highlight-and-hierarchy.md` §2): decision
-  // 0104's bit under `all_of[filters, highlight]`, all-null where the request carried no
-  // highlight. Read the same way and for the same reason — an absent column and an all-null one
-  // are one state, *there was no question*.
+  // The highlight bit, read the same way for the highlight.
   const highlighted = t.getChild('highlighted');
-  // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
-  // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
-  // body without the column — an r41-or-earlier server's `level` included — is a server this
-  // build does not match: silently reading every artifact as rung 0 would draw the whole
-  // hierarchy at its coarsest and look like data.
+  // The `tessera_id` of the artifact in this frame this row is attached to, or null.
+  const target = t.getChild('target');
+  // A missing `rung`, `parent_ids` or `target` is a server this client does not match, and is
+  // refused: read as zero, empty or null it would draw the hierarchy flat or drop every attached
+  // label, and look like data.
   if (rung == null) {
     throw new Error(
-      'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r44 renamed and re-meant `level`)'
+      'viewport artifacts frame has no `rung` column; this client expects one on every artifact row, which a server older than this client does not send.'
     );
   }
-  // The same refusal for the parent list: a body carrying `parent_id` — the scalar this column
-  // replaced (contracts §3.2 r71) — would otherwise read as a response in which nothing is
-  // linked, and a hierarchy drawn as a flat set looks like data. No shim keeps the old name
-  // (decision 0048).
   if (parentIds == null) {
     throw new Error(
-      'viewport artifacts frame carries no `parent_ids` column: this client requires a server that serves it (contracts §3.2 r71 replaced `parent_id`)'
+      'viewport artifacts frame has no `parent_ids` column; this client expects a list of parent ids on every artifact row, which a server older than this client does not send.'
+    );
+  }
+  if (target == null) {
+    throw new Error(
+      'viewport artifacts frame has no `target` column; this client expects the attached artifact\'s `tessera_id`, or null, on every artifact row, which a server older than this client does not send.'
     );
   }
   for (let i = 0; i < tesseraId.length; i++) {
@@ -583,10 +517,8 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
     const bx = boxMinX.get(i);
     const sx = shapeX === null ? null : shapeX.get(i);
     const sy = shapeY === null ? null : shapeY.get(i);
-    // The two axes carry the same structure by construction. **Checked at every level, not
-    // assumed** — a decoder that assumes it misdraws silently on the day something else does not,
-    // and a ring whose axes disagree has no reading at all: a shorter x than y would draw a ring
-    // that closes early, in the shape of a real boundary.
+    // The two axes are checked for the same structure at every level: a shorter x than y would draw
+    // a ring that closes early.
     if ((sx === null) !== (sy === null)) {
       throw new Error(`viewport artifact row ${i}: one shape axis is null and the other is not`);
     }
@@ -635,24 +567,22 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
           : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
       shape,
       content: Array.from(content.get(i) ?? [], (v) => String(v)),
-      // A null cell has no reading the contract gives it and is taken as the empty list, which is
-      // the fail-closed direction — no parent is invented.
+      // A null cell is taken as the empty list, so no parent is invented.
       parentIds: Array.from(parentIds.get(i) ?? [], (v) => BigInt(v as bigint)),
       rung: Number(rung.get(i)),
       matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i)),
-      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i))
+      highlighted: highlighted == null || highlighted.get(i) === null ? null : Boolean(highlighted.get(i)),
+      // Null is attached to nothing. A dependent whose target this response withheld is absent.
+      target: target.get(i) === null ? null : BigInt(target.get(i) as bigint)
     });
   }
   return {artifacts, artifactsIdentity: null};
 }
 
 /**
- * A response's head: the frames the server sends before any points frame.
- *
- * The counts channel, the underlay and the artifacts all land in the first flush
- * (`streamed-serving.md` §3), so this is everything a client can draw before a single point has
- * arrived — and, for a client naming layers, everything a point's membership column is named
- * through.
+ * A response's head: the frames the server sends before any points frame, all in the first flush.
+ * It is everything a client can draw before a point arrives, and what membership columns are
+ * named through.
  */
 export type ViewportHead = {
   tiles: TileCounts[];
@@ -661,7 +591,7 @@ export type ViewportHead = {
   artifactsIdentity: ArtifactIdentity[] | null;
 };
 
-/** Decode the head frames together — the one unit the streaming client asks its decoder for. */
+/** Decodes the head frames together, as the streaming client asks its decoder to. */
 export function decodeHead(frames: {
   tiles: Uint8Array;
   subCells: Uint8Array | null;
@@ -679,10 +609,8 @@ export function decodeHead(frames: {
 }
 
 /**
- * Parse the kind-4 trailer, refusing any key outside the closed set.
- *
- * The trailer's key set is closed (contracts §3.2 r26) and validated at every decode: the one
- * server-authored JSON region of the body must not quietly acquire a field no reader checks.
+ * Parses the kind-4 trailer. Its key set is closed, and a key outside it is refused, so the body's
+ * one server-written JSON region cannot gain a field no reader checks.
  */
 export function parseTrailer(payload: Uint8Array): Record<string, unknown> {
   const trailer = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
@@ -696,12 +624,15 @@ export function parseTrailer(payload: Uint8Array): Record<string, unknown> {
   return trailer;
 }
 
+/** The trailer's `stage_ns` CSV as numbers in its field order, or `null` where it has none. */
+export function stageNsOf(trailer: Record<string, unknown>): number[] | null {
+  const csv = trailer['stage_ns'];
+  return typeof csv === 'string' ? csv.split(',').map(Number) : null;
+}
+
 /**
- * The trailer's two counts against what the body actually carried.
- *
- * The server states how many point frames it flushed and how many points it served; a body that
- * disagrees is a body a reader has mis-framed or a transport has edited, and either way the points
- * in hand are not the answer to the question asked.
+ * Checks the trailer's point-frame and point counts against the body. A mismatch means the body
+ * was mis-framed or edited in transit, so the points in hand are not the answer.
  */
 export function checkTrailerCounts(
   trailer: Record<string, unknown>,
@@ -717,17 +648,15 @@ export function checkTrailerCounts(
 }
 
 /**
- * Decode a framed `/v1/viewport` body, whole.
+ * Decodes a whole `/v1/viewport` body into typed arrays on the calling thread, for a test, a
+ * script, a counts-only request or any caller holding a whole body. `ids` stays a
+ * `BigUint64Array`, since a `u64` does not survive conversion to a double.
  *
- * Two rules this path exists to hold:
+ * @throws `Error` for a body that is truncated, lacks its tiles frame or trailer, has a frame of
+ *   unknown kind or out of order, carries a column this client cannot read, or whose trailer counts
+ *   disagree with its frames.
  *
- * 1. `ids` stays a `BigUint64Array`. A `tessera_id` is a u64 and does not survive a double.
- * 2. Positions are deinterleaved once, in {@link decodePoints}, into the renderer's layout.
- *
- * **The streaming client does not come through here** — it takes the same frames one at a time as
- * the wire delivers them (`client.ts`) so that a tile can be drawn before the last byte lands.
- * This is the batch surface: a test, a script, a counts-only ask, and anything holding a whole
- * body already.
+ * @category HTTP client
  */
 export function decodeViewport(body: Uint8Array): ViewportResult {
   const parts = splitFramedStreams(body);
@@ -736,9 +665,8 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   const {ids, codes, positions, world, scalars, membership, highlighted, projection} = decodePoints(parts.points);
   checkTrailerCounts(trailer, parts.points.length, ids.length);
   const subCells = parts.subCells ? decodeSubCells(parts.subCells) : null;
-  // Empty when the response carried no artifacts frame, which is the ordinary state of a
-  // deployment with no layers — and of a principal who reaches none, and of a view holding none.
-  // Those are one answer on purpose; see `Artifact`.
+  // No artifacts frame means no layers, no layer this principal reaches, or none in view; these
+  // are one answer.
   const {artifacts, artifactsIdentity} = parts.artifacts
     ? decodeArtifactsFrame(parts.artifacts)
     : {artifacts: [] as Artifact[], artifactsIdentity: null};

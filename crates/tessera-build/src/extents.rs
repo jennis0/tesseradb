@@ -164,7 +164,7 @@ impl ExtentColumn {
         while self.extents.len() > max_open {
             let groups = self.extents.len().div_ceil(max_open);
             let per_group = self.extents.len().div_ceil(groups);
-            let taken: Vec<ExtentPaths> = self.extents.drain(..).collect();
+            let taken = std::mem::take(&mut self.extents);
             let mut folded: Vec<ExtentPaths> = Vec::with_capacity(groups);
             for (group, extents) in taken.chunks(per_group).enumerate() {
                 let stem = format!("extent-{}-fold{}-{group:05}", self.column, self.folds);
@@ -228,9 +228,11 @@ impl ExtentColumn {
         })
     }
 
-    /// Unlink the extents. Called once both readers are done with them; a build that fails
-    /// earlier leaves them to [`crate::spill::TmpDir`] with the rest of `.build-tmp/`.
+    /// Unlink the extents and stop the column's compressor threads. Called once both readers are
+    /// done with them; a build that fails earlier leaves them to [`crate::spill::TmpDir`] with the
+    /// rest of `.build-tmp/`.
     pub(crate) fn remove(&mut self) {
+        self.pool = None;
         for paths in self.extents.drain(..) {
             for path in [paths.blocks, paths.hasrow, paths.directory] {
                 let _ = std::fs::remove_file(path);
@@ -244,19 +246,21 @@ impl ExtentColumn {
 ///
 /// What an open extent costs the merge **per extent** is one uncompressed block,
 /// [`RECORD_BLOCK_TARGET`], and the share allowed for them is a sixty-fourth of the budget: 32 MB
-/// of blocks, 128 extents, at the smallest budget a build is run under, and 1,281 at the 21.5 GB
-/// rung 6 was built under, which is past the 964 extents that build's widest column spilled. The
-/// extent count rises with the corpus and the budget does not, so the bound is what keeps the
-/// merge's memory off the corpus; the fold below it is the cost of that bound and is paid only
-/// where the bound bites.
+/// of blocks, 1,024 extents, at the smallest budget a build is run under, and 10,251 at the
+/// 21.5 GB rung 6 was built under, which is past the 964 extents that build's widest column
+/// spilled. The extent count rises with the corpus and the budget does not, so the bound is what
+/// keeps the merge's memory off the corpus; the fold below it is the cost of that bound and is paid
+/// only where the bound bites.
 ///
-/// **A block buffer is the whole of what an open extent costs.** It used to bring in a has-row
-/// bitmap and a live set as well, and neither fell with the fan-in: a join chunk is a run of the
-/// attribute source's own order, scattered over entity space rather than a contiguous run of it,
-/// so every extent's bitmap spanned the column and folding two extents into one left the entity
-/// set the same size. That is why the term is gone rather than bounded —
-/// [`ExtentColumn::open`] reads the has-row files one at a time into [`DuplicateMap`], whose two
-/// whole-column bitmaps are a cost of the column and not of the extent count.
+/// **A block buffer is most of what an open extent costs.** It used to bring in a has-row bitmap
+/// and a live set as well, and neither fell with the fan-in: a join chunk is a run of the attribute
+/// source's own order, scattered over entity space rather than a contiguous run of it, so every
+/// extent's bitmap spanned the column and folding two extents into one left the entity set the
+/// same size. That is why the term is gone rather than bounded — [`ExtentColumn::open`] reads the
+/// has-row files one at a time into [`DuplicateMap`], whose two whole-column bitmaps are a cost of
+/// the column and not of the extent count. Merging 1,024 extents of 19,000 GBIF names each, at
+/// 32 KiB blocks, peaked at 48 MiB of anonymous memory, 47 KiB an extent, and took 8.0 s against
+/// 12.0 s for folding them to eight first.
 pub(crate) fn merge_fan_in(budget: u64) -> usize {
     let share = budget / 64;
     usize::try_from(share / RECORD_BLOCK_TARGET as u64)
@@ -717,11 +721,11 @@ mod tests {
     /// fan-in by the budget rather than by what a reader would prefer.** A bundle-level proof of it
     /// is not reachable from a build here: the extent count is `JOIN_STAGE_BYTES` over the staged
     /// row width, a constant of the code, while the fan-in is the memory budget over sixty-four
-    /// 256 KiB blocks — so folding a 10⁷-row corpus wants a budget under 82 MB and its entity-order
-    /// stages refuse under 1,082 MiB. The two meet at the 3.5×10⁹-row rung and nowhere a test can
-    /// go. So the claim is made here, over the one artefact a fold can change: the record blob its
-    /// extents merge into, written from a folded column and an unfolded one and compared byte for
-    /// byte.
+    /// blocks of [`RECORD_BLOCK_TARGET`] — so folding a 10⁷-row corpus wants a budget under 11 MB
+    /// and its entity-order stages refuse under 1,082 MiB. Even the 3.5×10⁹-row rung's 964 extents
+    /// fit the fan-in of the smallest budget, and nothing a test can build comes near. So the claim
+    /// is made here, over the one artefact a fold can change: the record blob its extents merge
+    /// into, written from a folded column and an unfolded one and compared byte for byte.
     #[test]
     fn a_fold_changes_no_byte_of_the_blob_its_extents_merge_into() {
         let plain_dir = tempfile::tempdir().expect("a temp dir");

@@ -1,24 +1,21 @@
-//! **`GET /v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
+//! **`/v1/categories/{column}/suggest`: the typeahead over a category vocabulary.**
 //!
 //! One gate with `/v1/categories` (`tests/categories.rs` covers that gate's own mechanics in
 //! depth — a public and a derived column, an interleaved narrow principal), so these cases cover
 //! what is new here: the wire shape (`match`, `count`, `more`), the two refusals the enumeration
-//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, and the
-//! per-session admission (`value-suggestion.md` §5.1).
+//! has no need of (`q` over 256 bytes, an unknown query parameter), the walk budget, the
+//! per-session admission (`value-suggestion.md` §5.1), and the `POST` form's counts under a filter
+//! and its compute admission.
 
 mod common;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, UInt64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
+use arrow::array::StringArray;
 use tempfile::TempDir;
 
 use common::*;
-use tessera_build::{build, BuildArgs};
 
 const N: u64 = 64;
 
@@ -92,81 +89,34 @@ fn department_of(entity: u64) -> String {
     }
 }
 
-fn write_points(path: &Path, n: u64) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("archive", DataType::Utf8, false),
-        Field::new("department", DataType::Utf8, false),
-        Field::new("score", DataType::Float32, true),
-    ]));
-    let ids: Vec<u64> = (0..n).collect();
-    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
-    let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
-    let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
-    let scores: Vec<Option<f32>> = ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
+/// The suggestion fixture in `dir`: [`N`] items carrying the columns [`SCHEMA_TOML`] declares.
+fn build_categories(dir: &Path) {
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let ids: Vec<u64> = (0..N).collect();
+    let archive = StringArray::from_iter_values(ids.iter().map(|&e| archive_of(e)));
+    let department = StringArray::from_iter_values(ids.iter().map(|&e| department_of(e)));
+    let score =
+        arrow::array::Float32Array::from_iter(ids.iter().map(|&e| Some((e % 97) as f32 * 0.5)));
+    write_points(
+        &points,
+        &ids,
+        scatter,
         vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(StringArray::from(archives)),
-            Arc::new(StringArray::from(departments)),
-            Arc::new(arrow::array::Float32Array::from(scores)),
+            column("archive", false, archive),
+            column("department", false, department),
+            column("score", true, score),
         ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
+    );
+    write_pairs_n(&pairs, N);
+    let schema = format!("{SCHEMA_TOML}\n{ID_ATTRIBUTE}");
+    build_declared(&dir.join("bundle"), &points, &pairs, &schema);
 }
 
-fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
-    write_points(points, N);
-    write_pairs_n(pairs, N);
-    let schema_path = points.with_file_name("schema.toml");
-    std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
-    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
-        .unwrap()
-        .schema;
-    let args = BuildArgs {
-        views: vec![tessera_build::ViewArgs {
-            visibility: None,
-            view_id: "s0".to_string(),
-            projection: tessera_spatial::Projection::None,
-            extent: extent(),
-            points: points.to_path_buf(),
-            point_fields: Default::default(),
-            select: None,
-            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
-        }],
-        anchor: 0,
-        groups: Vec::new(),
-        scoped_attributes: Vec::new(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.to_path_buf(),
-            &schema,
-        ),
-        out: out.to_path_buf(),
-        limit: None,
-        identity_key: test_key(),
-        identity_key_hex: TEST_KEY_HEX.to_string(),
-        idset: FIXTURE_IDSET,
-        shard_id: 0,
-        layers: Vec::new(),
-        layer_inputs: Vec::new(),
-        scoped_layers: Default::default(),
-        mint_external_ids: true,
-        emit_oracle_pairs: true,
-        batch_items: None,
-        memory_budget: None,
-        band_rows: None,
-        schema,
-    };
-    build(&args).expect("fixture build should succeed");
+/// A copy of [`build_categories`]' bundle in `tmp`, built once for this binary.
+fn copy_categories(tmp: &TempDir) {
+    static BUILT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    copy_built(&BUILT, tmp.path(), build_categories);
 }
 
 /// A server over the suggestion fixture, plus a session token for a fully-granted principal.
@@ -174,20 +124,9 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
 /// enough that the fixture's five- and eleven-value vocabularies exercise `limit` and paging
 /// behaviour on an ordinary request rather than only on a contrived one.
 async fn serve(tmp: &TempDir) -> (TestServer, String) {
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    copy_categories(tmp);
+    let server = open(tmp).await;
+    let token = token_for(&server, &["0"]).await;
     (server, token)
 }
 
@@ -242,26 +181,10 @@ async fn a_public_column_is_suggested_as_authored() {
 #[tokio::test]
 async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_is() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let full = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    copy_categories(&tmp);
+    let server = open(&tmp).await;
+    let full = token_for(&server, &["0"]).await;
+    let narrow = token_for(&server, &["1"]).await;
 
     // The full principal, paged past the server's `max_suggestions = 4` in one call via a limit
     // above the ceiling — clamped, not refused, exactly as `/v1/categories` clamps.
@@ -297,26 +220,10 @@ async fn a_derived_column_is_filtered_per_principal_exactly_as_the_enumeration_i
 #[tokio::test]
 async fn a_narrow_principal_sees_an_empty_page_where_the_wide_one_does_not() {
     let tmp = TempDir::new().unwrap();
-    let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
-    let server = spawn_server(
-        &bundle_root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-    )
-    .await;
-    let wide = authorise(&server, &["0"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let narrow = authorise(&server, &["1"]).await["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    copy_categories(&tmp);
+    let server = open(&tmp).await;
+    let wide = token_for(&server, &["0"]).await;
+    let narrow = token_for(&server, &["1"]).await;
 
     let (status, body) = get(&server, &wide, "/v1/categories/department/suggest?q=d10").await;
     assert_eq!(status, 200, "{body}");
@@ -385,12 +292,8 @@ async fn counts_are_present_iff_asked_and_are_exact() {
 #[tokio::test]
 async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
     let tmp = TempDir::new().unwrap();
+    copy_categories(&tmp);
     let bundle_root = tmp.path().join("bundle");
-    build_fixture_with_categories(
-        &bundle_root,
-        &tmp.path().join("points.parquet"),
-        &tmp.path().join("pairs.parquet"),
-    );
     let engine_config = default_engine_config();
     let max_k = engine_config.max_k;
     let engine = tessera_engine::Engine::open(
@@ -409,43 +312,31 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         engine,
         sessions: parking_lot::Mutex::new(tessera_server::state::SessionRegistry::default()),
         heap: tessera_server::memory::HeapWatch::default(),
-        max_k,
-        max_category_values: 4,
-        // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget
-        // reading rather than the page-filled one — deterministic without needing a vocabulary
-        // too large for this test to build. `d00` sorts first and is carried by nothing (§3.3's
-        // gate excludes it, never the walk), so a budget of 1 alone would spend its only unit on
-        // an invisible value and prove nothing about a value actually being found; 2 leaves room
-        // for `d01`, the first this principal can see.
-        max_suggestions: 20,
-        max_suggestion_walk: 2,
-        // The probe route, always: this case is about the walk budget, which the set route does
-        // not spend (§6.3).
-        max_suggest_set_entities: 1,
-        max_browse_rows: 200,
+        limits: tessera_server::state::ServeLimits {
+            max_k,
+            max_category_values: 4,
+            // A budget of 2, so a walk over `department`'s 11 values stops on the walk-budget
+            // reading rather than the page-filled one — deterministic without needing a vocabulary
+            // too large for this test to build. `d00` sorts first and is carried by nothing (§3.3's
+            // gate excludes it, never the walk), so a budget of 1 alone would spend its only unit on
+            // an invisible value and prove nothing about a value actually being found; 2 leaves room
+            // for `d01`, the first this principal can see.
+            max_suggestions: 20,
+            max_suggestion_walk: 2,
+            // The probe route, always: this case is about the walk budget, which the set route does
+            // not spend (§6.3).
+            max_suggest_set_entities: 1,
+            ingest_max_batch_rows: 200_000,
+            ingest_buffer_max_items: 10_000_000,
+            ingest_max_batch_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        },
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
-        max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
-        max_region_vertices: 10_000,
-        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
         compute_gate: generous_test_gate(),
+        bulk_gate: generous_bulk_gate(),
         ingest_admission: tessera_server::state::IngestAdmission::new(64),
-        ingest_max_batch_rows: 200_000,
-        ingest_buffer_max_items: 10_000_000,
-        ingest_max_batch_bytes: 64 * 1024 * 1024,
-        publish_max_body_bytes: 64 * 1024 * 1024,
-        max_artifacts_per_request: 10_000,
-        max_members_per_request: 5_000_000,
-        max_excluded_per_request: 1_000_000,
-        stage_timing: false,
-        stream_flush_bytes: 1 << 20,
-        stream_write_stall_ms: 10_000,
-        stream_deadline_ms: 60_000,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
-        dev_cors_origins: Vec::new(),
-        cors_origins: Vec::new(),
-        cors_loopback: false,
-        visible_wait_max_secs: 30,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 
@@ -478,8 +369,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         serve_tasks,
     };
 
-    let auth = authorise(&server, &["0"]).await;
-    let token = auth["token"].as_str().unwrap().to_string();
+    let token = token_for(&server, &["0"]).await;
 
     let (status, body) = get(&server, &token, "/v1/categories/department/suggest?q=d").await;
     assert_eq!(status, 200, "{body}");
@@ -606,4 +496,361 @@ async fn at_most_one_suggest_in_flight_per_session() {
     drop(guard);
     let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a").await;
     assert_eq!(status, 200, "{body}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `POST` form: counts under a filter
+// ---------------------------------------------------------------------------------------------
+
+async fn post(
+    server: &TestServer,
+    token: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> (u16, reqwest::header::HeaderMap, serde_json::Value) {
+    let resp = server
+        .client
+        .post(server.viewer_url(path))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    (status, headers, resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// **A filtered count is the items this principal may see in the view that pass the filter and
+/// carry the value**, for a principal who sees everything and one who sees a third, under a filter
+/// over a column with no index, so it is answered by the view's rows, and a region. The values
+/// offered are the `GET` form's, and the region's verdict is in `x-tessera-region`.
+#[tokio::test]
+async fn a_filtered_count_is_the_visible_items_passing_the_filter() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _) = serve(&tmp).await;
+    let departments = ["d01", "d03", "d04"];
+    let (lo, hi) = (100.5, 800.5);
+    let filter = serde_json::json!({ "all_of": [
+        { "department": { "in": departments } },
+        { "region": { "bbox": [lo, lo, hi, hi] } },
+    ] });
+    let passes = |e: u64| {
+        let (x, y) = scatter(e);
+        departments.contains(&department_of(e).as_str())
+            && (lo..=hi).contains(&x)
+            && (lo..=hi).contains(&y)
+    };
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (_, unfiltered) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=&limit=20&counts=true&view=s0")
+                .await;
+        let (status, headers, body) = post(
+            &server,
+            &token,
+            "/v1/categories/archive/suggest",
+            &serde_json::json!({ "q": "", "limit": 20, "counts": true, "view": "s0", "filters": filter }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(headers["x-tessera-region"], "exact");
+        assert_eq!(keys_of(&body), keys_of(&unfiltered), "{terms:?}: {body}");
+        let mut total = 0;
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..N)
+                .filter(|&e| sees(e) && passes(e) && archive_of(e) == key)
+                .count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+            total += expected;
+        }
+        assert!(total > 0, "the filter passes some item for {terms:?}");
+        let passing = (0..N).filter(|&e| sees(e) && passes(e)).count() as u64;
+        assert_eq!(body["total"], passing, "{terms:?}: total under a region leaf: {body}");
+    }
+}
+
+/// **A value the filter excludes is offered with count 0**, and a filter on the counted column
+/// itself narrows the counts to its own values.
+#[tokio::test]
+async fn a_value_the_filter_excludes_is_offered_with_zero() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, _, body) = post(
+        &server,
+        &token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({
+            "q": "", "limit": 20, "counts": true, "view": "s0",
+            "filters": { "archive": { "in": ["cond"] } },
+        }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // The server's `max_suggestions` is 4.
+    assert_eq!(keys_of(&body), ["astro", "cond", "hep", "math"], "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let expected = if value["key"] == "cond" {
+            (0..N).filter(|&e| archive_of(e) == "cond").count() as u64
+        } else {
+            0
+        };
+        assert_eq!(value["count"], expected, "{body}");
+    }
+}
+
+/// **`total` is the size of the set the counts are taken over**: this principal's visible items,
+/// within the view, passing the filter. It is present iff counts were asked for, and it counts
+/// items whose value the page does not offer.
+#[tokio::test]
+async fn total_is_the_counted_set() {
+    let tmp = TempDir::new().unwrap();
+    let (server, _) = serve(&tmp).await;
+    let filter = serde_json::json!({ "department": { "in": ["d01", "d02", "d03"] } });
+    let passes = |e: u64| ["d01", "d02", "d03"].contains(&department_of(e).as_str());
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let visible = (0..N).filter(|&e| sees(e)).count() as u64;
+        let passing = (0..N).filter(|&e| sees(e) && passes(e)).count() as u64;
+
+        let (_, body) = get(&server, &token, "/v1/categories/archive/suggest?q=&counts=true").await;
+        assert_eq!(body["total"], visible, "{terms:?}: {body}");
+        let (_, body) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=&counts=true&view=s0").await;
+        assert_eq!(body["total"], visible, "{terms:?}: {body}");
+        let (_, body) =
+            get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true&view=s0").await;
+        assert_eq!(body["total"], visible, "a narrower page counts over the same set: {body}");
+        let (status, _, body) = post(
+            &server,
+            &token,
+            "/v1/categories/archive/suggest",
+            &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": filter }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], passing, "{terms:?}: {body}");
+
+        let (_, body) = get(&server, &token, "/v1/categories/archive/suggest?q=&view=s0").await;
+        assert!(body.get("total").is_none(), "counts were not asked for: {body}");
+    }
+}
+
+/// `filters` needs `view`, is parsed as the viewport parses it, and without `counts` changes
+/// nothing.
+#[tokio::test]
+async fn the_post_forms_refusals() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let path = "/v1/categories/archive/suggest";
+    let filter = serde_json::json!({ "archive": { "in": ["cond"] } });
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "filters": filter }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": { "nonesuch": { "in": ["x"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (422, Some("contract")), "{body}");
+    let (status, headers, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "q": "", "view": "s0", "filters": filter }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(headers.get("x-tessera-region").is_none());
+    assert!(body["values"].as_array().unwrap().iter().all(|v| v.get("count").is_none()));
+}
+
+/// **A suggest counting within a view takes a compute permit, and one that does not open a view
+/// does not**: with the gate's one permit held and no queue, a count within a view is shed with
+/// `429` in either form, filtered or not, and a count across the database and a page without
+/// counts are served.
+#[tokio::test]
+async fn a_suggest_counting_within_a_view_is_subject_to_compute_admission() {
+    let tmp = TempDir::new().unwrap();
+    copy_categories(&tmp);
+    let server = spawn_server_with_config_and_gate(
+        &tmp.path().join("bundle"),
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        default_engine_config(),
+        tessera_server::state::ComputeGate::new(1, 0, 250),
+    )
+    .await;
+    let token = token_for(&server, &["0"]).await;
+    let held = server.state.compute_gate.admit().await.expect("the one permit is free");
+    let path = "/v1/categories/archive/suggest";
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, _, body) =
+        post(&server, &token, path, &serde_json::json!({ "counts": true, "view": "s0" })).await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, body) =
+        get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true&view=s0").await;
+    assert_eq!((status, body["error"].as_str()), (429, Some("backpressure")), "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&counts=true").await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = get(&server, &token, "/v1/categories/archive/suggest?q=a&view=s0").await;
+    assert_eq!(status, 200, "{body}");
+    drop(held);
+    let (status, _, body) = post(
+        &server,
+        &token,
+        path,
+        &serde_json::json!({ "counts": true, "view": "s0", "filters": { "archive": { "in": ["cond"] } } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+/// The counts a filtered `POST` serves for `archive` in `s0`, by key, and the whole body.
+async fn filtered_counts(
+    server: &TestServer,
+    token: &str,
+    filters: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let (status, _, body) = post(
+        server,
+        token,
+        "/v1/categories/archive/suggest",
+        &serde_json::json!({ "q": "", "counts": true, "view": "s0", "filters": filters }),
+    )
+    .await;
+    (status, body)
+}
+
+/// **A `member_of` leaf counts the artifact's members this principal may see**; an artifact
+/// withheld from the principal answers exactly as an identifier naming nothing, and a layer the
+/// principal cannot reach is refused exactly as one that does not exist.
+#[tokio::test]
+async fn a_member_of_filter_counts_the_members_and_withholds_as_absence() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let mut teams = flat_layer("teams");
+    teams["artifact_visibility"] = serde_json::json!({ "field": "team", "default": "inherited" });
+    register(&server, teams).await;
+    let mut hidden = flat_layer("hidden");
+    hidden["visibility"] = serde_json::json!("secret");
+    register(&server, hidden).await;
+    let publish = |layer: &'static str, artifacts: serde_json::Value| {
+        let server = &server;
+        async move {
+            let resp = server
+                .client
+                .put(server.control_url(&format!("/control/layers/{layer}/artifacts")))
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .json(&serde_json::json!({ "artifacts": artifacts }))
+                .send()
+                .await
+                .unwrap();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            body["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["tessera_id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let ids = publish(
+        "teams",
+        serde_json::json!([
+            { "key": "open", "members": members(0..30), "access": null },
+            { "key": "withheld", "members": members(30..50), "access": ["secret"] },
+        ]),
+    )
+    .await;
+    publish("hidden", serde_json::json!([{ "key": "h", "members": members(0..10), "access": null }]))
+        .await;
+    let (open, withheld) = (&ids[0], &ids[1]);
+
+    for (terms, sees) in [(["0"], (|_| true) as fn(u64) -> bool), (["1"], |e| e % 3 == 0)] {
+        let token = token_for(&server, &terms).await;
+        let (status, body) = filtered_counts(
+            &server,
+            &token,
+            serde_json::json!({ "member_of": { "layer": "teams", "artifact": open } }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        for value in body["values"].as_array().unwrap() {
+            let key = value["key"].as_str().unwrap();
+            let expected = (0..30).filter(|&e| sees(e) && archive_of(e) == key).count() as u64;
+            assert_eq!(value["count"], expected, "{terms:?} {key}: {body}");
+        }
+    }
+
+    let withheld_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": withheld } }),
+    )
+    .await;
+    let nothing_answer = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "teams", "artifact": "123456789" } }),
+    )
+    .await;
+    assert_eq!(withheld_answer, nothing_answer);
+    assert!(withheld_answer.1["values"].as_array().unwrap().iter().all(|v| v["count"] == 0));
+
+    let (unreachable_status, unreachable) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "hidden", "artifact": open } }),
+    )
+    .await;
+    let (unknown_status, unknown) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "member_of": { "layer": "nowhere", "artifact": open } }),
+    )
+    .await;
+    assert_eq!(unreachable_status, 422, "{unreachable}");
+    assert_eq!(unknown_status, unreachable_status);
+    assert_eq!(unknown["error"], unreachable["error"]);
+    assert_eq!(
+        unknown["detail"].as_str().unwrap().replace("nowhere", "hidden"),
+        unreachable["detail"].as_str().unwrap()
+    );
+}
+
+/// **A negated filter counts the items carrying a value in its column that match none of it.**
+#[tokio::test]
+async fn a_negated_filter_counts_what_it_leaves() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+    let (status, body) = filtered_counts(
+        &server,
+        &token,
+        serde_json::json!({ "none_of": [{ "department": { "in": ["d01", "d02"] } }] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for value in body["values"].as_array().unwrap() {
+        let key = value["key"].as_str().unwrap();
+        let expected = (0..N)
+            .filter(|&e| !["d01", "d02"].contains(&department_of(e).as_str()) && archive_of(e) == key)
+            .count() as u64;
+        assert_eq!(value["count"], expected, "{key}: {body}");
+    }
 }
