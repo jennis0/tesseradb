@@ -11,6 +11,7 @@
 //! Loading applies the rules that a write applies to every name and term, and refuses a
 //! catalogue holding a row that breaks one.
 
+use std::collections::HashMap;
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -93,6 +94,21 @@ INSERT INTO generation (id, value) VALUES (0, 0);
 pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
     DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     owner_only(dir, 0o700)?;
+    let lock = lock(dir)?;
+    let path = dir.join(FILE_NAME);
+    create_owner_only(&path)?;
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    check_integrity(&conn, &path)?;
+    create_or_check_schema(&conn)?;
+    Ok((conn, lock))
+}
+
+/// Takes the exclusive lock on `dir`'s lock file, which is held until the file is dropped.
+fn lock(dir: &Path) -> Result<File, Error> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -101,32 +117,33 @@ pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
         .mode(0o600)
         .open(dir.join(LOCK_NAME))?;
     match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            return Err(Error::Locked {
-                dir: dir.display().to_string(),
-            })
-        }
-        Err(TryLockError::Error(e)) => return Err(e.into()),
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(Error::Locked {
+            dir: dir.display().to_string(),
+        }),
+        Err(TryLockError::Error(e)) => Err(e.into()),
     }
-    let path = dir.join(FILE_NAME);
-    // SQLite gives its journal the database file's mode, so creating the file first covers both.
+}
+
+/// Creates the database file with mode 0600 when it does not exist, and refuses one others can
+/// reach. SQLite gives its journal the database file's mode, so this covers both.
+fn create_owner_only(path: &Path) -> Result<(), Error> {
     match OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)
+        .open(path)
     {
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
-    owner_only(&path, 0o600)?;
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.pragma_update(None, "foreign_keys", true)?;
+    owner_only(path, 0o600)
+}
+
+/// Refuses a file that fails SQLite's integrity check or holds a reference that does not resolve,
+/// which `load` relies on.
+fn check_integrity(conn: &Connection, path: &Path) -> Result<(), Error> {
     let integrity: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if integrity != "ok" {
         return Err(Error::Corrupt(format!(
@@ -134,7 +151,6 @@ pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
             path.display()
         )));
     }
-    // `load` relies on every reference resolving.
     let dangling: i64 =
         conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
             r.get(0)
@@ -145,6 +161,11 @@ pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
             path.display()
         )));
     }
+    Ok(())
+}
+
+/// Creates the schema in an empty file, and refuses a file written with another schema version.
+fn create_or_check_schema(conn: &Connection) -> Result<(), Error> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let tables: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
     match version {
@@ -152,16 +173,14 @@ pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
             conn.execute_batch(&format!(
                 "BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
             ))?;
+            Ok(())
         }
-        SCHEMA_VERSION => {}
-        found => {
-            return Err(Error::Version {
-                found,
-                supported: SCHEMA_VERSION,
-            })
-        }
+        SCHEMA_VERSION => Ok(()),
+        found => Err(Error::Version {
+            found,
+            supported: SCHEMA_VERSION,
+        }),
     }
-    Ok((conn, lock))
 }
 
 /// Refuses `path` when its mode grants anything outside `want`.
@@ -188,53 +207,85 @@ fn stored(row: &str, value: &str, rule: Result<String, Error>) -> Result<(), Err
     }
 }
 
+fn corrupt(what: String) -> Error {
+    Error::Corrupt(format!("the catalogue holds {what}"))
+}
+
+fn perms(bits: i64) -> Result<PermissionSet, Error> {
+    PermissionSet::from_bits(bits)
+        .ok_or_else(|| corrupt(format!("an unknown permission set {bits}")))
+}
+
+/// The row ids of loaded principals and groups, which the tables that refer to them name.
+#[derive(Default)]
+struct Ids {
+    principals: HashMap<i64, String>,
+    groups: HashMap<i64, String>,
+}
+
 /// Reads the whole catalogue into memory.
 pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
-    let corrupt = |what: String| Error::Corrupt(format!("the catalogue holds {what}"));
-    let perms = |bits: i64| {
-        PermissionSet::from_bits(bits)
-            .ok_or_else(|| corrupt(format!("an unknown permission set {bits}")))
-    };
     let mut st = State::default();
-    let mut principal_names = std::collections::HashMap::new();
-    let mut group_names = std::collections::HashMap::new();
+    let mut ids = Ids::default();
+    load_principals(conn, &mut st, &mut ids)?;
+    load_groups(conn, &mut st, &mut ids)?;
+    load_members(conn, &mut st, &ids)?;
+    load_terms(conn, &mut st, &ids)?;
+    load_keys(conn, &mut st, &ids)?;
+    load_providers(conn, &mut st)?;
+    st.generation = load_generation(conn)?;
+    Ok(st)
+}
 
+fn load_principals(conn: &Connection, st: &mut State, ids: &mut Ids) -> Result<(), Error> {
     let mut q = conn.prepare(
         "SELECT id, name, kind, disabled, bypass, permissions, password_hash FROM principal",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
-        let id: i64 = r.get(0)?;
-        let name: String = r.get(1)?;
-        let kind: String = r.get(2)?;
-        let kind = PrincipalKind::parse(&kind)
-            .ok_or_else(|| corrupt(format!("an unknown principal kind `{kind}`")))?;
-        let row = format!("principal row {id}");
-        stored(&row, &name, names::name("principal", &name))?;
-        principal_names.insert(id, name.clone());
-        st.principals.insert(
-            name,
-            PrincipalRec {
-                id,
-                kind,
-                disabled: r.get(3)?,
-                bypass: r.get(4)?,
-                permissions: perms(r.get(5)?)?,
-                password: r.get(6)?,
-                terms: Default::default(),
-                groups: Default::default(),
-            },
-        );
+        let (name, rec) = principal_row(r)?;
+        ids.principals.insert(rec.id, name.clone());
+        st.principals.insert(name, rec);
     }
+    Ok(())
+}
 
+fn principal_row(r: &rusqlite::Row<'_>) -> Result<(String, PrincipalRec), Error> {
+    let id: i64 = r.get(0)?;
+    let name: String = r.get(1)?;
+    let kind: String = r.get(2)?;
+    let kind = PrincipalKind::parse(&kind)
+        .ok_or_else(|| corrupt(format!("an unknown principal kind `{kind}`")))?;
+    stored(
+        &format!("principal row {id}"),
+        &name,
+        names::name("principal", &name),
+    )?;
+    let rec = PrincipalRec {
+        id,
+        kind,
+        disabled: r.get(3)?,
+        bypass: r.get(4)?,
+        permissions: perms(r.get(5)?)?,
+        password: r.get(6)?,
+        terms: Default::default(),
+        groups: Default::default(),
+    };
+    Ok((name, rec))
+}
+
+fn load_groups(conn: &Connection, st: &mut State, ids: &mut Ids) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT id, name, permissions FROM local_group")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let id: i64 = r.get(0)?;
         let name: String = r.get(1)?;
-        let row = format!("local_group row {id}");
-        stored(&row, &name, names::name("group", &name))?;
-        group_names.insert(id, name.clone());
+        stored(
+            &format!("local_group row {id}"),
+            &name,
+            names::name("group", &name),
+        )?;
+        ids.groups.insert(id, name.clone());
         st.groups.insert(
             name,
             GroupRec {
@@ -245,14 +296,15 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
             },
         );
     }
+    Ok(())
+}
 
+fn load_members(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT group_id, principal_id FROM member")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
-        let (g, p) = (
-            &group_names[&r.get::<_, i64>(0)?],
-            &principal_names[&r.get::<_, i64>(1)?],
-        );
+        let g = &ids.groups[&r.get::<_, i64>(0)?];
+        let p = &ids.principals[&r.get::<_, i64>(1)?];
         st.groups
             .get_mut(g)
             .expect("loaded")
@@ -264,27 +316,32 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
             .groups
             .insert(g.clone());
     }
+    Ok(())
+}
 
+fn load_terms(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT principal_id, term FROM principal_term")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
-        let p = &principal_names[&r.get::<_, i64>(0)?];
+        let p = &ids.principals[&r.get::<_, i64>(0)?];
         let term: String = r.get(1)?;
         let row = format!("principal_term row for principal `{p}`");
         stored(&row, &term, names::term(&term))?;
         st.principals.get_mut(p).expect("loaded").terms.insert(term);
     }
-
     let mut q = conn.prepare("SELECT group_id, term FROM group_term")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
-        let g = &group_names[&r.get::<_, i64>(0)?];
+        let g = &ids.groups[&r.get::<_, i64>(0)?];
         let term: String = r.get(1)?;
         let row = format!("group_term row for group `{g}`");
         stored(&row, &term, names::term(&term))?;
         st.groups.get_mut(g).expect("loaded").terms.insert(term);
     }
+    Ok(())
+}
 
+fn load_keys(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
     let mut q = conn.prepare(
         "SELECT prefix, principal_id, secret_sha256, created_at, expires_at, permissions \
          FROM api_key",
@@ -297,7 +354,7 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
         st.keys.insert(
             prefix,
             KeyRec {
-                principal: principal_names[&r.get::<_, i64>(1)?].clone(),
+                principal: ids.principals[&r.get::<_, i64>(1)?].clone(),
                 hash: hash
                     .try_into()
                     .map_err(|_| corrupt("an API key hash that is not 32 bytes".into()))?,
@@ -307,26 +364,30 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
             },
         );
     }
+    Ok(())
+}
 
+fn load_providers(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT name, issuer, audience, jwks_url FROM provider")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let name: String = r.get(0)?;
-        st.providers.insert(
-            name.clone(),
-            (
-                Provider {
-                    name,
-                    issuer: r.get(1)?,
-                    audience: r.get(2)?,
-                    jwks_url: r.get(3)?,
-                    rules: Vec::new(),
-                },
-                false,
-            ),
-        );
+        let provider = Provider {
+            name: name.clone(),
+            issuer: r.get(1)?,
+            audience: r.get(2)?,
+            jwks_url: r.get(3)?,
+            rules: Vec::new(),
+        };
+        st.providers.insert(name, (provider, false));
     }
+    load_claim_rules(conn, st)?;
+    st.providers
+        .values()
+        .try_for_each(|(p, _)| check_provider(p))
+}
 
+fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare(
         "SELECT provider, claim, target, template FROM claim_rule ORDER BY provider, position",
     )?;
@@ -339,43 +400,43 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
             "term" => RuleTarget::Term(template),
             _ => RuleTarget::LocalGroup(template),
         };
+        let rule = ClaimRule {
+            claim: r.get(1)?,
+            target,
+        };
         st.providers
             .get_mut(&provider)
             .expect("loaded")
             .0
             .rules
-            .push(ClaimRule {
-                claim: r.get(1)?,
-                target,
-            });
+            .push(rule);
     }
-    for (p, _) in st.providers.values() {
-        match p.validated() {
-            Ok(v) if v == *p => {}
-            Ok(_) => {
-                return Err(Error::Corrupt(format!(
-                    "provider row `{}` or one of its claim_rule rows holds a value with leading \
-                     or trailing white space",
-                    p.name
-                )))
-            }
-            Err(e) => {
-                return Err(Error::Corrupt(format!(
-                    "provider row `{}` or one of its claim_rule rows breaks a rule: {e}",
-                    p.name
-                )))
-            }
-        }
-    }
+    Ok(())
+}
 
+/// Refuses a stored provider that a write would not store as it is.
+fn check_provider(p: &Provider) -> Result<(), Error> {
+    match p.validated() {
+        Ok(v) if v == *p => Ok(()),
+        Ok(_) => Err(Error::Corrupt(format!(
+            "provider row `{}` or one of its claim_rule rows holds a value with leading or \
+             trailing white space",
+            p.name
+        ))),
+        Err(e) => Err(Error::Corrupt(format!(
+            "provider row `{}` or one of its claim_rule rows breaks a rule: {e}",
+            p.name
+        ))),
+    }
+}
+
+fn load_generation(conn: &Connection) -> Result<u64, Error> {
     let generation: i64 = conn
         .query_row("SELECT value FROM generation WHERE id = 0", [], |r| {
             r.get(0)
         })
         .map_err(|_| corrupt("no generation row".into()))?;
-    st.generation =
-        u64::try_from(generation).map_err(|_| corrupt(format!("generation {generation}")))?;
-    Ok(st)
+    u64::try_from(generation).map_err(|_| corrupt(format!("generation {generation}")))
 }
 
 #[cfg(test)]
