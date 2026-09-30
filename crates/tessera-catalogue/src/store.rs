@@ -22,10 +22,10 @@ use rusqlite::{Connection, OpenFlags};
 use crate::catalogue::{GroupRec, KeyRec, PrincipalKind, PrincipalRec, State};
 use crate::names;
 use crate::permission::PermissionSet;
-use crate::provider::{ClaimRule, Provider, RuleTarget};
+use crate::provider::{ClaimRule, Provider, RoleMapping};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
 const LOCK_NAME: &str = "catalogue.lock";
 
@@ -77,10 +77,14 @@ CREATE TABLE claim_rule (
     provider TEXT NOT NULL REFERENCES provider (name) ON DELETE CASCADE,
     position INTEGER NOT NULL,
     claim TEXT NOT NULL,
-    target TEXT NOT NULL CHECK (target IN ('term', 'group', 'fixed')),
     template TEXT NOT NULL,
-    equals TEXT,
-    CHECK ((target = 'fixed') = (equals IS NOT NULL)),
+    PRIMARY KEY (provider, position)
+) WITHOUT ROWID;
+CREATE TABLE role_mapping (
+    provider TEXT NOT NULL REFERENCES provider (name) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    term TEXT NOT NULL,
+    local_group TEXT NOT NULL,
     PRIMARY KEY (provider, position)
 ) WITHOUT ROWID;
 CREATE TABLE generation (
@@ -396,10 +400,12 @@ fn load_providers(
             audience: r.get(2)?,
             jwks_url: r.get(3)?,
             rules: Vec::new(),
+            role_mappings: Vec::new(),
         };
         st.providers.insert(name, (provider, false));
     }
     load_claim_rules(conn, st)?;
+    load_role_mappings(conn, st)?;
     st.providers
         .values()
         .try_for_each(|(p, _)| check_provider(p, allow_insecure_jwks))
@@ -407,43 +413,59 @@ fn load_providers(
 
 fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare(
-        "SELECT provider, claim, target, template, equals, position FROM claim_rule \
-         ORDER BY provider, position",
+        "SELECT provider, position, claim, template FROM claim_rule ORDER BY provider, position",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
-        let provider: String = r.get(0)?;
+        let (provider, row) = provider_row(r, "claim_rule")?;
         let rule = ClaimRule {
-            claim: r.get(1)?,
-            target: rule_target(r, &provider)?,
+            claim: text(r, 2, &row)?,
+            template: text(r, 3, &row)?,
         };
-        st.providers
-            .get_mut(&provider)
-            .expect("loaded")
-            .0
-            .rules
-            .push(rule);
+        provider_mut(st, &provider).rules.push(rule);
     }
     Ok(())
 }
 
-fn rule_target(r: &rusqlite::Row<'_>, provider: &str) -> Result<RuleTarget, Error> {
-    let target: String = r.get(2)?;
-    let template: String = r.get(3)?;
-    match (target.as_str(), r.get::<_, Option<String>>(4)?) {
-        ("term", None) => Ok(RuleTarget::Term(template)),
-        ("group", None) => Ok(RuleTarget::LocalGroup(template)),
-        ("fixed", Some(equals)) => Ok(RuleTarget::FixedGroup {
-            equals,
-            group: template,
-        }),
-        (_, equals) => Err(Error::Corrupt(format!(
-            "claim_rule row {} of provider `{provider}` has target `{target}` {} a value to \
-             equal, which no rule stores",
-            r.get::<_, i64>(5)?,
-            if equals.is_some() { "with" } else { "without" }
-        ))),
+fn load_role_mappings(conn: &Connection, st: &mut State) -> Result<(), Error> {
+    let mut q = conn.prepare(
+        "SELECT provider, position, term, local_group FROM role_mapping \
+         ORDER BY provider, position",
+    )?;
+    let mut rows = q.query([])?;
+    while let Some(r) = rows.next()? {
+        let (provider, row) = provider_row(r, "role_mapping")?;
+        let mapping = RoleMapping {
+            term: text(r, 2, &row)?,
+            group: text(r, 3, &row)?,
+        };
+        provider_mut(st, &provider).role_mappings.push(mapping);
     }
+    Ok(())
+}
+
+/// The provider a rule or mapping row belongs to, and a description of the row for errors.
+fn provider_row(r: &rusqlite::Row<'_>, table: &str) -> Result<(String, String), Error> {
+    let provider: String = r.get(0)?;
+    let position: i64 = r.get(1)?;
+    Ok((
+        provider.clone(),
+        format!("{table} row {position} of provider `{provider}`"),
+    ))
+}
+
+fn provider_mut<'a>(st: &'a mut State, name: &str) -> &'a mut Provider {
+    &mut st.providers.get_mut(name).expect("loaded").0
+}
+
+/// Column `i` of `r` as text, refusing a value of another type, which no write stores.
+fn text(r: &rusqlite::Row<'_>, i: usize, row: &str) -> Result<String, Error> {
+    r.get(i).map_err(|e| match e {
+        rusqlite::Error::InvalidColumnType(..) => {
+            Error::Corrupt(format!("{row} holds a value that is not text"))
+        }
+        e => e.into(),
+    })
 }
 
 /// Refuses a stored provider that a write would not store as it is.
@@ -451,13 +473,14 @@ fn check_provider(p: &Provider, allow_insecure_jwks: bool) -> Result<(), Error> 
     match p.validated(allow_insecure_jwks) {
         Ok(v) if v == *p => Ok(()),
         Ok(_) => Err(Error::Corrupt(format!(
-            "provider row `{}` or one of its claim_rule rows holds a value with leading or \
-             trailing white space",
+            "provider row `{}` or one of its claim_rule or role_mapping rows holds a value with \
+             leading or trailing white space",
             p.name
         ))),
         Err(e @ Error::InsecureJwks { .. }) => Err(e),
         Err(e) => Err(Error::Corrupt(format!(
-            "provider row `{}` or one of its claim_rule rows breaks a rule: {e}",
+            "provider row `{}` or one of its claim_rule or role_mapping rows breaks a rule: \
+             {e}",
             p.name
         ))),
     }
@@ -547,7 +570,7 @@ mod tests {
              'keys')",
             "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
              'https://login.example.org/keys'); \
-             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'term', 'public', NULL)",
+             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'public')",
             "DELETE FROM generation",
             "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
              INSERT INTO api_key VALUES ('abcd', 7, zeroblob(32), -1, NULL, NULL)",
@@ -564,12 +587,6 @@ mod tests {
              INSERT INTO group_term VALUES (7, 'PUBLIC')",
             "INSERT INTO provider VALUES ('co' || char(27) || 'rp', 'https://login.example.org/', \
              'tessera', 'https://login.example.org/keys')",
-            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
-             'https://login.example.org/keys'); \
-             INSERT INTO claim_rule VALUES ('corp', 0, 'tid', 'group', '{value}', NULL)",
-            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
-             'https://login.example.org/keys'); \
-             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'fixed', 'admins', ' x ')",
         ];
         for row in rows {
             let fx = Fixture::new();
@@ -586,26 +603,31 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_rule_target_that_no_write_stores_is_refused_on_open() {
+    fn a_stored_claim_rule_or_role_mapping_that_a_write_would_refuse_is_refused_on_open() {
         let provider = "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', \
-                        'tessera', 'https://login.example.org/keys'); \
-                        PRAGMA ignore_check_constraints = ON;";
-        for rule in [
-            "('corp', 0, 'tid', 'grp', 'tenant-{value}', NULL)",
-            "('corp', 0, 'tid', 'group', 'tenant-{value}', 'x')",
-            "('corp', 0, 'tid', 'term', 't-{value}', 'x')",
-            "('corp', 0, 'tid', 'fixed', 'admins', NULL)",
+                        'tessera', 'https://login.example.org/keys');";
+        for row in [
+            "claim_rule VALUES ('corp', 0, 'groups[*]', '{value}-{value}')",
+            "claim_rule VALUES ('corp', 0, 'groups[*]', ' {value}')",
+            "claim_rule VALUES ('corp', 0, 'a..b', '{value}')",
+            "claim_rule VALUES ('corp', 0, 'groups[*]', x'7b76616c75657d')",
+            "role_mapping VALUES ('corp', 0, 'PUBLIC', 'admins')",
+            "role_mapping VALUES ('corp', 0, 'tessera-admins', ' admins')",
+            "role_mapping VALUES ('corp', 0, 'tessera' || char(7), 'admins')",
+            "role_mapping VALUES ('corp', 0, 'tessera-admins', 'ad' || char(8238) || 'mins')",
+            "role_mapping VALUES ('corp', 0, 'tessera-admins', '')",
+            "role_mapping VALUES ('corp', 0, x'61', 'admins')",
         ] {
             let fx = Fixture::new();
             drop(fx.open());
-            let sql = format!("{provider} INSERT INTO claim_rule VALUES {rule}");
+            let sql = format!("{provider} INSERT INTO {row}");
             fx.raw().execute_batch(&sql).unwrap();
             assert!(
                 matches!(
                     Catalogue::open(&fx.path(), fx.options()),
                     Err(Error::Corrupt(_))
                 ),
-                "{rule}"
+                "{row}"
             );
         }
     }
@@ -680,6 +702,32 @@ mod tests {
                 Some([Permission::Write].into_iter().collect()),
             )
             .unwrap();
+        let snapshot = |cat: &Catalogue| {
+            (
+                cat.principals(),
+                cat.groups(),
+                cat.api_keys("ingest"),
+                cat.providers(),
+                cat.resolve("ada", None),
+                cat.resolve("ingest", Some(&key.prefix)),
+            )
+        };
+        let before = snapshot(&cat);
+        drop(cat);
+        let cat = fx.open();
+        assert_eq!(before, snapshot(&cat));
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
+        assert!(cat.verify_api_key(&key.key).is_ok());
+    }
+
+    #[test]
+    fn a_provider_with_its_rules_and_role_mappings_survives_closing_and_reopening() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        cat.create_group("eu").unwrap();
+        cat.grant_term(Grantee::Group("eu"), "region:eu").unwrap();
+        cat.grant_permission(Grantee::Group("eu"), Permission::Read)
+            .unwrap();
         cat.create_provider(&Provider {
             name: "corp".into(),
             issuer: "https://login.example.org/".into(),
@@ -688,36 +736,35 @@ mod tests {
             rules: vec![
                 ClaimRule {
                     claim: "groups[*]".into(),
-                    target: RuleTarget::Term("group:{value}".into()),
+                    template: "{value}".into(),
                 },
                 ClaimRule {
                     claim: "tid".into(),
-                    target: RuleTarget::LocalGroup("tenant-{value}".into()),
+                    template: "tenant:{value}".into(),
+                },
+            ],
+            role_mappings: vec![
+                RoleMapping {
+                    term: "tessera-admins".into(),
+                    group: "eu".into(),
+                },
+                RoleMapping {
+                    term: "analysts".into(),
+                    group: "eu".into(),
                 },
             ],
         })
         .unwrap();
 
-        let before = (
-            cat.principals(),
-            cat.groups(),
-            cat.api_keys("ingest"),
-            cat.providers(),
-            cat.resolve("ada", None),
-            cat.resolve("ingest", Some(&key.prefix)),
-        );
+        let claims = serde_json::json!({"groups": ["tessera-admins"], "tid": "7f3a"});
+        let before = (cat.providers(), cat.resolve_claims("corp", &claims));
         drop(cat);
         let cat = fx.open();
-        let after = (
-            cat.principals(),
-            cat.groups(),
-            cat.api_keys("ingest"),
-            cat.providers(),
-            cat.resolve("ada", None),
-            cat.resolve("ingest", Some(&key.prefix)),
+        assert_eq!(
+            before,
+            (cat.providers(), cat.resolve_claims("corp", &claims))
         );
-        assert_eq!(before, after);
-        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
-        assert!(cat.verify_api_key(&key.key).is_ok());
+        let r = before.1.unwrap();
+        assert_eq!(r.permissions, [Permission::Read].into_iter().collect());
     }
 }

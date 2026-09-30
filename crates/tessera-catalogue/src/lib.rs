@@ -1,5 +1,6 @@
 //! The identity catalogue: local principals and their credentials, groups, the terms and
-//! permissions granted to each, and the OIDC providers whose claims map to terms.
+//! permissions granted to each, and the OIDC providers whose claims map to terms, some of which
+//! carry a local group's grants.
 //!
 //! The catalogue is a SQLite database in a directory the caller names, independent of any
 //! bundle, so principals and grants carry across a rebuild. The whole of it is held in memory
@@ -32,7 +33,7 @@ pub use catalogue::{
 };
 pub use names::PUBLIC;
 pub use permission::{Permission, PermissionSet};
-pub use provider::{ClaimMapping, ClaimRule, Provider, RuleTarget};
+pub use provider::{ClaimMapping, ClaimRule, Provider, RoleMapping};
 
 /// Seconds since the Unix epoch.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;

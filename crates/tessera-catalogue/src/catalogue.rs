@@ -15,7 +15,7 @@ use crate::apikey;
 use crate::names;
 use crate::password::{self, Limiter};
 use crate::permission::{Permission, PermissionSet};
-use crate::provider::{Provider, RuleTarget};
+use crate::provider::Provider;
 use crate::store;
 use crate::{Affected, AuthError, Clock, Error, Options};
 
@@ -176,9 +176,8 @@ impl State {
         })
     }
 
-    /// The members of `group`, and every provider whose rules could add the grants of kind
-    /// `grant` held by it.
-    fn affected_by_group(&self, group: &str, grant: Grant) -> Affected {
+    /// The members of `group`, and every provider with a role mapping to it.
+    fn affected_by_group(&self, group: &str) -> Affected {
         Affected {
             principals: self
                 .groups
@@ -190,19 +189,16 @@ impl State {
             providers: self
                 .providers
                 .values()
-                .filter(|(p, _)| match grant {
-                    Grant::Term => p.may_reach_group_terms(group),
-                    Grant::Permission => p.may_reach_group_permissions(group),
-                })
+                .filter(|(p, _)| p.maps_to(group))
                 .map(|(p, _)| p.name.clone())
                 .collect(),
         }
     }
 
-    fn affected_by_grantee(&self, grantee: &Grantee<'_>, grant: Grant) -> Affected {
+    fn affected_by_grantee(&self, grantee: &Grantee<'_>) -> Affected {
         match grantee {
             Grantee::Principal(p) => only_principal(p),
-            Grantee::Group(g) => self.affected_by_group(g, grant),
+            Grantee::Group(g) => self.affected_by_group(g),
         }
     }
 
@@ -212,20 +208,6 @@ impl State {
             out.permissions = out.permissions.union(g.permissions);
         }
     }
-
-    fn add_group_terms(&self, groups: &BTreeSet<String>, out: &mut Resolution) {
-        for g in groups.iter().filter_map(|g| self.groups.get(g)) {
-            out.terms.extend(g.terms.iter().cloned());
-        }
-    }
-}
-
-/// The kind of grant a change to a group alters. Every rule that reaches a group's permissions
-/// also reaches its terms, so a change that alters both is reported as [`Grant::Term`].
-#[derive(Clone, Copy)]
-enum Grant {
-    Term,
-    Permission,
 }
 
 fn only_principal(name: &str) -> Affected {
@@ -693,7 +675,7 @@ impl Catalogue {
         self.affecting(|st, tx| {
             let g = st.group(&name)?;
             tx.execute("DELETE FROM local_group WHERE id = ?1", params![g.id])?;
-            let affected = st.affected_by_group(&name, Grant::Term);
+            let affected = st.affected_by_group(&name);
             let apply: Apply = Some(Box::new(move |st| {
                 if let Some(g) = st.groups.remove(&name) {
                     for m in &g.members {
@@ -789,7 +771,7 @@ impl Catalogue {
                 format!("DELETE FROM {table} WHERE {column} = ?1 AND term = ?2")
             };
             tx.execute(&sql, params![id, term])?;
-            let affected = st.affected_by_grantee(&who, Grant::Term);
+            let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| {
                 let held = match &owner {
@@ -848,7 +830,7 @@ impl Catalogue {
                 &format!("UPDATE {table} SET permissions = ?1 WHERE id = ?2"),
                 params![next.bits(), id],
             )?;
-            let affected = st.affected_by_grantee(&who, Grant::Permission);
+            let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| match &owner {
                 OwnedGrantee::Principal(n) => {
@@ -880,7 +862,7 @@ impl Catalogue {
         })
     }
 
-    /// Replaces a stored provider, rules included.
+    /// Replaces a stored provider, claim rules and role mappings included.
     pub fn update_provider(&self, provider: &Provider) -> Result<Affected, Error> {
         let p = provider.validated(self.allow_insecure_jwks)?;
         self.affecting(|st, tx| {
@@ -965,9 +947,9 @@ impl Catalogue {
     }
 
     /// The terms and permissions a session for an OIDC identity holds, from `claims` as accepted
-    /// from a token of `provider`: the terms its rules produce, the terms granted to each existing
-    /// local group a template names, and the terms and permissions granted to each existing fixed
-    /// local group whose required claim value is present. `None` when the provider is unknown.
+    /// from a token of `provider`: the terms its claim rules produce, and the terms and
+    /// permissions granted to each existing local group a role mapping names for one of those
+    /// terms. It never holds `bypass`. `None` when the provider is unknown.
     pub fn resolve_claims(&self, provider: &str, claims: &Value) -> Option<Resolution> {
         let st = self.state.read();
         let (p, _) = st.providers.get(provider.trim())?;
@@ -977,8 +959,7 @@ impl Catalogue {
             generation: st.generation,
             ..Resolution::default()
         };
-        st.add_group_terms(&mapped.groups, &mut out);
-        st.add_group_grants(&mapped.fixed_groups, &mut out);
+        st.add_group_grants(&mapped.groups, &mut out);
         Some(out)
     }
 }
@@ -1008,15 +989,17 @@ fn write_provider(tx: &Transaction<'_>, p: &Provider) -> Result<(), Error> {
         params![p.name, p.issuer, p.audience, p.jwks_url],
     )?;
     for (i, r) in p.rules.iter().enumerate() {
-        let (target, template, equals) = match &r.target {
-            RuleTarget::Term(t) => ("term", t, None),
-            RuleTarget::LocalGroup(t) => ("group", t, None),
-            RuleTarget::FixedGroup { equals, group } => ("fixed", group, Some(equals)),
-        };
         tx.execute(
-            "INSERT INTO claim_rule (provider, position, claim, target, template, equals) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![p.name, i as i64, r.claim, target, template, equals],
+            "INSERT INTO claim_rule (provider, position, claim, template) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![p.name, i as i64, r.claim, r.template],
+        )?;
+    }
+    for (i, m) in p.role_mappings.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO role_mapping (provider, position, term, local_group) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![p.name, i as i64, m.term, m.group],
         )?;
     }
     Ok(())
@@ -1085,7 +1068,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::provider::ClaimRule;
+    use crate::provider::{ClaimRule, RoleMapping};
     use crate::testing::Fixture;
 
     fn set(items: &[&str]) -> BTreeSet<String> {
@@ -1103,30 +1086,37 @@ mod tests {
             audience: "tessera".into(),
             jwks_url: "https://login.example.org/keys".into(),
             rules,
+            role_mappings: Vec::new(),
+        }
+    }
+
+    /// `groups[*] -> {value}`, which passes each group through as a term.
+    fn groups_rule() -> ClaimRule {
+        ClaimRule {
+            claim: "groups[*]".into(),
+            template: "{value}".into(),
         }
     }
 
     fn tenant_rule() -> ClaimRule {
         ClaimRule {
             claim: "tid".into(),
-            target: RuleTarget::LocalGroup("tenant-{value}".into()),
+            template: "tenant:{value}".into(),
         }
     }
 
-    fn admins_rule() -> ClaimRule {
-        ClaimRule {
-            claim: "groups[*]".into(),
-            target: RuleTarget::FixedGroup {
-                equals: "tessera-admins".into(),
-                group: "admins".into(),
-            },
+    fn mapping(term: &str, group: &str) -> RoleMapping {
+        RoleMapping {
+            term: term.into(),
+            group: group.into(),
         }
     }
 
-    fn groups_rule() -> ClaimRule {
-        ClaimRule {
-            claim: "groups[*]".into(),
-            target: RuleTarget::Term("group:{value}".into()),
+    /// `corp` with `groups_rule` and the role mapping `tessera-admins -> admins`.
+    fn corp_with_admins() -> Provider {
+        Provider {
+            role_mappings: vec![mapping("tessera-admins", "admins")],
+            ..corp(vec![groups_rule()])
         }
     }
 
@@ -1223,63 +1213,68 @@ mod tests {
     }
 
     #[test]
-    fn an_oidc_identity_resolves_through_claim_rules_and_local_groups() {
+    fn an_oidc_identity_holds_the_terms_its_claim_rules_produce_and_nothing_else() {
         let fx = Fixture::new();
         let cat = fx.open();
         cat.create_provider(&corp(vec![groups_rule(), tenant_rule()]))
             .unwrap();
-        cat.create_group("tenant-7f3a").unwrap();
-        cat.grant_term(Grantee::Group("tenant-7f3a"), "tenant:7f3a")
+        // A local group named as a claim value, with no role mapping, passes on nothing.
+        cat.create_group("analysts").unwrap();
+        cat.grant_term(Grantee::Group("analysts"), "secret")
             .unwrap();
-        cat.grant_permission(Grantee::Group("tenant-7f3a"), Permission::Read)
+        cat.grant_permission(Grantee::Group("analysts"), Permission::Admin)
             .unwrap();
 
         let claims = json!({"sub": "u1", "groups": ["analysts", "eu"], "tid": "7f3a"});
         let r = cat.resolve_claims("corp", &claims).unwrap();
-        assert_eq!(r.terms, set(&["group:analysts", "group:eu", "tenant:7f3a"]));
-        // A group a template names passes on its terms and not its permissions.
+        assert_eq!(r.terms, set(&["analysts", "eu", "tenant:7f3a"]));
         assert_eq!(r.permissions, PermissionSet::EMPTY);
         assert!(!r.bypass);
-
-        // A tenant with no local group adds nothing.
-        let r = cat
-            .resolve_claims("corp", &json!({"tid": "other"}))
-            .unwrap();
-        assert!(r.terms.is_empty() && r.permissions.is_empty());
         assert_eq!(cat.resolve_claims("nobody", &claims), None);
     }
 
     #[test]
-    fn a_fixed_group_rule_passes_on_its_groups_terms_and_permissions_and_never_bypass() {
+    fn a_role_mapping_passes_on_its_groups_terms_and_permissions_and_never_bypass() {
         let fx = Fixture::new();
         let cat = fx.open();
-        cat.create_provider(&corp(vec![admins_rule(), tenant_rule()]))
-            .unwrap();
+        cat.create_provider(&corp_with_admins()).unwrap();
+        let admin = json!({"groups": ["analysts", "tessera-admins"]});
+        // A mapping to a group that does not exist passes on nothing.
+        let r = cat.resolve_claims("corp", &admin).unwrap();
+        assert_eq!(r.terms, set(&["analysts", "tessera-admins"]));
+        assert_eq!(r.permissions, PermissionSet::EMPTY);
+
         cat.create_group("admins").unwrap();
         cat.grant_term(Grantee::Group("admins"), "ops").unwrap();
         cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
             .unwrap();
-
-        let admin = json!({"groups": ["analysts", "tessera-admins"]});
         let r = cat.resolve_claims("corp", &admin).unwrap();
-        assert_eq!(r.terms, set(&["ops"]));
+        assert_eq!(r.terms, set(&["analysts", "tessera-admins", "ops"]));
         assert_eq!(r.permissions, perms(&[Permission::Admin]));
         assert!(!r.bypass);
-        // A claim value spelling the group's own name, or reaching it through a template, does
-        // not pass on its permissions.
-        cat.update_provider(&corp(vec![
-            admins_rule(),
-            ClaimRule {
-                claim: "role".into(),
-                target: RuleTarget::LocalGroup("{value}s".into()),
-            },
-        ]))
-        .unwrap();
-        let r = cat
-            .resolve_claims("corp", &json!({"groups": ["admins"], "role": "admin"}))
+    }
+
+    #[test]
+    fn a_term_that_does_not_exactly_match_a_role_mapping_passes_on_nothing() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        cat.create_provider(&corp_with_admins()).unwrap();
+        cat.create_group("admins").unwrap();
+        cat.grant_term(Grantee::Group("admins"), "ops").unwrap();
+        cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
             .unwrap();
-        assert_eq!(r.terms, set(&["ops"]));
-        assert_eq!(r.permissions, PermissionSet::EMPTY);
+        for value in [
+            "tessera-admins-x",
+            "Tessera-Admins",
+            "tessera-admin",
+            "admins",
+        ] {
+            let r = cat
+                .resolve_claims("corp", &json!({ "groups": [value] }))
+                .unwrap();
+            assert_eq!(r.terms, set(&[value]), "{value}");
+            assert_eq!(r.permissions, PermissionSet::EMPTY, "{value}");
+        }
     }
 
     #[test]
@@ -1291,8 +1286,9 @@ mod tests {
             cat.create_provider(&corp(vec![])),
             Err(Error::Exists { .. })
         ));
-        let mut changed = corp(vec![tenant_rule(), admins_rule(), groups_rule()]);
+        let mut changed = corp(vec![tenant_rule(), groups_rule()]);
         changed.audience = "  tessera-prod ".into();
+        changed.role_mappings = vec![mapping(" tessera-admins ", "admins"), mapping("x", "y")];
         cat.update_provider(&changed).unwrap();
         drop(cat);
 
@@ -1300,9 +1296,10 @@ mod tests {
         let stored = cat.provider("corp").unwrap();
         assert!(!stored.read_only);
         assert_eq!(stored.provider.audience, "tessera-prod");
+        assert_eq!(stored.provider.rules, vec![tenant_rule(), groups_rule()]);
         assert_eq!(
-            stored.provider.rules,
-            vec![tenant_rule(), admins_rule(), groups_rule()]
+            stored.provider.role_mappings,
+            vec![mapping("tessera-admins", "admins"), mapping("x", "y")]
         );
 
         let mut bad = corp(vec![]);
@@ -1326,7 +1323,7 @@ mod tests {
     fn a_configured_provider_is_listed_and_cannot_be_changed_here() {
         let fx = Fixture::new();
         let mut options = fx.options();
-        options.config_providers = vec![corp(vec![groups_rule()])];
+        options.config_providers = vec![corp_with_admins()];
         let cat = Catalogue::open(&fx.path(), options.clone()).unwrap();
         let mut other = corp(vec![]);
         other.name = "partner".into();
@@ -1344,12 +1341,12 @@ mod tests {
         let claims = json!({"groups": ["a"]});
         assert_eq!(
             cat.resolve_claims("corp", &claims).unwrap().terms,
-            set(&["group:a"])
+            set(&["a"])
         );
 
         for refused in [
             cat.create_provider(&corp(vec![])),
-            cat.update_provider(&corp(vec![])),
+            cat.update_provider(&corp(vec![groups_rule()])),
             cat.drop_provider("corp"),
         ] {
             assert!(
@@ -1454,15 +1451,13 @@ mod tests {
         }
     }
 
-    /// A catalogue holding `ada`, `bob` and `cy`, with `ada` and `bob` in `eu` and nobody yet in
-    /// `tenant-7f3a`.
+    /// A catalogue holding `ada`, `bob` and `cy`, with `ada` and `bob` in `eu`.
     fn three_principals(fx: &Fixture) -> Catalogue {
         let cat = fx.open();
         for name in ["ada", "bob", "cy"] {
             cat.create_principal(name, PrincipalKind::Person).unwrap();
         }
         cat.create_group("eu").unwrap();
-        cat.create_group("tenant-7f3a").unwrap();
         cat.add_member("eu", "ada").unwrap();
         cat.add_member("eu", "bob").unwrap();
         cat
@@ -1564,69 +1559,60 @@ mod tests {
     }
 
     #[test]
-    fn provider_changes_and_grants_to_groups_they_name_report_the_provider() {
+    fn a_change_to_a_providers_rules_or_role_mappings_reports_the_provider() {
         let fx = Fixture::new();
         let cat = three_principals(&fx);
+        let corp_only = providers(&["corp"]);
         assert_eq!(
             who(cat.create_provider(&corp(vec![groups_rule()])).unwrap()),
             Affected::default()
         );
-        assert_eq!(
-            who(cat
-                .update_provider(&corp(vec![groups_rule(), tenant_rule()]))
-                .unwrap()),
-            providers(&["corp"])
-        );
-        let tenant = Grantee::Group("tenant-7f3a");
-        assert_eq!(
-            who(cat.grant_term(tenant, "t").unwrap()),
-            providers(&["corp"])
-        );
-        cat.add_member("tenant-7f3a", "cy").unwrap();
-        let cy_and_corp = Affected {
-            principals: set(&["cy"]),
-            providers: set(&["corp"]),
-            ..Affected::default()
+        let rules = corp(vec![groups_rule(), tenant_rule()]);
+        assert_eq!(who(cat.update_provider(&rules).unwrap()), corp_only);
+        let mapped = Provider {
+            role_mappings: vec![mapping("tessera-admins", "eu")],
+            ..rules
         };
-        // A template passes on a group's terms only, so a permission change reaches its members.
-        assert_eq!(
-            who(cat.grant_permission(tenant, Permission::Read).unwrap()),
-            principals(&["cy"])
-        );
-        assert_eq!(who(cat.delete_group("tenant-7f3a").unwrap()), cy_and_corp);
-        assert_eq!(
-            who(cat.delete_group("eu").unwrap()),
-            principals(&["ada", "bob"])
-        );
-        assert_eq!(
-            who(cat.drop_provider("corp").unwrap()),
-            providers(&["corp"])
-        );
+        assert_eq!(who(cat.update_provider(&mapped).unwrap()), corp_only);
+        assert_eq!(who(cat.drop_provider("corp").unwrap()), corp_only);
     }
 
     #[test]
-    fn grants_to_a_group_a_fixed_group_rule_names_report_the_provider() {
+    fn a_change_to_a_mapped_group_reports_its_members_and_every_provider_mapping_to_it() {
         let fx = Fixture::new();
         let cat = three_principals(&fx);
         cat.create_group("admins").unwrap();
-        cat.create_provider(&corp(vec![admins_rule()])).unwrap();
+        cat.add_member("admins", "cy").unwrap();
+        cat.create_provider(&corp_with_admins()).unwrap();
+        let partner = Provider {
+            name: "partner".into(),
+            role_mappings: vec![mapping("ops", "admins")],
+            ..corp(vec![])
+        };
+        cat.create_provider(&partner).unwrap();
+        cat.create_provider(&Provider {
+            name: "other".into(),
+            role_mappings: vec![mapping("tessera-admins", "eu")],
+            ..corp(vec![])
+        })
+        .unwrap();
         let admins = Grantee::Group("admins");
-        let corp_only = providers(&["corp"]);
-        assert_eq!(who(cat.grant_term(admins, "ops").unwrap()), corp_only);
+        let reported = Affected {
+            principals: set(&["cy"]),
+            providers: set(&["corp", "partner"]),
+            ..Affected::default()
+        };
+        assert_eq!(who(cat.grant_term(admins, "ops").unwrap()), reported);
+        assert_eq!(who(cat.revoke_term(admins, "ops").unwrap()), reported);
+        let admin = Permission::Admin;
+        assert_eq!(who(cat.grant_permission(admins, admin).unwrap()), reported);
+        assert_eq!(who(cat.revoke_permission(admins, admin).unwrap()), reported);
+        assert_eq!(who(cat.delete_group("admins").unwrap()), reported);
+        // A group no mapping names reports its members alone.
+        cat.drop_provider("other").unwrap();
+        let eu = Grantee::Group("eu");
         assert_eq!(
-            who(cat.grant_permission(admins, Permission::Admin).unwrap()),
-            corp_only
-        );
-        assert_eq!(
-            who(cat.revoke_permission(admins, Permission::Admin).unwrap()),
-            corp_only
-        );
-        assert_eq!(who(cat.delete_group("admins").unwrap()), corp_only);
-        // A group no rule names reports its members alone.
-        assert_eq!(
-            who(cat
-                .grant_permission(Grantee::Group("eu"), Permission::Read)
-                .unwrap()),
+            who(cat.grant_permission(eu, Permission::Read).unwrap()),
             principals(&["ada", "bob"])
         );
     }
@@ -1759,7 +1745,7 @@ mod tests {
                 name: "partner".into(),
                 ..corp(vec![])
             }),
-            cat.update_provider(&corp(vec![tenant_rule()])),
+            cat.update_provider(&corp_with_admins()),
             cat.drop_provider("corp"),
             cat.delete_group("eu"),
             cat.delete_principal("ada"),

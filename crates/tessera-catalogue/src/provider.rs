@@ -1,21 +1,17 @@
-//! OIDC providers as stored data, and the claim rules that turn a token's claims into terms and
-//! local groups. Validating a token's signature, issuer, audience and lifetime happens elsewhere;
-//! this module sees claims that have already been accepted.
+//! OIDC providers as stored data: the claim rules that turn a token's claims into terms, and the
+//! role mappings that give an identity holding an exact term the grants of a local group.
+//! Validating a token's signature, issuer, audience and lifetime happens elsewhere; this module
+//! sees claims that have already been accepted.
 //!
 //! A claim path is a dot-separated list of object keys. A key followed by `[*]` takes every
 //! element of the array found there. A key that itself holds a dot or a bracket is written in
 //! double quotes, with `\"` and `\\` as escapes: `"https://example.org/roles"[*]`.
 //!
-//! A template produces a term or a local group name from each value the path reaches. It holds
-//! `{value}` at most once, replaced by the value. A term template may be `{value}` alone, which
-//! passes each value through as a term. A local group template that holds `{value}` also holds
-//! literal text, so a claim value cannot name a local group made by hand. A template without
-//! `{value}` produces itself whenever the path reaches any value. Values are strings, numbers and
-//! booleans; the path reaching an object, an array without `[*]`, or null produces nothing.
-//!
-//! A template reaches terms only: those it produces, or those granted to the local group it
-//! produces. Permissions reach an OIDC identity only through a rule that names a fixed local group
-//! and the claim value it requires.
+//! A template produces a term from each value the path reaches. It holds `{value}` at most once,
+//! replaced by the value, and may hold literal text beside it, as `group:{value}` does. A template
+//! without `{value}` produces itself whenever the path reaches any value. Values are strings,
+//! numbers and booleans; the path reaching an object, an array without `[*]`, or null produces
+//! nothing.
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -29,7 +25,7 @@ use crate::Error;
 const PLACEHOLDER: &str = "{value}";
 
 /// An OIDC provider: where its tokens come from, who they are for, where its signing keys are
-/// published, and how its claims map to terms and local groups.
+/// published, how its claims map to terms, and which terms carry a local group's grants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Provider {
     pub name: String,
@@ -37,35 +33,30 @@ pub struct Provider {
     pub audience: String,
     pub jwks_url: String,
     pub rules: Vec<ClaimRule>,
+    pub role_mappings: Vec<RoleMapping>,
 }
 
-/// Reads the claim at `claim` and produces what `target` names from each value there.
+/// Reads the claim at `claim` and produces a term from each value there by `template`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClaimRule {
     pub claim: String,
-    pub target: RuleTarget,
+    pub template: String,
 }
 
+/// An identity whose claim rules produce exactly `term` receives the terms and permissions
+/// granted to the local group `group`. It never receives `bypass`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RuleTarget {
-    /// A template for a term.
-    Term(String),
-    /// A template for the name of a local group, whose granted terms are added.
-    LocalGroup(String),
-    /// The local group `group`, whose granted terms and permissions are added when the claim
-    /// holds the value `equals`.
-    FixedGroup { equals: String, group: String },
+pub struct RoleMapping {
+    pub term: String,
+    pub group: String,
 }
 
-/// What a provider's claim rules produce from one set of claims, before local groups are
-/// expanded.
+/// What a provider produces from one set of claims, before local groups are expanded.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClaimMapping {
     pub terms: BTreeSet<String>,
-    /// Local groups whose terms are added.
-    pub groups: BTreeSet<String>,
     /// Local groups whose terms and permissions are added.
-    pub fixed_groups: BTreeSet<String>,
+    pub groups: BTreeSet<String>,
 }
 
 impl Provider {
@@ -92,71 +83,41 @@ impl Provider {
             .iter()
             .map(ClaimRule::validated)
             .collect::<Result<Vec<_>, _>>()?;
+        let role_mappings = self
+            .role_mappings
+            .iter()
+            .map(RoleMapping::validated)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Provider {
             name,
             issuer,
             audience,
             jwks_url,
             rules,
+            role_mappings,
         })
     }
 
-    /// Applies every claim rule to `claims`, a JSON object. A value producing a term or a group
-    /// name that a grant or a group could not hold is dropped. That includes `public` in any
-    /// case, which every session holds anyway.
+    /// Applies every claim rule to `claims`, a JSON object, and then every role mapping to the
+    /// terms produced. A produced term that a grant could not hold is dropped. That includes
+    /// `public` in any case, which every session holds anyway.
     pub fn apply(&self, claims: &Value) -> ClaimMapping {
-        let mut out = ClaimMapping::default();
+        let mut terms = BTreeSet::new();
         for rule in &self.rules {
-            // A stored rule's path has been parsed once already; one that fails here was not
-            // validated and produces nothing.
-            let Ok(path) = parse_path(&rule.claim) else {
-                continue;
-            };
-            let mut values = Vec::new();
-            walk(claims, &path, &mut values);
-            for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
-                rule.target.produce(value, &mut out);
-            }
+            rule.produce(claims, &mut terms);
         }
-        out
-    }
-
-    /// Whether any of this provider's rules could add the terms of the local group `group`.
-    pub(crate) fn may_reach_group_terms(&self, group: &str) -> bool {
-        self.rules.iter().any(|r| match &r.target {
-            RuleTarget::LocalGroup(t) => template_may_produce(t, group),
-            RuleTarget::FixedGroup { group: g, .. } => g == group,
-            RuleTarget::Term(_) => false,
-        })
-    }
-
-    /// Whether any of this provider's rules could add the permissions of the local group `group`.
-    pub(crate) fn may_reach_group_permissions(&self, group: &str) -> bool {
-        self.rules
+        let groups = self
+            .role_mappings
             .iter()
-            .any(|r| matches!(&r.target, RuleTarget::FixedGroup { group: g, .. } if g == group))
+            .filter(|m| terms.contains(&m.term))
+            .map(|m| m.group.clone())
+            .collect();
+        ClaimMapping { terms, groups }
     }
-}
 
-impl RuleTarget {
-    fn produce(&self, value: &str, out: &mut ClaimMapping) {
-        match self {
-            RuleTarget::Term(t) => {
-                if let Ok(term) = names::term(&t.replacen(PLACEHOLDER, value, 1)) {
-                    out.terms.insert(term);
-                }
-            }
-            RuleTarget::LocalGroup(t) => {
-                if let Ok(group) = names::name("group", &t.replacen(PLACEHOLDER, value, 1)) {
-                    out.groups.insert(group);
-                }
-            }
-            RuleTarget::FixedGroup { equals, group } => {
-                if value == equals {
-                    out.fixed_groups.insert(group.clone());
-                }
-            }
-        }
+    /// Whether a role mapping of this provider names the local group `group`.
+    pub(crate) fn maps_to(&self, group: &str) -> bool {
+        self.role_mappings.iter().any(|m| m.group == group)
     }
 }
 
@@ -164,56 +125,39 @@ impl ClaimRule {
     fn validated(&self) -> Result<ClaimRule, Error> {
         let claim = self.claim.trim().to_owned();
         parse_path(&claim)?;
-        let target = match &self.target {
-            RuleTarget::Term(t) => {
-                let t = template(t)?;
-                names::term(&t)?;
-                RuleTarget::Term(t)
-            }
-            RuleTarget::LocalGroup(t) => {
-                let t = template(t)?;
-                if t == PLACEHOLDER {
-                    return Err(Error::Invalid(
-                        "the local group template `{value}` holds no literal text, so a claim \
-                         value could name any local group; write a prefix or suffix beside it, \
-                         such as `tenant-{value}`, or name a fixed local group with the claim \
-                         value it requires"
-                            .into(),
-                    ));
-                }
-                names::name("local group template", &t)?;
-                RuleTarget::LocalGroup(t)
-            }
-            RuleTarget::FixedGroup { equals, group } => fixed_group(equals, group)?,
+        let template = self.template.trim();
+        if template.matches(PLACEHOLDER).count() > 1 {
+            return Err(Error::Invalid(format!(
+                "the template `{template}` holds {{value}} more than once; write it at most once"
+            )));
+        }
+        let template = names::term(template)?;
+        Ok(ClaimRule { claim, template })
+    }
+
+    fn produce(&self, claims: &Value, out: &mut BTreeSet<String>) {
+        // A stored rule's path has been parsed once already; one that fails here was not
+        // validated and produces nothing.
+        let Ok(path) = parse_path(&self.claim) else {
+            return;
         };
-        Ok(ClaimRule { claim, target })
+        let mut values = Vec::new();
+        walk(claims, &path, &mut values);
+        for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            if let Ok(term) = names::term(&self.template.replacen(PLACEHOLDER, value, 1)) {
+                out.insert(term);
+            }
+        }
     }
 }
 
-/// A trimmed template, refused when it holds `{value}` more than once.
-fn template(raw: &str) -> Result<String, Error> {
-    let t = raw.trim();
-    if t.matches(PLACEHOLDER).count() > 1 {
-        return Err(Error::Invalid(format!(
-            "the template `{t}` holds {{value}} more than once; write it at most once"
-        )));
+impl RoleMapping {
+    fn validated(&self) -> Result<RoleMapping, Error> {
+        Ok(RoleMapping {
+            term: names::term(&self.term)?,
+            group: names::name("group", &self.group)?,
+        })
     }
-    Ok(t.to_owned())
-}
-
-fn fixed_group(equals: &str, group: &str) -> Result<RuleTarget, Error> {
-    let group = names::name("local group", group)?;
-    let equals = equals.trim();
-    if equals.is_empty() {
-        return Err(Error::Invalid(format!(
-            "the rule naming local group `{group}` requires an empty claim value, which no claim \
-             holds; write the value the claim must hold"
-        )));
-    }
-    Ok(RuleTarget::FixedGroup {
-        equals: equals.to_owned(),
-        group,
-    })
 }
 
 /// Refuses a JWKS URL other than `https://`, or `http://` to `localhost`, `127.0.0.1` or
@@ -248,17 +192,6 @@ fn is_loopback(host: &Host<&str>) -> bool {
         Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
         Host::Ipv4(a) => *a == Ipv4Addr::LOCALHOST,
         Host::Ipv6(a) => *a == Ipv6Addr::LOCALHOST,
-    }
-}
-
-fn template_may_produce(template: &str, produced: &str) -> bool {
-    match template.split_once(PLACEHOLDER) {
-        None => template == produced,
-        Some((pre, suf)) => {
-            produced.len() > pre.len() + suf.len()
-                && produced.starts_with(pre)
-                && produced.ends_with(suf)
-        }
     }
 }
 
@@ -359,20 +292,21 @@ mod tests {
             audience: "tessera".into(),
             jwks_url: "https://login.example.org/keys".into(),
             rules,
+            role_mappings: Vec::new(),
         }
     }
 
-    fn term_rule(claim: &str, t: &str) -> ClaimRule {
+    fn rule(claim: &str, template: &str) -> ClaimRule {
         ClaimRule {
             claim: claim.into(),
-            target: RuleTarget::Term(t.into()),
+            template: template.into(),
         }
     }
 
-    fn group_rule(claim: &str, t: &str) -> ClaimRule {
-        ClaimRule {
-            claim: claim.into(),
-            target: RuleTarget::LocalGroup(t.into()),
+    fn mapping(term: &str, group: &str) -> RoleMapping {
+        RoleMapping {
+            term: term.into(),
+            group: group.into(),
         }
     }
 
@@ -381,31 +315,31 @@ mod tests {
     }
 
     #[test]
-    fn each_element_of_a_groups_claim_becomes_a_term() {
-        let p = provider(vec![term_rule("groups[*]", "group:{value}")]);
-        let m = p.apply(&json!({"sub": "u1", "groups": ["analysts", "eu"]}));
-        assert_eq!(m.terms, set(&["group:analysts", "group:eu"]));
+    fn a_bare_value_template_passes_each_value_through_as_a_term() {
+        let p = provider(vec![rule("groups[*]", "{value}")]);
+        assert!(p.validated(false).is_ok());
+        let m = p.apply(&json!({"sub": "u1", "groups": ["analysts", " eu "]}));
+        assert_eq!(m.terms, set(&["analysts", "eu"]));
         assert!(m.groups.is_empty());
     }
 
     #[test]
-    fn a_tenant_claim_names_a_local_group() {
-        let p = provider(vec![group_rule("tid", "tenant-{value}")]);
-        let m = p.apply(&json!({"tid": "7f3a"}));
-        assert_eq!(m.groups, set(&["tenant-7f3a"]));
-        assert!(m.terms.is_empty());
+    fn a_template_with_literal_text_adds_it_to_each_value() {
+        let p = provider(vec![rule("groups[*]", "group:{value}")]);
+        let m = p.apply(&json!({"groups": ["analysts", "eu"]}));
+        assert_eq!(m.terms, set(&["group:analysts", "group:eu"]));
     }
 
     #[test]
     fn nested_and_quoted_paths_reach_their_values() {
         let p = provider(vec![
-            term_rule("realm_access.roles[*]", "role:{value}"),
-            term_rule(
+            rule("realm_access.roles[*]", "role:{value}"),
+            rule(
                 r#""https://example.org/claims".teams[*].id"#,
                 "team:{value}",
             ),
-            term_rule("email_verified", "verified"),
-            term_rule("level", "level-{value}"),
+            rule("email_verified", "verified"),
+            rule("level", "level-{value}"),
         ]);
         let m = p.apply(&json!({
             "realm_access": {"roles": ["viewer", "editor"]},
@@ -413,27 +347,25 @@ mod tests {
             "email_verified": true,
             "level": 3
         }));
-        assert_eq!(
-            m.terms,
-            set(&[
-                "role:viewer",
-                "role:editor",
-                "team:1",
-                "team:b",
-                "verified",
-                "level-3"
-            ])
-        );
+        let want = [
+            "role:viewer",
+            "role:editor",
+            "team:1",
+            "team:b",
+            "verified",
+            "level-3",
+        ];
+        assert_eq!(m.terms, set(&want));
     }
 
     #[test]
     fn a_path_that_does_not_match_the_claims_shape_produces_nothing() {
         let p = provider(vec![
-            term_rule("groups", "g:{value}"),
-            term_rule("tid[*]", "t:{value}"),
-            term_rule("missing", "m:{value}"),
-            term_rule("obj", "o:{value}"),
-            term_rule("nothing", "n:{value}"),
+            rule("groups", "g:{value}"),
+            rule("tid[*]", "t:{value}"),
+            rule("missing", "m:{value}"),
+            rule("obj", "o:{value}"),
+            rule("nothing", "n:{value}"),
         ]);
         let m = p.apply(&json!({
             "groups": ["a"], "tid": "x", "obj": {"a": 1}, "nothing": null
@@ -441,113 +373,85 @@ mod tests {
         assert!(m.terms.is_empty(), "{:?}", m.terms);
     }
 
-    fn fixed_rule(claim: &str, equals: &str, group: &str) -> ClaimRule {
-        ClaimRule {
-            claim: claim.into(),
-            target: RuleTarget::FixedGroup {
-                equals: equals.into(),
-                group: group.into(),
-            },
-        }
-    }
-
-    #[test]
-    fn a_bare_value_template_passes_each_value_through_as_a_term() {
-        let p = provider(vec![term_rule("groups[*]", "{value}")]);
-        assert!(p.validated(false).is_ok());
-        let m = p.apply(&json!({"groups": ["analysts", " eu "]}));
-        assert_eq!(m.terms, set(&["analysts", "eu"]));
-    }
-
     #[test]
     fn a_value_producing_public_in_any_case_a_control_character_or_nothing_is_dropped() {
-        let p = provider(vec![
-            term_rule("groups[*]", "{value}"),
-            group_rule("groups[*]", "tenant-{value}"),
-        ]);
+        let p = provider(vec![rule("groups[*]", "{value}")]);
         let claims =
             json!({"groups": ["public", "PUBLIC", " Public ", "  ", "", " kept ", "a\u{7}"]});
-        let m = p.apply(&claims);
-        assert_eq!(m.terms, set(&["kept"]));
-        assert_eq!(
-            m.groups,
-            set(&[
-                "tenant-kept",
-                "tenant-public",
-                "tenant-PUBLIC",
-                "tenant-Public"
-            ])
-        );
+        assert_eq!(p.apply(&claims).terms, set(&["kept"]));
     }
 
     #[test]
-    fn a_fixed_group_rule_names_its_group_only_when_the_claim_holds_its_value() {
-        let p = provider(vec![fixed_rule("groups[*]", "tessera-admins", "admins")]);
+    fn a_role_mapping_names_its_group_only_for_its_exact_term() {
+        let mut p = provider(vec![rule("groups[*]", "{value}")]);
+        p.role_mappings = vec![mapping("tessera-admins", "admins")];
         let m = p.apply(&json!({"groups": ["analysts", " tessera-admins "]}));
-        assert_eq!(m.fixed_groups, set(&["admins"]));
-        assert!(m.groups.is_empty() && m.terms.is_empty());
-        for other in [json!({"groups": ["tessera-admin", "admins"]}), json!({})] {
-            assert!(p.apply(&other).fixed_groups.is_empty(), "{other}");
+        assert_eq!(m.groups, set(&["admins"]));
+        assert_eq!(m.terms, set(&["analysts", "tessera-admins"]));
+        for other in [
+            json!({"groups": ["tessera-admins-x", "Tessera-Admins", "tessera-admin"]}),
+            json!({"groups": ["admins"]}),
+            json!({}),
+        ] {
+            assert!(p.apply(&other).groups.is_empty(), "{other}");
         }
     }
 
-    fn refused(rules: Vec<ClaimRule>) {
-        for rule in rules {
-            assert!(
-                provider(vec![rule.clone()]).validated(false).is_err(),
-                "{rule:?} was accepted"
-            );
-        }
+    #[test]
+    fn a_role_mapping_matches_the_produced_term_and_not_the_claim_value() {
+        let mut p = provider(vec![rule("groups[*]", "group:{value}")]);
+        p.role_mappings = vec![
+            mapping("tessera-admins", "admins"),
+            mapping("group:ops", "ops"),
+            mapping("group:ops", "oncall"),
+        ];
+        let m = p.apply(&json!({"groups": ["tessera-admins", "ops"]}));
+        assert_eq!(m.groups, set(&["ops", "oncall"]));
+    }
+
+    fn refused(p: Provider) {
+        assert!(p.validated(false).is_err(), "{p:?} was accepted");
     }
 
     #[test]
     fn a_malformed_claim_path_is_refused() {
-        refused(vec![
-            term_rule("", "x"),
-            term_rule("a..b", "x"),
-            term_rule("a[0]", "x"),
-            term_rule("a[*]b", "x"),
-            term_rule("\"unclosed", "x"),
-        ]);
+        for path in ["", "a..b", "a[0]", "a[*]b", "\"unclosed"] {
+            refused(provider(vec![rule(path, "x")]));
+        }
     }
 
     #[test]
-    fn a_term_template_that_cannot_produce_a_term_is_refused() {
-        refused(vec![
-            term_rule("groups[*]", "public"),
-            term_rule("groups[*]", "PUBLIC"),
-            term_rule("groups[*]", "  "),
-            term_rule("groups[*]", "{value}-{value}"),
-            term_rule("groups[*]", "g\u{0}{value}"),
-        ]);
+    fn a_template_that_cannot_produce_a_term_is_refused() {
+        for t in ["public", "PUBLIC", "  ", "{value}-{value}", "g\u{0}{value}"] {
+            refused(provider(vec![rule("groups[*]", t)]));
+        }
     }
 
     #[test]
-    fn a_group_template_without_literal_text_or_with_a_control_character_is_refused() {
-        refused(vec![
-            group_rule("tid", ""),
-            group_rule("tid", "{value}"),
-            group_rule("tid", " {value} "),
-            group_rule("tid", "t\n{value}"),
-        ]);
+    fn a_role_mapping_to_a_term_or_group_that_cannot_be_stored_is_refused() {
+        let bad = [
+            (" ", "admins"),
+            ("public", "admins"),
+            ("Public", "admins"),
+            ("a\u{7}b", "admins"),
+            ("tessera-admins", ""),
+            ("tessera-admins", "ad\tmins"),
+            ("tessera-admins", "ad\u{202E}mins"),
+        ];
+        for (term, group) in bad {
+            let mut p = provider(vec![]);
+            p.role_mappings = vec![mapping(term, group)];
+            refused(p);
+        }
     }
 
     #[test]
-    fn a_fixed_group_rule_needs_a_value_and_a_group() {
-        refused(vec![
-            fixed_rule("groups[*]", " ", "admins"),
-            fixed_rule("groups[*]", "tessera-admins", ""),
-            fixed_rule("groups[*]", "tessera-admins", "ad\tmins"),
-        ]);
-        let good = provider(vec![fixed_rule(
-            " groups[*] ",
-            " tessera-admins ",
-            " admins ",
-        )]);
-        assert_eq!(
-            good.validated(false).unwrap().rules,
-            vec![fixed_rule("groups[*]", "tessera-admins", "admins")]
-        );
+    fn rules_and_role_mappings_are_stored_trimmed() {
+        let mut p = provider(vec![rule(" groups[*] ", " group:{value} ")]);
+        p.role_mappings = vec![mapping(" tessera-admins ", " admins ")];
+        let v = p.validated(false).unwrap();
+        assert_eq!(v.rules, vec![rule("groups[*]", "group:{value}")]);
+        assert_eq!(v.role_mappings, vec![mapping("tessera-admins", "admins")]);
     }
 
     #[test]
@@ -620,24 +524,6 @@ mod tests {
                 with_jwks(never).validated(true).is_err(),
                 "{never} accepted"
             );
-        }
-    }
-
-    #[test]
-    fn only_a_fixed_group_rule_reaches_a_groups_permissions() {
-        let p = provider(vec![
-            group_rule("tid", "tenant-{value}"),
-            group_rule("x", "ops"),
-            fixed_rule("groups[*]", "tessera-admins", "admins"),
-        ]);
-        for group in ["tenant-7f3a", "ops", "admins"] {
-            assert!(p.may_reach_group_terms(group), "{group}");
-        }
-        assert!(!p.may_reach_group_terms("tenant-"));
-        assert!(!p.may_reach_group_terms("analysts"));
-        assert!(p.may_reach_group_permissions("admins"));
-        for group in ["tenant-7f3a", "ops", "analysts"] {
-            assert!(!p.may_reach_group_permissions(group), "{group}");
         }
     }
 }
