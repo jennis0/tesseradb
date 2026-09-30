@@ -60,8 +60,9 @@ It holds:
 - local groups and their members;
 - the terms granted to each principal and each group;
 - the permissions granted to each principal and each group, and the `bypass` flag;
-- each OIDC provider: issuer, audience, JWKS location, and the rules that map claims to terms and
-  to local groups.
+- each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
+  map claims to terms and to local groups. A provider can also be declared in `tessera.toml`
+  ([Surfaces](#surfaces)).
 
 It does not hold sessions, which stay in memory, or the audit log, which is append-only and kept
 separately.
@@ -294,8 +295,10 @@ the CLI each reach all of them:
 - declare, change and remove an OIDC provider and its claim rules;
 - list a principal's sessions, and end them.
 
-OIDC providers are declared through these verbs alone, and not in `tessera.toml`. A container that
-needs a provider at start runs the CLI as the superuser after the service is up.
+An OIDC provider can also be declared in `tessera.toml`, so that a service starts with it in
+place. A provider declared there is read-only: the API lists it and refuses to change or remove
+it, and editing the file and restarting changes it. The service refuses to start when a provider's
+name is declared both in the file and in the catalogue.
 
 ## Listeners
 
