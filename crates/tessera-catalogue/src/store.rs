@@ -230,7 +230,8 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
     load_principals(conn, &mut st, &mut ids)?;
     load_groups(conn, &mut st, &mut ids)?;
     load_members(conn, &mut st, &ids)?;
-    load_terms(conn, &mut st, &ids)?;
+    load_principal_terms(conn, &mut st, &ids)?;
+    load_group_terms(conn, &mut st, &ids)?;
     load_keys(conn, &mut st, &ids)?;
     load_providers(conn, &mut st)?;
     st.generation = load_generation(conn)?;
@@ -319,7 +320,7 @@ fn load_members(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Erro
     Ok(())
 }
 
-fn load_terms(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
+fn load_principal_terms(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT principal_id, term FROM principal_term")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
@@ -329,6 +330,10 @@ fn load_terms(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error>
         stored(&row, &term, names::term(&term))?;
         st.principals.get_mut(p).expect("loaded").terms.insert(term);
     }
+    Ok(())
+}
+
+fn load_group_terms(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT group_id, term FROM group_term")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
