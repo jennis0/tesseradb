@@ -117,14 +117,16 @@ holds.
 - A local principal's terms are those granted to it directly, together with those granted to each
   group it belongs to.
 - An OIDC identity's terms come from its provider's claim rules. A rule reads a claim and produces
-  terms, or names a local group whose granted terms are then added. For example, a rule
-  `groups[*] -> group:{value}` turns a `groups` claim of `["analysts", "eu"]` into the terms
-  `group:analysts` and `group:eu`. A rule `tid -> local group tenant-{value}` adds the terms granted
-  to the local group `tenant-7f3a`.
+  terms, or names a local group whose granted terms are then added. The standard rule,
+  `groups[*] -> {value}`, passes each value of the `groups` claim through as a term, so a claim of
+  `["analysts", "eu"]` gives the terms `analysts` and `eu` and a label is written with the names
+  the identity provider uses. A template may add text, as `groups[*] -> group:{value}` does. A rule
+  `tid -> local group tenant-{value}` adds the terms granted to the local group `tenant-7f3a`.
+- A produced term goes through the same rules as any term: it is trimmed, and a value that is
+  `public` in any case, or that holds a control character, is dropped.
 - A rule whose target is a template, holding `{value}`, reaches terms only: a term it produces, or
-  the terms of the local group it names. The template must hold literal text beside `{value}`, so
-  that a claim value cannot produce a bare name that collides with a local group made by hand or
-  with `public`.
+  the terms of the local group it names. A template naming a local group must hold literal text
+  beside `{value}`, so that a claim value cannot name a local group made by hand.
 - An OIDC identity's permissions come only from a rule that names a fixed local group and the claim
   value it requires, such as `groups[*] == "tessera-admins" -> local group admins`. The identity
   receives that group's terms and permissions, except `bypass`. A claim value can therefore select
