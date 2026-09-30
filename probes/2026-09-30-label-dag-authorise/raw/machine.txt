@@ -1,0 +1,10 @@
+nproc: 4
+MemTotal:       16480972 kB
+Model name:                              Intel(R) Xeon(R) Processor @ 2.10GHz
+Thread(s) per core:                      1
+Core(s) per socket:                      4
+Socket(s):                               1
+L2 cache:                                8 MiB (4 instances)
+L3 cache:                                260 MiB (1 instance)
+6.18.44-fc-v50
+rustc 1.94.1 (e408947bf 2026-03-25)

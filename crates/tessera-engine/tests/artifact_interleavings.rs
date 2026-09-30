@@ -934,15 +934,17 @@ fn a_window_that_could_not_append_leaves_neither_the_rows_nor_the_joins() {
 // -------------------------------------------------------------------------------------------
 
 /// **A reader never sees a membership part-grown.** One thread serves the viewport while another
-/// ingests, publishes, grows and ticks; every count the reader takes is one of the values a
-/// completed growth leaves — a multiple of the step above the published 300 — and never one
-/// between two of them, and no artifact it has been served goes away.
+/// ingests, publishes, grows and ticks; every response is a state the writer passed through — c0
+/// at a multiple of the step above the published 300, beside as many artifacts as the rounds
+/// that grew it had published — and never one between two of them.
 ///
-/// **It may repeat a value the reader has already passed, and that is the tick's own rule**
-/// (`ingest.md` §1.3). A request is served the level's form as last published; a request whose row
-/// space moved under it builds instead, and reads the store. So a reader that straddles a flush
-/// can take a fresher count from a build and the published count again afterwards. Both understate
-/// the store and neither overstates it, which is the direction the staleness is allowed in.
+/// **It may go back to a state it has already passed, and that is the tick's own rule.** A request is served the level's form as last published; a request whose row
+/// space moved under it (a merge swapped in while it ran) builds instead, reads the store, and
+/// serves every accepted write, the round's publication as well as its growth. The next request is
+/// served the published form again, with the artifact that publication added not yet in it. Both
+/// understate the store and neither overstates it, which is the direction the staleness is allowed
+/// in. So a step back lands on a whole round, as a tick publishes it, and no further back than
+/// the round before the furthest state the reader has seen.
 ///
 /// The only genuinely racing case in this file, and bounded rather than timed: a fixed number of
 /// rounds, each a whole growth of ten, so a torn read is a count that is not a multiple of ten
@@ -971,7 +973,10 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
     std::thread::scope(|s| {
         s.spawn(|| {
             let deadline = Instant::now() + WAIT;
-            let mut last = (0u64, 0usize);
+            // The writer's states in order: c0 alone, then per round a growth and a publication.
+            // A state's position is its growths plus its publications, and a tick publishes the
+            // even positions only.
+            let mut furthest = (0u64, (300u64, 1usize));
             while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                 let served = artifacts_of(&engine, &full_coverage_credential());
                 let count = served
@@ -988,14 +993,28 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                     0,
                     "a growth was read half-applied: {count}"
                 );
+                let state = (count, served.len());
+                let grown = (count - 300) / STEP;
+                let published = served.len() as u64 - 1;
                 assert!(
-                    served.len() >= last.1,
-                    "a served artifact went away: {:?} then {:?}",
-                    last,
-                    (count, served.len())
+                    published == grown || published + 1 == grown,
+                    "c0 and the artifacts beside it are from different states: {state:?}"
                 );
-                last = (count, served.len());
-                observed.lock().unwrap().push(last);
+                let position = grown + published;
+                if position >= furthest.0 {
+                    furthest = (position, state);
+                } else {
+                    // The tick before the furthest state's round had published everything before
+                    // that round, and a published form never goes back.
+                    let floor = 2 * furthest.0.div_ceil(2) - 2;
+                    assert!(
+                        position.is_multiple_of(2) && position >= floor,
+                        "a step back to a state no tick published since the reader saw {:?}: \
+                         {state:?}",
+                        furthest.1
+                    );
+                }
+                observed.lock().unwrap().push(state);
                 std::thread::sleep(Duration::from_millis(1));
             }
         });
@@ -1025,10 +1044,12 @@ fn a_reader_sees_the_membership_move_forward_through_whole_growths_only() {
                     )],
                 )
                 .expect("a publication beside the growth");
-            // **The round's writes reach the reader at the round's tick**, which is the moment a
-            // row form takes them (`ingest.md` §1.3). Without it the reader would overlap a
-            // publisher that publishes nothing and assert about one state.
-            tick(&engine);
+            // **The round's writes reach the reader at the publication that honours this round's
+            // request**, which is the moment a row form takes them. Waiting for that publication,
+            // not for any tick, keeps the published form at most one round behind the store.
+            // Without it the reader would overlap a publisher that publishes nothing and assert
+            // about one state.
+            publish_buffered(&engine);
             // **The reader must actually overlap the writer or its assertions never run**, and a
             // round is three windows on an idle executor — fast enough that a loaded box could
             // finish the whole loop inside one viewport. A pause per round is what makes the
