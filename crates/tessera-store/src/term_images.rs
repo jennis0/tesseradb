@@ -1108,14 +1108,14 @@ impl RouteCosts {
     pub fn price(&self, inputs: &ChooserInputs) -> RoutePrices {
         RoutePrices {
             walk: self.walk_ns_per_entity * inputs.held as f64,
-            split: (inputs.kept_terms > 0).then(|| {
+            split: (inputs.kept_terms > 0).then_some(
                 self.split_ns_per_array_or_run * inputs.kept_arrays_and_runs as f64
                     + self.split_ns_per_bitset * inputs.kept_bitsets as f64
-                    + self.residual_ns_per_entity * inputs.residual_entities as f64
-            }),
-            complement: inputs.complement_valid.then(|| {
-                self.complement_ns_per_entity * inputs.bound.saturating_sub(inputs.held) as f64
-            }),
+                    + self.residual_ns_per_entity * inputs.residual_entities as f64,
+            ),
+            complement: inputs.complement_valid.then_some(
+                self.complement_ns_per_entity * inputs.bound.saturating_sub(inputs.held) as f64,
+            ),
         }
     }
 }
