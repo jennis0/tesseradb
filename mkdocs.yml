@@ -143,6 +143,7 @@ nav:
           - tessera-key-picker: reference/components/tessera-key-picker.md
           - tessera-filter-panel: reference/components/tessera-filter-panel.md
           - tessera-filter: reference/components/tessera-filter.md
+          - tessera-cluster-filter: reference/components/tessera-cluster-filter.md
           - tessera-selection: reference/components/tessera-selection.md
           - tessera-item-card: reference/components/tessera-item-card.md
           - tessera-artifact-list: reference/components/tessera-artifact-list.md

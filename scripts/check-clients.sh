@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "check-clients: npm is not on PATH. Install Node (>=20) and re-run, or say in your report" >&2
+  echo "check-clients: npm is not on PATH. Install Node (>=22.15) and re-run, or say in your report" >&2
   echo "  that this check did not run." >&2
   exit 1
 fi
