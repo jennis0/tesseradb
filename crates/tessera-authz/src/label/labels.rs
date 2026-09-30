@@ -125,7 +125,7 @@ impl Labels {
         self.dag.authorise(held, scratch, out);
     }
 
-    /// Whether a principal holding the terms `held` accepts satisfies label `id`. The label alone
+    /// Whether a principal holding the terms `held` satisfies label `id`. The label alone
     /// is evaluated, so no authorised set is built.
     pub fn satisfied(&self, id: LabelId, held: &impl Fn(TermId) -> bool) -> bool {
         match &self.entries[id.raw() as usize] {
@@ -262,5 +262,18 @@ mod tests {
         );
         let public = f.add("public");
         assert_eq!(f.labels.witness(public, &f.holds(&[])), Some(vec![]));
+    }
+
+    #[test]
+    fn public_is_satisfied_by_every_principal_and_listed_by_no_authorise() {
+        let mut f = Fixture::new();
+        let public = f.add("public");
+        f.add("a");
+        assert!(f.labels.satisfied(public, &f.holds(&[])));
+        assert!(f.labels.satisfied(public, &f.holds(&["a"])));
+        let mut out = Vec::new();
+        f.labels
+            .authorise(&[f.dict["a"]], &mut Scratch::default(), &mut out);
+        assert!(out.is_empty());
     }
 }
