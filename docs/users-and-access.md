@@ -158,6 +158,10 @@ grammar is the one the `accumulo-access` project specifies.
 
 - A term is written bare when it consists of letters, digits and `_ - . : /`. Any other term is
   written in double quotes, with `\"` and `\\` as escapes.
+- The label as a whole is trimmed. Whitespace inside it is refused between tokens, as Accumulo
+  refuses it, and a quoted term is taken exactly as written: `"a "` and `a` are different terms. A
+  grant or claim value is trimmed, so a term with leading or trailing whitespace can appear in a
+  label and cannot be granted, and an item carrying only such a term is visible to nobody.
 - `&` is conjunction and `|` is disjunction. Mixing the two needs brackets: `a&b|c` is refused and
   `(a&b)|c` is accepted.
 - There is no negation. A label is therefore monotone: a principal holding more terms sees a
@@ -237,7 +241,8 @@ flowchart BT
 
 The DAG's size is linear in the total size of the distinct expressions, so an expression with many
 disjuncts costs space in proportion to its length. Converting to disjunctive normal form would cost
-space exponential in the number of disjuncts. A label longer than a configured number of nodes is
+space exponential in the number of disjuncts. A label that holds a conjunction and is longer than a
+configured number of nodes is
 refused when it is written, with the count in the message.
 
 ### Authorising
@@ -365,7 +370,8 @@ change records who made it and what it changed.
 
 ## Limits
 
-- An expression may hold at most a configured number of DAG nodes, 1,024 by default. Adding a label
+- An expression that holds a conjunction may hold at most a configured number of DAG nodes, 1,024
+  by default. A disjunction of terms never enters the DAG and has no limit. Adding a label
   to the DAG costs time quadratic in its length: the probe measured 15.7 ms at 1,024 nodes and
   8.1 s at 16,384. The longest label in the probe's corpora held 66.
 - A password is at least a configured number of characters long, fifteen by default, the length
