@@ -47,6 +47,10 @@ pub struct Options {
     /// The most names whose failed attempts are remembered. Past it, the name whose latest
     /// failure is oldest is forgotten.
     pub failed_attempt_names: usize,
+    /// The fewest characters a password may hold when it is set. At least 1.
+    pub min_password_length: usize,
+    /// Accepts an `http://` JWKS URL to a host other than a loopback address.
+    pub allow_insecure_jwks: bool,
     /// The time, for API key expiry and the failed-attempt window.
     pub clock: Clock,
     /// Providers declared in the deployment's configuration. They are listed with the stored
@@ -60,6 +64,8 @@ impl Default for Options {
             failed_attempt_limit: 10,
             failed_attempt_window: Duration::from_secs(15 * 60),
             failed_attempt_names: 100_000,
+            min_password_length: 15,
+            allow_insecure_jwks: false,
             clock: Arc::new(|| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)

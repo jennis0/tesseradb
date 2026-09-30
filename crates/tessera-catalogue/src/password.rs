@@ -20,6 +20,18 @@ use parking_lot::Mutex;
 
 use crate::Error;
 
+/// Refuses a password of fewer than `min` characters. No other rule is applied.
+pub(crate) fn check_length(password: &str, min: usize) -> Result<(), Error> {
+    let len = password.chars().count();
+    if len < min {
+        return Err(Error::Invalid(format!(
+            "the password holds {len} characters and the least accepted is {min}; write a \
+             longer one, such as a phrase of several words"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn hash(password: &str) -> Result<String, Error> {
     let mut salt = [0u8; 16];
     getrandom::getrandom(&mut salt).map_err(|e| Error::Storage(format!("no randomness: {e}")))?;
@@ -106,7 +118,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::testing::Fixture;
-    use crate::{AuthError, Catalogue, PrincipalKind};
+    use crate::{AuthError, Catalogue, Error, PrincipalKind};
 
     fn with_ada(fx: &Fixture, limit: u32, window: u64) -> Catalogue {
         let mut options = fx.options();
@@ -114,7 +126,7 @@ mod tests {
         options.failed_attempt_window = Duration::from_secs(window);
         let cat = Catalogue::open(&fx.path(), options).unwrap();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
-        cat.set_password("ada", "correct horse").unwrap();
+        cat.set_password("ada", "correct horse battery").unwrap();
         cat
     }
 
@@ -122,39 +134,78 @@ mod tests {
     fn only_the_set_password_of_an_enabled_principal_authenticates() {
         let fx = Fixture::new();
         let cat = with_ada(&fx, 10, 900);
-        let ok = cat.verify_password(" ada ", "correct horse").unwrap();
+        let ok = cat
+            .verify_password(" ada ", "correct horse battery")
+            .unwrap();
         assert_eq!(ok.principal, "ada");
         assert_eq!(ok.api_key, None);
         assert_eq!(
-            cat.verify_password("ada", "Correct horse"),
+            cat.verify_password("ada", "Correct horse battery"),
             Err(AuthError::Refused)
         );
         assert_eq!(
-            cat.verify_password("bob", "correct horse"),
+            cat.verify_password("bob", "correct horse battery"),
             Err(AuthError::Refused)
         );
 
         cat.disable_principal("ada").unwrap();
         assert_eq!(
-            cat.verify_password("ada", "correct horse"),
+            cat.verify_password("ada", "correct horse battery"),
             Err(AuthError::Refused)
         );
         cat.enable_principal("ada").unwrap();
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
 
-        cat.set_password("ada", "battery staple").unwrap();
+        cat.set_password("ada", "battery staple horse").unwrap();
         assert_eq!(
-            cat.verify_password("ada", "correct horse"),
+            cat.verify_password("ada", "correct horse battery"),
             Err(AuthError::Refused)
         );
-        assert!(cat.verify_password("ada", "battery staple").is_ok());
+        assert!(cat.verify_password("ada", "battery staple horse").is_ok());
 
         cat.clear_password("ada").unwrap();
         assert!(!cat.principal("ada").unwrap().has_password);
         assert_eq!(
-            cat.verify_password("ada", "battery staple"),
+            cat.verify_password("ada", "battery staple horse"),
             Err(AuthError::Refused)
         );
+    }
+
+    #[test]
+    fn a_password_shorter_than_the_minimum_is_refused_and_leaves_the_old_one() {
+        let fx = Fixture::new();
+        let cat = with_ada(&fx, 10, 900);
+        let fourteen = "abcdefghijklmn";
+        for short in ["", " ", fourteen, "ééééééééééééé"] {
+            assert!(
+                matches!(cat.set_password("ada", short), Err(Error::Invalid(_))),
+                "{short:?} was accepted"
+            );
+        }
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
+        // Fifteen characters, counted as characters and not bytes.
+        cat.set_password("ada", "ééééééééééééééé").unwrap();
+        assert!(cat.verify_password("ada", "ééééééééééééééé").is_ok());
+    }
+
+    #[test]
+    fn the_minimum_password_length_is_configurable_and_at_least_one() {
+        let fx = Fixture::new();
+        let mut options = fx.options();
+        options.min_password_length = 0;
+        assert!(matches!(
+            Catalogue::open(&fx.path(), options.clone()),
+            Err(Error::Invalid(_))
+        ));
+        options.min_password_length = 1;
+        let cat = Catalogue::open(&fx.path(), options).unwrap();
+        cat.create_principal("ada", PrincipalKind::Person).unwrap();
+        assert!(matches!(
+            cat.set_password("ada", ""),
+            Err(Error::Invalid(_))
+        ));
+        cat.set_password("ada", "x").unwrap();
+        assert!(cat.verify_password("ada", "x").is_ok());
     }
 
     #[test]
@@ -166,7 +217,7 @@ mod tests {
             .query_row("SELECT password_hash FROM principal", [], |r| r.get(0))
             .unwrap();
         assert!(stored.starts_with("$argon2id$"));
-        assert!(!stored.contains("correct horse"));
+        assert!(!stored.contains("correct horse battery"));
     }
 
     #[test]
@@ -179,16 +230,16 @@ mod tests {
         }
         // Failures at start, +10 and +20: the next attempt is taken once the first leaves.
         assert_eq!(
-            cat.verify_password("ada", "correct horse"),
+            cat.verify_password("ada", "correct horse battery"),
             Err(AuthError::Refused)
         );
         fx.advance(29);
         assert_eq!(
-            cat.verify_password("ada", "correct horse"),
+            cat.verify_password("ada", "correct horse battery"),
             Err(AuthError::Refused)
         );
         fx.advance(1);
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
     }
 
     #[test]
@@ -216,7 +267,8 @@ mod tests {
         let cat = with_ada(&fx, 3, 60);
         cat.create_principal("disabled", PrincipalKind::Person)
             .unwrap();
-        cat.set_password("disabled", "pw").unwrap();
+        cat.set_password("disabled", "a long enough password")
+            .unwrap();
         cat.disable_principal("disabled").unwrap();
         cat.create_principal("no-password", PrincipalKind::Person)
             .unwrap();
@@ -227,15 +279,22 @@ mod tests {
         }
         cat.create_principal("later", PrincipalKind::Person)
             .unwrap();
-        cat.set_password("later", "pw").unwrap();
+        cat.set_password("later", "a long enough password").unwrap();
         cat.enable_principal("disabled").unwrap();
-        cat.set_password("no-password", "pw").unwrap();
+        cat.set_password("no-password", "a long enough password")
+            .unwrap();
         for name in ["later", "disabled", "no-password"] {
-            assert_eq!(cat.verify_password(name, "pw"), Err(AuthError::Refused));
+            assert_eq!(
+                cat.verify_password(name, "a long enough password"),
+                Err(AuthError::Refused)
+            );
         }
         fx.advance(60);
         for name in ["later", "disabled", "no-password"] {
-            assert!(cat.verify_password(name, "pw").is_ok(), "{name}");
+            assert!(
+                cat.verify_password(name, "a long enough password").is_ok(),
+                "{name}"
+            );
         }
     }
 
@@ -247,16 +306,16 @@ mod tests {
         options.failed_attempt_names = 2;
         let cat = Catalogue::open(&fx.path(), options).unwrap();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
-        cat.set_password("ada", "correct horse").unwrap();
+        cat.set_password("ada", "correct horse battery").unwrap();
         for _ in 0..2 {
             cat.verify_password("ada", "wrong").unwrap_err();
         }
-        assert!(cat.verify_password("ada", "correct horse").is_err());
+        assert!(cat.verify_password("ada", "correct horse battery").is_err());
         fx.advance(1);
         cat.verify_password("x", "wrong").unwrap_err();
         fx.advance(1);
         cat.verify_password("y", "wrong").unwrap_err();
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
     }
 
     #[test]
@@ -266,11 +325,11 @@ mod tests {
         for _ in 0..2 {
             cat.verify_password("ada", "wrong").unwrap_err();
         }
-        cat.verify_password("ada", "correct horse").unwrap();
+        cat.verify_password("ada", "correct horse battery").unwrap();
         for _ in 0..2 {
             cat.verify_password("ada", "wrong").unwrap_err();
         }
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
     }
 
     #[test]
@@ -278,17 +337,17 @@ mod tests {
         let fx = Fixture::new();
         let cat = fx.open();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
-        cat.set_password("ada", "correct horse").unwrap();
+        cat.set_password("ada", "correct horse battery").unwrap();
         for _ in 0..10 {
             cat.verify_password("ada", "wrong").unwrap_err();
         }
         assert_eq!(
-            cat.verify_password("ada", "correct horse"),
+            cat.verify_password("ada", "correct horse battery"),
             Err(AuthError::Refused)
         );
         fx.advance(899);
-        assert!(cat.verify_password("ada", "correct horse").is_err());
+        assert!(cat.verify_password("ada", "correct horse battery").is_err());
         fx.advance(1);
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
     }
 }

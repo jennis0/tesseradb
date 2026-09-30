@@ -7,9 +7,16 @@
 //! double quotes, with `\"` and `\\` as escapes: `"https://example.org/roles"[*]`.
 //!
 //! A template produces a term or a local group name from each value the path reaches. It holds
-//! `{value}` at most once, replaced by the value. A template without `{value}` produces itself
-//! whenever the path reaches any value. Values are strings, numbers and booleans; the path
-//! reaching an object, an array without `[*]`, or null produces nothing.
+//! `{value}` at most once, replaced by the value. A term template may be `{value}` alone, which
+//! passes each value through as a term. A local group template that holds `{value}` also holds
+//! literal text, so a claim value cannot name a local group made by hand. A template without
+//! `{value}` produces itself whenever the path reaches any value. Values are strings, numbers and booleans; the path reaching an object, an
+//! array without `[*]`, or null produces nothing.
+//!
+//! A template reaches terms only: those it produces, or those granted to the local group it
+//! produces. Permissions reach an OIDC identity only through a rule that names a fixed local group
+//! and the claim value it requires, so a claim value can select a group an administrator named
+//! and cannot choose one by its own spelling.
 
 use std::collections::BTreeSet;
 
@@ -42,8 +49,11 @@ pub struct ClaimRule {
 pub enum RuleTarget {
     /// A template for a term.
     Term(String),
-    /// A template for the name of a local group, whose granted terms and permissions are added.
+    /// A template for the name of a local group, whose granted terms are added.
     LocalGroup(String),
+    /// The local group `group`, whose granted terms and permissions are added when the claim
+    /// holds the value `equals`.
+    FixedGroup { equals: String, group: String },
 }
 
 /// What a provider's claim rules produce from one set of claims, before local groups are
@@ -51,12 +61,17 @@ pub enum RuleTarget {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClaimMapping {
     pub terms: BTreeSet<String>,
+    /// Local groups whose terms are added.
     pub groups: BTreeSet<String>,
+    /// Local groups whose terms and permissions are added.
+    pub fixed_groups: BTreeSet<String>,
 }
 
 impl Provider {
-    /// The provider with every field trimmed, or the reason it cannot be stored.
-    pub(crate) fn validated(&self) -> Result<Provider, Error> {
+    /// The provider with every field trimmed, or the reason it cannot be stored. An `http://`
+    /// JWKS URL to a host other than a loopback address is accepted only with
+    /// `allow_insecure_jwks`.
+    pub(crate) fn validated(&self, allow_insecure_jwks: bool) -> Result<Provider, Error> {
         let name = names::name("provider", &self.name)?;
         let field = |label: &str, raw: &str| -> Result<String, Error> {
             let v = raw.trim();
@@ -70,11 +85,7 @@ impl Provider {
         let issuer = field("issuer", &self.issuer)?;
         let audience = field("audience", &self.audience)?;
         let jwks_url = field("JWKS URL", &self.jwks_url)?;
-        if !(jwks_url.starts_with("https://") || jwks_url.starts_with("http://")) {
-            return Err(Error::Invalid(format!(
-                "provider `{name}` has JWKS URL `{jwks_url}`; write an http:// or https:// URL"
-            )));
-        }
+        check_jwks_url(&name, &jwks_url, allow_insecure_jwks)?;
         let rules = self
             .rules
             .iter()
@@ -89,8 +100,9 @@ impl Provider {
         })
     }
 
-    /// Applies every claim rule to `claims`, a JSON object. Values producing an empty term or
-    /// group, or the term `public`, which every session holds anyway, are dropped.
+    /// Applies every claim rule to `claims`, a JSON object. A value producing a term or a group
+    /// name that a grant or a group could not hold is dropped. That includes `public` in any
+    /// case, which every session holds anyway.
     pub fn apply(&self, claims: &Value) -> ClaimMapping {
         let mut out = ClaimMapping::default();
         for rule in &self.rules {
@@ -101,33 +113,49 @@ impl Provider {
             };
             let mut values = Vec::new();
             walk(claims, &path, &mut values);
-            for value in values {
-                let value = value.trim();
-                if value.is_empty() {
-                    continue;
-                }
-                let (template, sink) = match &rule.target {
-                    RuleTarget::Term(t) => (t, &mut out.terms),
-                    RuleTarget::LocalGroup(t) => (t, &mut out.groups),
-                };
-                let produced = template.replacen(PLACEHOLDER, value, 1);
-                let produced = produced.trim();
-                let is_term = matches!(rule.target, RuleTarget::Term(_));
-                if produced.is_empty() || (is_term && produced == names::PUBLIC) {
-                    continue;
-                }
-                sink.insert(produced.to_owned());
+            for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                rule.target.produce(value, &mut out);
             }
         }
         out
     }
 
-    /// Whether any of this provider's rules could produce the local group `group`.
-    pub(crate) fn may_produce_group(&self, group: &str) -> bool {
+    /// Whether any of this provider's rules could add the terms of the local group `group`.
+    pub(crate) fn may_reach_group_terms(&self, group: &str) -> bool {
         self.rules.iter().any(|r| match &r.target {
             RuleTarget::LocalGroup(t) => template_may_produce(t, group),
+            RuleTarget::FixedGroup { group: g, .. } => g == group,
             RuleTarget::Term(_) => false,
         })
+    }
+
+    /// Whether any of this provider's rules could add the permissions of the local group `group`.
+    pub(crate) fn may_reach_group_permissions(&self, group: &str) -> bool {
+        self.rules
+            .iter()
+            .any(|r| matches!(&r.target, RuleTarget::FixedGroup { group: g, .. } if g == group))
+    }
+}
+
+impl RuleTarget {
+    fn produce(&self, value: &str, out: &mut ClaimMapping) {
+        match self {
+            RuleTarget::Term(t) => {
+                if let Ok(term) = names::term(&t.replacen(PLACEHOLDER, value, 1)) {
+                    out.terms.insert(term);
+                }
+            }
+            RuleTarget::LocalGroup(t) => {
+                if let Ok(group) = names::name("group", &t.replacen(PLACEHOLDER, value, 1)) {
+                    out.groups.insert(group);
+                }
+            }
+            RuleTarget::FixedGroup { equals, group } => {
+                if value == equals {
+                    out.fixed_groups.insert(group.clone());
+                }
+            }
+        }
     }
 }
 
@@ -135,32 +163,104 @@ impl ClaimRule {
     fn validated(&self) -> Result<ClaimRule, Error> {
         let claim = self.claim.trim().to_owned();
         parse_path(&claim)?;
-        let template = |raw: &str| -> Result<String, Error> {
-            let t = raw.trim();
-            if t.matches(PLACEHOLDER).count() > 1 {
-                return Err(Error::Invalid(format!(
-                    "the template `{t}` holds {{value}} more than once; write it at most once"
-                )));
-            }
-            Ok(t.to_owned())
-        };
         let target = match &self.target {
             RuleTarget::Term(t) => {
                 let t = template(t)?;
-                // A template without `{value}` is a term itself, and takes a term's rules.
-                if !t.contains(PLACEHOLDER) {
-                    names::term(&t)?;
-                }
+                names::term(&t)?;
                 RuleTarget::Term(t)
             }
             RuleTarget::LocalGroup(t) => {
                 let t = template(t)?;
+                if t == PLACEHOLDER {
+                    return Err(Error::Invalid(
+                        "the local group template `{value}` holds no literal text, so a claim \
+                         value could name any local group; write a prefix or suffix beside it, \
+                         such as `tenant-{value}`, or name a fixed local group with the claim \
+                         value it requires"
+                            .into(),
+                    ));
+                }
                 names::name("local group template", &t)?;
                 RuleTarget::LocalGroup(t)
             }
+            RuleTarget::FixedGroup { equals, group } => fixed_group(equals, group)?,
         };
         Ok(ClaimRule { claim, target })
     }
+}
+
+/// A trimmed template, refused when it holds `{value}` more than once.
+fn template(raw: &str) -> Result<String, Error> {
+    let t = raw.trim();
+    if t.matches(PLACEHOLDER).count() > 1 {
+        return Err(Error::Invalid(format!(
+            "the template `{t}` holds {{value}} more than once; write it at most once"
+        )));
+    }
+    Ok(t.to_owned())
+}
+
+fn fixed_group(equals: &str, group: &str) -> Result<RuleTarget, Error> {
+    let group = names::name("local group", group)?;
+    let equals = equals.trim();
+    if equals.is_empty() {
+        return Err(Error::Invalid(format!(
+            "the rule naming local group `{group}` requires an empty claim value, which no claim \
+             holds; write the value the claim must hold"
+        )));
+    }
+    Ok(RuleTarget::FixedGroup {
+        equals: equals.to_owned(),
+        group,
+    })
+}
+
+/// Refuses a JWKS URL other than `https://`, or `http://` to `localhost`, `127.0.0.1` or
+/// `[::1]`, unless `allow_insecure` is set. Anyone on the network path of a plain `http` fetch
+/// could substitute the keys and sign a token for any identity.
+fn check_jwks_url(provider: &str, url: &str, allow_insecure: bool) -> Result<(), Error> {
+    let bad = |why: &str| {
+        Error::Invalid(format!(
+            "provider `{provider}` has JWKS URL `{url}`, {why}; write an https:// URL, or an \
+             http:// URL to localhost, 127.0.0.1 or [::1]"
+        ))
+    };
+    let (secure, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return Err(bad("which is not an http:// or https:// URL"));
+    };
+    let host = url_host(rest);
+    if host.is_empty() {
+        return Err(bad("which names no host"));
+    }
+    if secure || allow_insecure || is_loopback(host) {
+        return Ok(());
+    }
+    Err(Error::Invalid(format!(
+        "provider `{provider}` has JWKS URL `{url}`, which fetches the signing keys over plain \
+         http from a host that is not a loopback address; write an https:// URL, or open the \
+         catalogue with insecure JWKS URLs allowed (TESSERA_ALLOW_INSECURE_JWKS=1)"
+    )))
+}
+
+/// The host of a URL whose scheme and `://` are removed: the authority ends at the first `/`,
+/// `\`, `?` or `#`, the host follows the last `@` in it, and a port is removed.
+fn url_host(rest: &str) -> &str {
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    match host.find(']') {
+        Some(end) if host.starts_with('[') => &host[..=end],
+        _ => host.split(':').next().unwrap_or_default(),
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    ["localhost", "127.0.0.1", "[::1]"]
+        .iter()
+        .any(|l| host.eq_ignore_ascii_case(l))
 }
 
 fn template_may_produce(template: &str, produced: &str) -> bool {
@@ -353,19 +453,58 @@ mod tests {
         assert!(m.terms.is_empty(), "{:?}", m.terms);
     }
 
+    fn fixed_rule(claim: &str, equals: &str, group: &str) -> ClaimRule {
+        ClaimRule {
+            claim: claim.into(),
+            target: RuleTarget::FixedGroup {
+                equals: equals.into(),
+                group: group.into(),
+            },
+        }
+    }
+
     #[test]
-    fn a_value_producing_public_or_nothing_is_dropped() {
+    fn a_bare_value_template_passes_each_value_through_as_a_term() {
+        let p = provider(vec![term_rule("groups[*]", "{value}")]);
+        assert!(p.validated(false).is_ok());
+        let m = p.apply(&json!({"groups": ["analysts", " eu "]}));
+        assert_eq!(m.terms, set(&["analysts", "eu"]));
+    }
+
+    #[test]
+    fn a_value_producing_public_in_any_case_a_control_character_or_nothing_is_dropped() {
         let p = provider(vec![
             term_rule("groups[*]", "{value}"),
             group_rule("groups[*]", "tenant-{value}"),
         ]);
-        let m = p.apply(&json!({"groups": ["public", "  ", "", " kept "]}));
+        let claims =
+            json!({"groups": ["public", "PUBLIC", " Public ", "  ", "", " kept ", "a\u{7}"]});
+        let m = p.apply(&claims);
         assert_eq!(m.terms, set(&["kept"]));
-        assert_eq!(m.groups, set(&["tenant-kept", "tenant-public"]));
+        assert_eq!(
+            m.groups,
+            set(&[
+                "tenant-kept",
+                "tenant-public",
+                "tenant-PUBLIC",
+                "tenant-Public"
+            ])
+        );
     }
 
     #[test]
-    fn a_malformed_rule_or_field_is_refused() {
+    fn a_fixed_group_rule_names_its_group_only_when_the_claim_holds_its_value() {
+        let p = provider(vec![fixed_rule("groups[*]", "tessera-admins", "admins")]);
+        let m = p.apply(&json!({"groups": ["analysts", " tessera-admins "]}));
+        assert_eq!(m.fixed_groups, set(&["admins"]));
+        assert!(m.groups.is_empty() && m.terms.is_empty());
+        for other in [json!({"groups": ["tessera-admin", "admins"]}), json!({})] {
+            assert!(p.apply(&other).fixed_groups.is_empty(), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_rule_is_refused() {
         let bad_rules = [
             term_rule("", "x"),
             term_rule("a..b", "x"),
@@ -373,39 +512,107 @@ mod tests {
             term_rule("a[*]b", "x"),
             term_rule(r#""unclosed"#, "x"),
             term_rule("groups[*]", "public"),
+            term_rule("groups[*]", "PUBLIC"),
             term_rule("groups[*]", "  "),
             term_rule("groups[*]", "{value}-{value}"),
+            term_rule("groups[*]", "g\u{0}{value}"),
             group_rule("tid", ""),
+            group_rule("tid", "{value}"),
+            group_rule("tid", " {value} "),
+            group_rule("tid", "t\n{value}"),
+            fixed_rule("groups[*]", " ", "admins"),
+            fixed_rule("groups[*]", "tessera-admins", ""),
+            fixed_rule("groups[*]", "tessera-admins", "ad\tmins"),
         ];
         for rule in bad_rules {
             assert!(
-                provider(vec![rule.clone()]).validated().is_err(),
+                provider(vec![rule.clone()]).validated(false).is_err(),
                 "{rule:?} was accepted"
             );
         }
-        let mut p = provider(vec![]);
-        p.jwks_url = "login.example.org/keys".into();
-        assert!(p.validated().is_err());
-        for blank in ["name", "issuer", "audience"] {
+        let good = provider(vec![fixed_rule(
+            " groups[*] ",
+            " tessera-admins ",
+            " admins ",
+        )]);
+        assert_eq!(
+            good.validated(false).unwrap().rules,
+            vec![fixed_rule("groups[*]", "tessera-admins", "admins")]
+        );
+    }
+
+    #[test]
+    fn a_blank_or_malformed_field_is_refused() {
+        for blank in ["name", "issuer", "audience", "control"] {
             let mut p = provider(vec![]);
             match blank {
                 "name" => p.name = " ".into(),
                 "issuer" => p.issuer = String::new(),
-                _ => p.audience = "\t".into(),
+                "audience" => p.audience = "\t".into(),
+                _ => p.name = "co\u{1b}rp".into(),
             }
-            assert!(p.validated().is_err(), "blank {blank} accepted");
+            assert!(p.validated(false).is_err(), "blank {blank} accepted");
+        }
+    }
+
+    fn with_jwks(url: &str) -> Provider {
+        Provider {
+            jwks_url: url.into(),
+            ..provider(vec![])
         }
     }
 
     #[test]
-    fn a_group_template_matches_the_names_it_can_produce() {
+    fn a_jwks_url_is_https_or_http_to_a_loopback_address() {
+        for ok in [
+            "https://login.example.org/keys",
+            "http://localhost:8080/keys",
+            "http://127.0.0.1/keys",
+            "http://[::1]:9000/keys",
+            "http://LocalHost?x",
+        ] {
+            assert!(with_jwks(ok).validated(false).is_ok(), "{ok} refused");
+        }
+        let insecure = [
+            "http://login.example.org/keys",
+            "http://localhost@evil.example.org/keys",
+            "http://localhost:80@evil.example.org/",
+            "http://localhost.evil.example.org/",
+            "http://127.0.0.2/keys",
+            "http://[::2]/keys",
+        ];
+        for bad in insecure {
+            assert!(with_jwks(bad).validated(false).is_err(), "{bad} accepted");
+            assert!(with_jwks(bad).validated(true).is_ok(), "{bad} refused");
+        }
+        for never in [
+            "login.example.org/keys",
+            "ftp://localhost/keys",
+            "https://",
+            "http:///k",
+        ] {
+            assert!(
+                with_jwks(never).validated(true).is_err(),
+                "{never} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_fixed_group_rule_reaches_a_groups_permissions() {
         let p = provider(vec![
             group_rule("tid", "tenant-{value}"),
             group_rule("x", "ops"),
+            fixed_rule("groups[*]", "tessera-admins", "admins"),
         ]);
-        assert!(p.may_produce_group("tenant-7f3a"));
-        assert!(p.may_produce_group("ops"));
-        assert!(!p.may_produce_group("tenant-"));
-        assert!(!p.may_produce_group("analysts"));
+        for group in ["tenant-7f3a", "ops", "admins"] {
+            assert!(p.may_reach_group_terms(group), "{group}");
+        }
+        assert!(!p.may_reach_group_terms("tenant-"));
+        assert!(!p.may_reach_group_terms("analysts"));
+        assert!(p.may_reach_group_permissions("admins"));
+        for group in ["tenant-7f3a", "ops", "analysts"] {
+            assert!(!p.may_reach_group_permissions(group), "{group}");
+        }
     }
 }

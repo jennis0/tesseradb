@@ -176,8 +176,9 @@ impl State {
         })
     }
 
-    /// The members of `group`, and every provider whose rules could name it.
-    fn affected_by_group(&self, group: &str) -> Affected {
+    /// The members of `group`, and every provider whose rules could add the grants of kind
+    /// `grant` held by it.
+    fn affected_by_group(&self, group: &str, grant: Grant) -> Affected {
         Affected {
             principals: self
                 .groups
@@ -189,16 +190,19 @@ impl State {
             providers: self
                 .providers
                 .values()
-                .filter(|(p, _)| p.may_produce_group(group))
+                .filter(|(p, _)| match grant {
+                    Grant::Term => p.may_reach_group_terms(group),
+                    Grant::Permission => p.may_reach_group_permissions(group),
+                })
                 .map(|(p, _)| p.name.clone())
                 .collect(),
         }
     }
 
-    fn affected_by_grantee(&self, grantee: &Grantee<'_>) -> Affected {
+    fn affected_by_grantee(&self, grantee: &Grantee<'_>, grant: Grant) -> Affected {
         match grantee {
             Grantee::Principal(p) => only_principal(p),
-            Grantee::Group(g) => self.affected_by_group(g),
+            Grantee::Group(g) => self.affected_by_group(g, grant),
         }
     }
 
@@ -208,6 +212,20 @@ impl State {
             out.permissions = out.permissions.union(g.permissions);
         }
     }
+
+    fn add_group_terms(&self, groups: &BTreeSet<String>, out: &mut Resolution) {
+        for g in groups.iter().filter_map(|g| self.groups.get(g)) {
+            out.terms.extend(g.terms.iter().cloned());
+        }
+    }
+}
+
+/// The kind of grant a change to a group alters. Every rule that reaches a group's permissions
+/// also reaches its terms, so a change that alters both is reported as [`Grant::Term`].
+#[derive(Clone, Copy)]
+enum Grant {
+    Term,
+    Permission,
 }
 
 fn only_principal(name: &str) -> Affected {
@@ -239,6 +257,8 @@ pub struct Catalogue {
     state: RwLock<State>,
     limiter: Limiter,
     clock: Clock,
+    min_password_length: usize,
+    allow_insecure_jwks: bool,
     /// Holds the catalogue's lock until the catalogue is dropped.
     _lock: File,
 }
@@ -247,17 +267,18 @@ impl Catalogue {
     /// Opens the catalogue in `dir`, creating it when absent. A catalogue that another
     /// `Catalogue` holds open, that others can reach, that was written by a different schema
     /// version, that holds a row breaking a rule of what may be stored, or that holds a provider
-    /// also in `options.config_providers` is refused.
+    /// also in `options.config_providers` is refused, as is a `min_password_length` of 0.
     pub fn open(dir: &Path, options: Options) -> Result<Catalogue, Error> {
-        let (conn, lock) = store::open(dir)?;
-        let mut state = store::load(&conn)?;
-        for p in &options.config_providers {
-            let p = p.validated()?;
-            if state.providers.contains_key(&p.name) {
-                return Err(Error::DeclaredTwice { provider: p.name });
-            }
-            state.providers.insert(p.name.clone(), (p, true));
+        if options.min_password_length < 1 {
+            return Err(Error::Invalid(
+                "the minimum password length is 0, which accepts the empty password; set it to \
+                 at least 1"
+                    .into(),
+            ));
         }
+        let (conn, lock) = store::open(dir)?;
+        let mut state = store::load(&conn, options.allow_insecure_jwks)?;
+        add_config_providers(&mut state, &options)?;
         Ok(Catalogue {
             conn: Mutex::new(conn),
             state: RwLock::new(state),
@@ -267,6 +288,8 @@ impl Catalogue {
                 options.failed_attempt_names,
             ),
             clock: options.clock,
+            min_password_length: options.min_password_length,
+            allow_insecure_jwks: options.allow_insecure_jwks,
             _lock: lock,
         })
     }
@@ -448,8 +471,10 @@ impl Catalogue {
             .collect()
     }
 
-    /// Sets the principal's password, replacing any previous one.
+    /// Sets the principal's password, replacing any previous one. A password shorter than the
+    /// minimum the catalogue was opened with is refused.
     pub fn set_password(&self, principal: &str, password: &str) -> Result<Affected, Error> {
+        password::check_length(password, self.min_password_length)?;
         let hash = password::hash(password)?;
         self.write_password(principal, Some(hash))
     }
@@ -463,14 +488,18 @@ impl Catalogue {
         let name = principal.trim().to_owned();
         self.affecting(|st, tx| {
             let p = st.principal(&name)?;
+            if hash.is_none() && p.password.is_none() {
+                return Ok((nothing(), Affected::default()));
+            }
             tx.execute(
                 "UPDATE principal SET password_hash = ?1 WHERE id = ?2",
                 params![hash, p.id],
             )?;
+            let affected = only_principal(&name);
             let apply: Apply = Some(Box::new(move |st| {
                 st.principals.get_mut(&name).expect("validated").password = hash;
             }));
-            Ok((apply, Affected::default()))
+            Ok((apply, affected))
         })
     }
 
@@ -664,7 +693,7 @@ impl Catalogue {
         self.affecting(|st, tx| {
             let g = st.group(&name)?;
             tx.execute("DELETE FROM local_group WHERE id = ?1", params![g.id])?;
-            let affected = st.affected_by_group(&name);
+            let affected = st.affected_by_group(&name, Grant::Term);
             let apply: Apply = Some(Box::new(move |st| {
                 if let Some(g) = st.groups.remove(&name) {
                     for m in &g.members {
@@ -760,7 +789,7 @@ impl Catalogue {
                 format!("DELETE FROM {table} WHERE {column} = ?1 AND term = ?2")
             };
             tx.execute(&sql, params![id, term])?;
-            let affected = st.affected_by_grantee(&who);
+            let affected = st.affected_by_grantee(&who, Grant::Term);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| {
                 let held = match &owner {
@@ -819,7 +848,7 @@ impl Catalogue {
                 &format!("UPDATE {table} SET permissions = ?1 WHERE id = ?2"),
                 params![next.bits(), id],
             )?;
-            let affected = st.affected_by_grantee(&who);
+            let affected = st.affected_by_grantee(&who, Grant::Permission);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| match &owner {
                 OwnedGrantee::Principal(n) => {
@@ -834,7 +863,7 @@ impl Catalogue {
     }
 
     pub fn create_provider(&self, provider: &Provider) -> Result<Affected, Error> {
-        let p = provider.validated()?;
+        let p = provider.validated(self.allow_insecure_jwks)?;
         self.affecting(|st, tx| {
             match st.providers.get(&p.name) {
                 Some((_, true)) => return Err(Error::ReadOnly { provider: p.name }),
@@ -853,7 +882,7 @@ impl Catalogue {
 
     /// Replaces a stored provider, rules included.
     pub fn update_provider(&self, provider: &Provider) -> Result<Affected, Error> {
-        let p = provider.validated()?;
+        let p = provider.validated(self.allow_insecure_jwks)?;
         self.affecting(|st, tx| {
             self.writable_provider(st, &p.name)?;
             tx.execute("DELETE FROM provider WHERE name = ?1", params![p.name])?;
@@ -936,8 +965,9 @@ impl Catalogue {
     }
 
     /// The terms and permissions a session for an OIDC identity holds, from `claims` as accepted
-    /// from a token of `provider`: the terms its rules produce, and the terms and permissions
-    /// granted to each existing local group they name. `None` when the provider is unknown.
+    /// from a token of `provider`: the terms its rules produce, the terms granted to each existing
+    /// local group a template names, and the terms and permissions granted to each existing fixed
+    /// local group whose required claim value is present. `None` when the provider is unknown.
     pub fn resolve_claims(&self, provider: &str, claims: &Value) -> Option<Resolution> {
         let st = self.state.read();
         let (p, _) = st.providers.get(provider.trim())?;
@@ -947,7 +977,8 @@ impl Catalogue {
             generation: st.generation,
             ..Resolution::default()
         };
-        st.add_group_grants(&mapped.groups, &mut out);
+        st.add_group_terms(&mapped.groups, &mut out);
+        st.add_group_grants(&mapped.fixed_groups, &mut out);
         Some(out)
     }
 }
@@ -959,20 +990,33 @@ fn only_provider(name: &str) -> Affected {
     }
 }
 
+/// Validates the configured providers and adds them, refusing one declared twice.
+fn add_config_providers(state: &mut State, options: &Options) -> Result<(), Error> {
+    for p in &options.config_providers {
+        let p = p.validated(options.allow_insecure_jwks)?;
+        if state.providers.contains_key(&p.name) {
+            return Err(Error::DeclaredTwice { provider: p.name });
+        }
+        state.providers.insert(p.name.clone(), (p, true));
+    }
+    Ok(())
+}
+
 fn write_provider(tx: &Transaction<'_>, p: &Provider) -> Result<(), Error> {
     tx.execute(
         "INSERT INTO provider (name, issuer, audience, jwks_url) VALUES (?1, ?2, ?3, ?4)",
         params![p.name, p.issuer, p.audience, p.jwks_url],
     )?;
     for (i, r) in p.rules.iter().enumerate() {
-        let (target, template) = match &r.target {
-            RuleTarget::Term(t) => ("term", t),
-            RuleTarget::LocalGroup(t) => ("group", t),
+        let (target, template, equals) = match &r.target {
+            RuleTarget::Term(t) => ("term", t, None),
+            RuleTarget::LocalGroup(t) => ("group", t, None),
+            RuleTarget::FixedGroup { equals, group } => ("fixed", group, Some(equals)),
         };
         tx.execute(
-            "INSERT INTO claim_rule (provider, position, claim, target, template) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![p.name, i as i64, r.claim, target, template],
+            "INSERT INTO claim_rule (provider, position, claim, target, template, equals) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![p.name, i as i64, r.claim, target, template, equals],
         )?;
     }
     Ok(())
@@ -1066,6 +1110,16 @@ mod tests {
         ClaimRule {
             claim: "tid".into(),
             target: RuleTarget::LocalGroup("tenant-{value}".into()),
+        }
+    }
+
+    fn admins_rule() -> ClaimRule {
+        ClaimRule {
+            claim: "groups[*]".into(),
+            target: RuleTarget::FixedGroup {
+                equals: "tessera-admins".into(),
+                group: "admins".into(),
+            },
         }
     }
 
@@ -1183,7 +1237,8 @@ mod tests {
         let claims = json!({"sub": "u1", "groups": ["analysts", "eu"], "tid": "7f3a"});
         let r = cat.resolve_claims("corp", &claims).unwrap();
         assert_eq!(r.terms, set(&["group:analysts", "group:eu", "tenant:7f3a"]));
-        assert_eq!(r.permissions, perms(&[Permission::Read]));
+        // A group a template names passes on its terms and not its permissions.
+        assert_eq!(r.permissions, PermissionSet::EMPTY);
         assert!(!r.bypass);
 
         // A tenant with no local group adds nothing.
@@ -1195,6 +1250,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fixed_group_rule_passes_on_its_groups_terms_and_permissions_and_never_bypass() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        cat.create_provider(&corp(vec![admins_rule(), tenant_rule()]))
+            .unwrap();
+        cat.create_group("admins").unwrap();
+        cat.grant_term(Grantee::Group("admins"), "ops").unwrap();
+        cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
+            .unwrap();
+
+        let admin = json!({"groups": ["analysts", "tessera-admins"]});
+        let r = cat.resolve_claims("corp", &admin).unwrap();
+        assert_eq!(r.terms, set(&["ops"]));
+        assert_eq!(r.permissions, perms(&[Permission::Admin]));
+        assert!(!r.bypass);
+        // A claim value spelling the group's own name, or reaching it through a template, does
+        // not pass on its permissions.
+        cat.update_provider(&corp(vec![
+            admins_rule(),
+            ClaimRule {
+                claim: "role".into(),
+                target: RuleTarget::LocalGroup("{value}s".into()),
+            },
+        ]))
+        .unwrap();
+        let r = cat
+            .resolve_claims("corp", &json!({"groups": ["admins"], "role": "admin"}))
+            .unwrap();
+        assert_eq!(r.terms, set(&["ops"]));
+        assert_eq!(r.permissions, PermissionSet::EMPTY);
+    }
+
+    #[test]
     fn a_provider_is_created_changed_and_dropped_and_survives_reopening() {
         let fx = Fixture::new();
         let cat = fx.open();
@@ -1203,7 +1291,7 @@ mod tests {
             cat.create_provider(&corp(vec![])),
             Err(Error::Exists { .. })
         ));
-        let mut changed = corp(vec![tenant_rule(), groups_rule()]);
+        let mut changed = corp(vec![tenant_rule(), admins_rule(), groups_rule()]);
         changed.audience = "  tessera-prod ".into();
         cat.update_provider(&changed).unwrap();
         drop(cat);
@@ -1212,7 +1300,10 @@ mod tests {
         let stored = cat.provider("corp").unwrap();
         assert!(!stored.read_only);
         assert_eq!(stored.provider.audience, "tessera-prod");
-        assert_eq!(stored.provider.rules, vec![tenant_rule(), groups_rule()]);
+        assert_eq!(
+            stored.provider.rules,
+            vec![tenant_rule(), admins_rule(), groups_rule()]
+        );
 
         let mut bad = corp(vec![]);
         bad.jwks_url = "keys".into();
@@ -1297,6 +1388,53 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_configured_provider_with_a_plain_http_jwks_url_needs_insecure_jwks_allowed() {
+        let fx = Fixture::new();
+        let mut options = fx.options();
+        options.config_providers = vec![Provider {
+            jwks_url: "http://keys.internal/jwks".into(),
+            ..corp(vec![])
+        }];
+        assert!(matches!(
+            Catalogue::open(&fx.path(), options.clone()),
+            Err(Error::Invalid(_))
+        ));
+        options.allow_insecure_jwks = true;
+        let cat = Catalogue::open(&fx.path(), options).unwrap();
+        assert!(cat.provider("corp").unwrap().read_only);
+    }
+
+    #[test]
+    fn a_declared_provider_with_a_plain_http_jwks_url_needs_insecure_jwks_allowed() {
+        let fx = Fixture::new();
+        let insecure = Provider {
+            jwks_url: "http://keys.internal/jwks".into(),
+            ..corp(vec![])
+        };
+        let cat = fx.open();
+        assert!(matches!(
+            cat.create_provider(&insecure),
+            Err(Error::Invalid(_))
+        ));
+        cat.create_provider(&corp(vec![])).unwrap();
+        assert!(matches!(
+            cat.update_provider(&insecure),
+            Err(Error::Invalid(_))
+        ));
+        drop(cat);
+        let mut options = fx.options();
+        options.allow_insecure_jwks = true;
+        let cat = Catalogue::open(&fx.path(), options).unwrap();
+        cat.update_provider(&insecure).unwrap();
+        drop(cat);
+        // Stored, it is refused by a catalogue opened without the allowance.
+        assert!(matches!(
+            Catalogue::open(&fx.path(), fx.options()),
+            Err(Error::Corrupt(_))
+        ));
+    }
+
     /// Strips the generation, which the tests below do not compare.
     fn who(a: Affected) -> Affected {
         Affected { generation: 0, ..a }
@@ -1343,7 +1481,16 @@ mod tests {
             who(cat.create_principal("bob", PrincipalKind::Person).unwrap()),
             none
         );
-        assert_eq!(who(cat.set_password("ada", "pw").unwrap()), none);
+        let ada = principals(&["ada"]);
+        assert_eq!(
+            who(cat.set_password("ada", "a long enough password").unwrap()),
+            ada
+        );
+        assert_eq!(
+            who(cat.set_password("ada", "a long enough password").unwrap()),
+            ada
+        );
+        assert_eq!(who(cat.clear_password("ada").unwrap()), ada);
         assert_eq!(who(cat.clear_password("ada").unwrap()), none);
         assert_eq!(who(cat.create_group("eu").unwrap()), none);
         assert_eq!(
@@ -1441,9 +1588,10 @@ mod tests {
             providers: set(&["corp"]),
             ..Affected::default()
         };
+        // A template passes on a group's terms only, so a permission change reaches its members.
         assert_eq!(
             who(cat.grant_permission(tenant, Permission::Read).unwrap()),
-            cy_and_corp
+            principals(&["cy"])
         );
         assert_eq!(who(cat.delete_group("tenant-7f3a").unwrap()), cy_and_corp);
         assert_eq!(
@@ -1453,6 +1601,33 @@ mod tests {
         assert_eq!(
             who(cat.drop_provider("corp").unwrap()),
             providers(&["corp"])
+        );
+    }
+
+    #[test]
+    fn grants_to_a_group_a_fixed_group_rule_names_report_the_provider() {
+        let fx = Fixture::new();
+        let cat = three_principals(&fx);
+        cat.create_group("admins").unwrap();
+        cat.create_provider(&corp(vec![admins_rule()])).unwrap();
+        let admins = Grantee::Group("admins");
+        let corp_only = providers(&["corp"]);
+        assert_eq!(who(cat.grant_term(admins, "ops").unwrap()), corp_only);
+        assert_eq!(
+            who(cat.grant_permission(admins, Permission::Admin).unwrap()),
+            corp_only
+        );
+        assert_eq!(
+            who(cat.revoke_permission(admins, Permission::Admin).unwrap()),
+            corp_only
+        );
+        assert_eq!(who(cat.delete_group("admins").unwrap()), corp_only);
+        // A group no rule names reports its members alone.
+        assert_eq!(
+            who(cat
+                .grant_permission(Grantee::Group("eu"), Permission::Read)
+                .unwrap()),
+            principals(&["ada", "bob"])
         );
     }
 
@@ -1548,7 +1723,7 @@ mod tests {
         let fx = Fixture::new();
         let cat = fx.open();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
-        cat.set_password("ada", "correct horse").unwrap();
+        cat.set_password("ada", "correct horse battery").unwrap();
         cat.create_group("eu").unwrap();
         cat.grant_term(Grantee::Group("eu"), "region:eu").unwrap();
         cat.create_provider(&corp(vec![groups_rule()])).unwrap();
@@ -1571,7 +1746,7 @@ mod tests {
             cat.create_principal("bob", PrincipalKind::Person),
             cat.disable_principal("ada"),
             cat.set_bypass("ada", true),
-            cat.set_password("ada", "other"),
+            cat.set_password("ada", "another long passphrase"),
             cat.clear_password("ada"),
             cat.create_group("ops"),
             cat.add_member("eu", "ada"),
@@ -1596,7 +1771,7 @@ mod tests {
             );
         }
         assert_eq!(snapshot(&cat), before);
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
         assert!(cat.verify_api_key(&key.key).is_ok());
 
         let triggers: Vec<String> = raw

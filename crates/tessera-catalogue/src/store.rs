@@ -25,7 +25,7 @@ use crate::permission::PermissionSet;
 use crate::provider::{ClaimRule, Provider, RuleTarget};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
 const LOCK_NAME: &str = "catalogue.lock";
 
@@ -77,8 +77,10 @@ CREATE TABLE claim_rule (
     provider TEXT NOT NULL REFERENCES provider (name) ON DELETE CASCADE,
     position INTEGER NOT NULL,
     claim TEXT NOT NULL,
-    target TEXT NOT NULL CHECK (target IN ('term', 'group')),
+    target TEXT NOT NULL CHECK (target IN ('term', 'group', 'fixed')),
     template TEXT NOT NULL,
+    equals TEXT,
+    CHECK ((target = 'fixed') = (equals IS NOT NULL)),
     PRIMARY KEY (provider, position)
 ) WITHOUT ROWID;
 CREATE TABLE generation (
@@ -223,8 +225,9 @@ struct Ids {
     groups: HashMap<i64, String>,
 }
 
-/// Reads the whole catalogue into memory.
-pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
+/// Reads the whole catalogue into memory. A stored provider's JWKS URL takes the rule a write
+/// applies with `allow_insecure_jwks`.
+pub(crate) fn load(conn: &Connection, allow_insecure_jwks: bool) -> Result<State, Error> {
     let mut st = State::default();
     let mut ids = Ids::default();
     load_principals(conn, &mut st, &mut ids)?;
@@ -233,7 +236,7 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
     load_principal_terms(conn, &mut st, &ids)?;
     load_group_terms(conn, &mut st, &ids)?;
     load_keys(conn, &mut st, &ids)?;
-    load_providers(conn, &mut st)?;
+    load_providers(conn, &mut st, allow_insecure_jwks)?;
     st.generation = load_generation(conn)?;
     Ok(st)
 }
@@ -377,7 +380,11 @@ fn time(t: i64) -> Result<u64, Error> {
     u64::try_from(t).map_err(|_| corrupt(format!("an API key time {t} before 1970")))
 }
 
-fn load_providers(conn: &Connection, st: &mut State) -> Result<(), Error> {
+fn load_providers(
+    conn: &Connection,
+    st: &mut State,
+    allow_insecure_jwks: bool,
+) -> Result<(), Error> {
     let mut q = conn.prepare("SELECT name, issuer, audience, jwks_url FROM provider")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
@@ -394,20 +401,25 @@ fn load_providers(conn: &Connection, st: &mut State) -> Result<(), Error> {
     load_claim_rules(conn, st)?;
     st.providers
         .values()
-        .try_for_each(|(p, _)| check_provider(p))
+        .try_for_each(|(p, _)| check_provider(p, allow_insecure_jwks))
 }
 
 fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare(
-        "SELECT provider, claim, target, template FROM claim_rule ORDER BY provider, position",
+        "SELECT provider, claim, target, template, equals FROM claim_rule \
+         ORDER BY provider, position",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let provider: String = r.get(0)?;
         let target: String = r.get(2)?;
         let template: String = r.get(3)?;
-        let target = match target.as_str() {
-            "term" => RuleTarget::Term(template),
+        let target = match (target.as_str(), r.get::<_, Option<String>>(4)?) {
+            ("term", _) => RuleTarget::Term(template),
+            ("fixed", Some(equals)) => RuleTarget::FixedGroup {
+                equals,
+                group: template,
+            },
             _ => RuleTarget::LocalGroup(template),
         };
         let rule = ClaimRule {
@@ -425,8 +437,8 @@ fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
 }
 
 /// Refuses a stored provider that a write would not store as it is.
-fn check_provider(p: &Provider) -> Result<(), Error> {
-    match p.validated() {
+fn check_provider(p: &Provider, allow_insecure_jwks: bool) -> Result<(), Error> {
+    match p.validated(allow_insecure_jwks) {
         Ok(v) if v == *p => Ok(()),
         Ok(_) => Err(Error::Corrupt(format!(
             "provider row `{}` or one of its claim_rule rows holds a value with leading or \
@@ -524,13 +536,25 @@ mod tests {
              'keys')",
             "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
              'https://login.example.org/keys'); \
-             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'term', 'public')",
+             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'term', 'public', NULL)",
             "DELETE FROM generation",
             "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
              INSERT INTO api_key VALUES ('abcd', 7, zeroblob(32), -1, NULL, NULL)",
             "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
              INSERT INTO api_key VALUES ('abcd', 7, zeroblob(32), 0, -1, NULL)",
             "PRAGMA foreign_keys = OFF; INSERT INTO member VALUES (7, 8)",
+            "INSERT INTO principal (name, kind) VALUES ('a' || char(7) || 'b', 'person')",
+            "INSERT INTO local_group (name) VALUES ('e' || char(10) || 'u')",
+            "INSERT INTO local_group (id, name) VALUES (7, 'eu'); \
+             INSERT INTO group_term VALUES (7, 'PUBLIC')",
+            "INSERT INTO provider VALUES ('co' || char(27) || 'rp', 'https://login.example.org/', \
+             'tessera', 'https://login.example.org/keys')",
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+             'https://login.example.org/keys'); \
+             INSERT INTO claim_rule VALUES ('corp', 0, 'tid', 'group', '{value}', NULL)",
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+             'https://login.example.org/keys'); \
+             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'fixed', 'admins', ' x ')",
         ];
         for row in rows {
             let fx = Fixture::new();
@@ -598,7 +622,7 @@ mod tests {
         cat.create_principal("ingest", PrincipalKind::Service)
             .unwrap();
         cat.create_principal("gone", PrincipalKind::Person).unwrap();
-        cat.set_password("ada", "correct horse").unwrap();
+        cat.set_password("ada", "correct horse battery").unwrap();
         cat.disable_principal("gone").unwrap();
         cat.set_bypass("ingest", true).unwrap();
         cat.grant_permission(Grantee::Principal("ingest"), Permission::Write)
@@ -653,7 +677,7 @@ mod tests {
             cat.resolve("ingest", Some(&key.prefix)),
         );
         assert_eq!(before, after);
-        assert!(cat.verify_password("ada", "correct horse").is_ok());
+        assert!(cat.verify_password("ada", "correct horse battery").is_ok());
         assert!(cat.verify_api_key(&key.key).is_ok());
     }
 }
