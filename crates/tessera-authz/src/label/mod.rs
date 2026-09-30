@@ -76,8 +76,9 @@ impl std::error::Error for LabelError {}
 
 impl Label {
     /// Reads `text` as an access label and normalises it. `max_nodes` bounds the operators and
-    /// term occurrences of the label once nested operators are flattened and repeated operands
-    /// removed, before absorption.
+    /// term occurrences of a label that holds a conjunction once nested operators are flattened
+    /// and repeated operands removed, before absorption. A term or a disjunction of terms has no
+    /// bound.
     pub fn parse(text: &str, max_nodes: usize) -> Result<Label, LabelError> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -90,6 +91,9 @@ impl Label {
             return Ok(Label(None));
         }
         let flat = normal::flatten(parse::parse(text)?);
+        if flat.is_any_of() {
+            return Ok(Label(Some(flat)));
+        }
         let nodes = normal::nodes(&flat);
         if nodes > max_nodes {
             return Err(LabelError::TooLarge {
@@ -108,8 +112,7 @@ impl Label {
     pub fn shape(&self) -> Shape {
         match &self.0 {
             None => Shape::Public,
-            Some(Expr::Term(_)) => Shape::AnyOf,
-            Some(Expr::Or(v)) if v.iter().all(|e| matches!(e, Expr::Term(_))) => Shape::AnyOf,
+            Some(e) if e.is_any_of() => Shape::AnyOf,
             Some(_) => Shape::Compound,
         }
     }
@@ -134,6 +137,15 @@ impl Expr {
             Expr::Term(t) => held(t),
             Expr::And(v) => v.iter().all(|e| e.satisfied_by(held)),
             Expr::Or(v) => v.iter().any(|e| e.satisfied_by(held)),
+        }
+    }
+
+    /// Whether this is a term or a disjunction of terms.
+    fn is_any_of(&self) -> bool {
+        match self {
+            Expr::Term(_) => true,
+            Expr::Or(v) => v.iter().all(|e| matches!(e, Expr::Term(_))),
+            Expr::And(_) => false,
         }
     }
 
@@ -199,9 +211,23 @@ mod tests {
     #[test]
     fn the_node_limit_counts_the_flattened_label() {
         assert!(Label::parse("a&(b&c)", 4).is_ok());
-        assert!(Label::parse("a|a|a|a|a|b", 3).is_ok());
+        assert!(Label::parse("a&a&a&(a&b)", 3).is_ok());
         let refused = Label::parse("a&(b|c)", 4);
         assert_eq!(refused, Err(LabelError::TooLarge { nodes: 5, limit: 4 }));
+    }
+
+    #[test]
+    fn a_disjunction_of_terms_has_no_node_limit() {
+        let wide = (0..5000).map(|i| format!("t{i}")).collect::<Vec<_>>();
+        let label = Label::parse(&wide.join("|"), DEFAULT_MAX_NODES).unwrap();
+        assert_eq!(label.shape(), Shape::AnyOf);
+        assert_eq!(label.expr().map(|e| e.operands().len()), Some(5000));
+        assert!(Label::parse("a|b|c", 1).is_ok());
+        let compound = format!("x&({})", wide[..DEFAULT_MAX_NODES].join("|"));
+        assert!(matches!(
+            Label::parse(&compound, DEFAULT_MAX_NODES),
+            Err(LabelError::TooLarge { .. })
+        ));
     }
 
     #[test]

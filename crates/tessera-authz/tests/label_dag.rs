@@ -1,6 +1,7 @@
-//! Random labels over six terms, written with random brackets and whitespace, evaluated through the
-//! DAG and against the tree they were written from. The tree is evaluated by direct recursion here, without parsing or normalising, so
-//! agreement checks the parser, normalisation, hash-consing, the bottom-up pass, top-down
+//! Random labels over eight terms, written with random brackets and padded with whitespace,
+//! evaluated through the DAG and against the tree they were written from. Some terms differ only
+//! by a space inside their quotes. The tree is evaluated by direct recursion here, without parsing
+//! or normalising, so agreement checks the parser, normalisation, hash-consing, the bottom-up pass, top-down
 //! evaluation and the witness together.
 
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use tessera_authz::label::Scratch;
 use tessera_authz::{Label, Labels, Shape, DEFAULT_MAX_NODES};
 use tessera_types::{LabelId, TermId};
 
-const TERMS: [&str; 6] = ["a", "b.c", "d e", "f", "g:h", "\"i\\"];
+const TERMS: [&str; 8] = ["a", "b.c", "d e", "f", "g:h", "\"i\\", "a ", " f"];
 
 enum Tree {
     Term(usize),
@@ -45,7 +46,7 @@ fn term_text(t: usize) -> String {
     TERMS[t].to_owned()
 }
 
-/// Writes `tree` with random whitespace, bracketing an operand at random wherever the brackets
+/// Writes `tree`, bracketing an operand at random wherever the brackets
 /// can be left out. Returns the text and the operator written outside any bracket.
 fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
     let (op, v) = match tree {
@@ -57,9 +58,7 @@ fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
     let mut top = (v.len() > 1).then_some(op);
     for (i, operand) in v.iter().enumerate() {
         if i > 0 {
-            out.push_str(space(rng));
             out.push(op);
-            out.push_str(space(rng));
         }
         let (inner, inner_top) = text(operand, rng);
         let may_be_bare = v.len() == 1 || inner_top.is_none_or(|t| t == op);
@@ -67,8 +66,7 @@ fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
             out.push_str(&inner);
             top = top.or(inner_top);
         } else {
-            let (before, after) = (space(rng), space(rng));
-            out.push_str(&format!("({before}{inner}{after})"));
+            out.push_str(&format!("({inner})"));
         }
     }
     (out, top)
@@ -144,7 +142,7 @@ fn authorise_agrees_with_direct_evaluation_for_every_credential() {
             assert_eq!(
                 out.contains(&case.id),
                 expected,
-                "{} held={held:06b}",
+                "{} held={held:08b}",
                 case.text
             );
         }
@@ -160,7 +158,7 @@ fn every_evaluation_agrees_with_direct_evaluation() {
         let by_id = |t: TermId| ids.contains(&t);
         for case in &cases {
             let expected = holds(&case.tree, held);
-            let context = format!("{} held={held:06b}", case.text);
+            let context = format!("{} held={held:08b}", case.text);
             assert_eq!(labels.satisfied(case.id, &by_id), expected, "{context}");
             assert_eq!(
                 case.label.satisfied_by(&|t| by_id(term_id(t))),
@@ -193,4 +191,20 @@ fn equal_normal_forms_share_a_label_id_and_the_canonical_text_round_trips() {
         assert_eq!(*by_text.entry(canonical).or_insert(case.id), case.id);
     }
     assert_eq!(labels.len(), by_text.len());
+}
+
+#[test]
+fn a_space_inside_quotes_makes_another_term() {
+    let mut labels = Labels::new();
+    let quoted = Label::parse("\"a \"", DEFAULT_MAX_NODES).unwrap();
+    let bare = Label::parse(" a ", DEFAULT_MAX_NODES).unwrap();
+    assert_ne!(quoted, bare);
+    let (quoted, bare) = (
+        labels.intern(&quoted, term_id),
+        labels.intern(&bare, term_id),
+    );
+    assert_ne!(quoted, bare);
+    let only_a = held_ids(1);
+    assert!(labels.satisfied(bare, &|t| only_a.contains(&t)));
+    assert!(!labels.satisfied(quoted, &|t| only_a.contains(&t)));
 }

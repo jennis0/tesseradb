@@ -3,8 +3,9 @@
 A label is an Accumulo visibility expression without negation, or `public`. A term is written bare
 when it is made of ASCII letters, digits and `_ - . : /`, and otherwise in double quotes, where
 `\\"` and `\\\\` are the only escapes. `&` is conjunction and `|` is disjunction, and one bracket may
-not mix them. Whitespace around a term, an operator or a bracket is ignored, and a quoted term is
-trimmed.
+not mix them. Whitespace before and after the whole label is ignored, and whitespace between tokens
+is refused. A quoted term is the text between its quotes, spaces included, with its escapes
+applied.
 
 A label is refused when it is empty, when brackets nest more than 256 deep, when a term holds a
 control character, and when a term equals `public` or `inherited` ignoring ASCII case. `public` is
@@ -12,7 +13,7 @@ accepted only as the whole label, and every principal satisfies it. `inherited` 
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
-The engine's limit on the size of a label is defined on its normalised form, and is not modelled.
+The engine's limit on the size of a label holding a conjunction is not modelled.
 """
 
 from __future__ import annotations
@@ -58,15 +59,15 @@ class Public:
 
 def parse(text: str):
     """The label `text` writes, as a tree of `Term`, `And` and `Or`, or `Public()`."""
-    if not text.strip(WHITESPACE):
+    body = text.strip(WHITESPACE)
+    if not body:
         raise Refused("empty")
-    if text.strip(WHITESPACE) == PUBLIC:
+    if body == PUBLIC:
         return Public()
-    reader = _Reader(text)
+    reader = _Reader(body)
     tree = reader.expression(0)
-    reader.skip_space()
-    if reader.at < len(text):
-        raise Refused(f"unexpected {text[reader.at]!r} at {reader.at}")
+    if reader.at < len(body):
+        raise Refused(f"unexpected {body[reader.at]!r} at {reader.at}")
     return tree
 
 
@@ -98,17 +99,12 @@ class _Reader:
     def peek(self) -> str | None:
         return self.text[self.at] if self.at < len(self.text) else None
 
-    def skip_space(self) -> None:
-        while self.peek() is not None and self.peek() in WHITESPACE:
-            self.at += 1
-
     def expression(self, depth: int):
         if depth > MAX_DEPTH:
             raise Refused("brackets nest too deeply")
         operands = [self.operand(depth)]
         operator = None
         while True:
-            self.skip_space()
             c = self.peek()
             if c is None or c == ")":
                 break
@@ -124,7 +120,6 @@ class _Reader:
         return (And if operator == "&" else Or)(tuple(operands))
 
     def operand(self, depth: int):
-        self.skip_space()
         c = self.peek()
         if c == "(":
             self.at += 1
@@ -156,7 +151,7 @@ class _Reader:
             name.append(c)
             self.at += 1
         self.at += 1
-        return "".join(name).strip(WHITESPACE)
+        return "".join(name)
 
 
 def _term(name: str) -> Term:

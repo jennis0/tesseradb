@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn equal_labels_normalise_to_equal_text() {
-        assert_eq!(n("c & (b & a)"), "a&b&c");
+        assert_eq!(n("c&(b&a)"), "a&b&c");
         assert_eq!(n("b|a|a"), "a|b");
         assert_eq!(n("(b|a)&(a|b)"), "a|b");
         assert_eq!(n("((a))"), "a");

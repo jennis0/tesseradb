@@ -2,9 +2,10 @@
 //!
 //! A term is bare when it is made of ASCII letters, digits and `_ - . : /`, and is otherwise
 //! double-quoted, with `\"` and `\\` as the only escapes. `&` and `|` join operands, and mixing
-//! them in one bracket is refused. Whitespace around a term, an operator or a bracket is skipped,
-//! and a quoted term is trimmed, as a label read from data is. A term holding a control character,
-//! or equal to `public` or `inherited` ignoring ASCII case, is refused. `public` is valid only as a
+//! them in one bracket is refused. Whitespace before and after the whole label is skipped, and
+//! whitespace between tokens is refused. A quoted term is the text between its quotes, spaces
+//! included, with its escapes applied. A term holding a control character, or equal to `public` or
+//! `inherited` ignoring ASCII case, is refused. `public` is valid only as a
 //! whole label, which [`super::Label::parse`] handles before this parser runs. `inherited` is never
 //! a label.
 
@@ -27,6 +28,8 @@ const UNCLOSED_QUOTE: &str = "a quoted term is not closed; add `\"`";
 const BAD_ESCAPE: &str =
     "only `\\\"` and `\\\\` are escapes in a quoted term; write other characters as they are";
 const EMPTY_TERM: &str = "a quoted term is empty; write at least one character between the quotes";
+const SPACE: &str = "whitespace between tokens is refused; remove it, or quote a term that \
+     holds a space, as in `\"team a\"`";
 const CONTROL: &str = "a term holds a control character; remove it";
 const PUBLIC_TERM: &str = "`public` is reserved and valid only as the whole label; write \
      `public` alone, or use another term";
@@ -34,12 +37,17 @@ const INHERITED_TERM: &str = "`inherited` is reserved for an annotation layer's 
      and is not a label; write another term, or `public`";
 const TOO_DEEP: &str = "brackets nest more than 256 deep; write the expression with fewer brackets";
 
-/// Parses `text` into an expression, without normalising it. `text` is not `public`.
+/// Parses `text` into an expression, without normalising it. `text` is not `public`, and is not
+/// empty once trimmed.
 pub(super) fn parse(text: &str) -> Result<Expr, LabelError> {
-    let mut parser = Parser { s: text, i: 0 };
+    let start = text.len() - text.trim_start().len();
+    let end = text.trim_end().len();
+    let mut parser = Parser {
+        s: &text[..end],
+        i: start,
+    };
     let expr = parser.expr(0)?;
-    parser.skip_space();
-    if parser.i < text.len() {
+    if parser.i < end {
         return Err(parser.err(STRAY_CLOSE));
     }
     Ok(expr)
@@ -63,11 +71,6 @@ impl Parser<'_> {
         self.s[self.i..].chars().next()
     }
 
-    fn skip_space(&mut self) {
-        let rest = &self.s[self.i..];
-        self.i += rest.len() - rest.trim_start().len();
-    }
-
     fn expr(&mut self, depth: usize) -> Result<Expr, LabelError> {
         if depth > MAX_DEPTH {
             return Err(self.err(TOO_DEEP));
@@ -75,10 +78,10 @@ impl Parser<'_> {
         let mut operands = vec![self.operand(depth)?];
         let mut op = None;
         loop {
-            self.skip_space();
             let c = match self.peek() {
                 None | Some(')') => break,
                 Some(c @ ('&' | '|')) => c,
+                Some(c) if c.is_whitespace() => return Err(self.err(SPACE)),
                 Some(_) => return Err(self.err(NO_OPERATOR)),
             };
             if op.is_some_and(|o| o != c) {
@@ -96,10 +99,10 @@ impl Parser<'_> {
     }
 
     fn operand(&mut self, depth: usize) -> Result<Expr, LabelError> {
-        self.skip_space();
         let start = self.i;
         let term = match self.peek() {
             None => return Err(self.err(ENDS)),
+            Some(c) if c.is_whitespace() => return Err(self.err(SPACE)),
             Some('(') => return self.bracketed(depth),
             Some('"') => self.quoted()?,
             Some(c) if is_bare(c) => self.bare(),
@@ -139,14 +142,13 @@ impl Parser<'_> {
                 c => term.push(c),
             }
         }
-        let trimmed = term.trim();
-        if trimmed.is_empty() {
+        if term.is_empty() {
             return Err(LabelError::Invalid {
                 at: open,
                 reason: EMPTY_TERM,
             });
         }
-        Ok(trimmed.to_owned())
+        Ok(term)
     }
 
     fn escaped(&mut self) -> Result<char, LabelError> {
@@ -186,15 +188,17 @@ mod tests {
     fn terms_bare_and_quoted() {
         assert_eq!(parse("user:a/b-c.d_E9"), Ok(term("user:a/b-c.d_E9")));
         assert_eq!(parse(r#""a\"b\\c""#), Ok(term(r#"a"b\c"#)));
-        assert_eq!(parse("\" team a \""), Ok(term("team a")));
+        assert_eq!(parse("\" team a \""), Ok(term(" team a ")));
+        assert_eq!(parse("\"  \""), Ok(term("  ")));
         assert_eq!(parse("\"é&|()\""), Ok(term("é&|()")));
-        assert_eq!(parse(" ( a ) "), Ok(term("a")));
+        assert_eq!(parse(" \t(a) "), Ok(term("a")));
+        assert_ne!(parse("\"a \""), parse("a"));
     }
 
     #[test]
     fn operators_and_brackets() {
         let and = Expr::And(vec![term("a"), Expr::Or(vec![term("b"), term("c")])]);
-        assert_eq!(parse("a & (b | c)"), Ok(and));
+        assert_eq!(parse("a&(b|c)"), Ok(and));
         assert!(parse("(a&b)|c").is_ok());
         assert!(parse("a|b|c").is_ok());
     }
@@ -211,7 +215,12 @@ mod tests {
             "a)",
             "()",
             "\"\"",
-            "\"  \"",
+            "a & b",
+            "a |b",
+            "( a|b)",
+            "(a|b )",
+            "a&( b)",
+            "\"a\" &b",
             "\"a",
             "\"a\\n\"",
             "!a",
@@ -249,8 +258,12 @@ mod tests {
             Err(LabelError::Invalid { at: 2, .. })
         ));
         assert!(matches!(
-            parse("a & \"  \""),
-            Err(LabelError::Invalid { at: 4, .. })
+            parse("a&\"\""),
+            Err(LabelError::Invalid { at: 2, .. })
+        ));
+        assert!(matches!(
+            parse("  a &b"),
+            Err(LabelError::Invalid { at: 3, .. })
         ));
     }
 }
