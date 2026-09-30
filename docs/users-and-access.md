@@ -67,9 +67,8 @@ It holds:
 - the terms granted to each principal and each group;
 - the permissions granted to each principal and each group, and the `bypass` flag;
 - each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
-  turn claims into terms, and the role mappings from exact terms to local groups. A provider can
-  also be declared in `tessera.toml`
-  ([Surfaces](#surfaces)).
+  turn claims into terms, and the role mappings from exact claim values to local groups. A
+  provider can also be declared in `tessera.toml` ([Surfaces](#surfaces)).
 
 It does not hold sessions, which stay in memory, or the audit log, which is append-only and kept
 separately.
@@ -126,17 +125,20 @@ holds.
   produce `public`, or holds a control character, is refused when the provider is declared. At
   authorise, a produced term is trimmed, and one that is `public` in any case or holds a control
   character is dropped.
-- An administrator declares **role mappings** for a provider: an exact term mapped to a local
-  group, such as `tessera-admins -> admins`. An identity whose claim rules produce that term
-  receives the group's permissions and the terms granted to it, and keeps the term itself. It never
-  receives `bypass`. A mapping matches a whole term exactly, so a claim value selects only a group
-  an administrator has named. Elasticsearch's role mappings, Vault's group aliases and Grafana's
-  role mapping each map an external group to an internal role in the same way.
-- A term from a claim, and so a role mapping, is trusted as the identity provider asserts it.
-  Where users can create or name their own groups at the provider, anyone who creates a group
-  called `secret` holds the term `secret`, and anyone who creates `tessera-admins` matches that
-  mapping. Such a deployment maps stable group ids, as Entra ID can put in its tokens, or gives its
-  template a prefix so that provider-made terms cannot collide with terms granted locally.
+- An administrator declares **role mappings** for a provider: a claim path and an exact value
+  mapped to a local group, such as `groups[*]: tessera-admins -> admins`. An identity whose
+  `groups` claim holds `tessera-admins` receives the group's permissions and the terms granted to
+  it. It never receives `bypass`. The mapping reads the claim itself and ignores the terms the
+  claim rules produce. The identity still holds those terms: with the standard rule it also holds
+  the term `tessera-admins`. A mapping matches a whole value exactly, and only in the claim it
+  names. A `department` claim that users can edit, set to `tessera-admins`, does not match.
+  Elasticsearch's role mappings, Vault's group aliases and Grafana's role mapping each match a
+  named claim to an internal role in the same way.
+- A claim is trusted as the identity provider asserts it. Where users can create or name their
+  own groups at the provider, anyone who creates a group called `secret` holds the term `secret`,
+  and anyone who creates `tessera-admins` matches a mapping on the `groups` claim. Such a
+  deployment maps stable group ids, as Entra ID can put in its tokens, or gives its template a
+  prefix so that provider-made terms cannot collide with terms granted locally.
 
 ```mermaid
 flowchart LR
@@ -146,7 +148,7 @@ flowchart LR
   L --> G[granted terms<br/>and group terms]
   I --> R[claim rules]
   R --> T[terms]
-  T --> M[role mappings] --> LG[local groups] --> G
+  I --> M[role mappings] --> LG[local groups] --> G
   G --> T
   T --> A[authorised set]
 ```

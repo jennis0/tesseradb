@@ -23,6 +23,11 @@ deny tessera-server tessera-authz
 deny tessera-wire tessera-store
 deny tessera-wire tessera-authz
 deny tessera-wire tessera-types       # the wire cannot name an entity id or the identity key
+# The identity catalogue maps credentials to terms and permissions, and must not see a row id or
+# an entity id.
+deny tessera-catalogue tessera-store
+deny tessera-catalogue tessera-authz
+deny tessera-catalogue tessera-engine
 # The filter index is entity-space and must stay there (filter-index §9). These are the two edges
 # tessera-authz is denied above, for the same reason: a crate that can see a RowId can relate the
 # two ID spaces, and I4 says only an explicit permutation may. The server edge keeps the filter
