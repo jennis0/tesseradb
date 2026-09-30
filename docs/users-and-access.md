@@ -153,8 +153,10 @@ all of them, below both the build and the ingest paths.
   reach the view. It is refused inside a larger expression, where `public|x` would mean `public`
   and `public&x` would mean `x`. Every session holds it, and a grant or claim rule that names it is
   refused.
-- `inherited` keeps its meaning for an annotation artifact: the layer's `visibility` is the
-  artifact's only gate. It is refused everywhere else.
+- `inherited` keeps its meaning for an annotation artifact with no label of its own: the artifact
+  is gated by its layer's `visibility` and membership requirement, and its members and counts are
+  still computed inside the viewer's visible set
+  ([annotations](system/annotations.md)). It is refused everywhere else.
 
 In the DAG below, `public` is a leaf that every session holds.
 
