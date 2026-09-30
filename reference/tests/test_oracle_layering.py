@@ -27,6 +27,7 @@ PYPROJECT = ORACLE.parent / "pyproject.toml"
 # `tessera tokenise` subprocess it makes is a declared echo (decision 0070) reached by a path it is
 # handed, not an import of a driver.
 DEFINITIONAL = (
+    "aggregate",
     "viewport",
     "occupancy",
     "mask",
