@@ -16,10 +16,10 @@ principal may see.
 | What a principal may do | Four permissions over the whole database: `read`, `write`, `authorise-as`, `admin`. They are separate from terms. |
 | What a principal may see | Terms, granted to local principals and groups, or derived from OIDC claims. |
 | Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
-| How labels are indexed | Each distinct label gets a label id. Each item carries exactly one. Labels are compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
+| How labels are indexed | Each distinct label gets a label id. A label that is a disjunction of terms is indexed under each of its terms. Any other label is indexed under its label id, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
-| OIDC users | Not stored. Claims map to terms and to local groups at each authorise. |
-| A grant changes | Every session of every affected principal ends. |
+| OIDC users | Not stored. Claims map to terms and to local groups at each authorise. Permissions come only from rules that name a fixed local group. |
+| A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
 | Writes to items the writer cannot see | Masked by the writer's own terms. A principal flagged `bypass` acts on the whole corpus. |
 | A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
@@ -39,12 +39,18 @@ A principal proves who it is with one of three credentials.
 
 | Credential | Held by | How Tessera checks it | What is stored |
 |---|---|---|---|
-| Password | Local person | argon2id against the stored hash. Failed attempts per principal are limited. Accepted over TLS only. | The argon2id hash. |
+| Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. Accepted over TLS only. | The argon2id hash. |
 | API key | Local person or service | A random secret with a public id prefix. The prefix finds the record and the secret is compared by SHA-256 in constant time. A key can carry an expiry and a narrower set of permissions than its principal. | The prefix, the hash, the expiry and the permissions. The secret is shown once, at creation. |
 | OIDC access token | OIDC identity | The signature against the provider's published keys (JWKS), then issuer, audience, expiry and not-before. | The provider's configuration only. Validating a token needs no stored secret. |
 
 An API key's secret carries enough entropy that a stolen hash cannot be reversed by guessing, so a
 fast hash is enough. A password carries far less, so it takes argon2id.
+
+A provider's JWKS URL uses `https`, or `http` to a loopback address (`localhost`, `127.0.0.1` or
+`::1`). Any other `http` URL is refused when the provider is declared, because anyone on the network
+path could substitute the keys and then sign a token for any identity. Setting the environment
+variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts it, for a development provider on a private
+network.
 
 ## The catalogue
 
@@ -115,6 +121,18 @@ holds.
   `groups[*] -> group:{value}` turns a `groups` claim of `["analysts", "eu"]` into the terms
   `group:analysts` and `group:eu`. A rule `tid -> local group tenant-{value}` adds the terms granted
   to the local group `tenant-7f3a`.
+- A rule whose target is a template, holding `{value}`, reaches terms only: a term it produces, or
+  the terms of the local group it names. The template must hold literal text beside `{value}`, so
+  that a claim value cannot produce a bare name that collides with a local group made by hand or
+  with `public`.
+- An OIDC identity's permissions come only from a rule that names a fixed local group and the claim
+  value it requires, such as `groups[*] == "tessera-admins" -> local group admins`. The identity
+  receives that group's terms and permissions, except `bypass`. A claim value can therefore select
+  a group that an administrator has named, and cannot choose a group by its own spelling. Vault's
+  group aliases, Grafana's role mapping and Kubernetes role bindings each map an external group to
+  an internal role explicitly in the same way. Where a provider can put stable group ids in its
+  tokens, as Entra ID does, a rule should match the id: a display name can be chosen by whoever
+  creates the group.
 
 ```mermaid
 flowchart LR
@@ -151,8 +169,11 @@ all of them, below both the build and the ingest paths.
 - The empty expression is refused.
 - `public` is a reserved word, written as the whole expression. It admits every viewer who can
   reach the view. It is refused inside a larger expression, where `public|x` would mean `public`
-  and `public&x` would mean `x`. Every session holds it, and a grant or claim rule that names it is
-  refused.
+  and `public&x` would mean `x`. Every session holds it. A term that equals `public` ignoring case
+  is refused wherever a term is written, in a label, a grant or a claim rule's output, so that
+  `Public` cannot be mistaken for it.
+- A term or a principal or group name that holds a control character is refused. Terms and names
+  are otherwise compared exactly, after trimming, and are case-sensitive.
 - `inherited` keeps its meaning for an annotation artifact with no label of its own: the artifact
   is gated by its layer's `visibility` and membership requirement, and its members and counts are
   still computed inside the viewer's visible set
@@ -163,10 +184,23 @@ In the DAG below, `public` is a leaf that every session holds.
 ### Label ids
 
 Each distinct label, after normalisation, gets a **label id**, and each item carries exactly one.
-The index maps each label id to the items that carry it, so the postings are disjoint and the
-index holds one entry per item. The build already sorts entity ids by permission signature. With
-the label id as the signature, the items that share a label form one contiguous range, which a
-Roaring bitmap stores as a run.
+The label id is the item's permission signature: the build sorts entity ids by it, so the items
+that share a label form one contiguous range. Item cards, masked writes and compaction read it.
+
+Which postings an item appears in depends on the label's shape.
+
+- A **disjunction of terms**, such as `user:ann|user:bob|group:x` or a single term, is indexed
+  under each of its terms, as terms are indexed today. Holding any one of them admits the item, so
+  the union of the held terms' postings is exactly the set these labels admit. Per-document sharing
+  produces labels of this shape.
+- **Any other label**, one holding a conjunction, is indexed under its label id and evaluated
+  through the DAG below.
+
+A probe of the two layouts measured authorise on a corpus of 9.3 million per-document labels at
+100 to 800 ms through the DAG and 1.4 to 95 ms through term postings, and on 500,000 compartmented
+labels at 20 to 95 ms through the DAG, which term postings cannot express
+([probe](../probes/2026-09-30-label-dag-authorise/results.md)). Indexing each label by its shape
+takes the faster figure for each.
 
 Normalisation flattens nested conjunctions and disjunctions, sorts and removes duplicate operands,
 and applies absorption, so that `a|(a&b)` becomes `a`. Two equivalent labels that normalise
@@ -210,15 +244,18 @@ At authorise, the service marks each of the credential's terms true and propagat
 node becomes true when its first child does. An AND node keeps a count and becomes true when every
 child has. The authorised set is the union of the postings of every label whose root became true.
 
+The DAG holds only the labels indexed under a label id. The authorised set is the union of the
+postings of the credential's terms and of the labels whose root became true.
+
 The pass visits only the nodes reachable from the credential's terms. A label that mentions none of
 them cannot be true, because the expressions have no negation, so it is never visited. The cost is
 proportional to the part of the DAG the credential reaches. This matters most for a corpus where
 nearly every item has its own label, such as documents each shared with a few named people: a
 principal's pass visits only the labels that name it.
 
-Not measured: the cost of the pass. A probe should time it over a few hundred thousand distinct
-labels with realistic sharing, credentials holding between 10 and 1,000 terms, and a corpus of
-per-document labels, before the design is committed.
+Measured on a model, one thread: 3 to 15 ms at 100,000 compartmented labels and 20 to 95 ms at
+500,000, for credentials holding 10 to 1,000 terms. Authorise runs once per session, so these
+figures are paid at session start and never by a map request.
 
 ### What changes elsewhere
 
@@ -247,6 +284,7 @@ every principal it affects. This includes changes that widen access. The affecte
 - a term or a permission granted to or removed from a principal or a group;
 - a principal added to or removed from a group;
 - a principal disabled or deleted;
+- a password set or cleared;
 - an API key revoked, which ends the sessions authorised with that key;
 - a change to an OIDC provider's configuration or claim rules, which ends every session authorised
   through that provider.
@@ -325,10 +363,14 @@ change records who made it and what it changed.
 
 ## Limits
 
-- An expression may hold at most a configured number of DAG nodes. The value is set from the probe
-  described under [Authorising](#authorising).
-- Ten failed password attempts for one principal within fifteen minutes refuse further attempts
-  for that principal until the fifteen minutes have passed. Both numbers are configurable.
+- An expression may hold at most a configured number of DAG nodes, 1,024 by default. Adding a label
+  to the DAG costs time quadratic in its length: the probe measured 15.7 ms at 1,024 nodes and
+  8.1 s at 16,384. The longest label in the probe's corpora held 66.
+- A password is at least a configured number of characters long, fifteen by default, the length
+  NIST SP 800-63B requires for a password that is the only factor. No composition rule is applied.
+- Ten failed password attempts for one name within fifteen minutes refuse further attempts for that
+  name until the fifteen minutes have passed. A refused attempt answers as a wrong password does.
+  Both numbers are configurable.
 
 ## Where the code lives
 
