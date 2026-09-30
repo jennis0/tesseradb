@@ -185,6 +185,18 @@ impl fmt::Display for Error {
                  plain http from a host that is not a loopback address; write an https:// URL, or \
                  open the catalogue with `Options::allow_insecure_jwks` set"
             ),
+            Error::Version { .. }
+            | Error::Locked { .. }
+            | Error::Mode { .. }
+            | Error::Corrupt(_)
+            | Error::Storage(_) => self.fmt_storage(f),
+        }
+    }
+}
+
+impl Error {
+    fn fmt_storage(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
             Error::Version { found, supported } => write!(
                 f,
                 "the catalogue has schema version {found} and this build reads version \
@@ -210,6 +222,7 @@ impl fmt::Display for Error {
                 "the catalogue could not be read or written ({why}) and nothing was changed; \
                  check that its directory is writable and its disc has space, then retry"
             ),
+            _ => unreachable!("Display for Error handles every other variant"),
         }
     }
 }
