@@ -2,21 +2,31 @@
 //!
 //! The schema version is SQLite's `user_version`. A file at version 0 with no tables is new and
 //! receives the schema; any other version but [`SCHEMA_VERSION`] is refused.
+//!
+//! One `Catalogue` at a time holds a catalogue open. It takes an exclusive `flock` on a lock file
+//! beside the database. The lock belongs to the open file, so a second open in the same process
+//! is refused as one in another process is. SQLite's own locks are per process and would admit
+//! the second.
+//!
+//! Loading applies the rules that a write applies to every name and term, and refuses a
+//! catalogue holding a row that breaks one.
 
-use std::fs::{DirBuilder, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::catalogue::{GroupRec, KeyRec, PrincipalKind, PrincipalRec, State};
+use crate::names;
 use crate::permission::PermissionSet;
 use crate::provider::{ClaimRule, Provider, RuleTarget};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
+const LOCK_NAME: &str = "catalogue.lock";
 
 const SCHEMA: &str = "
 CREATE TABLE principal (
@@ -70,12 +80,35 @@ CREATE TABLE claim_rule (
     template TEXT NOT NULL,
     PRIMARY KEY (provider, position)
 ) WITHOUT ROWID;
+CREATE TABLE generation (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    value INTEGER NOT NULL CHECK (value >= 0)
+);
+INSERT INTO generation (id, value) VALUES (0, 0);
 ";
 
 /// Opens the catalogue in `dir`, creating the directory (mode 0700) and the file (mode 0600)
-/// when they do not exist.
-pub(crate) fn open(dir: &Path) -> Result<Connection, Error> {
+/// when they do not exist, and locks it. Returns the connection and the locked file, which holds
+/// the lock until it is dropped. A directory or file that others can reach is refused.
+pub(crate) fn open(dir: &Path) -> Result<(Connection, File), Error> {
     DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    owner_only(dir, 0o700)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(LOCK_NAME))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(Error::Locked {
+                dir: dir.display().to_string(),
+            })
+        }
+        Err(TryLockError::Error(e)) => return Err(e.into()),
+    }
     let path = dir.join(FILE_NAME);
     // SQLite gives its journal the database file's mode, so creating the file first covers both.
     match OpenOptions::new()
@@ -88,6 +121,7 @@ pub(crate) fn open(dir: &Path) -> Result<Connection, Error> {
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.into()),
     }
+    owner_only(&path, 0o600)?;
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -95,7 +129,7 @@ pub(crate) fn open(dir: &Path) -> Result<Connection, Error> {
     conn.pragma_update(None, "foreign_keys", true)?;
     let integrity: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if integrity != "ok" {
-        return Err(Error::Storage(format!(
+        return Err(Error::Corrupt(format!(
             "{} fails SQLite's integrity check: {integrity}",
             path.display()
         )));
@@ -106,7 +140,7 @@ pub(crate) fn open(dir: &Path) -> Result<Connection, Error> {
             r.get(0)
         })?;
     if dangling != 0 {
-        return Err(Error::Storage(format!(
+        return Err(Error::Corrupt(format!(
             "{} holds {dangling} rows that name a missing principal, group or provider",
             path.display()
         )));
@@ -127,12 +161,36 @@ pub(crate) fn open(dir: &Path) -> Result<Connection, Error> {
             })
         }
     }
-    Ok(conn)
+    Ok((conn, lock))
+}
+
+/// Refuses `path` when its mode grants anything outside `want`.
+fn owner_only(path: &Path, want: u32) -> Result<(), Error> {
+    let found = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if found & !want != 0 {
+        return Err(Error::Mode {
+            path: path.display().to_string(),
+            found,
+            want,
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a stored name or term that a write would not store as it is.
+fn stored(row: &str, value: &str, rule: Result<String, Error>) -> Result<(), Error> {
+    match rule {
+        Ok(v) if v == value => Ok(()),
+        Ok(_) => Err(Error::Corrupt(format!(
+            "{row} holds `{value}`, which has leading or trailing white space"
+        ))),
+        Err(e) => Err(Error::Corrupt(format!("{row} holds `{value}`: {e}"))),
+    }
 }
 
 /// Reads the whole catalogue into memory.
 pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
-    let corrupt = |what: String| Error::Storage(format!("the catalogue holds {what}"));
+    let corrupt = |what: String| Error::Corrupt(format!("the catalogue holds {what}"));
     let perms = |bits: i64| {
         PermissionSet::from_bits(bits)
             .ok_or_else(|| corrupt(format!("an unknown permission set {bits}")))
@@ -151,6 +209,8 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
         let kind: String = r.get(2)?;
         let kind = PrincipalKind::parse(&kind)
             .ok_or_else(|| corrupt(format!("an unknown principal kind `{kind}`")))?;
+        let row = format!("principal row {id}");
+        stored(&row, &name, names::name("principal", &name))?;
         principal_names.insert(id, name.clone());
         st.principals.insert(
             name,
@@ -172,6 +232,8 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
     while let Some(r) = rows.next()? {
         let id: i64 = r.get(0)?;
         let name: String = r.get(1)?;
+        let row = format!("local_group row {id}");
+        stored(&row, &name, names::name("group", &name))?;
         group_names.insert(id, name.clone());
         st.groups.insert(
             name,
@@ -207,22 +269,20 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let p = &principal_names[&r.get::<_, i64>(0)?];
-        st.principals
-            .get_mut(p)
-            .expect("loaded")
-            .terms
-            .insert(r.get(1)?);
+        let term: String = r.get(1)?;
+        let row = format!("principal_term row for principal `{p}`");
+        stored(&row, &term, names::term(&term))?;
+        st.principals.get_mut(p).expect("loaded").terms.insert(term);
     }
 
     let mut q = conn.prepare("SELECT group_id, term FROM group_term")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let g = &group_names[&r.get::<_, i64>(0)?];
-        st.groups
-            .get_mut(g)
-            .expect("loaded")
-            .terms
-            .insert(r.get(1)?);
+        let term: String = r.get(1)?;
+        let row = format!("group_term row for group `{g}`");
+        stored(&row, &term, names::term(&term))?;
+        st.groups.get_mut(g).expect("loaded").terms.insert(term);
     }
 
     let mut q = conn.prepare(
@@ -289,6 +349,32 @@ pub(crate) fn load(conn: &Connection) -> Result<State, Error> {
                 target,
             });
     }
+    for (p, _) in st.providers.values() {
+        match p.validated() {
+            Ok(v) if v == *p => {}
+            Ok(_) => {
+                return Err(Error::Corrupt(format!(
+                    "provider row `{}` or one of its claim_rule rows holds a value with leading \
+                     or trailing white space",
+                    p.name
+                )))
+            }
+            Err(e) => {
+                return Err(Error::Corrupt(format!(
+                    "provider row `{}` or one of its claim_rule rows breaks a rule: {e}",
+                    p.name
+                )))
+            }
+        }
+    }
+
+    let generation: i64 = conn
+        .query_row("SELECT value FROM generation WHERE id = 0", [], |r| {
+            r.get(0)
+        })
+        .map_err(|_| corrupt("no generation row".into()))?;
+    st.generation =
+        u64::try_from(generation).map_err(|_| corrupt(format!("generation {generation}")))?;
     Ok(st)
 }
 
@@ -316,6 +402,75 @@ mod tests {
     }
 
     #[test]
+    fn a_catalogue_opens_once_at_a_time() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        assert!(matches!(
+            Catalogue::open(&fx.path(), fx.options()),
+            Err(Error::Locked { .. })
+        ));
+        let other = std::thread::spawn({
+            let (path, options) = (fx.path(), fx.options());
+            move || Catalogue::open(&path, options).err()
+        });
+        assert!(matches!(other.join().unwrap(), Some(Error::Locked { .. })));
+        drop(cat);
+        fx.open();
+    }
+
+    #[test]
+    fn a_directory_or_file_others_can_reach_is_refused() {
+        let chmod = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let fx = Fixture::new();
+        drop(fx.open());
+        let file = fx.path().join(FILE_NAME);
+        for (path, wide, narrow) in [(fx.path(), 0o750, 0o700), (file, 0o604, 0o600)] {
+            chmod(&path, wide);
+            assert!(matches!(
+                Catalogue::open(&fx.path(), fx.options()),
+                Err(Error::Mode { .. })
+            ));
+            chmod(&path, narrow);
+            drop(fx.open());
+        }
+    }
+
+    #[test]
+    fn a_stored_name_or_term_that_a_write_would_refuse_is_refused_on_open() {
+        let rows = [
+            "INSERT INTO principal (name, kind) VALUES ('  ', 'person')",
+            "INSERT INTO principal (name, kind) VALUES (' ada', 'person')",
+            "INSERT INTO local_group (name) VALUES ('')",
+            "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
+             INSERT INTO principal_term VALUES (7, 'public')",
+            "INSERT INTO principal (id, name, kind) VALUES (7, 'ada', 'person'); \
+             INSERT INTO principal_term VALUES (7, 'x ')",
+            "INSERT INTO local_group (id, name) VALUES (7, 'eu'); \
+             INSERT INTO group_term VALUES (7, 'public')",
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+             'keys')",
+            "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', 'tessera', \
+             'https://login.example.org/keys'); \
+             INSERT INTO claim_rule VALUES ('corp', 0, 'groups[*]', 'term', 'public')",
+            "DELETE FROM generation",
+        ];
+        for row in rows {
+            let fx = Fixture::new();
+            drop(fx.open());
+            fx.raw().execute_batch(row).unwrap();
+            assert!(
+                matches!(
+                    Catalogue::open(&fx.path(), fx.options()),
+                    Err(Error::Corrupt(_))
+                ),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
     fn a_catalogue_of_another_schema_version_is_refused() {
         for version in [SCHEMA_VERSION + 1, 99, -1] {
             let fx = Fixture::new();
@@ -323,7 +478,7 @@ mod tests {
             fx.raw()
                 .pragma_update(None, "user_version", version)
                 .unwrap();
-            let refused = Catalogue::open(fx.dir.path(), fx.options()).err();
+            let refused = Catalogue::open(&fx.path(), fx.options()).err();
             assert_eq!(
                 refused,
                 Some(Error::Version {
@@ -339,7 +494,7 @@ mod tests {
         let fx = Fixture::new();
         fx.raw().execute_batch("CREATE TABLE t (x)").unwrap();
         assert!(matches!(
-            Catalogue::open(fx.dir.path(), fx.options()),
+            Catalogue::open(&fx.path(), fx.options()),
             Err(Error::Version { found: 0, .. })
         ));
     }

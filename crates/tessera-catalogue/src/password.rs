@@ -4,8 +4,12 @@
 //! cost parameters, so a hash made under one set of parameters verifies after they change.
 //!
 //! The failed-attempt counts are held in memory and start empty when the catalogue is opened.
-//! An attempt is counted as failed before the hash is checked and uncounted if it succeeds, so
-//! concurrent attempts cannot together exceed the limit.
+//! They are kept for the name presented, whether or not a principal has it, so a throttled name
+//! does not show that the principal exists. An attempt is counted as failed before the hash is
+//! checked and uncounted if it succeeds, so concurrent attempts cannot together exceed the limit.
+//! At most a configured number of names is remembered. Past it, the name whose latest failure is
+//! oldest is forgotten, so an attacker who spreads failures over that many names gets one name's
+//! count reset.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
@@ -50,36 +54,50 @@ pub(crate) fn verify_nothing(password: &str) {
 pub(crate) struct Limiter {
     limit: usize,
     window: u64,
+    capacity: usize,
     failures: Mutex<HashMap<String, VecDeque<u64>>>,
 }
 
 impl Limiter {
-    pub(crate) fn new(limit: u32, window_secs: u64) -> Limiter {
+    pub(crate) fn new(limit: u32, window_secs: u64, capacity: usize) -> Limiter {
         Limiter {
             limit: limit as usize,
             window: window_secs,
+            capacity: capacity.max(1),
             failures: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Counts an attempt for `principal` as failed, or refuses it with the time at which the
-    /// next attempt will be taken.
-    pub(crate) fn begin(&self, principal: &str, now: u64) -> Result<(), u64> {
+    /// Counts an attempt for `name` as failed, or returns false when `name` has reached the
+    /// limit within the window.
+    pub(crate) fn begin(&self, name: &str, now: u64) -> bool {
         let mut failures = self.failures.lock();
-        let times = failures.entry(principal.to_owned()).or_default();
+        if !failures.contains_key(name) && failures.len() >= self.capacity {
+            failures.retain(|_, times| times.back().is_some_and(|t| t + self.window > now));
+            if failures.len() >= self.capacity {
+                let oldest = failures
+                    .iter()
+                    .min_by_key(|(_, times)| times.back().copied())
+                    .map(|(n, _)| n.clone());
+                if let Some(oldest) = oldest {
+                    failures.remove(&oldest);
+                }
+            }
+        }
+        let times = failures.entry(name.to_owned()).or_default();
         while times.front().is_some_and(|t| t + self.window <= now) {
             times.pop_front();
         }
         if times.len() >= self.limit {
-            return Err(times.front().map_or(now, |t| t + self.window));
+            return false;
         }
         times.push_back(now);
-        Ok(())
+        true
     }
 
-    /// Clears `principal`'s failed attempts after one succeeds.
-    pub(crate) fn succeeded(&self, principal: &str) {
-        self.failures.lock().remove(principal);
+    /// Clears `name`'s failed attempts after one succeeds.
+    pub(crate) fn succeeded(&self, name: &str) {
+        self.failures.lock().remove(name);
     }
 }
 
@@ -94,7 +112,7 @@ mod tests {
         let mut options = fx.options();
         options.failed_attempt_limit = limit;
         options.failed_attempt_window = Duration::from_secs(window);
-        let cat = Catalogue::open(fx.dir.path(), options).unwrap();
+        let cat = Catalogue::open(&fx.path(), options).unwrap();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
         cat.set_password("ada", "correct horse").unwrap();
         cat
@@ -155,19 +173,89 @@ mod tests {
     fn failures_up_to_the_limit_refuse_even_the_right_password_until_the_window_passes() {
         let fx = Fixture::new();
         let cat = with_ada(&fx, 3, 60);
-        let start = fx.now();
         for _ in 0..3 {
             assert_eq!(cat.verify_password("ada", "wrong"), Err(AuthError::Refused));
             fx.advance(10);
         }
         // Failures at start, +10 and +20: the next attempt is taken once the first leaves.
-        let throttled = Err(AuthError::Throttled {
-            retry_at: start + 60,
-        });
-        assert_eq!(cat.verify_password("ada", "correct horse"), throttled);
+        assert_eq!(
+            cat.verify_password("ada", "correct horse"),
+            Err(AuthError::Refused)
+        );
         fx.advance(29);
-        assert_eq!(cat.verify_password("ada", "correct horse"), throttled);
+        assert_eq!(
+            cat.verify_password("ada", "correct horse"),
+            Err(AuthError::Refused)
+        );
         fx.advance(1);
+        assert!(cat.verify_password("ada", "correct horse").is_ok());
+    }
+
+    #[test]
+    fn a_throttled_name_answers_as_an_unknown_one_does() {
+        let fx = Fixture::new();
+        let cat = with_ada(&fx, 3, 60);
+        let answers = |cat: &Catalogue| {
+            (0..5)
+                .map(|_| {
+                    (
+                        cat.verify_password("ada", "wrong"),
+                        cat.verify_password("nobody", "wrong"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (known, unknown) in answers(&cat) {
+            assert_eq!(known, unknown);
+        }
+    }
+
+    #[test]
+    fn failures_count_against_a_name_that_cannot_authenticate() {
+        let fx = Fixture::new();
+        let cat = with_ada(&fx, 3, 60);
+        cat.create_principal("disabled", PrincipalKind::Person)
+            .unwrap();
+        cat.set_password("disabled", "pw").unwrap();
+        cat.disable_principal("disabled").unwrap();
+        cat.create_principal("no-password", PrincipalKind::Person)
+            .unwrap();
+        for name in ["later", "disabled", "no-password"] {
+            for _ in 0..3 {
+                cat.verify_password(name, "wrong").unwrap_err();
+            }
+        }
+        cat.create_principal("later", PrincipalKind::Person)
+            .unwrap();
+        cat.set_password("later", "pw").unwrap();
+        cat.enable_principal("disabled").unwrap();
+        cat.set_password("no-password", "pw").unwrap();
+        for name in ["later", "disabled", "no-password"] {
+            assert_eq!(cat.verify_password(name, "pw"), Err(AuthError::Refused));
+        }
+        fx.advance(60);
+        for name in ["later", "disabled", "no-password"] {
+            assert!(cat.verify_password(name, "pw").is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn past_the_remembered_names_the_oldest_is_forgotten() {
+        let fx = Fixture::new();
+        let mut options = fx.options();
+        options.failed_attempt_limit = 2;
+        options.failed_attempt_names = 2;
+        let cat = Catalogue::open(&fx.path(), options).unwrap();
+        cat.create_principal("ada", PrincipalKind::Person).unwrap();
+        cat.set_password("ada", "correct horse").unwrap();
+        for _ in 0..2 {
+            cat.verify_password("ada", "wrong").unwrap_err();
+        }
+        assert!(cat.verify_password("ada", "correct horse").is_err());
+        fx.advance(1);
+        cat.verify_password("x", "wrong").unwrap_err();
+        fx.advance(1);
+        cat.verify_password("y", "wrong").unwrap_err();
         assert!(cat.verify_password("ada", "correct horse").is_ok());
     }
 
@@ -191,17 +279,16 @@ mod tests {
         let cat = fx.open();
         cat.create_principal("ada", PrincipalKind::Person).unwrap();
         cat.set_password("ada", "correct horse").unwrap();
-        let start = fx.now();
         for _ in 0..10 {
             cat.verify_password("ada", "wrong").unwrap_err();
         }
         assert_eq!(
             cat.verify_password("ada", "correct horse"),
-            Err(AuthError::Throttled {
-                retry_at: start + 900
-            })
+            Err(AuthError::Refused)
         );
-        fx.advance(900);
+        fx.advance(899);
+        assert!(cat.verify_password("ada", "correct horse").is_err());
+        fx.advance(1);
         assert!(cat.verify_password("ada", "correct horse").is_ok());
     }
 }

@@ -86,9 +86,20 @@ mod tests {
         assert_eq!(listed[0].created_at, fx.now());
 
         drop(cat);
-        let file = std::fs::read(fx.dir.path().join(crate::store::FILE_NAME)).unwrap();
+        let file = std::fs::read(fx.path().join(crate::store::FILE_NAME)).unwrap();
         let found = file.windows(secret.len()).any(|w| w == secret.as_bytes());
         assert!(!found, "the secret is in the catalogue file");
+    }
+
+    #[test]
+    fn an_issued_key_prints_its_prefix_and_not_its_secret() {
+        let fx = Fixture::new();
+        let cat = with_ingest(&fx);
+        let (issued, _) = cat.create_api_key("ingest", None, None).unwrap();
+        let (_, secret) = super::parse(&issued.key).unwrap();
+        let printed = format!("{issued:?} {issued:#?}");
+        assert!(printed.contains(&issued.prefix));
+        assert!(!printed.contains(secret));
     }
 
     #[test]

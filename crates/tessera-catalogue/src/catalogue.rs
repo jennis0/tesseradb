@@ -3,6 +3,8 @@
 //! by the connection's lock, so memory cannot move between the validation and the apply.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
+use std::fs::File;
 use std::path::Path;
 
 use parking_lot::{Mutex, RwLock};
@@ -81,11 +83,20 @@ pub struct ApiKeyInfo {
     pub permissions: Option<PermissionSet>,
 }
 
-/// A key as issued. `key` is the whole credential, returned here and nowhere else.
-#[derive(Clone, Debug)]
+/// A key as issued. `key` is the whole credential, returned here and nowhere else. `Debug`
+/// shows the prefix alone.
+#[derive(Clone)]
 pub struct IssuedKey {
     pub prefix: String,
     pub key: String,
+}
+
+impl fmt::Debug for IssuedKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuedKey")
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,6 +121,8 @@ pub struct Resolution {
     pub terms: BTreeSet<String>,
     pub permissions: PermissionSet,
     pub bypass: bool,
+    /// The catalogue's generation this was resolved at.
+    pub generation: u64,
 }
 
 pub(crate) struct PrincipalRec {
@@ -145,6 +158,7 @@ pub(crate) struct State {
     pub keys: HashMap<String, KeyRec>,
     /// Each provider, and whether it came from the configuration.
     pub providers: BTreeMap<String, (Provider, bool)>,
+    pub generation: u64,
 }
 
 impl State {
@@ -171,6 +185,7 @@ impl State {
                 .map(|g| g.members.clone())
                 .unwrap_or_default(),
             api_keys: BTreeSet::new(),
+            generation: 0,
             providers: self
                 .providers
                 .values()
@@ -202,10 +217,11 @@ fn only_principal(name: &str) -> Affected {
     }
 }
 
-type Apply = Box<dyn FnOnce(&mut State) + Send>;
+/// The change to memory once the transaction commits, or `None` when there is nothing to change.
+type Apply = Option<Box<dyn FnOnce(&mut State) + Send>>;
 
 fn nothing() -> Apply {
-    Box::new(|_| {})
+    None
 }
 
 fn secs(t: u64) -> Result<i64, Error> {
@@ -223,13 +239,17 @@ pub struct Catalogue {
     state: RwLock<State>,
     limiter: Limiter,
     clock: Clock,
+    /// Holds the catalogue's lock until the catalogue is dropped.
+    _lock: File,
 }
 
 impl Catalogue {
-    /// Opens the catalogue in `dir`, creating it when absent. A catalogue written by a different
-    /// schema version, or holding a provider also in `options.config_providers`, is refused.
+    /// Opens the catalogue in `dir`, creating it when absent. A catalogue that another
+    /// `Catalogue` holds open, that others can reach, that was written by a different schema
+    /// version, that holds a row breaking a rule of what may be stored, or that holds a provider
+    /// also in `options.config_providers` is refused.
     pub fn open(dir: &Path, options: Options) -> Result<Catalogue, Error> {
-        let conn = store::open(dir)?;
+        let (conn, lock) = store::open(dir)?;
         let mut state = store::load(&conn)?;
         for p in &options.config_providers {
             let p = p.validated()?;
@@ -244,9 +264,21 @@ impl Catalogue {
             limiter: Limiter::new(
                 options.failed_attempt_limit,
                 options.failed_attempt_window.as_secs(),
+                options.failed_attempt_names,
             ),
             clock: options.clock,
+            _lock: lock,
         })
+    }
+
+    /// The catalogue's generation. It starts at 0, rises by one with each committed change that
+    /// alters the catalogue, and is stored, so it never goes back when the catalogue is reopened.
+    /// Every [`Resolution`] and [`Affected`] carries the generation it was made at. A server
+    /// resolves a credential, registers the session, and then compares the resolution's
+    /// generation with this one or with the generation of each change it has applied since: if
+    /// the catalogue has moved on, it resolves again or ends the session.
+    pub fn generation(&self) -> u64 {
+        self.state.read().generation
     }
 
     /// Runs one change: `f` validates against memory and writes through the transaction, and
@@ -254,23 +286,44 @@ impl Catalogue {
     fn change<T>(
         &self,
         f: impl FnOnce(&State, &Transaction<'_>) -> Result<(Apply, T), Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<(T, u64), Error> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         let (apply, out) = {
             let st = self.state.read();
             f(&st, &tx)?
         };
+        let Some(apply) = apply else {
+            return Ok((out, self.state.read().generation));
+        };
+        let generation: i64 = tx.query_row(
+            "UPDATE generation SET value = value + 1 RETURNING value",
+            [],
+            |r| r.get(0),
+        )?;
+        let generation = generation as u64;
         tx.commit()?;
-        apply(&mut self.state.write());
-        Ok(out)
+        let mut st = self.state.write();
+        apply(&mut st);
+        st.generation = generation;
+        Ok((out, generation))
     }
 
-    // ---- principals ----
+    /// Runs a change that reports what it affected, stamping the report with the generation.
+    fn affecting(
+        &self,
+        f: impl FnOnce(&State, &Transaction<'_>) -> Result<(Apply, Affected), Error>,
+    ) -> Result<Affected, Error> {
+        let (affected, generation) = self.change(f)?;
+        Ok(Affected {
+            generation,
+            ..affected
+        })
+    }
 
     pub fn create_principal(&self, name: &str, kind: PrincipalKind) -> Result<Affected, Error> {
         let name = names::name("principal", name)?;
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             if st.principals.contains_key(&name) {
                 return Err(Error::Exists {
                     what: "principal",
@@ -282,7 +335,7 @@ impl Catalogue {
                 params![name, kind.as_str()],
             )?;
             let id = tx.last_insert_rowid();
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.principals.insert(
                     name,
                     PrincipalRec {
@@ -296,7 +349,7 @@ impl Catalogue {
                         groups: BTreeSet::new(),
                     },
                 );
-            });
+            }));
             Ok((apply, Affected::default()))
         })
     }
@@ -316,7 +369,7 @@ impl Catalogue {
 
     fn set_flag(&self, name: &str, column: &'static str, value: bool) -> Result<Affected, Error> {
         let name = name.trim().to_owned();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let p = st.principal(&name)?;
             let current = if column == "disabled" {
                 p.disabled
@@ -331,14 +384,14 @@ impl Catalogue {
                 params![value, p.id],
             )?;
             let affected = only_principal(&name);
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 let p = st.principals.get_mut(&name).expect("validated");
                 if column == "disabled" {
                     p.disabled = value;
                 } else {
                     p.bypass = value;
                 }
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -346,7 +399,7 @@ impl Catalogue {
     /// Deletes a principal with its password, API keys, grants and memberships.
     pub fn delete_principal(&self, name: &str) -> Result<Affected, Error> {
         let name = name.trim().to_owned();
-        let out = self.change(|st, tx| {
+        let out = self.affecting(|st, tx| {
             let p = st.principal(&name)?;
             tx.execute("DELETE FROM principal WHERE id = ?1", params![p.id])?;
             let keys: BTreeSet<String> = st
@@ -358,9 +411,9 @@ impl Catalogue {
             let affected = Affected {
                 principals: BTreeSet::from([name.clone()]),
                 api_keys: keys.clone(),
-                providers: BTreeSet::new(),
+                ..Affected::default()
             };
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 if let Some(p) = st.principals.remove(&name) {
                     for g in &p.groups {
                         if let Some(g) = st.groups.get_mut(g) {
@@ -371,7 +424,7 @@ impl Catalogue {
                 for k in &keys {
                     st.keys.remove(k);
                 }
-            });
+            }));
             Ok((apply, affected))
         })?;
         for p in &out.principals {
@@ -395,8 +448,6 @@ impl Catalogue {
             .collect()
     }
 
-    // ---- passwords ----
-
     /// Sets the principal's password, replacing any previous one.
     pub fn set_password(&self, principal: &str, password: &str) -> Result<Affected, Error> {
         let hash = password::hash(password)?;
@@ -410,43 +461,45 @@ impl Catalogue {
 
     fn write_password(&self, principal: &str, hash: Option<String>) -> Result<Affected, Error> {
         let name = principal.trim().to_owned();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let p = st.principal(&name)?;
             tx.execute(
                 "UPDATE principal SET password_hash = ?1 WHERE id = ?2",
                 params![hash, p.id],
             )?;
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.principals.get_mut(&name).expect("validated").password = hash;
-            });
+            }));
             Ok((apply, Affected::default()))
         })
     }
 
-    /// Checks a password. A principal that is unknown, disabled or has no password is refused
-    /// after the same work as a wrong password. A principal with too many recent failures is
-    /// refused without the password being checked.
+    /// Checks a password. Every failure counts against the name presented, whether or not a
+    /// principal has it. A name that is unknown, disabled, has no password or has too many
+    /// recent failures is refused after the same work as a wrong password, with the same answer.
     pub fn verify_password(
         &self,
         principal: &str,
         password: &str,
     ) -> Result<Authenticated, AuthError> {
         let name = principal.trim();
-        let stored = {
+        let stored = if self.limiter.begin(name, (self.clock)()) {
             let st = self.state.read();
             st.principals
                 .get(name)
                 .filter(|p| !p.disabled)
                 .and_then(|p| p.password.clone())
+        } else {
+            None
         };
-        let Some(stored) = stored else {
-            password::verify_nothing(password);
-            return Err(AuthError::Refused);
+        let accepted = match stored {
+            Some(stored) => password::verify(&stored, password),
+            None => {
+                password::verify_nothing(password);
+                false
+            }
         };
-        self.limiter
-            .begin(name, (self.clock)())
-            .map_err(|retry_at| AuthError::Throttled { retry_at })?;
-        if !password::verify(&stored, password) {
+        if !accepted {
             return Err(AuthError::Refused);
         }
         self.limiter.succeeded(name);
@@ -455,8 +508,6 @@ impl Catalogue {
             api_key: None,
         })
     }
-
-    // ---- API keys ----
 
     /// Issues an API key for `principal`. With `permissions`, a session authorised by the key
     /// holds at most those, and never more than the principal holds.
@@ -470,7 +521,7 @@ impl Catalogue {
         let expires = expires_at.map(secs).transpose()?;
         let now = (self.clock)();
         let created = secs(now)?;
-        self.change(|st, tx| {
+        let (issued, generation) = self.change(|st, tx| {
             let p = st.principal(&name)?;
             let fresh = loop {
                 let fresh = apikey::Fresh::generate()?;
@@ -496,7 +547,7 @@ impl Catalogue {
                 key: fresh.key(),
             };
             let prefix = fresh.prefix;
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.keys.insert(
                     prefix,
                     KeyRec {
@@ -507,14 +558,19 @@ impl Catalogue {
                         permissions,
                     },
                 );
-            });
-            Ok((apply, (issued, Affected::default())))
-        })
+            }));
+            Ok((apply, issued))
+        })?;
+        let affected = Affected {
+            generation,
+            ..Affected::default()
+        };
+        Ok((issued, affected))
     }
 
     pub fn revoke_api_key(&self, prefix: &str) -> Result<Affected, Error> {
         let prefix = prefix.trim().to_owned();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             if !st.keys.contains_key(&prefix) {
                 return Err(Error::NotFound {
                     what: "API key",
@@ -526,9 +582,9 @@ impl Catalogue {
                 api_keys: BTreeSet::from([prefix.clone()]),
                 ..Affected::default()
             };
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.keys.remove(&prefix);
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -576,11 +632,9 @@ impl Catalogue {
         enabled && key_ok
     }
 
-    // ---- groups ----
-
     pub fn create_group(&self, name: &str) -> Result<Affected, Error> {
         let name = names::name("group", name)?;
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             if st.groups.contains_key(&name) {
                 return Err(Error::Exists {
                     what: "group",
@@ -589,7 +643,7 @@ impl Catalogue {
             }
             tx.execute("INSERT INTO local_group (name) VALUES (?1)", params![name])?;
             let id = tx.last_insert_rowid();
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.groups.insert(
                     name,
                     GroupRec {
@@ -599,7 +653,7 @@ impl Catalogue {
                         members: BTreeSet::new(),
                     },
                 );
-            });
+            }));
             Ok((apply, Affected::default()))
         })
     }
@@ -607,11 +661,11 @@ impl Catalogue {
     /// Deletes a group with its grants and memberships.
     pub fn delete_group(&self, name: &str) -> Result<Affected, Error> {
         let name = name.trim().to_owned();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let g = st.group(&name)?;
             tx.execute("DELETE FROM local_group WHERE id = ?1", params![g.id])?;
             let affected = st.affected_by_group(&name);
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 if let Some(g) = st.groups.remove(&name) {
                     for m in &g.members {
                         if let Some(p) = st.principals.get_mut(m) {
@@ -619,7 +673,7 @@ impl Catalogue {
                         }
                     }
                 }
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -634,7 +688,7 @@ impl Catalogue {
 
     fn membership(&self, group: &str, principal: &str, add: bool) -> Result<Affected, Error> {
         let (group, principal) = (group.trim().to_owned(), principal.trim().to_owned());
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let g = st.group(&group)?;
             let p = st.principal(&principal)?;
             if g.members.contains(&principal) == add {
@@ -647,7 +701,7 @@ impl Catalogue {
             };
             tx.execute(sql, params![g.id, p.id])?;
             let affected = only_principal(&principal);
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 let g = st.groups.get_mut(&group).expect("validated");
                 let p = st.principals.get_mut(&principal).expect("validated");
                 if add {
@@ -657,7 +711,7 @@ impl Catalogue {
                     g.members.remove(&principal);
                     p.groups.remove(&group);
                 }
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -674,8 +728,6 @@ impl Catalogue {
         st.groups.iter().map(|(n, g)| group_info(n, g)).collect()
     }
 
-    // ---- grants ----
-
     /// Grants a term, trimmed. `public` and an empty term are refused.
     pub fn grant_term(&self, to: Grantee<'_>, term: &str) -> Result<Affected, Error> {
         self.term_grant(to, names::term(term)?, true)
@@ -688,7 +740,7 @@ impl Catalogue {
     fn term_grant(&self, who: Grantee<'_>, term: String, grant: bool) -> Result<Affected, Error> {
         let owned = trimmed(who);
         let who = owned.as_grantee();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let (id, held, table, column) = match who {
                 Grantee::Principal(n) => {
                     let p = st.principal(n)?;
@@ -710,7 +762,7 @@ impl Catalogue {
             tx.execute(&sql, params![id, term])?;
             let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 let held = match &owner {
                     OwnedGrantee::Principal(n) => {
                         &mut st.principals.get_mut(n).expect("validated").terms
@@ -722,7 +774,7 @@ impl Catalogue {
                 } else {
                     held.remove(&term);
                 }
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -743,7 +795,7 @@ impl Catalogue {
     ) -> Result<Affected, Error> {
         let owned = trimmed(who);
         let who = owned.as_grantee();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             let (id, held, table) = match who {
                 Grantee::Principal(n) => {
                     let p = st.principal(n)?;
@@ -769,23 +821,21 @@ impl Catalogue {
             )?;
             let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
-            let apply: Apply = Box::new(move |st| match &owner {
+            let apply: Apply = Some(Box::new(move |st| match &owner {
                 OwnedGrantee::Principal(n) => {
                     st.principals.get_mut(n).expect("validated").permissions = next
                 }
                 OwnedGrantee::Group(n) => {
                     st.groups.get_mut(n).expect("validated").permissions = next
                 }
-            });
+            }));
             Ok((apply, affected))
         })
     }
 
-    // ---- providers ----
-
     pub fn create_provider(&self, provider: &Provider) -> Result<Affected, Error> {
         let p = provider.validated()?;
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             match st.providers.get(&p.name) {
                 Some((_, true)) => return Err(Error::ReadOnly { provider: p.name }),
                 Some((_, false)) => {
@@ -804,7 +854,7 @@ impl Catalogue {
     /// Replaces a stored provider, rules included.
     pub fn update_provider(&self, provider: &Provider) -> Result<Affected, Error> {
         let p = provider.validated()?;
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             self.writable_provider(st, &p.name)?;
             tx.execute("DELETE FROM provider WHERE name = ?1", params![p.name])?;
             write_provider(tx, &p)?;
@@ -815,13 +865,13 @@ impl Catalogue {
 
     pub fn drop_provider(&self, name: &str) -> Result<Affected, Error> {
         let name = name.trim().to_owned();
-        self.change(|st, tx| {
+        self.affecting(|st, tx| {
             self.writable_provider(st, &name)?;
             tx.execute("DELETE FROM provider WHERE name = ?1", params![name])?;
             let affected = only_provider(&name);
-            let apply: Apply = Box::new(move |st| {
+            let apply: Apply = Some(Box::new(move |st| {
                 st.providers.remove(&name);
-            });
+            }));
             Ok((apply, affected))
         })
     }
@@ -859,8 +909,6 @@ impl Catalogue {
             .collect()
     }
 
-    // ---- resolution ----
-
     /// The terms and permissions a session for `principal` holds: those granted to it directly
     /// and through its groups. With `api_key`, the permissions are narrowed to the key's own
     /// where it has them. `None` when the principal is unknown or disabled, or the key is not the
@@ -873,6 +921,7 @@ impl Catalogue {
             terms: p.terms.clone(),
             permissions: p.permissions,
             bypass: p.bypass,
+            generation: st.generation,
         };
         st.add_group_grants(&p.groups, &mut out);
         if let Some(prefix) = api_key {
@@ -895,6 +944,7 @@ impl Catalogue {
         let mapped = p.apply(claims);
         let mut out = Resolution {
             terms: mapped.terms,
+            generation: st.generation,
             ..Resolution::default()
         };
         st.add_group_grants(&mapped.groups, &mut out);
@@ -929,9 +979,9 @@ fn write_provider(tx: &Transaction<'_>, p: &Provider) -> Result<(), Error> {
 }
 
 fn provider_apply(p: Provider) -> Apply {
-    Box::new(move |st| {
+    Some(Box::new(move |st| {
         st.providers.insert(p.name.clone(), (p, false));
-    })
+    }))
 }
 
 enum OwnedGrantee {
@@ -1186,7 +1236,7 @@ mod tests {
         let fx = Fixture::new();
         let mut options = fx.options();
         options.config_providers = vec![corp(vec![groups_rule()])];
-        let cat = Catalogue::open(fx.dir.path(), options.clone()).unwrap();
+        let cat = Catalogue::open(&fx.path(), options.clone()).unwrap();
         let mut other = corp(vec![]);
         other.name = "partner".into();
         cat.create_provider(&other).unwrap();
@@ -1230,19 +1280,19 @@ mod tests {
 
         options.config_providers.push(other);
         assert!(matches!(
-            Catalogue::open(fx.dir.path(), options.clone()),
+            Catalogue::open(&fx.path(), options.clone()),
             Err(Error::DeclaredTwice { .. })
         ));
         options.config_providers = vec![corp(vec![]), corp(vec![])];
         assert!(matches!(
-            Catalogue::open(fx.dir.path(), options.clone()),
+            Catalogue::open(&fx.path(), options.clone()),
             Err(Error::DeclaredTwice { .. })
         ));
         let mut invalid = corp(vec![]);
         invalid.issuer = String::new();
         options.config_providers = vec![invalid];
         assert!(matches!(
-            Catalogue::open(fx.dir.path(), options),
+            Catalogue::open(&fx.path(), options),
             Err(Error::Invalid(_))
         ));
     }
@@ -1252,6 +1302,7 @@ mod tests {
         let fx = Fixture::new();
         let cat = fx.open();
         let none = Affected::default();
+        let who = |a: Affected| Affected { generation: 0, ..a };
         let principals = |ps: &[&str]| Affected {
             principals: set(ps),
             ..Affected::default()
@@ -1262,81 +1313,106 @@ mod tests {
         };
 
         assert_eq!(
-            cat.create_principal("ada", PrincipalKind::Person).unwrap(),
+            who(cat.create_principal("ada", PrincipalKind::Person).unwrap()),
             none
         );
         assert_eq!(
-            cat.create_principal("bob", PrincipalKind::Person).unwrap(),
+            who(cat.create_principal("bob", PrincipalKind::Person).unwrap()),
             none
         );
         assert_eq!(
-            cat.create_principal("cy", PrincipalKind::Person).unwrap(),
+            who(cat.create_principal("cy", PrincipalKind::Person).unwrap()),
             none
         );
-        assert_eq!(cat.set_password("ada", "pw").unwrap(), none);
-        assert_eq!(cat.clear_password("ada").unwrap(), none);
-        assert_eq!(cat.create_group("eu").unwrap(), none);
-        assert_eq!(cat.create_group("tenant-7f3a").unwrap(), none);
+        assert_eq!(who(cat.set_password("ada", "pw").unwrap()), none);
+        assert_eq!(who(cat.clear_password("ada").unwrap()), none);
+        assert_eq!(who(cat.create_group("eu").unwrap()), none);
+        assert_eq!(who(cat.create_group("tenant-7f3a").unwrap()), none);
 
-        assert_eq!(cat.add_member("eu", "ada").unwrap(), principals(&["ada"]));
-        assert_eq!(cat.add_member("eu", "ada").unwrap(), none);
-        assert_eq!(cat.add_member("eu", "bob").unwrap(), principals(&["bob"]));
         assert_eq!(
-            cat.remove_member("eu", "bob").unwrap(),
+            who(cat.add_member("eu", "ada").unwrap()),
+            principals(&["ada"])
+        );
+        assert_eq!(who(cat.add_member("eu", "ada").unwrap()), none);
+        assert_eq!(
+            who(cat.add_member("eu", "bob").unwrap()),
             principals(&["bob"])
         );
-        assert_eq!(cat.remove_member("eu", "bob").unwrap(), none);
+        assert_eq!(
+            who(cat.remove_member("eu", "bob").unwrap()),
+            principals(&["bob"])
+        );
+        assert_eq!(who(cat.remove_member("eu", "bob").unwrap()), none);
         cat.add_member("eu", "bob").unwrap();
 
         let ada = Grantee::Principal("ada");
         let eu = Grantee::Group("eu");
-        assert_eq!(cat.grant_term(ada, "x").unwrap(), principals(&["ada"]));
-        assert_eq!(cat.grant_term(ada, "x").unwrap(), none);
-        assert_eq!(cat.revoke_term(ada, "x").unwrap(), principals(&["ada"]));
-        assert_eq!(cat.revoke_term(ada, "x").unwrap(), none);
+        assert_eq!(who(cat.grant_term(ada, "x").unwrap()), principals(&["ada"]));
+        assert_eq!(who(cat.grant_term(ada, "x").unwrap()), none);
         assert_eq!(
-            cat.grant_term(eu, "x").unwrap(),
-            principals(&["ada", "bob"])
-        );
-        assert_eq!(
-            cat.revoke_term(eu, "x").unwrap(),
-            principals(&["ada", "bob"])
-        );
-        assert_eq!(
-            cat.grant_permission(ada, Permission::Admin).unwrap(),
+            who(cat.revoke_term(ada, "x").unwrap()),
             principals(&["ada"])
         );
-        assert_eq!(cat.grant_permission(ada, Permission::Admin).unwrap(), none);
+        assert_eq!(who(cat.revoke_term(ada, "x").unwrap()), none);
         assert_eq!(
-            cat.grant_permission(eu, Permission::Read).unwrap(),
+            who(cat.grant_term(eu, "x").unwrap()),
             principals(&["ada", "bob"])
         );
         assert_eq!(
-            cat.revoke_permission(eu, Permission::Read).unwrap(),
+            who(cat.revoke_term(eu, "x").unwrap()),
             principals(&["ada", "bob"])
         );
-        assert_eq!(cat.set_bypass("cy", true).unwrap(), principals(&["cy"]));
-        assert_eq!(cat.set_bypass("cy", true).unwrap(), none);
-        assert_eq!(cat.disable_principal("cy").unwrap(), principals(&["cy"]));
-        assert_eq!(cat.disable_principal("cy").unwrap(), none);
-        assert_eq!(cat.enable_principal("cy").unwrap(), principals(&["cy"]));
-
-        // A provider change names the provider.
         assert_eq!(
-            cat.create_provider(&corp(vec![groups_rule()])).unwrap(),
+            who(cat.grant_permission(ada, Permission::Admin).unwrap()),
+            principals(&["ada"])
+        );
+        assert_eq!(
+            who(cat.grant_permission(ada, Permission::Admin).unwrap()),
             none
         );
         assert_eq!(
-            cat.update_provider(&corp(vec![groups_rule(), tenant_rule()]))
-                .unwrap(),
+            who(cat.grant_permission(eu, Permission::Read).unwrap()),
+            principals(&["ada", "bob"])
+        );
+        assert_eq!(
+            who(cat.revoke_permission(eu, Permission::Read).unwrap()),
+            principals(&["ada", "bob"])
+        );
+        assert_eq!(
+            who(cat.set_bypass("cy", true).unwrap()),
+            principals(&["cy"])
+        );
+        assert_eq!(who(cat.set_bypass("cy", true).unwrap()), none);
+        assert_eq!(
+            who(cat.disable_principal("cy").unwrap()),
+            principals(&["cy"])
+        );
+        assert_eq!(who(cat.disable_principal("cy").unwrap()), none);
+        assert_eq!(
+            who(cat.enable_principal("cy").unwrap()),
+            principals(&["cy"])
+        );
+
+        // A provider change names the provider.
+        assert_eq!(
+            who(cat.create_provider(&corp(vec![groups_rule()])).unwrap()),
+            none
+        );
+        assert_eq!(
+            who(cat
+                .update_provider(&corp(vec![groups_rule(), tenant_rule()]))
+                .unwrap()),
             providers(&["corp"])
         );
         // A grant to a group a provider's rules can name also affects that provider.
         let tenant = Grantee::Group("tenant-7f3a");
-        assert_eq!(cat.grant_term(tenant, "t").unwrap(), providers(&["corp"]));
+        assert_eq!(
+            who(cat.grant_term(tenant, "t").unwrap()),
+            providers(&["corp"])
+        );
         cat.add_member("tenant-7f3a", "cy").unwrap();
         assert_eq!(
-            cat.grant_permission(tenant, Permission::Read).unwrap(),
+            who(cat.grant_permission(tenant, Permission::Read).unwrap()),
             Affected {
                 principals: set(&["cy"]),
                 providers: set(&["corp"]),
@@ -1344,36 +1420,84 @@ mod tests {
             }
         );
         assert_eq!(
-            cat.delete_group("tenant-7f3a").unwrap(),
+            who(cat.delete_group("tenant-7f3a").unwrap()),
             Affected {
                 principals: set(&["cy"]),
                 providers: set(&["corp"]),
                 ..Affected::default()
             }
         );
-        assert_eq!(cat.delete_group("eu").unwrap(), principals(&["ada", "bob"]));
+        assert_eq!(
+            who(cat.delete_group("eu").unwrap()),
+            principals(&["ada", "bob"])
+        );
 
         // A key's revocation names the key; a principal's deletion names it and its keys.
         let (k1, created) = cat.create_api_key("bob", None, None).unwrap();
-        assert_eq!(created, none);
+        assert_eq!(who(created), none);
         let (k2, _) = cat.create_api_key("bob", None, None).unwrap();
         let (k3, _) = cat.create_api_key("ada", None, None).unwrap();
         assert_eq!(
-            cat.revoke_api_key(&k3.prefix).unwrap(),
+            who(cat.revoke_api_key(&k3.prefix).unwrap()),
             Affected {
                 api_keys: set(&[&k3.prefix]),
                 ..Affected::default()
             }
         );
         assert_eq!(
-            cat.delete_principal("bob").unwrap(),
+            who(cat.delete_principal("bob").unwrap()),
             Affected {
                 principals: set(&["bob"]),
                 api_keys: set(&[&k1.prefix, &k2.prefix]),
                 ..Affected::default()
             }
         );
-        assert_eq!(cat.drop_provider("corp").unwrap(), providers(&["corp"]));
+        assert_eq!(
+            who(cat.drop_provider("corp").unwrap()),
+            providers(&["corp"])
+        );
+    }
+
+    #[test]
+    fn the_generation_rises_with_each_change_and_survives_reopening() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        assert_eq!(cat.generation(), 0);
+        assert_eq!(
+            cat.create_principal("ada", PrincipalKind::Person)
+                .unwrap()
+                .generation,
+            1
+        );
+        assert_eq!(
+            cat.grant_term(Grantee::Principal("ada"), "x")
+                .unwrap()
+                .generation,
+            2
+        );
+        // A change that alters nothing, and one that is refused, leave it as it was.
+        assert_eq!(
+            cat.grant_term(Grantee::Principal("ada"), "x")
+                .unwrap()
+                .generation,
+            2
+        );
+        cat.grant_term(Grantee::Principal("bob"), "x").unwrap_err();
+        assert_eq!(cat.generation(), 2);
+        let (key, created) = cat.create_api_key("ada", None, None).unwrap();
+        assert_eq!(created.generation, 3);
+        assert_eq!(cat.resolve("ada", Some(&key.prefix)).unwrap().generation, 3);
+        cat.create_provider(&corp(vec![groups_rule()])).unwrap();
+        assert_eq!(
+            cat.resolve_claims("corp", &json!({})).unwrap().generation,
+            4
+        );
+        drop(cat);
+
+        let cat = fx.open();
+        assert_eq!(cat.generation(), 4);
+        assert_eq!(cat.resolve("ada", None).unwrap().generation, 4);
+        assert_eq!(cat.revoke_api_key(&key.prefix).unwrap().generation, 5);
     }
 
     /// Makes every write to every table in the file fail, as a full disc or a lost file would.

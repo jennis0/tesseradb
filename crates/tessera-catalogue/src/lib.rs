@@ -7,7 +7,8 @@
 //! that fails to commit leaves both as they were.
 //!
 //! Every change returns an [`Affected`]: the principals, API keys and providers whose sessions it
-//! may have changed the terms or permissions of. The caller ends those sessions.
+//! may have changed the terms or permissions of, and the catalogue's generation after it. The
+//! caller ends those sessions.
 //!
 //! This crate sees names and terms only. It depends on nothing that can see a row id or an
 //! entity id.
@@ -39,10 +40,13 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 /// How a catalogue is opened.
 #[derive(Clone)]
 pub struct Options {
-    /// Failed password attempts for one principal within `failed_attempt_window` after which
+    /// Failed password attempts for one name within `failed_attempt_window` after which
     /// further attempts are refused until the oldest of them leaves the window.
     pub failed_attempt_limit: u32,
     pub failed_attempt_window: Duration,
+    /// The most names whose failed attempts are remembered. Past it, the name whose latest
+    /// failure is oldest is forgotten.
+    pub failed_attempt_names: usize,
     /// The time, for API key expiry and the failed-attempt window.
     pub clock: Clock,
     /// Providers declared in the deployment's configuration. They are listed with the stored
@@ -55,6 +59,7 @@ impl Default for Options {
         Options {
             failed_attempt_limit: 10,
             failed_attempt_window: Duration::from_secs(15 * 60),
+            failed_attempt_names: 100_000,
             clock: Arc::new(|| {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -74,6 +79,9 @@ pub struct Affected {
     /// API key prefixes.
     pub api_keys: BTreeSet<String>,
     pub providers: BTreeSet<String>,
+    /// The catalogue's generation once the change committed. A change that altered nothing
+    /// leaves it as it was.
+    pub generation: u64,
 }
 
 impl Affected {
@@ -109,6 +117,19 @@ pub enum Error {
         found: i64,
         supported: i64,
     },
+    /// Another `Catalogue`, in this process or another, holds the catalogue open.
+    Locked {
+        dir: String,
+    },
+    /// The catalogue's directory or file can be reached by users other than its owner.
+    Mode {
+        path: String,
+        found: u32,
+        want: u32,
+    },
+    /// The stored catalogue breaks a rule of what may be stored, or fails SQLite's checks. It is
+    /// not opened.
+    Corrupt(String),
     /// SQLite or the file system failed. Nothing was changed.
     Storage(String),
 }
@@ -117,9 +138,18 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Invalid(why) => f.write_str(why),
-            Error::NotFound { what, name } => {
-                write!(f, "there is no {what} named `{name}`; create it first")
-            }
+            Error::NotFound {
+                what: "API key",
+                name,
+            } => write!(
+                f,
+                "there is no API key with prefix `{name}`; list the principal's API keys to find \
+                 the prefix"
+            ),
+            Error::NotFound { what, name } => write!(
+                f,
+                "there is no {what} named `{name}`; list the {what}s to find the name"
+            ),
             Error::Exists { what, name } => {
                 write!(
                     f,
@@ -141,7 +171,26 @@ impl fmt::Display for Error {
                 "the catalogue has schema version {found} and this build reads version \
                  {supported}; open it with the build that wrote it or recreate it"
             ),
-            Error::Storage(why) => write!(f, "the catalogue could not be read or written: {why}"),
+            Error::Locked { dir } => write!(
+                f,
+                "the catalogue in {dir} is already open; close the process or catalogue that \
+                 holds it, or name another directory"
+            ),
+            Error::Mode { path, found, want } => write!(
+                f,
+                "{path} has mode {found:o}, which lets other users reach it; run \
+                 `chmod {want:o} {path}` and open the catalogue again"
+            ),
+            Error::Corrupt(why) => write!(
+                f,
+                "{why}; correct it with the sqlite3 shell, or restore the catalogue from a \
+                 backup"
+            ),
+            Error::Storage(why) => write!(
+                f,
+                "the catalogue could not be read or written ({why}) and nothing was changed; \
+                 check that its directory is writable and its disc has space, then retry"
+            ),
         }
     }
 }
@@ -160,23 +209,20 @@ impl From<std::io::Error> for Error {
     }
 }
 
-/// Why a credential was not accepted.
+/// Why a credential was not accepted: an unknown principal or key, a wrong secret, a disabled
+/// principal, an expired key, no password, or too many failed password attempts for the name.
+/// The causes are not told apart, so the answer does not show whether a principal exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthError {
-    /// Unknown principal or key, wrong secret, disabled principal, expired key, or no password.
     Refused,
-    /// Too many failed password attempts. The next is taken at `retry_at`, in seconds since the
-    /// Unix epoch.
-    Throttled { retry_at: u64 },
 }
 
 impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthError::Refused => f.write_str("the credential was not accepted"),
-            AuthError::Throttled { retry_at } => write!(
-                f,
-                "too many failed attempts; try again at {retry_at} seconds after the epoch"
+            AuthError::Refused => f.write_str(
+                "the credential was not accepted; check it, and after repeated failures wait \
+                 before trying again",
             ),
         }
     }
@@ -213,8 +259,13 @@ pub(crate) mod testing {
             }
         }
 
+        /// The catalogue's directory, which the first open creates.
+        pub fn path(&self) -> std::path::PathBuf {
+            self.dir.path().join("catalogue")
+        }
+
         pub fn open(&self) -> Catalogue {
-            Catalogue::open(self.dir.path(), self.options()).unwrap()
+            Catalogue::open(&self.path(), self.options()).unwrap()
         }
 
         pub fn now(&self) -> u64 {
@@ -225,9 +276,24 @@ pub(crate) mod testing {
             self.now.fetch_add(secs, Ordering::SeqCst);
         }
 
-        /// A second connection to the catalogue's file, as another process would have.
+        /// A second connection to the catalogue's file, as another process would have. The
+        /// directory and file are created, with the modes an open requires, when absent.
         pub fn raw(&self) -> rusqlite::Connection {
-            rusqlite::Connection::open(self.dir.path().join(crate::store::FILE_NAME)).unwrap()
+            use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(self.path())
+                .unwrap();
+            let file = self.path().join(crate::store::FILE_NAME);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&file)
+                .unwrap();
+            rusqlite::Connection::open(file).unwrap()
         }
     }
 }
