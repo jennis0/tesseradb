@@ -18,7 +18,7 @@ principal may see.
 | Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
 | How labels are indexed | Each distinct label gets a label id. A label that is a disjunction of terms is indexed under each of its terms. Any other label is indexed under its label id, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
-| OIDC users | Not stored. Claims map to terms and to local groups at each authorise. Permissions come only from rules that name a fixed local group. |
+| OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
 | Writes to items the writer cannot see | Masked by the writer's own terms. A principal flagged `bypass` acts on the whole corpus. |
 | A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
@@ -67,7 +67,8 @@ It holds:
 - the terms granted to each principal and each group;
 - the permissions granted to each principal and each group, and the `bypass` flag;
 - each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
-  map claims to terms and to local groups. A provider can also be declared in `tessera.toml`
+  turn claims into terms, and the role mappings from exact terms to local groups. A provider can
+  also be declared in `tessera.toml`
   ([Surfaces](#surfaces)).
 
 It does not hold sessions, which stay in memory, or the audit log, which is append-only and kept
@@ -116,31 +117,26 @@ holds.
 
 - A local principal's terms are those granted to it directly, together with those granted to each
   group it belongs to.
-- An OIDC identity's terms come from its provider's claim rules. A rule reads a claim and produces
-  terms, or names a local group whose granted terms are then added. The standard rule,
-  `groups[*] -> {value}`, passes each value of the `groups` claim through as a term, so a claim of
-  `["analysts", "eu"]` gives the terms `analysts` and `eu` and a label is written with the names
-  the identity provider uses. A template may add text, as `groups[*] -> group:{value}` does. A rule
-  `tid -> local group tenant-{value}` adds the terms granted to the local group `tenant-7f3a`.
+- An OIDC identity's terms come from its provider's claim rules. A claim rule reads a claim and
+  produces terms, and does nothing else. The standard rule, `groups[*] -> {value}`, passes each
+  value of the `groups` claim through as a term, so a claim of `["analysts", "eu"]` gives the terms
+  `analysts` and `eu` and a label is written with the names the identity provider uses. A template
+  may add text, as `groups[*] -> group:{value}` does.
 - A produced term goes through the same rules as any term. A rule whose template could only
   produce `public`, or holds a control character, is refused when the provider is declared. At
   authorise, a produced term is trimmed, and one that is `public` in any case or holds a control
   character is dropped.
-- A term from a claim is trusted as the identity provider asserts it. Where users can create or
-  name their own groups at the provider, anyone who creates a group called `secret` holds the term
-  `secret`. Such a deployment gives its template a prefix, as `group:{value}` does, so that
-  provider-made terms cannot collide with terms granted locally, or maps stable group ids.
-- A rule whose target is a template, holding `{value}`, reaches terms only: a term it produces, or
-  the terms of the local group it names. A template naming a local group must hold literal text
-  beside `{value}`, so that a claim value cannot name a local group made by hand.
-- An OIDC identity's permissions come only from a rule that names a fixed local group and the claim
-  value it requires, such as `groups[*] == "tessera-admins" -> local group admins`. The identity
-  receives that group's terms and permissions, except `bypass`. A claim value can therefore select
-  a group that an administrator has named, and cannot choose a group by its own spelling. Vault's
-  group aliases, Grafana's role mapping and Kubernetes role bindings each map an external group to
-  an internal role explicitly in the same way. Where a provider can put stable group ids in its
-  tokens, as Entra ID does, a rule should match the id: a display name can be chosen by whoever
-  creates the group.
+- An administrator declares **role mappings** for a provider: an exact term mapped to a local
+  group, such as `tessera-admins -> admins`. An identity whose claim rules produce that term
+  receives the group's permissions and the terms granted to it, and keeps the term itself. It never
+  receives `bypass`. A mapping matches a whole term exactly, so a claim value selects only a group
+  an administrator has named. Elasticsearch's role mappings, Vault's group aliases and Grafana's
+  role mapping each map an external group to an internal role in the same way.
+- A term from a claim, and so a role mapping, is trusted as the identity provider asserts it.
+  Where users can create or name their own groups at the provider, anyone who creates a group
+  called `secret` holds the term `secret`, and anyone who creates `tessera-admins` matches that
+  mapping. Such a deployment maps stable group ids, as Entra ID can put in its tokens, or gives its
+  template a prefix so that provider-made terms cannot collide with terms granted locally.
 
 ```mermaid
 flowchart LR
@@ -150,7 +146,7 @@ flowchart LR
   L --> G[granted terms<br/>and group terms]
   I --> R[claim rules]
   R --> T[terms]
-  R --> LG[local groups] --> G
+  T --> M[role mappings] --> LG[local groups] --> G
   G --> T
   T --> A[authorised set]
 ```
@@ -378,11 +374,10 @@ The three listeners stay, and each accepts the credentials of the callers it ser
 |---|---|---|
 | Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests, and writes made with a session token that carries `write`. |
 | Session | A principal with `authorise-as`, by API key. | `POST /session/authorise`, naming the principal to authorise, and `POST /session/revoke`. |
-| Control | An API key, or the operator credential. | Writes, and the catalogue's verbs. |
+| Control | An API key, an OIDC access token, or the operator credential. | Writes, and the catalogue's verbs. |
 
-Not decided: whether the control listener also accepts an OIDC access token. Without it, an OIDC
-identity granted `write` or `admin` through a fixed-group rule can use `write` through the viewer
-listener, as a session carrying `write`, and cannot use `admin` at all.
+An OIDC access token on the control listener is checked as it is at login, and its permissions come
+from its role mappings, so administration can be granted through single sign-on.
 
 The session listener stays separate because the credential that reaches it acts as any viewer. It
 belongs to an integrator's backend and is not exposed to a browser.
