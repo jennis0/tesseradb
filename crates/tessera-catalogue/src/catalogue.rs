@@ -1398,7 +1398,7 @@ mod tests {
         }];
         assert!(matches!(
             Catalogue::open(&fx.path(), options.clone()),
-            Err(Error::Invalid(_))
+            Err(Error::InsecureJwks { .. })
         ));
         options.allow_insecure_jwks = true;
         let cat = Catalogue::open(&fx.path(), options).unwrap();
@@ -1415,12 +1415,12 @@ mod tests {
         let cat = fx.open();
         assert!(matches!(
             cat.create_provider(&insecure),
-            Err(Error::Invalid(_))
+            Err(Error::InsecureJwks { .. })
         ));
         cat.create_provider(&corp(vec![])).unwrap();
         assert!(matches!(
             cat.update_provider(&insecure),
-            Err(Error::Invalid(_))
+            Err(Error::InsecureJwks { .. })
         ));
         drop(cat);
         let mut options = fx.options();
@@ -1431,7 +1431,7 @@ mod tests {
         // Stored, it is refused by a catalogue opened without the allowance.
         assert!(matches!(
             Catalogue::open(&fx.path(), fx.options()),
-            Err(Error::Corrupt(_))
+            Err(Error::InsecureJwks { .. })
         ));
     }
 

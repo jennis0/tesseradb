@@ -11,6 +11,7 @@ subtle = "2.6"
 sha2 = { workspace = true }
 getrandom = "0.2"
 serde_json = { workspace = true }
+url = "2.5.8"
 parking_lot = { workspace = true }
 
 [dev-dependencies]

@@ -407,25 +407,15 @@ fn load_providers(
 
 fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
     let mut q = conn.prepare(
-        "SELECT provider, claim, target, template, equals FROM claim_rule \
+        "SELECT provider, claim, target, template, equals, position FROM claim_rule \
          ORDER BY provider, position",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let provider: String = r.get(0)?;
-        let target: String = r.get(2)?;
-        let template: String = r.get(3)?;
-        let target = match (target.as_str(), r.get::<_, Option<String>>(4)?) {
-            ("term", _) => RuleTarget::Term(template),
-            ("fixed", Some(equals)) => RuleTarget::FixedGroup {
-                equals,
-                group: template,
-            },
-            _ => RuleTarget::LocalGroup(template),
-        };
         let rule = ClaimRule {
             claim: r.get(1)?,
-            target,
+            target: rule_target(r, &provider)?,
         };
         st.providers
             .get_mut(&provider)
@@ -437,6 +427,25 @@ fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
     Ok(())
 }
 
+fn rule_target(r: &rusqlite::Row<'_>, provider: &str) -> Result<RuleTarget, Error> {
+    let target: String = r.get(2)?;
+    let template: String = r.get(3)?;
+    match (target.as_str(), r.get::<_, Option<String>>(4)?) {
+        ("term", None) => Ok(RuleTarget::Term(template)),
+        ("group", None) => Ok(RuleTarget::LocalGroup(template)),
+        ("fixed", Some(equals)) => Ok(RuleTarget::FixedGroup {
+            equals,
+            group: template,
+        }),
+        (_, equals) => Err(Error::Corrupt(format!(
+            "claim_rule row {} of provider `{provider}` has target `{target}` {} a value to \
+             equal, which no rule stores",
+            r.get::<_, i64>(5)?,
+            if equals.is_some() { "with" } else { "without" }
+        ))),
+    }
+}
+
 /// Refuses a stored provider that a write would not store as it is.
 fn check_provider(p: &Provider, allow_insecure_jwks: bool) -> Result<(), Error> {
     match p.validated(allow_insecure_jwks) {
@@ -446,6 +455,7 @@ fn check_provider(p: &Provider, allow_insecure_jwks: bool) -> Result<(), Error> 
              trailing white space",
             p.name
         ))),
+        Err(e @ Error::InsecureJwks { .. }) => Err(e),
         Err(e) => Err(Error::Corrupt(format!(
             "provider row `{}` or one of its claim_rule rows breaks a rule: {e}",
             p.name
@@ -546,6 +556,10 @@ mod tests {
             "PRAGMA foreign_keys = OFF; INSERT INTO member VALUES (7, 8)",
             "INSERT INTO principal (name, kind) VALUES ('a' || char(7) || 'b', 'person')",
             "INSERT INTO local_group (name) VALUES ('e' || char(10) || 'u')",
+            "INSERT INTO principal (name, kind) VALUES ('ad' || char(8238) || 'a', 'person')",
+            "INSERT INTO local_group (name) VALUES ('e' || char(8203) || 'u')",
+            "INSERT INTO provider VALUES ('co' || char(8294) || 'rp', \
+             'https://login.example.org/', 'tessera', 'https://login.example.org/keys')",
             "INSERT INTO local_group (id, name) VALUES (7, 'eu'); \
              INSERT INTO group_term VALUES (7, 'PUBLIC')",
             "INSERT INTO provider VALUES ('co' || char(27) || 'rp', 'https://login.example.org/', \
@@ -567,6 +581,31 @@ mod tests {
                     Err(Error::Corrupt(_))
                 ),
                 "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_rule_target_that_no_write_stores_is_refused_on_open() {
+        let provider = "INSERT INTO provider VALUES ('corp', 'https://login.example.org/', \
+                        'tessera', 'https://login.example.org/keys'); \
+                        PRAGMA ignore_check_constraints = ON;";
+        for rule in [
+            "('corp', 0, 'tid', 'grp', 'tenant-{value}', NULL)",
+            "('corp', 0, 'tid', 'group', 'tenant-{value}', 'x')",
+            "('corp', 0, 'tid', 'term', 't-{value}', 'x')",
+            "('corp', 0, 'tid', 'fixed', 'admins', NULL)",
+        ] {
+            let fx = Fixture::new();
+            drop(fx.open());
+            let sql = format!("{provider} INSERT INTO claim_rule VALUES {rule}");
+            fx.raw().execute_batch(&sql).unwrap();
+            assert!(
+                matches!(
+                    Catalogue::open(&fx.path(), fx.options()),
+                    Err(Error::Corrupt(_))
+                ),
+                "{rule}"
             );
         }
     }

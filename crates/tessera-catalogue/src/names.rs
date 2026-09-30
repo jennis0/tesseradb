@@ -26,8 +26,9 @@ pub fn term(raw: &str) -> Result<String, Error> {
     Ok(t.to_owned())
 }
 
-/// Trims the name of a principal, a group or a provider. An empty name and a name holding a
-/// control character are refused.
+/// Trims the name of a principal, a group or a provider. An empty name, a name holding a
+/// control character, and a name holding a zero-width or bidirectional formatting character
+/// (U+200B to U+200F, U+202A to U+202E, U+2066 to U+2069, U+FEFF) are refused.
 pub fn name(what: &str, raw: &str) -> Result<String, Error> {
     let n = raw.trim();
     if n.is_empty() {
@@ -36,7 +37,21 @@ pub fn name(what: &str, raw: &str) -> Result<String, Error> {
         )));
     }
     no_control(&format!("{what} name"), n)?;
+    if let Some(c) = n.chars().find(|&c| is_display_format(c)) {
+        return Err(Error::Invalid(format!(
+            "the {what} name {n:?} holds U+{:04X}, a character that is invisible or changes the \
+             direction of the text around it; remove it",
+            c as u32
+        )));
+    }
     Ok(n.to_owned())
+}
+
+fn is_display_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 fn no_control(what: &str, value: &str) -> Result<(), Error> {
@@ -110,5 +125,33 @@ mod tests {
             assert!(matches!(cat.create_group(bad), Err(Error::Invalid(_))));
         }
         assert!(cat.principals().is_empty() && cat.groups().is_empty());
+    }
+
+    #[test]
+    fn a_name_holding_a_zero_width_or_bidirectional_character_is_refused_and_a_term_is_not() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        let bad = [
+            "ad\u{200B}a",
+            "a\u{200F}b",
+            "\u{202E}nimda",
+            "x\u{202A}y",
+            "x\u{2066}y",
+            "x\u{2069}y",
+            "\u{FEFF}ada",
+        ];
+        for name in bad {
+            assert!(matches!(
+                cat.create_principal(name, PrincipalKind::Person),
+                Err(Error::Invalid(_))
+            ));
+            assert!(matches!(cat.create_group(name), Err(Error::Invalid(_))));
+        }
+        assert!(cat.principals().is_empty() && cat.groups().is_empty());
+        cat.create_principal("ada", PrincipalKind::Person).unwrap();
+        for term in bad {
+            cat.grant_term(Grantee::Principal("ada"), term).unwrap();
+        }
+        assert_eq!(cat.principal("ada").unwrap().terms.len(), bad.len());
     }
 }

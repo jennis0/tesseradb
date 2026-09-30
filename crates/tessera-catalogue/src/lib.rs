@@ -118,6 +118,12 @@ pub enum Error {
     DeclaredTwice {
         provider: String,
     },
+    /// A provider's JWKS URL is `http://` to a host other than a loopback address, and the
+    /// catalogue was opened without `Options::allow_insecure_jwks`.
+    InsecureJwks {
+        provider: String,
+        url: String,
+    },
     /// The database was written by a different version of the catalogue.
     Version {
         found: i64,
@@ -171,6 +177,12 @@ impl fmt::Display for Error {
                 f,
                 "provider `{provider}` is declared more than once; remove it from the \
                  configuration file or from the catalogue"
+            ),
+            Error::InsecureJwks { provider, url } => write!(
+                f,
+                "provider `{provider}` has JWKS URL `{url}`, which fetches the signing keys over \
+                 plain http from a host that is not a loopback address; write an https:// URL, or \
+                 open the catalogue with `Options::allow_insecure_jwks` set"
             ),
             Error::Version { found, supported } => write!(
                 f,

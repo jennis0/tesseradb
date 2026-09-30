@@ -10,17 +10,18 @@
 //! `{value}` at most once, replaced by the value. A term template may be `{value}` alone, which
 //! passes each value through as a term. A local group template that holds `{value}` also holds
 //! literal text, so a claim value cannot name a local group made by hand. A template without
-//! `{value}` produces itself whenever the path reaches any value. Values are strings, numbers and booleans; the path reaching an object, an
-//! array without `[*]`, or null produces nothing.
+//! `{value}` produces itself whenever the path reaches any value. Values are strings, numbers and
+//! booleans; the path reaching an object, an array without `[*]`, or null produces nothing.
 //!
 //! A template reaches terms only: those it produces, or those granted to the local group it
 //! produces. Permissions reach an OIDC identity only through a rule that names a fixed local group
-//! and the claim value it requires, so a claim value can select a group an administrator named
-//! and cannot choose one by its own spelling.
+//! and the claim value it requires.
 
 use std::collections::BTreeSet;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde_json::Value;
+use url::{Host, Url};
 
 use crate::names;
 use crate::Error;
@@ -216,8 +217,7 @@ fn fixed_group(equals: &str, group: &str) -> Result<RuleTarget, Error> {
 }
 
 /// Refuses a JWKS URL other than `https://`, or `http://` to `localhost`, `127.0.0.1` or
-/// `[::1]`, unless `allow_insecure` is set. Anyone on the network path of a plain `http` fetch
-/// could substitute the keys and sign a token for any identity.
+/// `[::1]`, unless `allow_insecure` is set. A URL that does not parse is refused either way.
 fn check_jwks_url(provider: &str, url: &str, allow_insecure: bool) -> Result<(), Error> {
     let bad = |why: &str| {
         Error::Invalid(format!(
@@ -225,42 +225,30 @@ fn check_jwks_url(provider: &str, url: &str, allow_insecure: bool) -> Result<(),
              http:// URL to localhost, 127.0.0.1 or [::1]"
         ))
     };
-    let (secure, rest) = if let Some(rest) = url.strip_prefix("https://") {
-        (true, rest)
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        (false, rest)
-    } else {
-        return Err(bad("which is not an http:// or https:// URL"));
+    let parsed = Url::parse(url).map_err(|e| bad(&format!("which is not a URL ({e})")))?;
+    let secure = match parsed.scheme() {
+        "https" => true,
+        "http" => false,
+        _ => return Err(bad("which is not an http:// or https:// URL")),
     };
-    let host = url_host(rest);
-    if host.is_empty() {
+    let Some(host) = parsed.host() else {
         return Err(bad("which names no host"));
-    }
-    if secure || allow_insecure || is_loopback(host) {
+    };
+    if secure || allow_insecure || is_loopback(&host) {
         return Ok(());
     }
-    Err(Error::Invalid(format!(
-        "provider `{provider}` has JWKS URL `{url}`, which fetches the signing keys over plain \
-         http from a host that is not a loopback address; write an https:// URL, or open the \
-         catalogue with insecure JWKS URLs allowed (TESSERA_ALLOW_INSECURE_JWKS=1)"
-    )))
+    Err(Error::InsecureJwks {
+        provider: provider.to_owned(),
+        url: url.to_owned(),
+    })
 }
 
-/// The host of a URL whose scheme and `://` are removed: the authority ends at the first `/`,
-/// `\`, `?` or `#`, the host follows the last `@` in it, and a port is removed.
-fn url_host(rest: &str) -> &str {
-    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit('@').next().unwrap_or_default();
-    match host.find(']') {
-        Some(end) if host.starts_with('[') => &host[..=end],
-        _ => host.split(':').next().unwrap_or_default(),
+fn is_loopback(host: &Host<&str>) -> bool {
+    match host {
+        Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        Host::Ipv4(a) => *a == Ipv4Addr::LOCALHOST,
+        Host::Ipv6(a) => *a == Ipv6Addr::LOCALHOST,
     }
-}
-
-fn is_loopback(host: &str) -> bool {
-    ["localhost", "127.0.0.1", "[::1]"]
-        .iter()
-        .any(|l| host.eq_ignore_ascii_case(l))
 }
 
 fn template_may_produce(template: &str, produced: &str) -> bool {
@@ -564,12 +552,13 @@ mod tests {
 
     #[test]
     fn a_blank_or_malformed_field_is_refused() {
-        for blank in ["name", "issuer", "audience", "control"] {
+        for blank in ["name", "issuer", "audience", "control", "bidi"] {
             let mut p = provider(vec![]);
             match blank {
                 "name" => p.name = " ".into(),
                 "issuer" => p.issuer = String::new(),
                 "audience" => p.audience = "\t".into(),
+                "bidi" => p.name = "co\u{202E}rp".into(),
                 _ => p.name = "co\u{1b}rp".into(),
             }
             assert!(p.validated(false).is_err(), "blank {blank} accepted");
@@ -587,9 +576,11 @@ mod tests {
     fn a_jwks_url_is_https_or_http_to_a_loopback_address() {
         for ok in [
             "https://login.example.org/keys",
+            "HTTPS://login.example.org/keys",
             "http://localhost:8080/keys",
             "http://127.0.0.1/keys",
             "http://[::1]:9000/keys",
+            "http://[0:0:0:0:0:0:0:1]/",
             "http://LocalHost?x",
         ] {
             assert!(with_jwks(ok).validated(false).is_ok(), "{ok} refused");
@@ -598,19 +589,32 @@ mod tests {
             "http://login.example.org/keys",
             "http://localhost@evil.example.org/keys",
             "http://localhost:80@evil.example.org/",
+            "http://localhost@evil.org/",
             "http://localhost.evil.example.org/",
             "http://127.0.0.2/keys",
             "http://[::2]/keys",
         ];
         for bad in insecure {
-            assert!(with_jwks(bad).validated(false).is_err(), "{bad} accepted");
+            assert!(
+                matches!(
+                    with_jwks(bad).validated(false),
+                    Err(Error::InsecureJwks { .. })
+                ),
+                "{bad} accepted"
+            );
             assert!(with_jwks(bad).validated(true).is_ok(), "{bad} refused");
         }
+    }
+
+    #[test]
+    fn a_jwks_url_that_does_not_parse_or_is_not_http_is_refused_even_when_insecure_is_allowed() {
         for never in [
             "login.example.org/keys",
             "ftp://localhost/keys",
             "https://",
-            "http:///k",
+            "http://[::1]evil.org/",
+            "http://[::1].evil.org",
+            "http://localhost:80:evil.org",
         ] {
             assert!(
                 with_jwks(never).validated(true).is_err(),
