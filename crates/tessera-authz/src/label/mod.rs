@@ -125,7 +125,7 @@ impl Label {
         }
     }
 
-    /// Whether a principal holding the terms `held` accepts satisfies this label.
+    /// Whether a principal holding the terms `held` satisfies this label.
     pub fn satisfied_by(&self, held: &impl Fn(&str) -> bool) -> bool {
         self.0.as_ref().is_none_or(|e| e.satisfied_by(held))
     }

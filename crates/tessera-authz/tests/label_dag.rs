@@ -1,9 +1,8 @@
-//! Random labels over eight terms, written with random brackets and padded with whitespace,
-//! evaluated through the DAG and against the tree they were written from. Some terms differ only
-//! by a space inside their quotes. The tree is evaluated by direct recursion here, without parsing
-//! or normalising, so agreement checks the parser, normalisation, hash-consing, the bottom-up pass, top-down
-//! evaluation and the witness together.
-
+//! Random labels over eight terms, written with random brackets, evaluated through the DAG and
+//! against the tree they were written from. Some terms differ only by a space inside their quotes.
+//! The tree is evaluated by direct recursion here, without parsing or normalising, so agreement
+//! checks the parser, normalisation, hash-consing, the bottom-up pass, top-down evaluation and the
+//! witness together.
 use std::collections::HashMap;
 
 use rand::rngs::StdRng;

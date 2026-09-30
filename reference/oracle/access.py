@@ -72,7 +72,7 @@ def parse(text: str):
 
 
 def satisfies(tree, held: Callable[[str], bool]) -> bool:
-    """Whether a principal holding the terms `held` accepts satisfies the label `tree`."""
+    """Whether a principal holding the terms `held` satisfies the label `tree`."""
     if isinstance(tree, Public):
         return True
     if isinstance(tree, Term):
