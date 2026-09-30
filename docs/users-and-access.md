@@ -15,12 +15,13 @@ principal may see.
 | Where identity data lives | A catalogue in SQLite, beside the bundle and independent of it. |
 | What a principal may do | Four permissions over the whole database: `read`, `write`, `authorise-as`, `admin`. They are separate from terms. |
 | What a principal may see | Terms, granted to local principals and groups, or derived from OIDC claims. |
-| Access labels | Accumulo visibility expressions, without negation. |
+| Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
 | How labels are indexed | Each distinct label gets a label id. Each item carries exactly one. Labels are compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
 | OIDC users | Not stored. Claims map to terms and to local groups at each authorise. |
 | A grant changes | Every session of every affected principal ends. |
 | Writes to items the writer cannot see | Masked by the writer's own terms. A principal flagged `bypass` acts on the whole corpus. |
+| A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
 ## Principals and credentials
@@ -83,16 +84,23 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate, masked by the principal's own terms ([Writes](#writes)). |
-| `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. The session it mints has that principal's terms and `read` alone. |
-| `admin` | Declaring and dropping views, layers and attributes, and every change to the catalogue. |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. All of it is masked by the principal's own terms ([Writes](#writes)). |
+| `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
+| `admin` | Every change to the catalogue. |
+
+The four are independent. `admin` implies neither `read` nor `write`, so an account that manages
+users can be one that sees nothing. The superuser ([Bootstrap](#bootstrap)) holds all four.
 
 `authorise-as` is the permission an integrator's backend holds. It replaces the session credential.
-It does not imply `admin`, so a compromised backend can mint viewer sessions and cannot change who
-exists or what they are granted.
+A session it mints for a principal carries that principal's terms, and that principal's `read` and
+`write`. A viewer who may annotate can therefore annotate through the integrator's application,
+and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
+also give the caller the target's privileges. The session never carries the target's `admin`,
+`authorise-as` or `bypass`, so a compromised backend can act as any viewer and cannot change who
+exists, what they are granted, or write outside a viewer's terms.
 
 `bypass` is a flag on a principal. A principal with `write` and `bypass` writes against the whole
-corpus. It is intended for ingest pipelines.
+corpus. It is intended for ingest pipelines that authenticate as themselves.
 
 ## From a credential to terms
 
@@ -137,8 +145,17 @@ grammar is the one the `accumulo-access` project specifies.
 
 An expression is written wherever a label is written: an item's access column at a build and at
 ingest, a view's `visibility`, an annotation layer's `visibility`, and a default. One parser reads
-all of them, below both the build and the ingest paths. The empty expression's meaning is an open
-question ([Open questions](#open-questions)).
+all of them, below both the build and the ingest paths.
+
+- The empty expression is refused.
+- `public` is a reserved word, written as the whole expression. It admits every viewer who can
+  reach the view. It is refused inside a larger expression, where `public|x` would mean `public`
+  and `public&x` would mean `x`. Every session holds it, and a grant or claim rule that names it is
+  refused.
+- `inherited` keeps its meaning for an annotation artifact: the layer's `visibility` is the
+  artifact's only gate. It is refused everywhere else.
+
+In the DAG below, `public` is a leaf that every session holds.
 
 ### Label ids
 
@@ -224,7 +241,7 @@ Any catalogue change that could change a principal's terms or permissions ends e
 every principal it affects. This includes changes that widen access. The affected clients receive
 `403 expired-token` and authorise again. The changes are:
 
-- a term granted to or removed from a principal or a group;
+- a term or a permission granted to or removed from a principal or a group;
 - a principal added to or removed from a group;
 - a principal disabled or deleted;
 - an API key revoked, which ends the sessions authorised with that key;
@@ -245,11 +262,17 @@ A write is masked by the writer's own terms unless the writer has `bypass`.
   the answer for an item that does not exist, and does the same work.
 - Inserting an item, or publishing an annotation, with a label the writer does not satisfy is
   refused, and the message says which label.
-- Declaring a view or a layer needs `admin`. Its `visibility` expression is not checked against
-  the declarer's terms.
+- Declaring a view or a layer with a `visibility` the writer does not satisfy is refused in the same
+  way. Changing or dropping a view or a layer the writer cannot reach returns the answer for one
+  that does not exist.
+- An insert whose unique field collides with an item the writer cannot see is refused as a
+  collision. The refusal tells the writer that an item with that value exists, and nothing else
+  about it. Postgres's row-level security has the same property and documents it. Scoping
+  uniqueness to what each writer can see would let two items share a value that is meant to
+  identify one.
 
-A write needs no session. Checking one item evaluates that item's label against the writer's
-terms, from the item's root node upwards, so the writer's authorised set is never built.
+Checking a write evaluates each affected item's label against the writer's terms, from the label's
+root node upwards, so the writer's authorised set is never built.
 
 ## Bootstrap
 
@@ -271,25 +294,42 @@ the CLI each reach all of them:
 - declare, change and remove an OIDC provider and its claim rules;
 - list a principal's sessions, and end them.
 
-A login endpoint exchanges a password, an API key or an OIDC access token for a viewer token. The
-session plane's `POST /session/authorise` takes a caller with `authorise-as` and names the
-principal to authorise.
+OIDC providers are declared through these verbs alone, and not in `tessera.toml`. A container that
+needs a provider at start runs the CLI as the superuser after the service is up.
 
-## Open questions
+## Listeners
 
-- **The empty expression.** Accumulo reads it as visible to everyone. Tessera gives an item with no
-  label its view's default. One rule has to win.
-- **Does `admin` imply `write` and `read`?** Postgres's superuser implies every privilege. Keeping
-  them separate lets an administrator's account see nothing.
-- **OIDC providers in `tessera.toml`.** The catalogue holds them. Declaring them in the
-  configuration file as well would let a container start with a provider already set.
-- **A unique field that collides with an invisible item.** A masked insert that collides on a
-  unique field with an item the writer cannot see reveals that the item exists. Postgres documents
-  the same leak and leaves it. The alternatives are to accept it, or to scope uniqueness to what a
-  writer can see.
-- **The session listener.** With `authorise-as` in place of the session credential, the session
-  plane could stay a separate listener or move onto the control listener.
-- **The audit log.** What an authorise records, given that the terms themselves may be sensitive.
-- **Limits.** The node limit on an expression, and the limit on failed password attempts.
-- **Where the code lives.** A catalogue crate needs a place in `scripts/check-layers.sh`: below the
-  server and above nothing that can see a row id.
+The three listeners stay, and each accepts the credentials of the callers it serves.
+
+| Listener | Accepts | Serves |
+|---|---|---|
+| Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests, and writes made with a session token that carries `write`. |
+| Session | A principal with `authorise-as`, by API key. | `POST /session/authorise`, naming the principal to authorise, and `POST /session/revoke`. |
+| Control | An API key, or the operator credential. | Writes, and the catalogue's verbs. |
+
+The session listener stays separate because the credential that reaches it acts as any viewer. It
+belongs to an integrator's backend and is not exposed to a browser.
+
+## Audit
+
+Each authorise, each refused authentication and each catalogue change is appended to an audit log
+kept outside the catalogue. An authorise record holds the time, the principal, the kind of
+credential and the API key's prefix where there is one, the listener, and the number of terms the
+session resolved to. It does not hold the terms, which can themselves be sensitive. A catalogue
+change records who made it and what it changed.
+
+## Limits
+
+- An expression may hold at most a configured number of DAG nodes. The value is set from the probe
+  described under [Authorising](#authorising).
+- Ten failed password attempts for one principal within fifteen minutes refuse further attempts
+  for that principal until the fifteen minutes have passed. Both numbers are configurable.
+
+## Where the code lives
+
+A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks and the mapping
+from a principal to its terms and permissions. It depends on nothing that can see a row id or an
+entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
+`tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
+parser, normalisation and the DAG belong in `tessera-authz`, beside the index they replace.
+`tessera-plugin` is deleted.
