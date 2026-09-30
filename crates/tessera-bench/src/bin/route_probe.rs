@@ -346,7 +346,9 @@ fn parse_principal(spec: &str) -> Result<Principal, String> {
         .map(str::to_string)
         .collect();
     if name.is_empty() || terms.is_empty() {
-        return Err(format!("--principal '{spec}' names no principal or no term"));
+        return Err(format!(
+            "--principal '{spec}' names no principal or no term"
+        ));
     }
     Ok(Principal {
         name: name.to_string(),
@@ -368,38 +370,6 @@ fn read_terms_file(path: &Path) -> Result<Vec<String>, String> {
     Ok(terms)
 }
 
-/// The dictionary's descriptors in ordinal order, read with `Dict::load`'s rule: a descriptor
-/// already seen is skipped and the ordinal does not advance for it.
-fn load_descriptors(paths: &[PathBuf]) -> Result<Vec<String>, String> {
-    let mut seen = std::collections::HashSet::<Vec<u8>>::new();
-    let mut out = Vec::new();
-    for path in paths {
-        let data = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let mut offset = 0;
-        while offset < data.len() {
-            if offset + 4 > data.len() {
-                return Err(format!("{}: incomplete length field", path.display()));
-            }
-            let len = u32::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-            offset += 4;
-            if offset + len > data.len() {
-                return Err(format!("{}: incomplete descriptor", path.display()));
-            }
-            let descriptor = data[offset..offset + len].to_vec();
-            offset += len;
-            if seen.insert(descriptor.clone()) {
-                out.push(String::from_utf8_lossy(&descriptor).into_owned());
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// One entry of a rung's `country-ranks.json`: a term and the (item, term) pairs carrying it.
 #[derive(serde::Deserialize)]
 struct Rank {
@@ -419,7 +389,11 @@ struct Rank {
 /// Composed from the corpus rather than written down, so the same invocation runs at a rung whose
 /// compartment vocabulary is a prefix of another's. The rung 6 sets of the evidence memo are what
 /// this produces at rung 6.
-fn compose_ladder(ranks: &[Rank], total_rows: u64, target: f64) -> (Vec<String>, u64, &'static str) {
+fn compose_ladder(
+    ranks: &[Rank],
+    total_rows: u64,
+    target: f64,
+) -> (Vec<String>, u64, &'static str) {
     if target >= 1.0 {
         let mut terms: Vec<String> = ranks.iter().map(|r| r.term.clone()).collect();
         terms.sort();
@@ -651,14 +625,12 @@ fn run(args: Args) -> Result<(), String> {
         .map(|e| prefix_dir.join(&e.path))
         .collect();
     let dict = Dict::load(&dict_paths).map_err(|e| format!("loading the dictionary: {e}"))?;
-    let descriptors = load_descriptors(&dict_paths)?;
-    if descriptors.len() as u32 != dict.len() {
-        return Err(format!(
-            "the descriptor table has {} entries and the dictionary {}",
-            descriptors.len(),
-            dict.len()
-        ));
-    }
+    let descriptors: Vec<String> = (0..dict.len())
+        .map(|id| {
+            let bytes = dict.descriptor(TermId::new(id)).unwrap_or_default();
+            String::from_utf8_lossy(bytes).into_owned()
+        })
+        .collect();
     let partition_dir = prefix_dir.join("partitions").join(phash);
     let postings_path = partition_dir.join("terms").join("postings.arrow");
     let postings = PostingsReader::open(&postings_path, true)
@@ -703,7 +675,8 @@ fn run(args: Args) -> Result<(), String> {
         )
         .map_err(|e| format!("parsing {}: {e}", path.display()))?;
         for target in &args.country_ladder {
-            let (terms, pairs, rule) = compose_ladder(&ranks, u64::from(row_space.base_rows()), *target);
+            let (terms, pairs, rule) =
+                compose_ladder(&ranks, u64::from(row_space.base_rows()), *target);
             if terms.is_empty() {
                 return Err(format!(
                     "--country-ladder {target}: no term set composes to it over {} ranks",
@@ -741,7 +714,11 @@ fn run(args: Args) -> Result<(), String> {
     // term whether or not its image was kept. A view with no image table cannot be drawn from
     // this way, and the refusal says so rather than falling back to a uniform draw that would be
     // reported as weighted.
-    let rows_of = |id: u32| -> Option<u64> { images.and_then(|t| t.entry(TermId::new(id))).map(|e| e.rows) };
+    let rows_of = |id: u32| -> Option<u64> {
+        images
+            .and_then(|t| t.entry(TermId::new(id)))
+            .map(|e| e.rows)
+    };
 
     let mut rng = SplitMix(args.seed);
     for count in &args.year_uniform {
@@ -778,7 +755,9 @@ fn run(args: Args) -> Result<(), String> {
             .map(|id| (id, rows_of(id).unwrap_or(0) as f64))
             .collect();
         if candidates.is_empty() {
-            return Err("--species-weighted: the dictionary holds no term prefixed 's:'".to_string());
+            return Err(
+                "--species-weighted: the dictionary holds no term prefixed 's:'".to_string(),
+            );
         }
         let drawn = weighted_draw(&candidates, *count, &mut rng);
         draws.push(json!({
@@ -828,10 +807,7 @@ fn run(args: Args) -> Result<(), String> {
         row_space.total_rows(),
         row_space.extent_count(),
         dict.len(),
-        images.map_or("none".to_string(), |t| format!(
-            "{} terms",
-            t.stamp().base_rows
-        )),
+        images.map_or("none".to_string(), |t| format!("{} terms", t.dict_len())),
         args.seed,
     );
 
@@ -853,22 +829,20 @@ fn run(args: Args) -> Result<(), String> {
         // What the chooser is given, and what it makes of it — recorded so the constants can be
         // re-derived from this file without re-running the arms.
         let complement_valid = base.dense_rows().is_some();
-        let chooser = match images.filter(|t| ids.iter().any(|term| t.kept(*term))) {
-            Some(t) => chooser_inputs(t, ids, held, bound, complement_valid, 0),
-            None => ChooserInputs {
+        let chooser = images.map_or(
+            ChooserInputs {
                 held,
                 bound,
                 complement_valid,
                 ..ChooserInputs::default()
             },
-        };
+            |t| chooser_inputs(t, ids, held, bound, complement_valid, 0),
+        );
+        let prices = ROUTE_COSTS.price(&chooser);
         let priced = json!({
-            "walk": ROUTE_COSTS.walk_ns_per_entity * chooser.held as f64,
-            "split": ROUTE_COSTS.split_ns_per_array_or_run * chooser.kept_arrays_and_runs as f64
-                + ROUTE_COSTS.split_ns_per_bitset * chooser.kept_bitsets as f64
-                + ROUTE_COSTS.residual_ns_per_entity * chooser.residual_entities as f64,
-            "complement": ROUTE_COSTS.complement_ns_per_entity
-                * (chooser.bound.saturating_sub(chooser.held)) as f64,
+            "walk": prices.walk,
+            "split": prices.split,
+            "complement": prices.complement,
         });
         let chosen_offline = match choose(&chooser, &ROUTE_COSTS) {
             Route::Walk => "walk",
