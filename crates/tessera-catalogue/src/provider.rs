@@ -410,7 +410,10 @@ mod tests {
 
     #[test]
     fn a_role_mapping_names_its_group_only_for_its_exact_value_in_its_own_claim() {
-        let mut p = provider(vec![rule("groups[*]", "{value}")]);
+        let mut p = provider(vec![
+            rule("groups[*]", "{value}"),
+            rule("department", "{value}"),
+        ]);
         p.role_mappings = vec![mapping("groups[*]", "tessera-admins", "admins")];
         let m = p.apply(&json!({"groups": ["analysts", " tessera-admins "]}));
         assert_eq!(m.groups, set(&["admins"]));

@@ -948,8 +948,8 @@ impl Catalogue {
 
     /// The terms and permissions a session for an OIDC identity holds, from `claims` as accepted
     /// from a token of `provider`: the terms its claim rules produce, and the terms and
-    /// permissions granted to each existing local group whose role mapping's claim holds its
-    /// value. It never holds `bypass`. `None` when the provider is unknown.
+    /// permissions granted to each existing local group named by a role mapping whose claim
+    /// holds the mapping's value. It never holds `bypass`. `None` when the provider is unknown.
     pub fn resolve_claims(&self, provider: &str, claims: &Value) -> Option<Resolution> {
         let st = self.state.read();
         let (p, _) = st.providers.get(provider.trim())?;
@@ -1277,6 +1277,29 @@ mod tests {
             assert_eq!(r.terms, set(&[value]), "{value}");
             assert_eq!(r.permissions, PermissionSet::EMPTY, "{value}");
         }
+    }
+
+    #[test]
+    fn the_mapped_value_in_another_claim_passes_on_nothing_beyond_its_term() {
+        let fx = Fixture::new();
+        let cat = fx.open();
+        let department = ClaimRule {
+            claim: "department".into(),
+            template: "{value}".into(),
+        };
+        cat.create_provider(&Provider {
+            rules: vec![groups_rule(), department],
+            ..corp_with_admins()
+        })
+        .unwrap();
+        cat.create_group("admins").unwrap();
+        cat.grant_permission(Grantee::Group("admins"), Permission::Admin)
+            .unwrap();
+        let r = cat
+            .resolve_claims("corp", &json!({"department": "tessera-admins"}))
+            .unwrap();
+        assert_eq!(r.terms, set(&["tessera-admins"]));
+        assert_eq!(r.permissions, PermissionSet::EMPTY);
     }
 
     #[test]

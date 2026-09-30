@@ -128,10 +128,10 @@ holds.
 - An administrator declares **role mappings** for a provider: a claim path and an exact value
   mapped to a local group, such as `groups[*]: tessera-admins -> admins`. An identity whose
   `groups` claim holds `tessera-admins` receives the group's permissions and the terms granted to
-  it. It never receives `bypass`. The mapping reads its claim directly, apart from the claim rules,
-  so the identity also holds whatever terms its claim rules produce from the same value. A mapping
-  matches a whole value exactly and only in the claim it names: a `department` claim that users can
-  edit, set to `tessera-admins`, does not match. Elasticsearch's role mappings, Vault's group
+  it. It never receives `bypass`. The mapping reads the claim itself and ignores the terms the
+  claim rules produce. The identity still holds those terms: with the standard rule it also holds
+  the term `tessera-admins`. A mapping matches a whole value exactly, and only in the claim it
+  names. A `department` claim that users can edit, set to `tessera-admins`, does not match. Elasticsearch's role mappings, Vault's group
   aliases and Grafana's role mapping each match a named claim to an internal role in the same way.
 - A claim is trusted as the identity provider asserts it. Where users can create or name their
   own groups at the provider, anyone who creates a group called `secret` holds the term `secret`,
