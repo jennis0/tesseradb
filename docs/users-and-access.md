@@ -122,8 +122,14 @@ holds.
   `["analysts", "eu"]` gives the terms `analysts` and `eu` and a label is written with the names
   the identity provider uses. A template may add text, as `groups[*] -> group:{value}` does. A rule
   `tid -> local group tenant-{value}` adds the terms granted to the local group `tenant-7f3a`.
-- A produced term goes through the same rules as any term: it is trimmed, and a value that is
-  `public` in any case, or that holds a control character, is dropped.
+- A produced term goes through the same rules as any term. A rule whose template could only
+  produce `public`, or holds a control character, is refused when the provider is declared. At
+  authorise, a produced term is trimmed, and one that is `public` in any case or holds a control
+  character is dropped.
+- A term from a claim is trusted as the identity provider asserts it. Where users can create or
+  name their own groups at the provider, anyone who creates a group called `secret` holds the term
+  `secret`. Such a deployment gives its template a prefix, as `group:{value}` does, so that
+  provider-made terms cannot collide with terms granted locally, or maps stable group ids.
 - A rule whose target is a template, holding `{value}`, reaches terms only: a term it produces, or
   the terms of the local group it names. A template naming a local group must hold literal text
   beside `{value}`, so that a claim value cannot name a local group made by hand.
@@ -176,8 +182,8 @@ all of them, below both the build and the ingest paths.
 - `public` is a reserved word, written as the whole expression. It admits every viewer who can
   reach the view. It is refused inside a larger expression, where `public|x` would mean `public`
   and `public&x` would mean `x`. Every session holds it. A term that equals `public` ignoring case
-  is refused wherever a term is written, in a label, a grant or a claim rule's output, so that
-  `Public` cannot be mistaken for it.
+  is refused in a label, a grant or a claim rule's template, and dropped from a claim value at
+  authorise, so that `Public` cannot be mistaken for it.
 - A term or a principal or group name that holds a control character is refused. Terms and names
   are otherwise compared exactly, after trimming, and are case-sensitive.
 - `inherited` keeps its meaning for an annotation artifact with no label of its own: the artifact
@@ -185,7 +191,8 @@ all of them, below both the build and the ingest paths.
   still computed inside the viewer's visible set
   ([annotations](system/annotations.md)). It is refused everywhere else.
 
-In the DAG below, `public` is a leaf that every session holds.
+An item labelled `public` is in every session's authorised set, and the label never enters the
+DAG.
 
 ### Label ids
 
@@ -196,7 +203,7 @@ that share a label form one contiguous range. Item cards, masked writes and comp
 Which postings an item appears in depends on the label's shape.
 
 - A **disjunction of terms**, such as `user:ann|user:bob|group:x` or a single term, is indexed
-  under each of its terms, as terms are indexed today. Holding any one of them admits the item, so
+  under each of its terms, as terms are indexed in the current system. Holding any one of them admits the item, so
   the union of the held terms' postings is exactly the set these labels admit. Per-document sharing
   produces labels of this shape.
 - **Any other label**, one holding a conjunction, is indexed under its label id and evaluated
@@ -218,7 +225,7 @@ id whose items have all been removed.
 
 ### The expression DAG
 
-Every label is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
+Every label that holds a conjunction is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
 an AND or an OR over its children. Structurally identical subexpressions are one node, so `secret`
 appears once however many labels mention it. Each node records its parents, and each label id
 points at its root node.
@@ -234,10 +241,12 @@ flowchart BT
   c[eu] --> n3
   n2 --> L1["label 1: secret&(team_a|team_b)"]
   n3 --> L2["label 2: team_a&eu"]
-  a --> L3["label 3: team_a"]
+  s --> n4["AND"]
+  c --> n4
+  n4 --> L3["label 3: secret&eu"]
 ```
 
-*Three labels sharing the leaves `secret` and `team_a`.*
+*Three labels sharing the leaves `secret`, `team_a` and `eu`.*
 
 The DAG's size is linear in the total size of the distinct expressions, so an expression with many
 disjuncts costs space in proportion to its length. Converting to disjunctive normal form would cost
@@ -247,21 +256,21 @@ refused when it is written, with the count in the message.
 
 ### Authorising
 
-At authorise, the service marks each of the credential's terms true and propagates upwards. An OR
-node becomes true when its first child does. An AND node keeps a count and becomes true when every
-child has. The authorised set is the union of the postings of every label whose root became true.
-
-The DAG holds only the labels indexed under a label id. The authorised set is the union of the
-postings of the credential's terms and of the labels whose root became true.
+At authorise, the service marks each of the credential's terms true and propagates upwards through
+the DAG. An OR node becomes true when its first child does. An AND node keeps a count and becomes
+true when every child has. The authorised set is the union of the postings of the credential's
+terms, which admit every item whose label is a disjunction of terms, and the postings of every
+label in the DAG whose root became true.
 
 The pass visits only the nodes reachable from the credential's terms. A label that mentions none of
 them cannot be true, because the expressions have no negation, so it is never visited. The cost is
-proportional to the part of the DAG the credential reaches. This matters most for a corpus where
-nearly every item has its own label, such as documents each shared with a few named people: a
-principal's pass visits only the labels that name it.
+proportional to the part of the DAG the credential reaches, and to the number of labels that
+become true: each true label adds its own postings. That second cost is why labels that are
+disjunctions of terms, such as per-document sharing where nearly every item has its own label, are
+kept out of the DAG.
 
-Measured on a model, one thread: 3 to 15 ms at 100,000 compartmented labels and 20 to 95 ms at
-500,000, for credentials holding 10 to 1,000 terms. Authorise runs once per session, so these
+Measured on a model, one thread, as medians: 3 to 15 ms at 100,000 compartmented labels and 20 to
+95 ms at 500,000, for credentials holding 10 to 1,000 terms, with a p99 of up to 170 ms. Authorise runs once per session, so these
 figures are paid at session start and never by a map request.
 
 ### What changes elsewhere
@@ -278,10 +287,18 @@ figures are paid at session start and never by a map request.
   the item side and the catalogue on the credential side. Both use one vocabulary, so the service
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
 - The bundle's format changes and its version is bumped.
+- Pages in `docs/system/` that this note changes, and which are rewritten when it is built:
+  - [write-path](system/write-path.md), where an item's permission signature is its sorted list of
+    terms. Here it is the label id.
+  - [access-control](system/access-control.md), which says the service never refreshes a grant on
+    its own. Here a catalogue change ends the affected sessions.
+  - [security](system/security.md), whose control plane is trusted with every item. Here writers are
+    principals masked by their own terms, and the unique-field rule under [Writes](#writes) replaces
+    its rule that a lookup by value answers an invisible holder as absent.
 
 ## Sessions
 
-A token is a random bearer string, as it is today. The session behind it records the principal,
+A token is a random bearer string, as it is in the current system. The session behind it records the principal,
 local or `(iss, sub)`, and the terms it resolved to.
 
 Any catalogue change that could change a principal's terms or permissions ends every session of
@@ -292,15 +309,19 @@ every principal it affects. This includes changes that widen access. The affecte
 - a principal added to or removed from a group;
 - a principal disabled or deleted;
 - a password set or cleared;
-- an API key revoked, which ends the sessions authorised with that key;
+- an API key revoked, which ends every session authorised with that key, including the sessions an
+  integrator minted for other principals through `authorise-as` with it;
 - a change to an OIDC provider's configuration or claim rules, which ends every session authorised
   through that provider.
 
-An OIDC identity's grants come from its token, which Tessera cannot see change. Its sessions end
-when the token lifetime configured in `token_max_lifetime` passes, or when its provider's
+A session never outlives what authorised it. A session authorised with an API key that has an
+expiry ends when the key expires. An OIDC identity's grants come from its token, which Tessera
+cannot see change, so its session ends at the token's own expiry (`exp`), at the lifetime
+configured in `tessera.toml`'s `token_max_lifetime` if that is sooner, or when its provider's
 configuration changes.
 
-Deletion and suppression apply to open sessions exactly as they do today, through the overlay.
+Deletion and suppression apply to open sessions through the overlay, as they do in the current
+system.
 
 ## Writes
 
@@ -314,10 +335,12 @@ A write is masked by the writer's own terms unless the writer has `bypass`.
   way. Changing or dropping a view or a layer the writer cannot reach returns the answer for one
   that does not exist.
 - An insert whose unique field collides with an item the writer cannot see is refused as a
-  collision. The refusal tells the writer that an item with that value exists, and nothing else
-  about it. Postgres's row-level security has the same property and documents it. Scoping
-  uniqueness to what each writer can see would let two items share a value that is meant to
-  identify one.
+  collision. It is never treated as an update of that item, and the refusal carries no
+  `tessera_id`. It tells the writer that an item with that value exists, and nothing else about it.
+  Postgres's row-level security has the same property and documents it. Scoping uniqueness to what
+  each writer can see would let two items share a value that is meant to identify one.
+- Declaring a view or a layer under a name that a view or layer the writer cannot reach already
+  holds is refused as a collision in the same way.
 
 Checking a write evaluates each affected item's label against the writer's terms, from the label's
 root node upwards, so the writer's authorised set is never built.
@@ -357,6 +380,10 @@ The three listeners stay, and each accepts the credentials of the callers it ser
 | Session | A principal with `authorise-as`, by API key. | `POST /session/authorise`, naming the principal to authorise, and `POST /session/revoke`. |
 | Control | An API key, or the operator credential. | Writes, and the catalogue's verbs. |
 
+Not decided: whether the control listener also accepts an OIDC access token. Without it, an OIDC
+identity granted `write` or `admin` through a fixed-group rule can use `write` through the viewer
+listener, as a session carrying `write`, and cannot use `admin` at all.
+
 The session listener stays separate because the credential that reaches it acts as any viewer. It
 belongs to an integrator's backend and is not exposed to a browser.
 
@@ -372,8 +399,8 @@ change records who made it and what it changed.
 
 - An expression that holds a conjunction may hold at most a configured number of DAG nodes, 1,024
   by default. A disjunction of terms never enters the DAG and has no limit. Adding a label
-  to the DAG costs time quadratic in its length: the probe measured 15.7 ms at 1,024 nodes and
-  8.1 s at 16,384. The longest label in the probe's corpora held 66.
+  to the DAG costs time quadratic in its length: the probe measured 0.8 ms at 515 nodes, 15.7 ms at
+  2,051 and 8.1 s at 32,771. The longest label in the probe's corpora held 66.
 - A password is at least a configured number of characters long, fifteen by default, the length
   NIST SP 800-63B requires for a password that is the only factor. No composition rule is applied.
 - Ten failed password attempts for one name within fifteen minutes refuse further attempts for that

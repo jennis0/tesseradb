@@ -1,15 +1,15 @@
 # Authorising over a shared label DAG
 
 **Date:** 2026-09-30 · **Harness:** [`labeldag/`](labeldag/) · **Raw:** [`raw/`](raw/) ·
-**Machine:** 4 cores of an Intel Xeon @ 2.10GHz (cloud VM, one thread per core, 8 MiB L2 per core),
+**Machine:** 4 cores of an Intel Xeon @ 2.10GHz (cloud VM, one thread per core, 2 MiB L2 per core),
 16 GB of memory, Linux 6.18, rustc 1.94.1, release build with debug off
 ([`raw/machine.txt`](raw/machine.txt))
 
 [users-and-access.md](../../docs/users-and-access.md) proposes Accumulo visibility expressions as
 access labels. Each distinct label gets a label id, each item carries exactly one, the labels are
 compiled into one hash-consed DAG, and authorise propagates the credential's terms upwards and
-unions the postings of every label whose root became true. Its section on authorising asks for this
-measurement before the design is committed.
+unions the postings of every label whose root became true. This probe measures that pass before
+the design is built.
 
 Nothing here is Tessera code. The probe is a model: its own parser, normaliser, DAG and postings,
 depending on no workspace crate. The only shared piece is the Roaring library, `croaring` 2.6.0
@@ -95,7 +95,7 @@ top-down evaluation of the label alone, the check a masked write makes.
 
 ## The corpora
 
-All three are generated from fixed seeds and are the sizes the brief asked for. Nothing was scaled
+All three are generated from fixed seeds and are the sizes chosen for the probe. Nothing was scaled
 down. Items are numbered in label-id order, so each label's items are one contiguous run, as a
 build that sorts by label id would store them.
 
@@ -162,8 +162,8 @@ from A100k to A500k, the drawn 10-term pass visits 4.1 times as many nodes for 0
 authorised items.
 
 Whether 20 to 95 ms is acceptable depends on how often authorise runs. It runs once per session,
-and again for each session when the background refresh re-evaluates labels. That decision is
-Joe's. The figures are single-threaded, and the pass has no parallelism in it.
+and again for each session when the background refresh re-evaluates labels. That decision
+belongs to the design, not to this probe. The figures are single-threaded, and the pass has no parallelism in it.
 
 For per-document labels (B) it is not fast enough. It is 8 to 77 times slower than today's scheme
 on the same corpus and the same answer: 102 ms against 1.38 ms for a drawn 10-term credential, 798
