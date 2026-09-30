@@ -1,5 +1,5 @@
-//! Random labels over six terms, evaluated through the DAG and against the tree they were written
-//! from. The tree is evaluated by direct recursion here, without parsing or normalising, so
+//! Random labels over six terms, written with random brackets and whitespace, evaluated through the
+//! DAG and against the tree they were written from. The tree is evaluated by direct recursion here, without parsing or normalising, so
 //! agreement checks the parser, normalisation, hash-consing, the bottom-up pass, top-down
 //! evaluation and the witness together.
 
@@ -33,20 +33,45 @@ fn random_tree(rng: &mut StdRng, depth: u32) -> Tree {
     }
 }
 
-fn text(tree: &Tree) -> String {
+fn space(rng: &mut StdRng) -> &'static str {
+    ["", "", " ", "\t", "  "][rng.gen_range(0..5)]
+}
+
+fn term_text(t: usize) -> String {
+    if TERMS[t].contains(['"', '\\', ' ']) {
+        let escaped = TERMS[t].replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("\"{escaped}\"");
+    }
+    TERMS[t].to_owned()
+}
+
+/// Writes `tree` with random whitespace, bracketing an operand at random wherever the brackets
+/// can be left out. Returns the text and the operator written outside any bracket.
+fn text(tree: &Tree, rng: &mut StdRng) -> (String, Option<char>) {
     let (op, v) = match tree {
-        Tree::Term(t) if TERMS[*t].contains(['"', '\\', ' ']) => {
-            let escaped = TERMS[*t].replace('\\', "\\\\").replace('"', "\\\"");
-            return format!(" \"{escaped}\" ");
-        }
-        Tree::Term(t) => return TERMS[*t].to_owned(),
-        Tree::And(v) => (" & ", v),
-        Tree::Or(v) => ("|", v),
+        Tree::Term(t) => return (term_text(*t), None),
+        Tree::And(v) => ('&', v),
+        Tree::Or(v) => ('|', v),
     };
-    v.iter()
-        .map(|c| format!("({})", text(c)))
-        .collect::<Vec<_>>()
-        .join(op)
+    let mut out = String::new();
+    let mut top = (v.len() > 1).then_some(op);
+    for (i, operand) in v.iter().enumerate() {
+        if i > 0 {
+            out.push_str(space(rng));
+            out.push(op);
+            out.push_str(space(rng));
+        }
+        let (inner, inner_top) = text(operand, rng);
+        let may_be_bare = v.len() == 1 || inner_top.is_none_or(|t| t == op);
+        if may_be_bare && rng.gen_bool(0.5) {
+            out.push_str(&inner);
+            top = top.or(inner_top);
+        } else {
+            let (before, after) = (space(rng), space(rng));
+            out.push_str(&format!("({before}{inner}{after})"));
+        }
+    }
+    (out, top)
 }
 
 fn holds(tree: &Tree, held: u32) -> bool {
@@ -72,6 +97,7 @@ fn held_ids(held: u32) -> Vec<TermId> {
 
 struct Case {
     tree: Tree,
+    text: String,
     label: Label,
     id: LabelId,
 }
@@ -81,9 +107,17 @@ fn cases(labels: &mut Labels) -> Vec<Case> {
     (0..600)
         .map(|_| {
             let tree = random_tree(&mut rng, 4);
-            let label = Label::parse(&text(&tree), DEFAULT_MAX_NODES).unwrap();
+            let (text, _) = text(&tree, &mut rng);
+            let (before, after) = (space(&mut rng), space(&mut rng));
+            let label = Label::parse(&format!("{before}{text}{after}"), DEFAULT_MAX_NODES)
+                .unwrap_or_else(|e| panic!("{text:?}: {e}"));
             let id = labels.intern(&label, term_id);
-            Case { tree, label, id }
+            Case {
+                tree,
+                text,
+                label,
+                id,
+            }
         })
         .collect()
 }
@@ -111,7 +145,7 @@ fn authorise_agrees_with_direct_evaluation_for_every_credential() {
                 out.contains(&case.id),
                 expected,
                 "{} held={held:06b}",
-                text(&case.tree)
+                case.text
             );
         }
     }
@@ -126,7 +160,7 @@ fn every_evaluation_agrees_with_direct_evaluation() {
         let by_id = |t: TermId| ids.contains(&t);
         for case in &cases {
             let expected = holds(&case.tree, held);
-            let context = format!("{} held={held:06b}", text(&case.tree));
+            let context = format!("{} held={held:06b}", case.text);
             assert_eq!(labels.satisfied(case.id, &by_id), expected, "{context}");
             assert_eq!(
                 case.label.satisfied_by(&|t| by_id(term_id(t))),
@@ -136,6 +170,7 @@ fn every_evaluation_agrees_with_direct_evaluation() {
             let witness = labels.witness(case.id, &by_id);
             assert_eq!(witness.is_some(), expected, "{context}");
             let only_witness = witness.unwrap_or_default();
+            assert!(only_witness.iter().all(|&t| by_id(t)), "{context}");
             assert!(
                 !expected || labels.satisfied(case.id, &|t| only_witness.contains(&t)),
                 "{context}"

@@ -7,8 +7,8 @@ not mix them. Whitespace around a term, an operator or a bracket is ignored, and
 trimmed.
 
 A label is refused when it is empty, when brackets nest more than 256 deep, when a term holds a
-control character, and when a term equals `public` ignoring ASCII case. `public` is accepted only as
-the whole label, and every principal satisfies it.
+control character, and when a term equals `public` or `inherited` ignoring ASCII case. `public` is
+accepted only as the whole label, and every principal satisfies it. `inherited` is never a label.
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 PUBLIC = "public"
+INHERITED = "inherited"
 MAX_DEPTH = 256
 # Unicode's White_Space property, which trimming removes. `str.isspace` also accepts U+001C to
 # U+001F, which are control characters here.
@@ -163,6 +164,6 @@ def _term(name: str) -> Term:
         raise Refused("empty term")
     if any(unicodedata.category(c) == "Cc" for c in name):
         raise Refused(f"control character in {name!r}")
-    if name.lower() == PUBLIC and name.isascii():
+    if name.isascii() and name.lower() in (PUBLIC, INHERITED):
         raise Refused(f"{name!r} is reserved")
     return Term(name)

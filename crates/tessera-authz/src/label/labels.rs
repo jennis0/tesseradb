@@ -49,10 +49,10 @@ impl Labels {
     /// The label id of `label`, issuing a new one if no equal label has one. `term` gives the id
     /// of each term the label names, and must give distinct terms distinct ids.
     pub fn intern(&mut self, label: &Label, mut term: impl FnMut(&str) -> TermId) -> LabelId {
-        match (label.shape(), label.expr()) {
-            (Shape::AnyOf, Some(e)) => self.intern_any_of(e, &mut term),
-            (Shape::Compound, Some(e)) => self.intern_compound(e, &mut term),
-            _ => self.intern_public(),
+        match label.expr() {
+            None => self.intern_public(),
+            Some(e) if label.shape() == Shape::AnyOf => self.intern_any_of(e, &mut term),
+            Some(e) => self.intern_compound(e, &mut term),
         }
     }
 
@@ -217,6 +217,21 @@ mod tests {
             shapes
         );
         assert_eq!(f.labels.any_of(ids[1]).len(), 2);
+    }
+
+    #[test]
+    fn compound_labels_sharing_a_subexpression_keep_their_own_meaning() {
+        let mut f = Fixture::new();
+        let first = f.add("s&(a|b)");
+        assert_eq!(f.add("(b|a)&s"), first);
+        let other = f.add("s|(a&b)");
+        let third = f.add("(a|b)&e");
+        assert_eq!([first, other, third].map(|id| id.raw()), [0, 1, 2]);
+        assert!(f.labels.satisfied(first, &f.holds(&["s", "b"])));
+        assert!(!f.labels.satisfied(first, &f.holds(&["a", "b"])));
+        assert!(f.labels.satisfied(other, &f.holds(&["a", "b"])));
+        assert!(!f.labels.satisfied(third, &f.holds(&["s", "a"])));
+        assert!(f.labels.satisfied(third, &f.holds(&["b", "e"])));
     }
 
     #[test]

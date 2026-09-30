@@ -6,9 +6,6 @@
 //! labels can be added while the service runs. Each node keeps a list of its parents, which the
 //! bottom-up pass follows. The lists are threaded through the edge arrays, so adding a node
 //! allocates nothing per node beyond its edges.
-//!
-//! The DAG's size is linear in the total size of the distinct labels. Converting them to
-//! disjunctive normal form instead would cost space exponential in the number of disjuncts.
 
 use std::hash::Hasher;
 
@@ -244,11 +241,6 @@ impl Dag {
             }
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn nodes(&self) -> usize {
-        self.node.len()
-    }
 }
 
 #[cfg(test)]
@@ -260,16 +252,6 @@ mod tests {
         let label = Label::parse(text, DEFAULT_MAX_NODES).unwrap();
         let mut term = |t: &str| TermId::new(u32::from(t.as_bytes()[0]));
         dag.intern(label.expr().unwrap(), &mut term)
-    }
-
-    #[test]
-    fn shared_subexpressions_are_one_node() {
-        let mut dag = Dag::new();
-        let first = intern(&mut dag, "s&(a|b)");
-        assert_eq!(dag.nodes(), 5);
-        assert_eq!(intern(&mut dag, "(b|a)&s"), first);
-        intern(&mut dag, "a&e");
-        assert_eq!(dag.nodes(), 7);
     }
 
     #[test]

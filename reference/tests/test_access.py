@@ -21,6 +21,7 @@ def holding(*names):
         ("a & (b | c)", And((Term("a"), Or((Term("b"), Term("c")))))),
         (" public ", Public()),
         ("publicly", Term("publicly")),
+        ("inheritance", Term("inheritance")),
     ],
 )
 def test_what_a_label_reads_as(text, tree):
@@ -32,7 +33,8 @@ def test_what_a_label_reads_as(text, tree):
     [
         "", "  ", "a&b|c", "a|b&c", "a&", "&a", "a b", "(a", "a)", "()", '""', '"  "', '"a',
         '"a\\n"', "!a", "a&!b", "é", "a,b", '"a\tb"', '"\x07"', "a\x1c", "public&a", "PUBLIC",
-        '"public"', "(public)", "a|Public",
+        '"public"', "(public)", "a|Public", "inherited", " Inherited ", "INHERITED",
+        '"inherited"', "(inherited)", "a&inherited", "a|(b&InHeRiTeD)",
     ],
 )
 def test_what_is_refused(text):

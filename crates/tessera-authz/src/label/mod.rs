@@ -4,8 +4,7 @@
 //! text, refuses what the grammar refuses, and returns the label normalised: nested operators of
 //! one kind flattened, operands sorted and deduplicated, and absorption applied, so that `a|(a&b)`
 //! is `a`. Equal labels then have equal [`Label::canonical`] text. Two equivalent labels that
-//! normalise differently stay two labels and evaluate identically, so normalisation affects no
-//! access decision.
+//! normalise differently stay two labels.
 //!
 //! [`Labels`] gives each distinct label a [`LabelId`]. A label that is `public` or a disjunction
 //! of terms is recorded with its terms, which index it. Every other label holds a conjunction and
@@ -24,10 +23,6 @@ pub use labels::Labels;
 use std::fmt;
 
 /// The largest number of nodes a label may hold unless the service configures another.
-///
-/// Normalising a label compares every pair of operands, so writing one costs time quadratic in
-/// its length. Measured on a model of this design, adding a disjunction of 1,024 three-term
-/// conjunctions took 15.7 ms, and of 16,384 took 8.1 s.
 pub const DEFAULT_MAX_NODES: usize = 1024;
 
 /// A parsed access expression. Operands of a normalised expression are sorted, distinct, and
@@ -174,6 +169,22 @@ mod tests {
             assert!(Label::parse(text, DEFAULT_MAX_NODES).is_err(), "{text}");
         }
         assert!(label("publicly").shape() == Shape::AnyOf);
+    }
+
+    #[test]
+    fn inherited_is_refused_in_any_case_and_any_position() {
+        for text in [
+            "inherited",
+            " Inherited ",
+            "INHERITED",
+            "\"inherited\"",
+            "(inherited)",
+            "a&inherited",
+            "a|(b&InHeRiTeD)",
+        ] {
+            assert!(Label::parse(text, DEFAULT_MAX_NODES).is_err(), "{text}");
+        }
+        assert_eq!(label("inheritance").shape(), Shape::AnyOf);
     }
 
     #[test]

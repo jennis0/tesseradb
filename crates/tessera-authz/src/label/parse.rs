@@ -4,8 +4,9 @@
 //! double-quoted, with `\"` and `\\` as the only escapes. `&` and `|` join operands, and mixing
 //! them in one bracket is refused. Whitespace around a term, an operator or a bracket is skipped,
 //! and a quoted term is trimmed, as a label read from data is. A term holding a control character,
-//! or equal to `public` ignoring ASCII case, is refused: `public` is valid only as a whole label,
-//! which [`super::Label::parse`] handles before this parser runs.
+//! or equal to `public` or `inherited` ignoring ASCII case, is refused. `public` is valid only as a
+//! whole label, which [`super::Label::parse`] handles before this parser runs. `inherited` is never
+//! a label.
 
 use super::{Expr, LabelError};
 
@@ -29,6 +30,8 @@ const EMPTY_TERM: &str = "a quoted term is empty; write at least one character b
 const CONTROL: &str = "a term holds a control character; remove it";
 const PUBLIC_TERM: &str = "`public` is reserved and valid only as the whole label; write \
      `public` alone, or use another term";
+const INHERITED_TERM: &str = "`inherited` is reserved for an annotation layer's artifact default \
+     and is not a label; write another term, or `public`";
 const TOO_DEEP: &str = "brackets nest more than 256 deep; write the expression with fewer brackets";
 
 /// Parses `text` into an expression, without normalising it. `text` is not `public`.
@@ -124,6 +127,7 @@ impl Parser<'_> {
     }
 
     fn quoted(&mut self) -> Result<String, LabelError> {
+        let open = self.i;
         self.i += 1;
         let mut term = String::new();
         loop {
@@ -137,7 +141,10 @@ impl Parser<'_> {
         }
         let trimmed = term.trim();
         if trimmed.is_empty() {
-            return Err(self.err(EMPTY_TERM));
+            return Err(LabelError::Invalid {
+                at: open,
+                reason: EMPTY_TERM,
+            });
         }
         Ok(trimmed.to_owned())
     }
@@ -160,6 +167,9 @@ fn check_term(term: &str) -> Result<(), &'static str> {
     }
     if term.eq_ignore_ascii_case(tessera_types::label::PUBLIC) {
         return Err(PUBLIC_TERM);
+    }
+    if term.eq_ignore_ascii_case(tessera_types::label::INHERITED) {
+        return Err(INHERITED_TERM);
     }
     Ok(())
 }
@@ -212,6 +222,9 @@ mod tests {
             "\"\u{7}\"",
             "public&a",
             "PUBLIC",
+            "inherited",
+            "a|Inherited",
+            "\"INHERITED\"&b",
         ];
         for text in refused {
             assert!(parse(text).is_err(), "{text:?}");
@@ -234,6 +247,10 @@ mod tests {
         assert!(matches!(
             parse("a&\"Public\""),
             Err(LabelError::Invalid { at: 2, .. })
+        ));
+        assert!(matches!(
+            parse("a & \"  \""),
+            Err(LabelError::Invalid { at: 4, .. })
         ));
     }
 }
