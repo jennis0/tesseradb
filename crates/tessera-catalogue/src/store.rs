@@ -357,22 +357,23 @@ fn load_keys(conn: &Connection, st: &mut State, ids: &Ids) -> Result<(), Error> 
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
         let prefix: String = r.get(0)?;
-        let hash: Vec<u8> = r.get(2)?;
-        let permissions: Option<i64> = r.get(5)?;
-        st.keys.insert(
-            prefix,
-            KeyRec {
-                principal: ids.principals[&r.get::<_, i64>(1)?].clone(),
-                hash: hash
-                    .try_into()
-                    .map_err(|_| corrupt("an API key hash that is not 32 bytes".into()))?,
-                created_at: time(r.get(3)?)?,
-                expires_at: r.get::<_, Option<i64>>(4)?.map(time).transpose()?,
-                permissions: permissions.map(perms).transpose()?,
-            },
-        );
+        st.keys.insert(prefix, key_row(r, ids)?);
     }
     Ok(())
+}
+
+fn key_row(r: &rusqlite::Row<'_>, ids: &Ids) -> Result<KeyRec, Error> {
+    let hash: Vec<u8> = r.get(2)?;
+    let permissions: Option<i64> = r.get(5)?;
+    Ok(KeyRec {
+        principal: ids.principals[&r.get::<_, i64>(1)?].clone(),
+        hash: hash
+            .try_into()
+            .map_err(|_| corrupt("an API key hash that is not 32 bytes".into()))?,
+        created_at: time(r.get(3)?)?,
+        expires_at: r.get::<_, Option<i64>>(4)?.map(time).transpose()?,
+        permissions: permissions.map(perms).transpose()?,
+    })
 }
 
 /// A stored time in seconds since the epoch, which a write never stores negative.

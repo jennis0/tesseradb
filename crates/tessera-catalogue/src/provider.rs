@@ -503,33 +503,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_malformed_rule_is_refused() {
-        let bad_rules = [
-            term_rule("", "x"),
-            term_rule("a..b", "x"),
-            term_rule("a[0]", "x"),
-            term_rule("a[*]b", "x"),
-            term_rule(r#""unclosed"#, "x"),
-            term_rule("groups[*]", "public"),
-            term_rule("groups[*]", "PUBLIC"),
-            term_rule("groups[*]", "  "),
-            term_rule("groups[*]", "{value}-{value}"),
-            term_rule("groups[*]", "g\u{0}{value}"),
-            group_rule("tid", ""),
-            group_rule("tid", "{value}"),
-            group_rule("tid", " {value} "),
-            group_rule("tid", "t\n{value}"),
-            fixed_rule("groups[*]", " ", "admins"),
-            fixed_rule("groups[*]", "tessera-admins", ""),
-            fixed_rule("groups[*]", "tessera-admins", "ad\tmins"),
-        ];
-        for rule in bad_rules {
+    fn refused(rules: Vec<ClaimRule>) {
+        for rule in rules {
             assert!(
                 provider(vec![rule.clone()]).validated(false).is_err(),
                 "{rule:?} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn a_malformed_claim_path_is_refused() {
+        refused(vec![
+            term_rule("", "x"),
+            term_rule("a..b", "x"),
+            term_rule("a[0]", "x"),
+            term_rule("a[*]b", "x"),
+            term_rule("\"unclosed", "x"),
+        ]);
+    }
+
+    #[test]
+    fn a_term_template_that_cannot_produce_a_term_is_refused() {
+        refused(vec![
+            term_rule("groups[*]", "public"),
+            term_rule("groups[*]", "PUBLIC"),
+            term_rule("groups[*]", "  "),
+            term_rule("groups[*]", "{value}-{value}"),
+            term_rule("groups[*]", "g\u{0}{value}"),
+        ]);
+    }
+
+    #[test]
+    fn a_group_template_without_literal_text_or_with_a_control_character_is_refused() {
+        refused(vec![
+            group_rule("tid", ""),
+            group_rule("tid", "{value}"),
+            group_rule("tid", " {value} "),
+            group_rule("tid", "t\n{value}"),
+        ]);
+    }
+
+    #[test]
+    fn a_fixed_group_rule_needs_a_value_and_a_group() {
+        refused(vec![
+            fixed_rule("groups[*]", " ", "admins"),
+            fixed_rule("groups[*]", "tessera-admins", ""),
+            fixed_rule("groups[*]", "tessera-admins", "ad\tmins"),
+        ]);
         let good = provider(vec![fixed_rule(
             " groups[*] ",
             " tessera-admins ",
