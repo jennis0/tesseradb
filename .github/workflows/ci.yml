@@ -216,11 +216,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      # Node >= 20, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
-      # and `clients/py/check.sh`'s wheel is built by a hatchling hook that shells out to npm.
+      # Node >= 22.15, which both scripts below need: `check-clients.sh` refuses without npm on PATH,
+      # the core tests compress with `node:zlib`'s zstd, and `clients/py/check.sh`'s wheel is built
+      # by a hatchling hook that shells out to npm.
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: clients/ts/package-lock.json
       - uses: actions/setup-python@v7
