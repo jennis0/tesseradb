@@ -37,22 +37,23 @@ use tessera_build::{build, BuildArgs, BuildReport};
 use tessera_spatial::Bounds;
 
 /// Appends `line` to `build_equals_ingest.log` in the directory `TESSERA_TEST_TRACE_DIR` names,
-/// and does nothing when it is unset. Each line is written straight to the file, so the last phase
-/// reached can be read after the test process is killed.
+/// and does nothing when it is unset. Each line is one write straight to the file, so the last
+/// phase reached can be read after the test process is killed. A line that cannot be written is
+/// dropped, so the trace never decides the test's result.
 fn trace(line: &str) {
     use std::io::Write;
     let Some(dir) = std::env::var_os("TESSERA_TEST_TRACE_DIR") else {
         return;
     };
-    std::fs::create_dir_all(&dir).expect("the trace directory can be created");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(Path::new(&dir).join("build_equals_ingest.log"))
-        .expect("the trace file opens");
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs_f64();
-    let pid = std::process::id();
-    writeln!(file, "{now:.3} pid {pid} {line}").expect("the trace line is written");
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap_or_default().as_secs_f64();
+    let line = format!("{now:.3} pid {} {line}\n", std::process::id());
+    let _ = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Path::new(&dir).join("build_equals_ingest.log"))?
+            .write_all(line.as_bytes())
+    });
 }
 
 const LAYER: &str = "groups";
