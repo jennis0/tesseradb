@@ -53,7 +53,6 @@
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,7 +66,11 @@ use tessera_authz::{Dict, FragmentCache, FrozenFragment, PostingsReader};
 use tessera_engine::{ProjectionInputs, ProjectionRoute, RowProjection};
 use tessera_store::manifest::CurrentPointer;
 use tessera_store::read::open_bundle;
-use tessera_store::term_images::{choose, chooser_inputs, ChooserInputs, Route, ROUTE_COSTS};
+use tessera_store::term_images::{
+    choose, chooser_inputs, ChooserInputs, Route, TermImages, ROUTE_COSTS,
+};
+use tessera_store::RowSpace;
+use tessera_types::process::{self, resident_bytes};
 use tessera_types::TermId;
 
 #[derive(Parser)]
@@ -101,9 +104,9 @@ struct Args {
     /// The seed both draws use. Printed and recorded.
     #[arg(long, default_value_t = 20_260_917)]
     seed: u64,
-    /// The commit to record. `git rev-parse HEAD` in the working directory when absent.
+    /// The commit to record.
     #[arg(long)]
-    commit: Option<String>,
+    commit: String,
     /// Where the results go.
     #[arg(long)]
     out: PathBuf,
@@ -180,15 +183,6 @@ fn reset_peak() {
     let _ = std::fs::write("/proc/self/clear_refs", "5");
 }
 
-/// Return freed heap to the kernel, so a run's anonymous baseline is not the last run's free
-/// lists.
-fn trim_heap() {
-    // SAFETY: `malloc_trim` takes a padding size and touches only the allocator's own state.
-    unsafe {
-        libc::malloc_trim(0);
-    }
-}
-
 /// Samples `RssAnon` every millisecond on its own thread, so a run's peak anonymous memory is
 /// recorded rather than only its value at the end.
 struct AnonSampler {
@@ -200,13 +194,13 @@ struct AnonSampler {
 
 impl AnonSampler {
     fn start() -> Self {
-        let base = status_bytes("RssAnon:");
+        let base = resident_bytes().anon;
         let stop = Arc::new(AtomicBool::new(false));
         let peak = Arc::new(AtomicU64::new(base));
         let (s, p) = (Arc::clone(&stop), Arc::clone(&peak));
         let handle = std::thread::spawn(move || {
             while !s.load(Ordering::Relaxed) {
-                let now = status_bytes("RssAnon:");
+                let now = resident_bytes().anon;
                 p.fetch_max(now, Ordering::Relaxed);
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -225,10 +219,7 @@ impl AnonSampler {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        let peak = self
-            .peak
-            .load(Ordering::Relaxed)
-            .max(status_bytes("RssAnon:"));
+        let peak = self.peak.load(Ordering::Relaxed).max(resident_bytes().anon);
         (self.base, peak, peak.saturating_sub(self.base))
     }
 }
@@ -495,19 +486,6 @@ fn weighted_draw(candidates: &[(u32, f64)], count: usize, rng: &mut SplitMix) ->
     drawn
 }
 
-fn commit_of_cwd() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
-}
-
 fn box_json() -> Value {
     json!({
         "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_string()).ok(),
@@ -519,34 +497,43 @@ fn box_json() -> Value {
 // The run
 // ------------------------------------------------------------------------------------------
 
+/// What every arm over one view reads, beside the principal's own fragment: the postings, the
+/// view's images and row space, and the files a cold arm evicts.
+struct Subject<'a> {
+    postings: &'a PostingsReader,
+    images: Option<&'a TermImages>,
+    row_space: &'a RowSpace,
+    evictable: &'a [PathBuf],
+}
+
 /// One arm, cold then warm, with equality against `walk` when one is given.
-#[allow(clippy::too_many_arguments)]
 fn arm(
     label: &str,
     force: Option<ProjectionRoute>,
+    subject: &Subject<'_>,
     fragment: &FrozenFragment,
     satisfied: &[TermId],
-    postings: &PostingsReader,
-    images: Option<&tessera_store::term_images::TermImages>,
-    row_space: &tessera_store::RowSpace,
-    evictable: &[PathBuf],
     walk: Option<&Bitmap>,
 ) -> Result<(Value, Bitmap), String> {
     let run = |cold: bool| -> Result<(Value, Bitmap), String> {
-        let advised = if cold { evict(evictable) } else { json!(null) };
-        trim_heap();
+        let advised = if cold {
+            evict(subject.evictable)
+        } else {
+            json!(null)
+        };
+        process::trim_heap();
         reset_peak();
         let sampler = AnonSampler::start();
         let counters = Counters::now();
         let inputs = ProjectionInputs {
             fragment,
             satisfied,
-            postings,
+            postings: subject.postings,
             deltas: &[],
-            images,
+            images: subject.images,
             force,
         };
-        let (projection, route) = RowProjection::new(&inputs, row_space)
+        let (projection, route) = RowProjection::new(&inputs, subject.row_space)
             .map_err(|e| format!("arm '{label}': building the projection: {e}"))?;
         let counters = counters.since();
         let (anon_base, anon_peak, anon_rise) = sampler.finish();
@@ -589,15 +576,279 @@ fn arm(
     Ok((record, warm_rows))
 }
 
+/// What a cold arm evicts: the permutation the walk reads, the postings the residual reads and
+/// the images the split maps.
+fn evictable(partition_dir: &Path, view: &str, postings_path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![
+        partition_dir
+            .join("views")
+            .join(view)
+            .join("permutation.bin"),
+        postings_path.to_path_buf(),
+    ];
+    if let Ok(entries) = std::fs::read_dir(partition_dir.join("term-images")) {
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        found.sort();
+        paths.extend(found);
+    }
+    paths.retain(|p| p.exists());
+    paths
+}
+
+/// The compartment ladder's principals, composed from `--ranks-file`, with the record of each.
+fn ladder_principals(
+    args: &Args,
+    base_rows: u64,
+    principals: &mut Vec<Principal>,
+    draws: &mut Vec<Value>,
+) -> Result<(), String> {
+    if args.country_ladder.is_empty() {
+        return Ok(());
+    }
+    let path = args.ranks_file.as_ref().ok_or_else(|| {
+        "--country-ladder composes from the rung's country-ranks.json; give --ranks-file"
+            .to_string()
+    })?;
+    let ranks: Vec<Rank> = serde_json::from_slice(
+        &std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?,
+    )
+    .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    for target in &args.country_ladder {
+        let (terms, pairs, rule) = compose_ladder(&ranks, base_rows, *target);
+        if terms.is_empty() {
+            return Err(format!(
+                "--country-ladder {target}: no term set composes to it over {} ranks",
+                ranks.len()
+            ));
+        }
+        let name = format!("p{}", (target * 100.0).round() as u64);
+        draws.push(json!({
+            "name": name,
+            "kind": "country ladder",
+            "target": target,
+            "rule": rule,
+            "target_pairs": pairs,
+            "terms": terms,
+        }));
+        principals.push(Principal { name, terms });
+    }
+    Ok(())
+}
+
+/// The year and species principals, drawn from the dictionary so the same invocation runs at any
+/// rung, with the record of each draw.
+///
+/// A species' weight is its posting's row count, which the image table records for every term
+/// whether or not its image was kept. A view with no image table cannot be drawn from this way,
+/// and the refusal says so rather than falling back to a uniform draw reported as weighted.
+fn drawn_principals(
+    args: &Args,
+    descriptors: &[String],
+    images: Option<&TermImages>,
+    principals: &mut Vec<Principal>,
+    draws: &mut Vec<Value>,
+) -> Result<(), String> {
+    let by_prefix = |prefix: &str| -> Vec<u32> {
+        descriptors
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| d.starts_with(prefix))
+            .map(|(i, _)| i as u32)
+            .collect()
+    };
+    if !args.species_weighted.is_empty() && images.is_none() {
+        return Err(
+            "--species-weighted needs the view's term-image table for the posting row counts it \
+             weights by, and this view has none"
+                .to_string(),
+        );
+    }
+    let weight = |id: u32| {
+        images
+            .and_then(|t| t.entry(TermId::new(id)))
+            .map_or(0.0, |e| e.rows as f64)
+    };
+    // Years are drawn uniformly, species by size.
+    let classes = [
+        (
+            "year",
+            "y:",
+            "--year-uniform",
+            "year, uniform",
+            false,
+            &args.year_uniform,
+        ),
+        (
+            "species",
+            "s:",
+            "--species-weighted",
+            "species, size-weighted",
+            true,
+            &args.species_weighted,
+        ),
+    ];
+    let mut rng = SplitMix(args.seed);
+    for (class, prefix, flag, kind, weighted, counts) in classes {
+        for count in counts {
+            let candidates: Vec<(u32, f64)> = by_prefix(prefix)
+                .into_iter()
+                .map(|id| (id, if weighted { weight(id) } else { 1.0 }))
+                .collect();
+            if candidates.is_empty() {
+                return Err(format!(
+                    "{flag}: the dictionary holds no term prefixed '{prefix}'"
+                ));
+            }
+            let drawn = weighted_draw(&candidates, *count, &mut rng);
+            let name = format!("{class}{count}");
+            draws.push(json!({
+                "name": name,
+                "kind": kind,
+                "asked": count,
+                "candidates": candidates.len(),
+                "drawn": drawn.len(),
+            }));
+            principals.push(Principal {
+                name,
+                terms: drawn
+                    .iter()
+                    .map(|id| descriptors[*id as usize].clone())
+                    .collect(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Each principal's terms as ids, ascending and deduplicated as a session's own are; a term the
+/// dictionary does not hold is refused before anything is measured.
+fn resolve(principals: &[Principal], dict: &Dict) -> Result<Vec<(String, Vec<TermId>)>, String> {
+    principals
+        .iter()
+        .map(|principal| {
+            let mut ids = principal
+                .terms
+                .iter()
+                .map(|term| {
+                    dict.lookup(term.as_bytes()).ok_or_else(|| {
+                        format!(
+                            "principal '{}': term '{term}' is not in the bundle dictionary",
+                            principal.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            ids.sort_unstable();
+            ids.dedup();
+            Ok((principal.name.clone(), ids))
+        })
+        .collect()
+}
+
+/// One principal: what the chooser is given and makes of it — recorded so the constants can be
+/// re-derived from the results without re-running — then the walk and the three other arms.
+fn measure(
+    name: &str,
+    ids: &[TermId],
+    subject: &Subject<'_>,
+    cache: &FragmentCache,
+) -> Result<Value, String> {
+    eprintln!("principal {name}: {} terms", ids.len());
+    let fragment = cache
+        .get_or_build(ids, subject.postings, &[], 0)
+        .map_err(|e| format!("principal '{name}': building the fragment: {e}"))?;
+    let base = subject.row_space.base();
+    let bound = base.bound();
+    let held = match bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) {
+        Some(hi) => fragment.view().range_cardinality(0..=hi),
+        None => 0,
+    };
+
+    let complement_valid = base.dense_rows().is_some();
+    let chooser = subject.images.map_or(
+        ChooserInputs {
+            held,
+            bound,
+            complement_valid,
+            ..ChooserInputs::default()
+        },
+        |t| chooser_inputs(t, ids, held, bound, complement_valid, 0),
+    );
+    let prices = ROUTE_COSTS.price(&chooser);
+    let chosen_offline = match choose(&chooser, &ROUTE_COSTS) {
+        Route::Walk => "walk",
+        Route::Split => "split",
+        Route::Complement => "complement",
+    };
+
+    // The walk first, so every other arm has something to be checked against.
+    let walk = Some(ProjectionRoute::Walk);
+    let (walk_record, walk_rows) = arm("walk", walk, subject, &fragment, ids, None)?;
+    let mut arms = vec![walk_record];
+    for (label, force) in [
+        ("chooser", None),
+        ("split", Some(ProjectionRoute::Split)),
+        ("complement", Some(ProjectionRoute::Complement)),
+    ] {
+        arms.push(arm(label, force, subject, &fragment, ids, Some(&walk_rows))?.0);
+    }
+
+    Ok(json!({
+        "name": name,
+        "terms": ids.len(),
+        "term_ids": ids.iter().map(|id| id.raw()).collect::<Vec<_>>(),
+        "fragment_cardinality": fragment.view().cardinality(),
+        "held_below_bound": held,
+        "coverage": held as f64 / bound.max(1) as f64,
+        "chooser_inputs": {
+            "held": chooser.held,
+            "bound": chooser.bound,
+            "complement_valid": chooser.complement_valid,
+            "kept_arrays_and_runs": chooser.kept_arrays_and_runs,
+            "kept_bitsets": chooser.kept_bitsets,
+            "kept_terms": chooser.kept_terms,
+            "residual_entities": chooser.residual_entities,
+        },
+        "chooser_priced_ns": {
+            "walk": prices.walk,
+            "split": prices.split,
+            "complement": prices.complement,
+        },
+        "chooser_route_offline": chosen_offline,
+        "arms": arms,
+    }))
+}
+
+/// `principal/arm` for every arm whose rows differ from the walk's.
+fn mismatched(principals: &[Value]) -> Vec<String> {
+    principals
+        .iter()
+        .flat_map(|principal| {
+            let arms = principal["arms"].as_array().into_iter().flatten();
+            arms.filter(|a| a["equal_to_walk"]["equal"] == json!(false))
+                .map(|a| {
+                    format!(
+                        "{}/{}",
+                        principal["name"].as_str().unwrap_or("?"),
+                        a["arm"].as_str().unwrap_or("?")
+                    )
+                })
+        })
+        .collect()
+}
+
 fn run(args: Args) -> Result<(), String> {
     // ---- The bundle, opened as `tessera serve` opens it.
     let opened = Counters::now();
     let bundle = open_bundle(&args.bundle).map_err(|e| format!("opening the bundle: {e}"))?;
     let opened = opened.since();
 
-    let current_path = args.bundle.join("CURRENT");
     let current: CurrentPointer = serde_json::from_slice(
-        &std::fs::read(&current_path).map_err(|e| format!("reading CURRENT: {e}"))?,
+        &std::fs::read(args.bundle.join("CURRENT")).map_err(|e| format!("reading CURRENT: {e}"))?,
     )
     .map_err(|e| format!("parsing CURRENT: {e}"))?;
     let prefix_dir = args.bundle.join(&current.prefix);
@@ -613,8 +864,6 @@ fn run(args: Args) -> Result<(), String> {
         format!("no view '{}' in the bundle; it has {:?}", args.view, names)
     })?;
     let row_space = &view_data.row_space;
-    let base = row_space.base();
-    let bound = base.bound();
     let images = view_data.term_images.as_deref();
 
     // ---- The dictionary and the postings, as `Engine::open` loads them.
@@ -635,175 +884,35 @@ fn run(args: Args) -> Result<(), String> {
     let postings_path = partition_dir.join("terms").join("postings.arrow");
     let postings = PostingsReader::open(&postings_path, true)
         .map_err(|e| format!("opening {}: {e}", postings_path.display()))?;
+    let evictable = evictable(&partition_dir, &args.view, &postings_path);
 
-    // ---- What a cold arm evicts: the permutation the walk reads, the images the split maps and
-    // the postings the residual reads.
-    let mut evictable = vec![
-        partition_dir
-            .join("views")
-            .join(&args.view)
-            .join("permutation.bin"),
-        postings_path.clone(),
-    ];
-    let image_dir = partition_dir.join("term-images");
-    if let Ok(entries) = std::fs::read_dir(&image_dir) {
-        let mut found: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        found.sort();
-        evictable.extend(found);
-    }
-    evictable.retain(|p| p.exists());
-
-    // ---- The principals. The drawn ones come out of the dictionary, so the same invocation runs
-    // at any rung.
+    // ---- The principals, every term resolved before anything is measured.
     let mut principals: Vec<Principal> = args
         .principals
         .iter()
         .map(|spec| parse_principal(spec))
         .collect::<Result<_, _>>()?;
     let mut draws = Vec::new();
-    if !args.country_ladder.is_empty() {
-        let path = args.ranks_file.as_ref().ok_or_else(|| {
-            "--country-ladder composes from the rung's country-ranks.json; give --ranks-file"
-                .to_string()
-        })?;
-        let ranks: Vec<Rank> = serde_json::from_slice(
-            &std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?,
-        )
-        .map_err(|e| format!("parsing {}: {e}", path.display()))?;
-        for target in &args.country_ladder {
-            let (terms, pairs, rule) =
-                compose_ladder(&ranks, u64::from(row_space.base_rows()), *target);
-            if terms.is_empty() {
-                return Err(format!(
-                    "--country-ladder {target}: no term set composes to it over {} ranks",
-                    ranks.len()
-                ));
-            }
-            let name = format!("p{}", (target * 100.0).round() as u64);
-            draws.push(json!({
-                "name": name,
-                "kind": "country ladder",
-                "target": target,
-                "rule": rule,
-                "target_pairs": pairs,
-                "terms": terms,
-            }));
-            principals.push(Principal { name, terms });
-        }
-    }
+    let base_rows = u64::from(row_space.base_rows());
+    ladder_principals(&args, base_rows, &mut principals, &mut draws)?;
     if let Some(path) = &args.terms_file {
         principals.push(Principal {
             name: "all".to_string(),
             terms: read_terms_file(path)?,
         });
     }
-
-    let by_prefix = |prefix: &str| -> Vec<u32> {
-        descriptors
-            .iter()
-            .enumerate()
-            .filter(|(_, d)| d.starts_with(prefix))
-            .map(|(i, _)| i as u32)
-            .collect()
-    };
-    // The weight of a term is its posting's row count, which the image table records for every
-    // term whether or not its image was kept. A view with no image table cannot be drawn from
-    // this way, and the refusal says so rather than falling back to a uniform draw that would be
-    // reported as weighted.
-    let rows_of = |id: u32| -> Option<u64> {
-        images
-            .and_then(|t| t.entry(TermId::new(id)))
-            .map(|e| e.rows)
-    };
-
-    let mut rng = SplitMix(args.seed);
-    for count in &args.year_uniform {
-        let candidates: Vec<(u32, f64)> = by_prefix("y:").into_iter().map(|id| (id, 1.0)).collect();
-        if candidates.is_empty() {
-            return Err("--year-uniform: the dictionary holds no term prefixed 'y:'".to_string());
-        }
-        let drawn = weighted_draw(&candidates, *count, &mut rng);
-        draws.push(json!({
-            "name": format!("year{count}"),
-            "kind": "year, uniform",
-            "asked": count,
-            "candidates": candidates.len(),
-            "drawn": drawn.len(),
-        }));
-        principals.push(Principal {
-            name: format!("year{count}"),
-            terms: drawn
-                .iter()
-                .map(|id| descriptors[*id as usize].clone())
-                .collect(),
-        });
-    }
-    for count in &args.species_weighted {
-        if images.is_none() {
-            return Err(
-                "--species-weighted needs the view's term-image table for the posting row counts \
-                 it weights by, and this view has none"
-                    .to_string(),
-            );
-        }
-        let candidates: Vec<(u32, f64)> = by_prefix("s:")
-            .into_iter()
-            .map(|id| (id, rows_of(id).unwrap_or(0) as f64))
-            .collect();
-        if candidates.is_empty() {
-            return Err(
-                "--species-weighted: the dictionary holds no term prefixed 's:'".to_string(),
-            );
-        }
-        let drawn = weighted_draw(&candidates, *count, &mut rng);
-        draws.push(json!({
-            "name": format!("species{count}"),
-            "kind": "species, size-weighted",
-            "asked": count,
-            "candidates": candidates.len(),
-            "drawn": drawn.len(),
-        }));
-        principals.push(Principal {
-            name: format!("species{count}"),
-            terms: drawn
-                .iter()
-                .map(|id| descriptors[*id as usize].clone())
-                .collect(),
-        });
-    }
+    drawn_principals(&args, &descriptors, images, &mut principals, &mut draws)?;
     if principals.is_empty() {
         return Err("nothing to measure: give --principal, --terms-file or a draw".to_string());
     }
+    let resolved = resolve(&principals, &dict)?;
 
-    // ---- Every term string resolved before anything is measured.
-    let mut resolved: Vec<(String, Vec<TermId>)> = Vec::new();
-    for principal in &principals {
-        let mut ids = Vec::with_capacity(principal.terms.len());
-        for term in &principal.terms {
-            let id = dict.lookup(term.as_bytes()).ok_or_else(|| {
-                format!(
-                    "principal '{}': term '{term}' is not in the bundle dictionary",
-                    principal.name
-                )
-            })?;
-            ids.push(id);
-        }
-        // `ProjectionInputs::satisfied` is ascending and deduplicated, as the session's own is.
-        ids.sort_unstable();
-        ids.dedup();
-        resolved.push((principal.name.clone(), ids));
-    }
-
+    let bound = row_space.base().bound();
     eprintln!(
-        "bundle {} view {}: bound {bound}, base_rows {}, total_rows {}, {} extents, {} terms, \
-         images {}, seed {}",
+        "bundle {} view {}: bound {bound}, base_rows {base_rows}, total_rows {}, {} extents, \
+         {} terms, images {}, seed {}",
         args.bundle.display(),
         args.view,
-        row_space.base_rows(),
         row_space.total_rows(),
         row_space.extent_count(),
         dict.len(),
@@ -814,109 +923,30 @@ fn run(args: Args) -> Result<(), String> {
     // ---- The fragment cache the engine uses, in a directory this run cleans up.
     let cache_dir = tempfile::tempdir().map_err(|e| format!("making a cache directory: {e}"))?;
     let cache = FragmentCache::new(cache_dir.path(), [0u8; 32], [0u8; 32]);
-
-    let mut records = Vec::new();
-    for (name, ids) in &resolved {
-        eprintln!("principal {name}: {} terms", ids.len());
-        let fragment = cache
-            .get_or_build(ids, &postings, &[], 0)
-            .map_err(|e| format!("principal '{name}': building the fragment: {e}"))?;
-        let held = match bound.checked_sub(1).and_then(|hi| u32::try_from(hi).ok()) {
-            Some(hi) => fragment.view().range_cardinality(0..=hi),
-            None => 0,
-        };
-
-        // What the chooser is given, and what it makes of it — recorded so the constants can be
-        // re-derived from this file without re-running the arms.
-        let complement_valid = base.dense_rows().is_some();
-        let chooser = images.map_or(
-            ChooserInputs {
-                held,
-                bound,
-                complement_valid,
-                ..ChooserInputs::default()
-            },
-            |t| chooser_inputs(t, ids, held, bound, complement_valid, 0),
-        );
-        let prices = ROUTE_COSTS.price(&chooser);
-        let priced = json!({
-            "walk": prices.walk,
-            "split": prices.split,
-            "complement": prices.complement,
-        });
-        let chosen_offline = match choose(&chooser, &ROUTE_COSTS) {
-            Route::Walk => "walk",
-            Route::Split => "split",
-            Route::Complement => "complement",
-        };
-
-        // The walk first, so every other arm has something to be checked against.
-        let (walk_record, walk_rows) = arm(
-            "walk",
-            Some(ProjectionRoute::Walk),
-            &fragment,
-            ids,
-            &postings,
-            images,
-            row_space,
-            &evictable,
-            None,
-        )?;
-        let mut arms = vec![walk_record];
-        for (label, force) in [
-            ("chooser", None),
-            ("split", Some(ProjectionRoute::Split)),
-            ("complement", Some(ProjectionRoute::Complement)),
-        ] {
-            let (record, _) = arm(
-                label,
-                force,
-                &fragment,
-                ids,
-                &postings,
-                images,
-                row_space,
-                &evictable,
-                Some(&walk_rows),
-            )?;
-            arms.push(record);
-        }
-
-        records.push(json!({
-            "name": name,
-            "terms": ids.len(),
-            "term_ids": ids.iter().map(|id| id.raw()).collect::<Vec<_>>(),
-            "fragment_cardinality": fragment.view().cardinality(),
-            "held_below_bound": held,
-            "coverage": held as f64 / bound.max(1) as f64,
-            "chooser_inputs": {
-                "held": chooser.held,
-                "bound": chooser.bound,
-                "complement_valid": chooser.complement_valid,
-                "kept_arrays_and_runs": chooser.kept_arrays_and_runs,
-                "kept_bitsets": chooser.kept_bitsets,
-                "kept_terms": chooser.kept_terms,
-                "residual_entities": chooser.residual_entities,
-            },
-            "chooser_priced_ns": priced,
-            "chooser_route_offline": chosen_offline,
-            "arms": arms,
-        }));
-    }
+    let subject = Subject {
+        postings: &postings,
+        images,
+        row_space,
+        evictable: &evictable,
+    };
+    let records = resolved
+        .iter()
+        .map(|(name, ids)| measure(name, ids, &subject, &cache))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let results = json!({
         "bundle": args.bundle.display().to_string(),
         "view": args.view,
-        "commit": args.commit.clone().or_else(commit_of_cwd),
+        "commit": args.commit,
         "box": box_json(),
         "seed": args.seed,
         "draws": draws,
         "opened": opened,
         "bound": bound,
-        "base_rows": row_space.base_rows(),
+        "base_rows": base_rows,
         "total_rows": row_space.total_rows(),
         "extent_count": row_space.extent_count(),
-        "dense_rows": base.dense_rows(),
+        "dense_rows": row_space.base().dense_rows(),
         "dictionary_terms": dict.len(),
         "postings_terms": postings.term_count(),
         "image_file_bytes": evictable
@@ -937,22 +967,11 @@ fn run(args: Args) -> Result<(), String> {
 
     let text = serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?;
     std::fs::write(&args.out, text).map_err(|e| format!("writing {}: {e}", args.out.display()))?;
+    eprintln!("wrote {}", args.out.display());
 
     // A mismatch is an invariant failure, and the exit code says so after the whole table is
     // written: the reader needs the other principals to tell a route's bug from a corpus's.
-    let mut mismatched = Vec::new();
-    for principal in results["principals"].as_array().into_iter().flatten() {
-        for a in principal["arms"].as_array().into_iter().flatten() {
-            if a["equal_to_walk"]["equal"] == json!(false) {
-                mismatched.push(format!(
-                    "{}/{}",
-                    principal["name"].as_str().unwrap_or("?"),
-                    a["arm"].as_str().unwrap_or("?")
-                ));
-            }
-        }
-    }
-    eprintln!("wrote {}", args.out.display());
+    let mismatched = mismatched(&records);
     if !mismatched.is_empty() {
         return Err(format!(
             "route(s) whose rows differ from the walk's: {mismatched:?}. The table is in {}",
