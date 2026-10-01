@@ -44,7 +44,7 @@ The table is required.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `token_max_lifetime` | integer | required | The lifetime, in seconds, of every viewer token `POST /session/authorise` issues. A token past it is refused with 403. With `0`, a token has expired when it is issued. |
+| `token_max_lifetime` | integer | required | The longest a session lasts, in seconds. A session ends sooner when the API key it was authorised with expires, or when the OIDC access token it was authorised with does. A token past its session's end is refused with 403. With `0`, a session has ended when it is issued. |
 
 ## `[serve]`
 
@@ -53,11 +53,9 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `viewer` | string | not set | The viewer plane's address and port, such as `"127.0.0.1:8141"`: `/v1/meta`, `/v1/viewport`, `/v1/items`, `/v1/artifacts` and `/v1/categories`, for requests carrying a viewer token. `tessera serve` refuses to start without it, and `tessera health` probes it. Port 0 takes a free port, which the server prints when it starts. |
-| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, which issues viewer tokens, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
+| `session` | string | not set | The session plane's address and port: `POST /session/authorise`, where a principal holding `authorise-as` mints a session for another principal by API key, and `POST /session/revoke`. `tessera serve` refuses to start without it. |
 | `control` | string | not set | The control plane's address and port, or `"unix:<path>"` for a Unix socket: ingest, deletion and suppression, declarations, flush, compaction and status, all under `/control`. `tessera serve` refuses to start without it. A relative socket path is read from the server's working directory, not from this file's directory, and a file already at the path is removed. |
-| `session_credential_file` | string (a path) | not set | A file holding the session credential, the bearer token the session plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `session_credential_env` is set. When both are set, the file is used. |
-| `session_credential_env` | string | not set | An environment variable holding the session credential. `tessera serve` refuses to start when it is unset. |
-| `operator_credential_file` | string (a path) | not set | A file holding the operator credential, the bearer token every request to the control plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
+| `operator_credential_file` | string (a path) | not set | A file holding the operator credential. On the control plane it authenticates the built-in superuser, which holds every permission and `bypass` and is not in the catalogue, so an empty catalogue still has an administrator. Its contents are trimmed. Changing the file and restarting rotates it. `tessera serve` refuses to start when the file cannot be read, and when neither this nor `operator_credential_env` is set. When both are set, the file is used. |
 | `operator_credential_env` | string | not set | An environment variable holding the operator credential. `tessera serve` refuses to start when it is unset. |
 | `cors_origins` | array of strings | `[]` | Browser origins, such as `"https://maps.example.org"`, whose pages may call the viewer plane with a viewer token. `"*"` is refused. |
 | `cors_loopback` | boolean | `false` | Admit a page served from `localhost`, `127.0.0.1` or `[::1]`, on any port, to the viewer plane, as for a notebook whose port is not known in advance. |
@@ -135,3 +133,15 @@ Writes through the control plane: the limits on each request, and when buffered 
 | `compaction_after_deletions` | integer or `"off"` | the value of `overlay_soft_limit` | At any hour, compact when this many deleted items wait to be removed, or `"off"`. |
 | `compaction_dead_rows_fraction` | number or `"off"` | `0.2` | At any hour, compact when deleted items waiting to be removed reach this fraction of the stored rows, or `"off"`. |
 | `compaction_dead_bytes_ratio` | number or `"off"` | `1.0` | At any hour, compact when the bundle's unreferenced bytes on disc reach this ratio of the bytes its manifests name, or `"off"`. |
+
+## `[catalogue]`
+
+The identity catalogue: who may authenticate, with what, and the OIDC providers whose access tokens are accepted. `tessera build` reads none of it.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dir` | string (a path) | not set | The directory holding the catalogue, a SQLite database of local principals, their password hashes and API keys, groups, grants and the providers declared through the API. It lives outside the bundle, so principals and grants carry across a rebuild. It is created, readable by the service's user alone, when absent. `tessera serve` refuses to start without it, or when another process holds it open. |
+| `min_password_length` | integer | `15` | The fewest characters a password may hold when it is set. At least 1. |
+| `failed_attempt_limit` | integer | `10` | Failed password attempts for one name within `failed_attempt_window` after which further attempts for that name are refused, answered as a wrong password is, until the oldest leaves the window. |
+| `failed_attempt_window` | integer | `900` | The window, in seconds, over which failed password attempts are counted. |
+| `providers` | array of tables | `[]` | OIDC providers the service starts with, each a table of `name`, `issuer`, `audience`, `jwks_url`, and optional `claim_rules` (each `{ claim, template }`) and `role_mappings` (each `{ claim, value, group }`). A provider declared here is listed by the API and cannot be changed or removed through it; edit this file and restart. The service refuses to start when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL. |

@@ -33,6 +33,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     // With neither CORS list set there is no CORS layer at all.
     let cors = crate::cors::viewer_layer(&state);
     let router = Router::new()
+        .route("/v1/login", post(crate::login::login))
+        .route("/v1/logout", post(crate::login::logout))
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
         .route(

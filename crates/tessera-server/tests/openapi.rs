@@ -24,7 +24,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use arrow::array::{Float32Array, StringArray};
-use base64::Engine as _;
 use common::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -372,14 +371,12 @@ async fn fixture() -> Fixture {
 /// Authorise with the request body validated against the description, returning the response
 /// body already validated too.
 async fn authorise_checked(doc: &Value, server: &TestServer, terms: &[&str]) -> Value {
-    let auth_data =
-        base64::engine::general_purpose::STANDARD.encode(json!({ "terms": terms }).to_string());
-    let body = json!({ "auth_data": auth_data });
+    let body = json!({ "principal": principal_for(server, terms) });
     assert_valid(doc, "AuthoriseRequest", &body);
     let resp = server
         .client
         .post(server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
+        .bearer_auth(&server.integrator_key)
         .json(&body)
         .send()
         .await
@@ -433,10 +430,24 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/control/changes",
             "/control/compact",
             "/control/flush",
+            "/control/grants",
+            "/control/grants/revoke",
+            "/control/groups",
+            "/control/groups/{name}",
+            "/control/groups/{name}/members/{principal}",
             "/control/ingest",
+            "/control/keys/{prefix}",
             "/control/layers",
             "/control/layers/{name}",
             "/control/layers/{name}/artifacts",
+            "/control/principals",
+            "/control/principals/{name}",
+            "/control/principals/{name}/keys",
+            "/control/principals/{name}/password",
+            "/control/providers",
+            "/control/providers/{name}",
+            "/control/sessions",
+            "/control/sessions/end",
             "/control/status",
             "/control/view_groups/{name}",
             "/control/views/{group}/{key}",
@@ -455,6 +466,8 @@ fn the_description_names_every_route_on_the_three_planes_and_no_other() {
             "/v1/categories/{column}/suggest",
             "/v1/items",
             "/v1/items/{tessera_id}",
+            "/v1/login",
+            "/v1/logout",
             "/v1/meta",
             "/v1/viewport",
         ]
@@ -472,6 +485,30 @@ fn every_closed_dto_is_declared_closed() {
         "AuthoriseRequest",
         "AuthoriseResponse",
         "RevokeRequest",
+        "LoginRequest",
+        "LoginResponse",
+        "CatalogueChange",
+        "PrincipalCreate",
+        "PrincipalChange",
+        "PrincipalRecord",
+        "PrincipalList",
+        "PasswordSet",
+        "KeyCreate",
+        "IssuedKey",
+        "KeyRecord",
+        "KeyList",
+        "GroupCreate",
+        "GroupRecord",
+        "GroupList",
+        "Grant",
+        "ClaimRule",
+        "RoleMapping",
+        "ProviderDeclaration",
+        "ProviderRecord",
+        "ProviderList",
+        "SessionRecord",
+        "SessionList",
+        "SessionsEnd",
         "Meta",
         "DeclaredScalar",
         "Selection",
@@ -633,59 +670,62 @@ async fn authorise_and_revoke_match_the_description() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
 
-    // Refusals: the wrong session credential, and auth_data that is not base64.
-    let resp = f
-        .server
-        .client
-        .post(f.server.session_url("/session/authorise"))
-        .bearer_auth("not-the-credential")
-        .json(&json!({ "auth_data": "e30=" }))
-        .send()
+    let authorise = |key: &str, body: Value| {
+        f.server
+            .client
+            .post(f.server.session_url("/session/authorise"))
+            .bearer_auth(key)
+            .json(&body)
+            .send()
+    };
+    let principal = principal_for(&f.server, &["0"]);
+
+    // A key that is not accepted, and the operator credential, which this plane does not take.
+    let resp = authorise("tsk_nope_nope", json!({ "principal": principal }))
         .await
         .unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
-    let resp = f
-        .server
-        .client
-        .post(f.server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&json!({ "auth_data": "not base64!" }))
-        .send()
+    let resp = authorise(OPERATOR_CREDENTIAL, json!({ "principal": principal }))
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 401, "bad-credential").await;
+    // An accepted key whose principal lacks `authorise-as`.
+    let catalogue = &f.server.state.catalogue;
+    catalogue
+        .create_principal("plain", tessera_catalogue::PrincipalKind::Service)
+        .unwrap();
+    let (plain, _) = catalogue.create_api_key("plain", None, None).unwrap();
+    let resp = authorise(&plain.key, json!({ "principal": principal }))
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 403, "forbidden").await;
+    // A principal that does not exist, one without `read`, and a body naming neither or both.
+    let key = f.server.integrator_key.clone();
+    let resp = authorise(&key, json!({ "principal": "nobody" })).await.unwrap();
+    assert_refusal(&doc, resp, 404, "unknown").await;
+    let resp = authorise(&key, json!({ "principal": "plain" })).await.unwrap();
+    assert_refusal(&doc, resp, 403, "forbidden").await;
+    for body in [
+        json!({}),
+        json!({ "principal": principal, "access_token": "x" }),
+    ] {
+        assert_invalid(&doc, "AuthoriseRequest", &body);
+        let resp = authorise(&key, body).await.unwrap();
+        assert_refusal(&doc, resp, 422, "contract").await;
+    }
+    let resp = authorise(&key, json!({ "access_token": "not.a.token" }))
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
-    // auth_data the plugin refuses is the caller's to correct, and the plugin's reason reaches
-    // them: a 422 whose detail is not the fail-closed text every internal failure gets.
-    let resp = f
-        .server
-        .client
-        .post(f.server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&json!({ "auth_data": base64::engine::general_purpose::STANDARD.encode("not json") }))
-        .send()
-        .await
-        .unwrap();
-    let body = assert_refusal(&doc, resp, 422, "contract").await;
-    let internal = tessera_server::error::map_engine_error(tessera_engine::EngineError::Malformed(
-        String::new(),
-    ));
-    let internal: Value = serde_json::from_slice(
-        &axum::body::to_bytes(axum::response::IntoResponse::into_response(internal).into_body(), 4096)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_ne!(body["detail"], internal["detail"]);
 
-    // Revoke: 204 with no body, and the token is then a 401 — the session ending, exactly as a
-    // 403 would be (the obligations list's rule).
+    // Revoke: 204 with no body, and the token is then a 403, the session having ended.
     let body = json!({ "token_id": token_id });
     assert_valid(&doc, "RevokeRequest", &body);
     let resp = f
         .server
         .client
         .post(f.server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
+        .bearer_auth(&f.server.integrator_key)
         .json(&body)
         .send()
         .await
@@ -700,9 +740,9 @@ async fn authorise_and_revoke_match_the_description() {
         .send()
         .await
         .unwrap();
-    assert_refusal(&doc, resp, 401, "bad-credential").await;
+    assert_refusal(&doc, resp, 403, "expired-token").await;
 
-    // Revoke without the credential.
+    // Revoke without a key, and with a key lacking `authorise-as`.
     let resp = f
         .server
         .client
@@ -712,6 +752,370 @@ async fn authorise_and_revoke_match_the_description() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
+    let resp = f
+        .server
+        .client
+        .post(f.server.session_url("/session/revoke"))
+        .bearer_auth(&plain.key)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 403, "forbidden").await;
+}
+
+/// `POST /v1/login` by password and by API key, its refusals, and `POST /v1/logout`.
+#[tokio::test]
+async fn login_and_logout_match_the_description() {
+    use tessera_catalogue::{Grantee, Permission, PrincipalKind};
+    let doc = description();
+    let f = fixture().await;
+    let catalogue = &f.server.state.catalogue;
+    catalogue.create_principal("bea", PrincipalKind::Person).unwrap();
+    catalogue
+        .set_password("bea", "correct horse battery staple")
+        .unwrap();
+    catalogue
+        .grant_permission(Grantee::Principal("bea"), Permission::Read)
+        .unwrap();
+    catalogue.grant_term(Grantee::Principal("bea"), "0").unwrap();
+    let (key, _) = catalogue.create_api_key("bea", None, None).unwrap();
+    catalogue.create_principal("cal", PrincipalKind::Person).unwrap();
+    catalogue
+        .set_password("cal", "correct horse battery staple")
+        .unwrap();
+
+    let login = |body: Value| {
+        f.server
+            .client
+            .post(f.server.viewer_url("/v1/login"))
+            .json(&body)
+            .send()
+    };
+    let password = |principal: &str, password: &str| {
+        json!({ "password": { "principal": principal, "password": password } })
+    };
+
+    for body in [
+        password("bea", "correct horse battery staple"),
+        json!({ "api_key": key.key }),
+    ] {
+        assert_valid(&doc, "LoginRequest", &body);
+        let resp = login(body).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let answer: Value = resp.json().await.unwrap();
+        assert_valid(&doc, "LoginResponse", &answer);
+        let token = answer["token"].as_str().unwrap();
+        let resp = f
+            .server
+            .client
+            .get(f.server.viewer_url("/v1/meta"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let resp = f
+            .server
+            .client
+            .post(f.server.viewer_url("/v1/logout"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 204);
+        let resp = f
+            .server
+            .client
+            .get(f.server.viewer_url("/v1/meta"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_refusal(&doc, resp, 403, "expired-token").await;
+    }
+
+    // A wrong password, an unknown name, a malformed key and an access token from no provider
+    // each answer the same 401.
+    for body in [
+        password("bea", "the wrong password entirely"),
+        password("nobody", "correct horse battery staple"),
+        json!({ "api_key": "tsk_nope_nope" }),
+        json!({ "access_token": "not.a.token" }),
+    ] {
+        let resp = login(body).await.unwrap();
+        assert_refusal(&doc, resp, 401, "bad-credential").await;
+    }
+    // A principal without `read`.
+    let resp = login(password("cal", "correct horse battery staple"))
+        .await
+        .unwrap();
+    assert_refusal(&doc, resp, 403, "forbidden").await;
+    // A credential of a kind the route does not take, and two credentials at once, which the
+    // HTTP framework refuses before the handler runs.
+    let body = json!({ "certificate": "x" });
+    assert_invalid(&doc, "LoginRequest", &body);
+    let resp = login(body).await.unwrap();
+    assert_refusal(&doc, resp, 422, "contract").await;
+    let body = json!({ "api_key": key.key, "access_token": "x" });
+    assert_invalid(&doc, "LoginRequest", &body);
+    let resp = login(body).await.unwrap();
+    assert_framework_refusal(&doc, &reqwest::Method::POST, resp, 400).await;
+}
+
+/// Every catalogue verb on the control plane, with a success and a refusal each.
+#[tokio::test]
+async fn the_catalogue_routes_match_the_description() {
+    let doc = description();
+    let f = fixture().await;
+    let s = &f.server;
+    let (get, post, put, patch, delete) = (
+        reqwest::Method::GET,
+        reqwest::Method::POST,
+        reqwest::Method::PUT,
+        reqwest::Method::PATCH,
+        reqwest::Method::DELETE,
+    );
+    let send = |method: &reqwest::Method, path: &str, body: Option<(&str, Value)>| {
+        let mut req = control(s, method, path);
+        if let Some((schema, body)) = body {
+            if !schema.is_empty() {
+                assert_valid(&doc, schema, &body);
+            }
+            req = req.json(&body);
+        }
+        req.send()
+    };
+
+    // Principals.
+    let created = json!({ "name": "ann", "kind": "person" });
+    let resp = send(&post, "/control/principals", Some(("PrincipalCreate", created.clone())));
+    assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    let resp = send(&post, "/control/principals", Some(("PrincipalCreate", created)));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 409, "conflict").await;
+    let body = json!({ "name": "bo", "kind": "robot" });
+    assert_invalid(&doc, "PrincipalCreate", &body);
+    let resp = send(&post, "/control/principals", Some(("", body)));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&get, "/control/principals", None);
+    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let resp = send(&get, "/control/principals/ann", None);
+    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let resp = send(&get, "/control/principals/nobody", None);
+    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
+    let resp = send(
+        &patch,
+        "/control/principals/ann",
+        Some(("PrincipalChange", json!({ "bypass": true }))),
+    );
+    assert_answer(&doc, &patch, resp.await.unwrap(), 200).await;
+    let resp = send(&patch, "/control/principals/ann", Some(("PrincipalChange", json!({}))));
+    assert_refusal_to(&doc, Some(&patch), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(
+        &patch,
+        "/control/principals/nobody",
+        Some(("PrincipalChange", json!({ "disabled": true }))),
+    );
+    assert_refusal_to(&doc, Some(&patch), resp.await.unwrap(), 404, "unknown").await;
+
+    // Passwords.
+    let body = json!({ "password": "correct horse battery staple" });
+    let resp = send(&put, "/control/principals/ann/password", Some(("PasswordSet", body)));
+    assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
+    let body = json!({ "password": "short" });
+    let resp = send(&put, "/control/principals/ann/password", Some(("PasswordSet", body)));
+    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&delete, "/control/principals/ann/password", None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, "/control/principals/nobody/password", None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+
+    // Keys.
+    let body = json!({ "permissions": ["read"], "expires_at": 4_000_000_000u64 });
+    let resp = send(&post, "/control/principals/ann/keys", Some(("KeyCreate", body)));
+    let issued = assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    let body = json!({ "permissions": ["superuser"] });
+    assert_invalid(&doc, "KeyCreate", &body);
+    let resp = send(&post, "/control/principals/ann/keys", Some(("", body)));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&post, "/control/principals/nobody/keys", Some(("KeyCreate", json!({}))));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 404, "unknown").await;
+    let resp = send(&get, "/control/principals/ann/keys", None);
+    let keys = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    assert_eq!(keys["keys"][0]["prefix"], issued["prefix"]);
+    let resp = send(&get, "/control/principals/nobody/keys", None);
+    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
+    let path = format!("/control/keys/{}", issued["prefix"].as_str().unwrap());
+    let resp = send(&delete, &path, None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, &path, None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+
+    // Groups and members.
+    let body = json!({ "name": "analysts" });
+    let resp = send(&post, "/control/groups", Some(("GroupCreate", body.clone())));
+    assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    let resp = send(&post, "/control/groups", Some(("GroupCreate", body)));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 409, "conflict").await;
+    let resp = send(&post, "/control/groups", Some(("GroupCreate", json!({ "name": " " }))));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&put, "/control/groups/analysts/members/ann", None);
+    assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
+    let resp = send(&put, "/control/groups/analysts/members/nobody", None);
+    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 404, "unknown").await;
+    let resp = send(&get, "/control/groups", None);
+    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let resp = send(&get, "/control/groups/analysts", None);
+    let group = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    assert_eq!(group["members"], json!(["ann"]));
+    let resp = send(&get, "/control/groups/nobody", None);
+    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
+    let resp = send(&delete, "/control/groups/analysts/members/ann", None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, "/control/groups/nobody/members/ann", None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+
+    // Grants.
+    for (path, method) in [("/control/grants", &post), ("/control/grants/revoke", &post)] {
+        for body in [
+            json!({ "principal": "ann", "term": "0" }),
+            json!({ "group": "analysts", "permission": "read" }),
+        ] {
+            let resp = send(method, path, Some(("Grant", body)));
+            assert_answer(&doc, method, resp.await.unwrap(), 200).await;
+        }
+        let body = json!({ "principal": "ann" });
+        assert_invalid(&doc, "Grant", &body);
+        let resp = send(method, path, Some(("", body)));
+        assert_refusal_to(&doc, Some(method), resp.await.unwrap(), 422, "contract").await;
+        let resp = send(method, path, Some(("Grant", json!({ "group": "nobody", "term": "0" }))));
+        assert_refusal_to(&doc, Some(method), resp.await.unwrap(), 404, "unknown").await;
+    }
+    let resp = send(&delete, "/control/groups/analysts", None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, "/control/groups/analysts", None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+
+    // Providers.
+    let declared = json!({
+        "issuer": "https://login.example.org",
+        "audience": "tessera",
+        "jwks_url": "http://127.0.0.1:9/keys",
+        "claim_rules": [{ "claim": "groups[*]", "template": "{value}" }],
+        "role_mappings": [{ "claim": "groups[*]", "value": "tessera-admins", "group": "admins" }],
+    });
+    for _ in 0..2 {
+        let resp = send(
+            &put,
+            "/control/providers/corp",
+            Some(("ProviderDeclaration", declared.clone())),
+        );
+        assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
+    }
+    let mut insecure = declared.clone();
+    insecure["jwks_url"] = json!("http://login.example.org/keys");
+    let resp = send(&put, "/control/providers/other", Some(("ProviderDeclaration", insecure)));
+    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&get, "/control/providers", None);
+    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let resp = send(&get, "/control/providers/corp", None);
+    let provider = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    assert_eq!(provider["read_only"], false);
+    let resp = send(&get, "/control/providers/nobody", None);
+    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
+    let resp = send(&delete, "/control/providers/corp", None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, "/control/providers/corp", None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+
+    // Sessions.
+    let auth = authorise_checked(&doc, s, &["0"]).await;
+    let viewer = principal_for(s, &["0"]);
+    let resp = send(&get, &format!("/control/sessions?principal={viewer}"), None);
+    let listed = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    assert_eq!(listed["sessions"][0]["token_id"], auth["token_id"]);
+    assert_eq!(listed["sessions"][0]["minted_by"], json!(INTEGRATOR));
+    let resp = send(&get, "/control/sessions?principal=a&provider=b", None);
+    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 422, "contract").await;
+    let resp = send(&get, "/control/sessions", None);
+    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let resp = send(
+        &post,
+        "/control/sessions/end",
+        Some(("SessionsEnd", json!({ "principal": viewer }))),
+    );
+    let ended = assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    assert_eq!(ended["sessions_ended"], 1);
+    let resp = send(&post, "/control/sessions/end", Some(("", json!({}))));
+    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
+
+    let resp = send(&delete, "/control/principals/ann", None);
+    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
+    let resp = send(&delete, "/control/principals/ann", None);
+    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+}
+
+/// Every control operation refuses an accepted credential without the permission it needs with
+/// `403 forbidden`, before the body is read; a writer without `bypass` is refused every write;
+/// and `admin` reaches status and the catalogue and no write.
+#[tokio::test]
+async fn every_control_route_needs_its_permission() {
+    use tessera_catalogue::{Grantee, Permission, PrincipalKind};
+    let doc = description();
+    let f = fixture().await;
+    let catalogue = &f.server.state.catalogue;
+    let key_for = |name: &str, permissions: &[Permission], bypass: bool| {
+        catalogue.create_principal(name, PrincipalKind::Service).unwrap();
+        for p in permissions {
+            catalogue.grant_permission(Grantee::Principal(name), *p).unwrap();
+        }
+        catalogue.set_bypass(name, bypass).unwrap();
+        catalogue.create_api_key(name, None, None).unwrap().0.key
+    };
+    let nothing = key_for("nothing", &[], true);
+    let writer = key_for("writer", &[Permission::Write], false);
+    let admin = key_for("admin", &[Permission::Admin], false);
+
+    let mut writes = 0;
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        if !path.starts_with("/control/") {
+            continue;
+        }
+        for (method, op) in item.as_object().unwrap() {
+            let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).unwrap();
+            let concrete = path
+                .split('/')
+                .map(|s| if s.starts_with('{') { "1" } else { s })
+                .collect::<Vec<_>>()
+                .join("/");
+            let send = |key: &str| {
+                f.server
+                    .client
+                    .request(method.clone(), f.server.control_url(&concrete))
+                    .bearer_auth(key)
+                    .send()
+            };
+            let resp = send(&nothing).await.unwrap();
+            assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
+            let is_write = !op["tags"][0]
+                .as_str()
+                .is_some_and(|t| matches!(t, "control: identity" | "control: status" | "control: flush" | "control: compact"));
+            if is_write {
+                writes += 1;
+                let resp = send(&writer).await.unwrap();
+                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
+                let resp = send(&admin).await.unwrap();
+                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
+            } else {
+                let resp = send(&writer).await.unwrap();
+                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
+                let resp = send(&admin).await.unwrap();
+                assert_ne!(resp.status().as_u16(), 403, "{method} {path} with admin");
+            }
+        }
+    }
+    assert_eq!(writes, 13, "ingest, changes, the declarations, layers and artifacts");
 }
 
 #[tokio::test]
@@ -728,13 +1132,12 @@ async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
         ComputeGate::new(0, 0, 250),
     )
     .await;
-    let auth_data =
-        base64::engine::general_purpose::STANDARD.encode(json!({ "terms": ["0"] }).to_string());
+    let principal = principal_for(&server, &["0"]);
     let resp = server
         .client
         .post(server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&json!({ "auth_data": auth_data }))
+        .bearer_auth(&server.integrator_key)
+        .json(&json!({ "principal": principal }))
         .send()
         .await
         .unwrap();
@@ -1595,6 +1998,7 @@ async fn every_described_route_requires_its_planes_credential() {
 
     let mut gated = 0usize;
     let mut probes = 0usize;
+    let mut login = 0usize;
     let mut session_plane = 0usize;
     let mut control_plane = 0usize;
 
@@ -1609,14 +2013,14 @@ async fn every_described_route_requires_its_planes_credential() {
             let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).unwrap();
 
             match scheme.as_deref() {
-                // The session plane's own credential, on its own listener.
-                Some("sessionCredential") => {
+                // An `authorise-as` key, on the session listener.
+                Some("authoriseAsKey") => {
                     session_plane += 1;
                     continue;
                 }
-                // The operator credential, on the control listener, answered 401 before anything
+                // A control credential, on the control listener, answered 401 before anything
                 // else about the request is read.
-                Some("operatorCredential") => {
+                Some("controlCredential") => {
                     control_plane += 1;
                     let concrete = path
                         .split('/')
@@ -1636,7 +2040,12 @@ async fn every_described_route_requires_its_planes_credential() {
                     }
                     continue;
                 }
-                // The probes answer without a credential, and they are the only two routes on
+                // Login takes its credential in the body, and is tested on its own.
+                None if path == "/v1/login" => {
+                    login += 1;
+                    continue;
+                }
+                // The probes answer without a credential, and they are the only other routes on
                 // this plane that do.
                 None => {
                     probes += 1;
@@ -1648,6 +2057,17 @@ async fn every_described_route_requires_its_planes_credential() {
                         "{method} {path} is described as unauthenticated and must not demand a \
                          credential"
                     );
+                    continue;
+                }
+                // Logout ends the session it is sent with, so only its refusals are probed here.
+                Some("sessionToken") if path == "/v1/logout" => {
+                    gated += 1;
+                    for credential in [None, Some("not-a-session-token")] {
+                        let resp =
+                            send_viewer_probe(&f.server, &method, path, Malformed::No, credential)
+                                .await;
+                        assert_refusal_to(&doc, Some(&method), resp, 401, "bad-credential").await;
+                    }
                     continue;
                 }
                 Some("sessionToken") => gated += 1,
@@ -1688,26 +2108,27 @@ async fn every_described_route_requires_its_planes_credential() {
     // Non-vacuity, both halves: the loop must have found the seven gated routes and the two
     // probes, or it enumerated nothing and proved nothing.
     assert_eq!(
-        gated, 11,
-        "the viewer plane's gated operations are meta, categories, suggest's two forms, viewport, \
-         the items read, items, the artifacts read, artifacts, artifacts/browse and the \
-         aggregate; a change to \
-         that set belongs in this test's reasoning, not silently in its count"
+        gated, 12,
+        "the viewer plane's gated operations are logout, meta, categories, suggest's two forms, \
+         viewport, the items read, items, the artifacts read, artifacts, artifacts/browse and the \
+         aggregate; a change to that set belongs in this test's reasoning, not silently in its \
+         count"
     );
     assert_eq!(
         probes, 2,
-        "/healthz and /readyz are the only unauthenticated routes"
+        "/healthz and /readyz are the only unauthenticated routes besides login"
     );
+    assert_eq!(login, 1);
     assert_eq!(
         session_plane, 2,
         "/session/authorise and /session/revoke are the session plane's"
     );
     assert_eq!(
-        control_plane, 16,
+        control_plane, 40,
         "the control plane's operations are ingest, changes, status, flush, compact, \
          the attribute, vocabulary, value-page, view group and plain view declarations, a group \
-         view's create and drop, a layer's registration and drop, and an artifact publication \
-         and growth"
+         view's create and drop, a layer's registration and drop, an artifact publication \
+         and growth, and the catalogue's 24 verbs"
     );
 }
 
@@ -1821,8 +2242,8 @@ fn with_body(
     }
 }
 
-/// **Both session-plane routes refuse a caller without the session credential before they read
-/// the body.** With no credential or a wrong one, a request the route accepts and each malformed
+/// **Both session-plane routes refuse a caller without an accepted API key before they read the
+/// body.** With no credential or a wrong one, a request the route accepts and each malformed
 /// body answer 401, so an unauthenticated caller learns nothing about the request shape and no
 /// body is buffered for them. With the credential, the malformed bodies answer the refusal the
 /// route gives them, so the 401s are not the route refusing everything.
@@ -1830,9 +2251,8 @@ fn with_body(
 async fn both_session_routes_require_the_credential_before_the_body() {
     let doc = description();
     let f = fixture().await;
-    let auth_data = base64::engine::general_purpose::STANDARD.encode(r#"{"terms":["0"]}"#);
     let routes = [
-        ("/session/authorise", json!({ "auth_data": auth_data })),
+        ("/session/authorise", json!({ "principal": principal_for(&f.server, &["0"]) })),
         ("/session/revoke", json!({ "token_id": 1 })),
     ];
     let malformed = [
@@ -1845,7 +2265,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
         let url = f.server.session_url(path);
         let kinds = std::iter::once(Malformed::No).chain(malformed.iter().map(|(kind, _)| *kind));
         for kind in kinds {
-            for credential in [None, Some("not-the-session-credential")] {
+            for credential in [None, Some("not-a-key"), Some("tsk_nope_nope")] {
                 let mut req = f.server.client.post(url.clone());
                 if let Some(credential) = credential {
                     req = req.bearer_auth(credential);
@@ -1860,7 +2280,11 @@ async fn both_session_routes_require_the_credential_before_the_body() {
             }
         }
         for (kind, status) in malformed {
-            let req = f.server.client.post(url.clone()).bearer_auth(SESSION_CREDENTIAL);
+            let req = f
+                .server
+                .client
+                .post(url.clone())
+                .bearer_auth(&f.server.integrator_key);
             let resp = with_body(req, kind, body).send().await.unwrap();
             if matches!(kind, Malformed::Shape | Malformed::UnknownField) {
                 assert_refusal(&doc, resp, status, "contract").await;
@@ -1887,6 +2311,7 @@ fn viewer_body(path: &str) -> Value {
         "/v1/artifacts/browse" => json!({ "view": "s0", "layer": "clusters/none" }),
         "/v1/categories/{column}/suggest" => json!({ "q": "a" }),
         "/v1/aggregate" => json!({ "view": "s0", "groupings": [{}] }),
+        "/v1/logout" => json!({}),
         other => panic!(
             "{other} is a described POST route and this test has no request body for it; add \
              one rather than letting a new viewer route go unchecked"

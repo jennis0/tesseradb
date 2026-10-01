@@ -51,6 +51,77 @@ struct RawConfig {
     /// are published and compacted.
     #[serde(default)]
     ingest: RawIngest,
+    /// The identity catalogue: who may authenticate, with what, and the OIDC providers whose
+    /// access tokens are accepted. `tessera build` reads none of it.
+    #[serde(default)]
+    catalogue: RawCatalogue,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCatalogue {
+    /// The directory holding the catalogue, a SQLite database of local principals, their
+    /// password hashes and API keys, groups, grants and the providers declared through the API.
+    /// It lives outside the bundle, so principals and grants carry across a rebuild. It is
+    /// created, readable by the service's user alone, when absent. `tessera serve` refuses to
+    /// start without it, or when another process holds it open.
+    ///
+    /// Default: not set.
+    dir: Option<PathBuf>,
+    /// The fewest characters a password may hold when it is set. At least 1.
+    ///
+    /// Default: `15`.
+    min_password_length: Option<usize>,
+    /// Failed password attempts for one name within `failed_attempt_window` after which further
+    /// attempts for that name are refused, answered as a wrong password is, until the oldest
+    /// leaves the window.
+    ///
+    /// Default: `10`.
+    failed_attempt_limit: Option<u32>,
+    /// The window, in seconds, over which failed password attempts are counted.
+    ///
+    /// Default: `900`.
+    failed_attempt_window: Option<u64>,
+    /// OIDC providers the service starts with, each a table of `name`, `issuer`, `audience`,
+    /// `jwks_url`, and optional `claim_rules` (each `{ claim, template }`) and `role_mappings`
+    /// (each `{ claim, value, group }`). A provider declared here is listed by the API and cannot
+    /// be changed or removed through it; edit this file and restart. The service refuses to start
+    /// when a name is declared here and in the catalogue, or twice here. A `jwks_url` is `https`,
+    /// or `http` to `localhost`, `127.0.0.1` or `[::1]`; the environment variable
+    /// `TESSERA_ALLOW_INSECURE_JWKS=1` accepts any other `http` URL.
+    ///
+    /// Type: array of tables.
+    ///
+    /// Default: `[]`.
+    providers: Option<Vec<RawProvider>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProvider {
+    name: String,
+    issuer: String,
+    audience: String,
+    jwks_url: String,
+    #[serde(default)]
+    claim_rules: Vec<RawClaimRule>,
+    #[serde(default)]
+    role_mappings: Vec<RawRoleMapping>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClaimRule {
+    claim: String,
+    template: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoleMapping {
+    claim: String,
+    value: String,
+    group: String,
 }
 
 #[derive(Deserialize)]
@@ -90,8 +161,10 @@ struct RawPlugin {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDisclosure {
-    /// The lifetime, in seconds, of every viewer token `POST /session/authorise` issues. A token
-    /// past it is refused with 403. With `0`, a token has expired when it is issued.
+    /// The longest a session lasts, in seconds. A session ends sooner when the API key it was
+    /// authorised with expires, or when the OIDC access token it was authorised with does. A
+    /// token past its session's end is refused with 403. With `0`, a session has ended when it
+    /// is issued.
     ///
     /// Required.
     token_max_lifetime: Option<u64>,
@@ -107,8 +180,9 @@ struct RawServe {
     ///
     /// Default: not set.
     viewer: Option<String>,
-    /// The session plane's address and port: `POST /session/authorise`, which issues viewer
-    /// tokens, and `POST /session/revoke`. `tessera serve` refuses to start without it.
+    /// The session plane's address and port: `POST /session/authorise`, where a principal holding
+    /// `authorise-as` mints a session for another principal by API key, and
+    /// `POST /session/revoke`. `tessera serve` refuses to start without it.
     ///
     /// Default: not set.
     session: Option<String>,
@@ -120,20 +194,10 @@ struct RawServe {
     ///
     /// Default: not set.
     control: Option<String>,
-    /// A file holding the session credential, the bearer token the session plane requires. Its
-    /// contents are trimmed. `tessera serve` refuses to start when the file cannot be read, and
-    /// when neither this nor `session_credential_env` is set. When both are set, the file is
-    /// used.
-    ///
-    /// Default: not set.
-    session_credential_file: Option<PathBuf>,
-    /// An environment variable holding the session credential. `tessera serve` refuses to start
-    /// when it is unset.
-    ///
-    /// Default: not set.
-    session_credential_env: Option<String>,
-    /// A file holding the operator credential, the bearer token every request to the control
-    /// plane requires. Its contents are trimmed. `tessera serve` refuses to start when the file
+    /// A file holding the operator credential. On the control plane it authenticates the built-in
+    /// superuser, which holds every permission and `bypass` and is not in the catalogue, so an
+    /// empty catalogue still has an administrator. Its contents are trimmed. Changing the file
+    /// and restarting rotates it. `tessera serve` refuses to start when the file
     /// cannot be read, and when neither this nor `operator_credential_env` is set. When both are
     /// set, the file is used.
     ///
@@ -577,8 +641,13 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     pub visible_wait_max_secs: u64,
     pub cors_loopback: bool,
-    pub session_credential: Credential,
     pub operator_credential: Credential,
+    /// `None` when the file declares no `[catalogue] dir`; `tessera serve` refuses to start then.
+    pub catalogue_dir: Option<PathBuf>,
+    pub min_password_length: usize,
+    pub failed_attempt_limit: u32,
+    pub failed_attempt_window_secs: u64,
+    pub oidc_providers: Vec<OidcProvider>,
     pub compute_threads: usize,
     pub compute_admission: usize,
     pub compute_queue: usize,
@@ -612,6 +681,20 @@ pub struct Config {
     pub masked_count_cache_bytes: u64,
     pub occupancy_cache_bytes: u64,
     pub fragment_cache_bytes: u64,
+}
+
+/// An OIDC provider declared in `[catalogue] providers`, as written. The catalogue checks it when
+/// the service opens it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcProvider {
+    pub name: String,
+    pub issuer: String,
+    pub audience: String,
+    pub jwks_url: String,
+    /// Each `(claim, template)`.
+    pub claim_rules: Vec<(String, String)>,
+    /// Each `(claim, value, group)`.
+    pub role_mappings: Vec<(String, String, String)>,
 }
 
 /// The serving runtime's `max_blocking_threads`: one per request any admission bound lets
@@ -694,8 +777,8 @@ pub fn load(path: &Path) -> Result<Config> {
         Some(&mut config.cache_dir),
         Some(&mut config.wal_path),
         Some(&mut config.schema_path),
-        config.session_credential.file.as_mut(),
         config.operator_credential.file.as_mut(),
+        config.catalogue_dir.as_mut(),
     ]
     .into_iter()
     .flatten()
@@ -733,6 +816,28 @@ fn parse(text: &str) -> Result<Config> {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEMA_FILE));
 
     let serve = raw.serve;
+    let catalogue = raw.catalogue;
+    let oidc_providers = catalogue
+        .providers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| OidcProvider {
+            name: p.name,
+            issuer: p.issuer,
+            audience: p.audience,
+            jwks_url: p.jwks_url,
+            claim_rules: p
+                .claim_rules
+                .into_iter()
+                .map(|r| (r.claim, r.template))
+                .collect(),
+            role_mappings: p
+                .role_mappings
+                .into_iter()
+                .map(|m| (m.claim, m.value, m.group))
+                .collect(),
+        })
+        .collect();
     let socket = |key: &'static str, value: &Option<String>| {
         value
             .as_deref()
@@ -964,14 +1069,21 @@ fn parse(text: &str) -> Result<Config> {
             .visible_wait_max_secs
             .unwrap_or(DEFAULT_VISIBLE_WAIT_MAX_SECS),
         cors_loopback: serve.cors_loopback.unwrap_or(false),
-        session_credential: Credential {
-            file: serve.session_credential_file,
-            env: serve.session_credential_env,
-        },
         operator_credential: Credential {
             file: serve.operator_credential_file,
             env: serve.operator_credential_env,
         },
+        catalogue_dir: catalogue.dir,
+        min_password_length: catalogue
+            .min_password_length
+            .unwrap_or(DEFAULT_MIN_PASSWORD_LENGTH),
+        failed_attempt_limit: catalogue
+            .failed_attempt_limit
+            .unwrap_or(DEFAULT_FAILED_ATTEMPT_LIMIT),
+        failed_attempt_window_secs: catalogue
+            .failed_attempt_window
+            .unwrap_or(DEFAULT_FAILED_ATTEMPT_WINDOW_SECS),
+        oidc_providers,
         compute_threads,
         compute_admission,
         compute_queue,
@@ -1112,7 +1224,6 @@ mod tests {
             viewer = "127.0.0.1:7407"
             session = "127.0.0.1:7408"
             control = "127.0.0.1:7409"
-            session_credential_env = "TESSERA_TEST_SESSION_CRED"
             operator_credential_env = "TESSERA_TEST_OPERATOR_CRED"
             {serve_extra}
         "#
@@ -1347,32 +1458,29 @@ mod tests {
     }
 
     #[test]
-    fn a_credential_file_resolves_against_the_deployment_files_own_directory() {
+    fn a_credential_file_and_the_catalogue_resolve_against_the_deployment_files_own_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let at = tmp.path().join(DEPLOYMENT_FILE);
-        std::fs::write(tmp.path().join("session.cred"), "s3cret\n").unwrap();
+        std::fs::write(tmp.path().join("operator.cred"), "s3cret\n").unwrap();
         std::fs::write(
             &at,
-            valid_toml("session_credential_file = \"session.cred\"\n").replace(
-                "session_credential_env = \"TESSERA_TEST_SESSION_CRED\"\n",
+            valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
+                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
                 "",
-            ),
+            ) + "[catalogue]\ndir = \"identity\"\n",
         )
         .unwrap();
         assert!(
-            !Path::new("session.cred").exists(),
+            !Path::new("operator.cred").exists(),
             "the cwd must not hold one"
         );
 
         let config = load(&at).expect("the file loads");
         assert_eq!(
-            config.session_credential.file.as_deref(),
-            Some(tmp.path().join("session.cred").as_path())
-        );
-        assert_eq!(
-            config.session_credential.resolve("session").unwrap(),
+            config.operator_credential.resolve("operator").unwrap(),
             "s3cret"
         );
+        assert_eq!(config.catalogue_dir, Some(tmp.path().join("identity")));
 
         let at = tmp.path().join("absent").join(DEPLOYMENT_FILE);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
@@ -1391,29 +1499,59 @@ mod tests {
             Err(ConfigError::CredentialFileUnreadable { which: "operator", ref path, .. })
                 if *path == resolved
         ));
+        assert_eq!(config.catalogue_dir, None);
     }
 
     #[test]
     fn a_serving_credential_is_read_at_startup_rather_than_at_parse() {
         let toml = valid_toml("").replace(
-            "TESSERA_TEST_SESSION_CRED",
+            "TESSERA_TEST_OPERATOR_CRED",
             "TESSERA_TEST_CREDENTIAL_THAT_IS_NEVER_SET",
         );
         let config = parse(&toml).expect("an unset credential variable must still parse");
         assert!(matches!(
-            config.session_credential.resolve("session"),
-            Err(ConfigError::MissingCredential("session"))
+            config.operator_credential.resolve("operator"),
+            Err(ConfigError::MissingCredential("operator"))
         ));
+    }
 
-        let toml = valid_toml("").replace(
-            "session_credential_env = \"TESSERA_TEST_SESSION_CRED\"\n",
-            "",
+    #[test]
+    fn catalogue_providers_are_read_as_written() {
+        let toml = valid_toml("")
+            + r#"
+            [catalogue]
+            dir = "identity"
+            min_password_length = 20
+
+            [[catalogue.providers]]
+            name = "corp"
+            issuer = "https://login.example.org"
+            audience = "tessera"
+            jwks_url = "https://login.example.org/keys"
+            claim_rules = [{ claim = "groups[*]", template = "{value}" }]
+            role_mappings = [{ claim = "groups[*]", value = "tessera-admins", group = "admins" }]
+            "#;
+        let config = parse(&toml).expect("a provider parses");
+        assert_eq!(config.min_password_length, 20);
+        assert_eq!(
+            config.oidc_providers,
+            vec![OidcProvider {
+                name: "corp".into(),
+                issuer: "https://login.example.org".into(),
+                audience: "tessera".into(),
+                jwks_url: "https://login.example.org/keys".into(),
+                claim_rules: vec![("groups[*]".into(), "{value}".into())],
+                role_mappings: vec![(
+                    "groups[*]".into(),
+                    "tessera-admins".into(),
+                    "admins".into()
+                )],
+            }]
         );
-        let config = parse(&toml).expect("a config declaring no session credential still parses");
-        assert!(matches!(
-            config.session_credential.resolve("session"),
-            Err(ConfigError::MissingCredential("session"))
-        ));
+        let unknown = valid_toml("")
+            + "[[catalogue.providers]]\nname = \"a\"\nissuer = \"i\"\naudience = \"a\"\n\
+               jwks_url = \"https://k\"\nscopes = []\n";
+        assert!(parse(&unknown).is_err(), "an unknown provider key is refused");
     }
 
     #[test]

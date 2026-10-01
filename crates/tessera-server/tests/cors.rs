@@ -1,11 +1,11 @@
 //! The two browser seams. See `tessera_server::cors`.
 //!
 //! `serve.dev_cors_origins` is the development affordance: it covers the viewer *and* session
-//! planes, because a browser on a laptop calls `/session/authorise` with the deployment's session
-//! credential before it can call anything at all. `serve.cors_origins` is the production list
+//! planes, because a browser on a laptop may call `/session/authorise` with an `authorise-as` API key
+//! before it can call anything at all. `serve.cors_origins` is the production list
 //! (decision 0102): it covers the **viewer plane only**, because that plane's bearer is a token —
-//! per-principal, already scoped, already expiring — and the session plane's is the credential
-//! that mints tokens, which a browser must never hold.
+//! per-principal, already scoped, already expiring — and the session plane's is an `authorise-as`
+//! key that mints tokens for any principal, which a browser must never hold.
 //!
 //! The load-bearing assertion in this file is therefore the negative one:
 //! [`the_session_plane_refuses_a_production_origin`]. Everything else here would still pass if
@@ -310,8 +310,8 @@ async fn an_unlisted_origin_is_refused_against_the_production_list() {
 /// **The load-bearing half of decision 0102.**
 ///
 /// `serve.cors_origins` names pages that may present a *token*. `/session/authorise` is gated by
-/// the session credential — the shared secret that decides who may mint tokens at all — and a
-/// browser must never hold one. Wiring the production list into the session router would make
+/// an `authorise-as` API key, which mints tokens for any principal, and a browser must never hold
+/// one. Wiring the production list into the session router would make
 /// every listed origin a page that could be asked to carry that credential, which is the thing the
 /// decision declined rather than deferred.
 #[tokio::test]
@@ -591,7 +591,6 @@ async fn the_control_plane_never_carries_a_layer() {
 #[test]
 fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
     let tmp = TempDir::new().unwrap();
-    std::env::set_var("TESSERA_TEST_CORS_SESSION", SESSION_CREDENTIAL);
     std::env::set_var("TESSERA_TEST_CORS_OPERATOR", OPERATOR_CREDENTIAL);
 
     let write = |extra: &str| {
@@ -609,7 +608,6 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
             viewer = "127.0.0.1:7407"
             session = "127.0.0.1:7408"
             control = "127.0.0.1:7409"
-            session_credential_env = "TESSERA_TEST_CORS_SESSION"
             operator_credential_env = "TESSERA_TEST_CORS_OPERATOR"
             {extra}
             "#

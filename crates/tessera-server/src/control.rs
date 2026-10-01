@@ -1,7 +1,7 @@
-//! The control (admin) plane: ingest, changes, declarations, status, flush and compact.
-//! Every route requires the operator credential, checked once at the router by
-//! [`require_operator_credential`]; `/healthz` and `/readyz` are served on the viewer and session
-//! listeners, not here.
+//! The control (admin) plane: ingest, changes, declarations, status, flush and compact, and the
+//! catalogue's verbs ([`crate::identity`]). Every route requires a credential, checked once at the
+//! router by [`authenticate_control`]; writes need `write` and `bypass`, and everything else
+//! `admin`. `/healthz` and `/readyz` are served on the viewer and session listeners, not here.
 //!
 //! A write is acknowledged only after its WAL append is fsynced: parse, allocate ids, append,
 //! fsync, apply, then 200. A deletion or suppression whose append fails is still applied to the
@@ -102,12 +102,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     ));
     let changes_route =
         post(changes).layer(axum::extract::DefaultBodyLimit::max(CHANGES_MAX_BODY_BYTES));
-    let router = Router::new()
+    let writes = Router::new()
         .route("/control/ingest", ingest_route)
         .route("/control/changes", changes_route)
-        .route("/control/status", get(status))
-        .route("/control/flush", post(flush))
-        .route("/control/compact", post(compact))
         // Declarations are `PUT` because the name is the identity: an identical redeclaration
         // answers what exists and a differing one is refused. They are small and keep axum's
         // 2 MiB default body limit.
@@ -145,19 +142,28 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     state.limits.publish_max_body_bytes,
                 )),
-        );
+        )
+        .route_layer(axum::middleware::from_fn(require_unmasked_write));
+    let operations = Router::new()
+        .route("/control/status", get(status))
+        .route("/control/flush", post(flush))
+        .route("/control/compact", post(compact));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
     #[cfg(feature = "fault-injection")]
-    let router = router
+    let operations = operations
         .route("/control/faults/arm", post(faults_arm))
         .route("/control/faults/arrivals", get(faults_arrivals))
         .route("/control/faults/release", post(faults_release));
-    router
+    let administration = operations
+        .merge(crate::identity::routes())
+        .route_layer(axum::middleware::from_fn(require_admin));
+    writes
+        .merge(administration)
         // `Router::layer`, not `route_layer`, so every route, and every unrouted path, is behind
         // the credential.
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
-            require_operator_credential,
+            authenticate_control,
         ))
         // Outside the credential layer, so a refused request still runs the allocator trim check.
         .layer(axum::middleware::from_fn_with_state(
@@ -167,22 +173,66 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// The operator-credential check for every path on the control listener, routed or not, with no
-/// exemption. It runs as a layer before the body is read, so an unauthenticated caller buffers
-/// nothing and meets 401 ahead of any 404, 422 or 429; no handler checks the credential itself.
-async fn require_operator_credential(
+/// The credential check for every path on the control listener, routed or not, with no
+/// exemption: the operator credential, an API key or an OIDC access token. It runs as a layer
+/// before the body is read, so an unauthenticated caller buffers nothing and meets 401 ahead of
+/// any 403, 404, 422 or 429. The caller goes into the request's extensions for the permission
+/// checks and the handlers.
+async fn authenticate_control(
     State(state): State<Arc<AppState>>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
-    state.check_bearer(
+    let accepts = crate::auth::Accepts {
+        operator: true,
+        api_key: true,
+        access_token: true,
+    };
+    let caller = crate::auth::authenticate(
+        &state,
         crate::state::bearer_token(request.headers()),
-        &state.operator_credential,
-    )?;
+        accepts,
+    )
+    .await?;
+    request.extensions_mut().insert(caller);
     Ok(next.run(request).await)
 }
 
-/// The frame, projection and quantisation extent, of each of the layer's own views; a layer's
+fn caller(request: &axum::extract::Request) -> &crate::auth::Caller {
+    request
+        .extensions()
+        .get::<crate::auth::Caller>()
+        .expect("authenticate_control runs before every route")
+}
+
+/// Status, flush, compaction and the catalogue's verbs need `admin`.
+async fn require_admin(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    caller(&request).require(tessera_catalogue::Permission::Admin)?;
+    Ok(next.run(request).await)
+}
+
+/// Writes need `write`, and `bypass` as well: a write masked by the writer's own terms is not
+/// built, and an unmasked write by a principal without `bypass` could change or name items it
+/// cannot see.
+async fn require_unmasked_write(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    let caller = caller(&request);
+    caller.require(tessera_catalogue::Permission::Write)?;
+    if !caller.resolution.bypass {
+        return Err(ApiError::Forbidden(
+            "writes masked by the writer's own terms are not built, so a write on the control \
+             plane needs `bypass`; write as a principal with `write` and `bypass`"
+                .into(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
 /// views need not share one, and a shape goes through each view's own transform. The layer's
 /// views, not the bundle's, because a layer need not be drawn on every view.
 fn layer_frames(

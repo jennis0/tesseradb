@@ -1611,6 +1611,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64",
+ "js-sys",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3178,9 +3191,11 @@ dependencies = [
  "bytes",
  "futures-core",
  "jsonschema",
+ "jsonwebtoken",
  "parking_lot",
  "parquet",
  "reqwest",
+ "ring",
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
@@ -3188,6 +3203,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tessera-build",
+ "tessera-catalogue",
  "tessera-config",
  "tessera-engine",
  "tessera-lifecycle",

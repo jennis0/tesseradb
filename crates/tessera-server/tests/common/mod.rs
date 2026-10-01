@@ -18,7 +18,6 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use base64::Engine as _;
 use parking_lot::Mutex;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
@@ -28,12 +27,13 @@ use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::FaultSwitchboard;
 use tessera_plugin::Passthrough;
+use sha2::Digest as _;
+use tessera_catalogue::{Catalogue, Grantee, Permission, PrincipalKind};
 use tessera_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
 pub const N_ITEMS: u64 = 1_000;
-pub const SESSION_CREDENTIAL: &str = "session-secret";
 
 pub const OPERATOR_CREDENTIAL: &str = "operator-secret";
 /// The identity key `tessera-build`'s own test fixtures use. It guards nothing.
@@ -453,6 +453,11 @@ pub struct TestServer {
     /// The three `axum::serve` tasks. Each holds the state, and so the engine and its lock on the
     /// bundle root, until it is stopped.
     pub serve_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// The API key of `integrator`, a service principal holding `authorise-as`, which
+    /// [`authorise`] mints sessions with.
+    pub integrator_key: String,
+    /// The catalogue's directory where the server made its own, dropped after the state.
+    pub catalogue_dir: Option<TempDir>,
 }
 
 impl TestServer {
@@ -1010,6 +1015,7 @@ async fn mount_server_with_flush(
         ..Default::default()
     };
     tune(&mut limits);
+    let (catalogue, integrator_key, catalogue_dir) = test_identity();
     let state = Arc::new(AppState {
         engine,
         sessions: Mutex::new(SessionRegistry::default()),
@@ -1019,11 +1025,47 @@ async fn mount_server_with_flush(
         compute_gate,
         bulk_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
-        session_credential: SESSION_CREDENTIAL.to_string(),
+        catalogue,
+        oidc: tessera_server::oidc::Verifier::new(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         faults,
     });
+    serve_state(state, integrator_key, Some(catalogue_dir)).await
+}
 
+/// The service principal [`authorise`] mints sessions through.
+pub const INTEGRATOR: &str = "integrator";
+
+/// Opens the catalogue in `dir` and issues a key for [`INTEGRATOR`], creating it with
+/// `authorise-as` where it is absent.
+pub fn test_identity_at(dir: &Path) -> (Catalogue, String) {
+    let catalogue = Catalogue::open(dir, tessera_catalogue::Options::default())
+        .expect("the test catalogue opens");
+    if catalogue.principal(INTEGRATOR).is_none() {
+        catalogue
+            .create_principal(INTEGRATOR, PrincipalKind::Service)
+            .unwrap();
+        catalogue
+            .grant_permission(Grantee::Principal(INTEGRATOR), Permission::AuthoriseAs)
+            .unwrap();
+    }
+    let (key, _) = catalogue.create_api_key(INTEGRATOR, None, None).unwrap();
+    (catalogue, key.key)
+}
+
+/// [`test_identity_at`] in a fresh directory.
+pub fn test_identity() -> (Catalogue, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let (catalogue, key) = test_identity_at(&dir.path().join("catalogue"));
+    (catalogue, key, dir)
+}
+
+/// Binds the three listeners on loopback ports and serves `state` on them.
+pub async fn serve_state(
+    state: Arc<AppState>,
+    integrator_key: String,
+    catalogue_dir: Option<TempDir>,
+) -> TestServer {
     let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let viewer_addr = viewer_listener.local_addr().unwrap();
     let session_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1054,14 +1096,45 @@ async fn mount_server_with_flush(
         client: reqwest::Client::new(),
         state,
         serve_tasks,
+        integrator_key,
+        catalogue_dir,
     }
 }
 
-/// Authorise a session for a principal holding `terms`, retrying while the admission gate sheds
-/// under machine load. A test about shedding calls the route itself.
+/// The local principal [`authorise`] acts as for `terms`: one per distinct set, holding `read`
+/// and each term but `public`, which every session holds and no grant may name.
+pub fn principal_for(server: &TestServer, terms: &[&str]) -> String {
+    let mut held: Vec<&str> = terms
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("public"))
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    let digest = sha2::Sha256::digest(serde_json::to_vec(&held).unwrap());
+    let name = format!("viewer-{}", &hex(&digest)[..16]);
+    let catalogue = &server.state.catalogue;
+    if catalogue.principal(&name).is_none() {
+        catalogue.create_principal(&name, PrincipalKind::Person).unwrap();
+        catalogue
+            .grant_permission(Grantee::Principal(&name), Permission::Read)
+            .unwrap();
+        for term in held {
+            catalogue.grant_term(Grantee::Principal(&name), term).unwrap();
+        }
+    }
+    name
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Authorise a session for a principal holding `terms`, through [`INTEGRATOR`]'s
+/// `authorise-as`, retrying while the admission gate sheds under machine load. A test about
+/// shedding calls the route itself.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
-    let auth_data = serde_json::json!({ "terms": terms }).to_string();
-    let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
+    let principal = principal_for(server, terms);
     let resp = wait_for(
         "authorise",
         std::time::Duration::from_secs(60),
@@ -1069,8 +1142,8 @@ pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value
             let resp = server
                 .client
                 .post(server.session_url("/session/authorise"))
-                .bearer_auth(SESSION_CREDENTIAL)
-                .json(&serde_json::json!({ "auth_data": encoded }))
+                .bearer_auth(&server.integrator_key)
+                .json(&serde_json::json!({ "principal": principal }))
                 .send()
                 .await
                 .unwrap();

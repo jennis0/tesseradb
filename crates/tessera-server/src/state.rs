@@ -8,7 +8,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
-use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use tessera_engine::{Engine, Session};
@@ -28,11 +27,69 @@ pub fn now_secs() -> u64 {
 /// insert. A quiet process keeps up to this many expired sessions until the next authorisation.
 const SWEEP_FLOOR_ENTRIES: usize = 16;
 
-/// Every live session, by bearer token and by `token_id`. Expired sessions are refused at lookup
-/// and swept on insert once the registry holds twice its live set, since each pins a mapped mask
-/// fragment. Revocation never waits on a sweep. A swept token answers 401, not 403.
+/// Who a session or a control-plane request acts for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Principal {
+    /// The holder of the operator credential. It is not in the catalogue and holds no session.
+    Superuser,
+    /// A principal stored in the catalogue, by name.
+    Local(String),
+    /// An OIDC identity, named by its issuer and subject, and the provider that accepted it.
+    Oidc {
+        provider: String,
+        issuer: String,
+        subject: String,
+    },
+}
+
+/// One live session: the engine's session and what authorised it.
+pub struct SessionEntry {
+    pub session: Arc<Session>,
+    pub principal: Principal,
+    /// The API key the session was authenticated with at login, or minted with through
+    /// `authorise-as`, by prefix.
+    pub api_key: Option<String>,
+    /// The principal that minted the session through `authorise-as`.
+    pub minted_by: Option<String>,
+    pub permissions: tessera_catalogue::PermissionSet,
+    pub created_at: u64,
+    /// The earliest of the configured lifetime, the API key's expiry and the OIDC token's `exp`.
+    pub expires_at: u64,
+}
+
+impl SessionEntry {
+    /// Whether a catalogue change reported in `affected` ends this session.
+    fn affected_by(&self, affected: &tessera_catalogue::Affected) -> bool {
+        let principal = match &self.principal {
+            Principal::Local(name) => affected.principals.contains(name),
+            Principal::Oidc { provider, .. } => affected.providers.contains(provider),
+            Principal::Superuser => false,
+        };
+        principal
+            || self
+                .minted_by
+                .as_ref()
+                .is_some_and(|p| affected.principals.contains(p))
+            || self
+                .api_key
+                .as_ref()
+                .is_some_and(|k| affected.api_keys.contains(k))
+    }
+}
+
+/// A token's place in the registry. An ended session keeps its token until the next sweep, so its
+/// holder is answered `403 expired-token` and authorises again.
+enum Slot {
+    Live(Arc<SessionEntry>),
+    Ended,
+}
+
+/// Every session, by bearer token and by `token_id`. Expired and ended sessions are refused at
+/// lookup and swept on insert once the registry holds twice its live set, since each live one
+/// pins a mapped mask fragment. A swept token answers 401.
 pub struct SessionRegistry {
-    by_token: FxHashMap<String, Arc<Session>>,
+    by_token: FxHashMap<String, Slot>,
+    /// Live sessions only.
     token_id_to_token: FxHashMap<u64, String>,
     /// Retained count at which [`Self::insert`] runs a sweep. See [`next_sweep_threshold`].
     sweep_at: usize,
@@ -75,7 +132,7 @@ fn prune_index(index: &mut FxHashMap<u64, String>, live: impl Fn(&str) -> bool) 
 
 /// `/control/status`'s `sessions` block.
 pub struct SessionRegistryStats {
-    /// Sessions retained, live and expired but not yet swept: the size of a sweep's pass.
+    /// Sessions retained, live, ended and expired but not yet swept: the size of a sweep's pass.
     pub retained: usize,
     /// Sweeps run since process start.
     pub sweeps: u64,
@@ -90,10 +147,11 @@ impl SessionRegistry {
     /// Inserts a freshly authorised session and sweeps if the registry has reached its threshold.
     /// `now_secs` is the caller's wall-clock reading. Returns the swept token ids, for the caller
     /// to prune from the engine after dropping this lock, which every viewer request takes.
-    pub fn insert(&mut self, session: Session, now_secs: u64) -> Vec<u64> {
-        let token = session.token().to_string();
-        let token_id = session.token_id();
-        self.by_token.insert(token.clone(), Arc::new(session));
+    pub fn insert(&mut self, entry: SessionEntry, now_secs: u64) -> Vec<u64> {
+        let token = entry.session.token().to_string();
+        let token_id = entry.session.token_id();
+        self.by_token
+            .insert(token.clone(), Slot::Live(Arc::new(entry)));
         self.token_id_to_token.insert(token_id, token);
         if self.by_token.len() >= self.sweep_at {
             self.sweep_expired(now_secs)
@@ -102,15 +160,16 @@ impl SessionRegistry {
         }
     }
 
-    /// Drops every session whose deadline has passed, with exactly the refusal's predicate, so a
-    /// sweep removes only what [`AppState::authenticated_session`] already refuses. Returns the
-    /// swept token ids.
+    /// Drops every ended session and every session whose deadline has passed, with exactly the
+    /// refusal's predicate, so a sweep removes only what [`AppState::authenticated_session`]
+    /// already refuses. Returns the swept token ids that were still indexed.
     fn sweep_expired(&mut self, now_secs: u64) -> Vec<u64> {
         let before = self.by_token.len();
-        self.by_token
-            .retain(|_, entry| entry.expires_at() > now_secs);
-        // Pruned against the primary map so the two cannot disagree: `revoke` reaches `by_token`
-        // only through this index.
+        self.by_token.retain(|_, slot| match slot {
+            Slot::Live(entry) => entry.expires_at > now_secs,
+            Slot::Ended => false,
+        });
+        // Pruned against the primary map so the two cannot disagree.
         let by_token = &self.by_token;
         let swept = prune_index(&mut self.token_id_to_token, |token| {
             by_token.contains_key(token)
@@ -118,25 +177,72 @@ impl SessionRegistry {
         self.sweeps += 1;
         self.swept_total += (before - self.by_token.len()) as u64;
         self.sweep_at = next_sweep_threshold(self.by_token.len());
-        // Both maps hold one entry per session. An unpruned index would grow unseen, since
-        // `retained` reads `by_token`.
         debug_assert_eq!(
             self.by_token.len(),
             self.token_id_to_token.len(),
-            "the token-id index must be pruned with the session map, or half the registry leaks"
+            "after a sweep every retained session is live and indexed"
         );
         swept
     }
 
-    pub fn get(&self, token: &str) -> Option<Arc<Session>> {
-        self.by_token.get(token).cloned()
+    /// The session behind `token`: `Ok(None)` for a token never issued or already swept, and
+    /// `Err(())` for one that has ended.
+    #[allow(clippy::result_unit_err)]
+    pub fn get(&self, token: &str) -> Result<Option<Arc<SessionEntry>>, ()> {
+        match self.by_token.get(token) {
+            None => Ok(None),
+            Some(Slot::Live(entry)) => Ok(Some(Arc::clone(entry))),
+            Some(Slot::Ended) => Err(()),
+        }
     }
 
-    /// Removes a session at once. An id never minted or already revoked is a no-op.
-    pub fn revoke(&mut self, token_id: u64) {
-        if let Some(token) = self.token_id_to_token.remove(&token_id) {
-            self.by_token.remove(&token);
+    /// The live session with `token_id`.
+    pub fn by_id(&self, token_id: u64) -> Option<Arc<SessionEntry>> {
+        let token = self.token_id_to_token.get(&token_id)?;
+        match self.by_token.get(token) {
+            Some(Slot::Live(entry)) => Some(Arc::clone(entry)),
+            _ => None,
         }
+    }
+
+    /// Ends every live session `doomed` selects. Each holder is answered `403 expired-token` until
+    /// the next sweep. Returns the ended token ids, for the caller to prune from the engine.
+    pub fn end_where(&mut self, doomed: impl Fn(&SessionEntry) -> bool) -> Vec<u64> {
+        let mut ended = Vec::new();
+        for slot in self.by_token.values_mut() {
+            if let Slot::Live(entry) = slot {
+                if doomed(entry) {
+                    ended.push(entry.session.token_id());
+                    *slot = Slot::Ended;
+                }
+            }
+        }
+        for token_id in &ended {
+            self.token_id_to_token.remove(token_id);
+        }
+        ended
+    }
+
+    /// Ends every session a catalogue change reported in `affected`.
+    pub fn end_affected(&mut self, affected: &tessera_catalogue::Affected) -> Vec<u64> {
+        if affected.is_empty() {
+            return Vec::new();
+        }
+        self.end_where(|entry| entry.affected_by(affected))
+    }
+
+    /// Every live session `keep` selects, in `token_id` order.
+    pub fn list(&self, keep: impl Fn(&SessionEntry) -> bool) -> Vec<Arc<SessionEntry>> {
+        let mut out: Vec<Arc<SessionEntry>> = self
+            .by_token
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Live(entry) if keep(entry) => Some(Arc::clone(entry)),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|e| e.session.token_id());
+        out
     }
 
     pub fn stats(&self) -> SessionRegistryStats {
@@ -590,7 +696,11 @@ pub struct AppState {
     pub bulk_gate: ComputeGate,
     /// The control plane's own bound, so ingest is never throttled by what viewports consume.
     pub ingest_admission: IngestAdmission,
-    pub session_credential: String,
+    /// Principals, credentials, groups, grants and OIDC providers.
+    pub catalogue: tessera_catalogue::Catalogue,
+    /// Checks OIDC access tokens against their providers' published keys.
+    pub oidc: crate::oidc::Verifier,
+    /// Authenticates the superuser on the control plane.
     pub operator_credential: String,
     /// The write executor's fault switchboard, in the faults build only. The executor holds the
     /// same `Arc`, so `/control/faults/*` arms the thread that pauses.
@@ -620,23 +730,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
     ) -> Result<Self, ApiError> {
         let token = bearer_token(&parts.headers).ok_or(ApiError::BadCredential)?;
         state.authenticated_session(token).map(ViewerSession)
-    }
-}
-
-/// The session plane's authentication extractor: the bearer token checked against the session
-/// credential. Taken first after the state, so a caller without the credential is refused before
-/// the body is read.
-pub struct SessionCredential;
-
-impl axum::extract::FromRequestParts<Arc<AppState>> for SessionCredential {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, ApiError> {
-        state.check_bearer(bearer_token(&parts.headers), &state.session_credential)?;
-        Ok(SessionCredential)
     }
 }
 
@@ -743,43 +836,43 @@ impl AppState {
             .await
     }
 
-    /// Looks up a viewer token: unknown is 401 and expired is 403. The engine never checks
-    /// `expires_at`, so this is the only deadline check.
-    pub fn authenticated_session(
-        &self,
-        token: &str,
-    ) -> Result<Arc<Session>, ApiError> {
+    /// Looks up a viewer token: unknown is 401, and ended or past its deadline is 403. The
+    /// engine never checks a deadline, so this is the only deadline check.
+    pub fn authenticated_session(&self, token: &str) -> Result<Arc<Session>, ApiError> {
+        self.session_entry(token).map(|e| Arc::clone(&e.session))
+    }
+
+    /// [`Self::authenticated_session`], with what authorised the session.
+    pub fn session_entry(&self, token: &str) -> Result<Arc<SessionEntry>, ApiError> {
         let entry = self
             .sessions
             .lock()
             .get(token)
+            .map_err(|()| ApiError::ExpiredToken)?
             .ok_or(ApiError::BadCredential)?;
-        if now_secs() >= entry.expires_at() {
+        if now_secs() >= entry.expires_at {
             return Err(ApiError::ExpiredToken);
         }
         Ok(entry)
     }
 
-    /// Checks a bearer token against a shared-secret credential. Both sides are hashed and the
-    /// digests compared in constant time, so a wrong guess takes the same time wherever it
-    /// diverges; `==` on the strings would let a caller recover the secret byte by byte. Viewer
-    /// tokens need none of this: they are random 256-bit values looked up in a map.
-    pub fn check_bearer(&self, presented: Option<&str>, expected: &str) -> Result<(), ApiError> {
-        let Some(token) = presented else {
-            return Err(ApiError::BadCredential);
-        };
-        let presented_digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let expected_digest: [u8; 32] = Sha256::digest(expected.as_bytes()).into();
-        // `|=` over every byte, with no early exit.
-        let mut diff = 0u8;
-        for (a, b) in presented_digest.iter().zip(expected_digest.iter()) {
-            diff |= a ^ b;
+    /// Drops the sessions `ended` names from the engine's caches, off the request path. The
+    /// registry has already made them unusable.
+    pub fn prune_sessions(self: &Arc<Self>, ended: Vec<u64>) {
+        if ended.is_empty() {
+            return;
         }
-        if diff == 0 {
-            Ok(())
-        } else {
-            Err(ApiError::BadCredential)
-        }
+        let doomed: FxHashSet<u64> = ended.into_iter().collect();
+        let pruner = Arc::clone(self);
+        tokio::task::spawn_blocking(move || pruner.engine.prune_tokens(&doomed));
+    }
+
+    /// Ends every session a catalogue change affected, and returns how many.
+    pub fn end_affected(self: &Arc<Self>, affected: &tessera_catalogue::Affected) -> usize {
+        let ended = self.sessions.lock().end_affected(affected);
+        let n = ended.len();
+        self.prune_sessions(ended);
+        n
     }
 }
 

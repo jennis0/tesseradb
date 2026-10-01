@@ -23,13 +23,15 @@ info:
   version: "1"
   summary: The viewer, session and control planes of a Tessera server.
   description: |
-    Three listeners. The **session plane** mints and revokes viewer sessions and is authenticated
-    by the *session credential*, a shared secret the operator configures; it is never
-    browser-facing. The **viewer plane** answers about the corpus as one principal may see it and
-    is authenticated by the *session token* the session plane minted. The **control plane**
-    declares, ingests, deletes, suppresses and publishes, reports the node's state, and is
-    authenticated by the *operator credential*, a second shared secret. `/healthz` and `/readyz`
-    sit on the viewer and session listeners, unauthenticated, bare status codes with no body.
+    Three listeners. The **viewer plane** answers about the corpus as one principal may see it and
+    is authenticated by a *session token*; `POST /v1/login` mints one from a password, an API key
+    or an OIDC access token. The **session plane** lets an integrator's backend mint a session
+    for another principal, with an API key holding `authorise-as`; it is never browser-facing.
+    The **control plane** declares, ingests, deletes, suppresses and publishes, reports the
+    node's state, and manages principals, credentials, groups, grants, OIDC providers and
+    sessions. It takes the operator credential, an API key or an OIDC access token. `/healthz`
+    and `/readyz` sit on the viewer and session listeners, unauthenticated, bare status codes with
+    no body.
 
     `api_version` is published by `GET /v1/meta` and by nothing else. There is no version header,
     on any plane. A client does not send one to negotiate, and a server does not refuse a client
@@ -83,9 +85,9 @@ servers:
 
 tags:
   - name: session
-    description: Minting and revoking viewer sessions. Authenticated by the session credential.
+    description: Minting and revoking sessions for other principals. Authenticated by an API key holding `authorise-as`.
   - name: viewer
-    description: The corpus as one principal sees it. Authenticated by a session token.
+    description: Logging in, and the corpus as one principal sees it. Authenticated by a session token.
   - name: probes
     description: Liveness and readiness, on the viewer and session listeners, unauthenticated, no body.
   - name: "control: ingest"
@@ -110,28 +112,32 @@ tags:
     description: Registering and dropping annotation layers. Control plane.
   - name: "control: artifacts"
     description: Publishing a layer's artifacts and growing their memberships. Control plane.
+  - name: "control: identity"
+    description: Principals, passwords, API keys, groups, grants, OIDC providers and sessions. Control plane, `admin`.
 
 paths:
   /session/authorise:
     post:
       tags: [session]
       operationId: authorise
-      summary: Mint a viewer session from a credential the auth plugin understands.
+      summary: Mint a session for another principal, with an API key holding `authorise-as`.
       description: |
-        `auth_data` is base64 of bytes the deployment's auth plugin evaluates. What the bytes mean
-        is the plugin's to say; the built-in passthrough plugin reads them as JSON
-        `{"terms": [...]}`. The server hashes the decoded bytes to find a mask fragment it has
-        already built for them, so one credential has to arrive as the same bytes each time;
-        base64 keeps them exact.
+        The bearer is an API key whose principal holds `authorise-as`. The body names the
+        principal to act as: a local principal by `principal`, or an OIDC identity by its
+        `access_token`, which is checked as `POST /v1/login` checks one. The session carries that
+        principal's terms and its `read` and `write`, and never its `admin`, `authorise-as` or
+        `bypass`. The target must hold `read`.
 
-        A valid credential that yields no terms still mints a token, which sees nothing. The
-        service cannot tell a wrong credential from one cleared for nothing, and refusing would
-        say which.
+        The session ends at the earliest of `token_max_lifetime` after the request, the expiry of
+        the key that minted it, and the target access token's `exp`. It also ends when a catalogue
+        change affects the target, the minting principal or the minting key: a grant or
+        membership changed, a principal disabled or deleted, a password set or cleared, a key
+        revoked, or the target's provider or a group it maps to changed.
 
-        Subject to compute admission: a first authorise for a credential builds and writes a mask
-        fragment.
+        Subject to compute admission: a first authorise for a set of terms builds and writes a
+        mask fragment.
       security:
-        - sessionCredential: []
+        - authoriseAsKey: []
       requestBody:
         required: true
         content:
@@ -140,15 +146,27 @@ paths:
               $ref: "#/components/schemas/AuthoriseRequest"
       responses:
         "200":
-          description: A session. `expires_at` is the time of the request plus the server's `token_max_lifetime_secs`, in seconds since the Unix epoch.
+          description: A session.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthoriseResponse"
+        "400":
+          $ref: "#/components/responses/NotJson"
         "401":
           $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`principal` names no enabled local principal."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
         "422":
-          description: "`auth_data` is not base64, or the deployment's plugin refused it. The detail carries the plugin's reason, which only a holder of the session credential reads."
+          description: "The body names neither or both of `principal` and `access_token`, or the access token was not accepted."
           content:
             application/json:
               schema:
@@ -162,13 +180,14 @@ paths:
     post:
       tags: [session]
       operationId: revoke
-      summary: End a session by its `token_id`, which is not the token itself.
+      summary: End a session this principal minted, by its `token_id`, which is not the token itself.
       description: |
         Revocation names the session by `token_id`, so the token is sent once, when it is minted,
-        and never again. A `token_id` that names no live session is also answered `204`, since any
-        other answer would let a caller enumerate sessions.
+        and never again. Only a session minted by the caller's own principal is ended. A
+        `token_id` that names no such live session is also answered `204`, since any other answer
+        would let a caller enumerate sessions.
       security:
-        - sessionCredential: []
+        - authoriseAsKey: []
       requestBody:
         required: true
         content:
@@ -178,8 +197,14 @@ paths:
       responses:
         "204":
           description: Revoked, or never live. No body.
+        "400":
+          $ref: "#/components/responses/NotJson"
         "401":
           $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
         "422":
           $ref: "#/components/responses/Contract"
 
@@ -207,6 +232,70 @@ paths:
           description: Ready to serve.
         "503":
           description: Not ready. No body and no `Retry-After`, because a figure that varied with the write executor's state would tell an unauthenticated caller about it.
+
+  /v1/login:
+    post:
+      tags: [viewer]
+      operationId: login
+      summary: Mint a session for the principal a password, an API key or an OIDC access token authenticates.
+      description: |
+        The credential travels in the body, so the route takes no bearer. A password is checked
+        with argon2id, and failed attempts are limited per name presented: past the limit an
+        attempt is refused as a wrong password is. An API key authenticates its principal with
+        the key's own permissions where it has them. An access token is checked against its
+        provider's published keys, then issuer, audience, `exp` and `nbf`, and its claims are
+        mapped to terms and groups by the provider's claim rules and role mappings.
+
+        The principal must hold `read`. The session carries its terms and its `read` and `write`.
+        It ends at the earliest of `token_max_lifetime` after the request, the key's expiry and the
+        access token's `exp`, and when a catalogue change affects the principal, the key or the
+        provider.
+
+        Every reason a credential is not accepted answers the same `401`, so the answer does not
+        show whether a principal exists. Subject to compute admission.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: A session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/NotJson"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/logout:
+    post:
+      tags: [viewer]
+      operationId: logout
+      summary: End the session of the token sent. No body is read.
+      security:
+        - sessionToken: []
+      responses:
+        "204":
+          description: The session has ended. No body.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
 
   /v1/meta:
     get:
@@ -1359,7 +1448,7 @@ paths:
         The answer follows the write-ahead log's fsync. The rows become visible in the publication
         cycle `publication` names.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/BatchId"
         - $ref: "#/components/parameters/WriteView"
@@ -1388,7 +1477,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/IngestResponse"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: "`x-tessera-view` names no view."
           content:
@@ -1466,7 +1557,7 @@ paths:
         has no readiness check. A `500` means a change may be in force without being durable:
         sending the same request again is safe, and treating the items as visible is not.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/Wait"
         - $ref: "#/components/parameters/Strict"
@@ -1486,7 +1577,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ChangesApplied"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: With `strict=true`, a change names no item the deployment holds. Nothing was applied. The detail names the change by its index in the request.
           content:
@@ -1538,7 +1631,7 @@ paths:
         `running`, and nothing else. `/readyz` also fails while a partition serves a stepped-down
         manifest, so it can answer `503` while this document reads ready.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       responses:
         "200":
           description: The status document.
@@ -1547,7 +1640,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Status"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /control/flush:
     post:
@@ -1563,7 +1658,7 @@ paths:
         not reach its number, until every one of them has been published. A request body is not
         read.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/Wait"
       responses:
@@ -1574,7 +1669,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/PublicationAck"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "422":
           description: "`wait` has a value other than `visible`, or the query names another parameter. No cycle was requested."
           content:
@@ -1594,12 +1691,14 @@ paths:
         `compaction` on `/control/status` shows what happened, including a fold refused for want
         of memory or disc. The query string is not read.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       responses:
         "202":
           description: The fold is requested. No body.
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /control/attributes:
     put:
@@ -1627,7 +1726,7 @@ paths:
         again answers once it ends. Declaring it `false` drops the index at once and keeps the
         values.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/Wait"
       requestBody:
@@ -1652,7 +1751,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJson"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: The name is declared with a different type, vocabulary, analyser, flags or scope, which is written into every row and cannot change; or `unique` was declared on a column in which more than one item holds one value, and the detail says how many values and names up to ten.
           content:
@@ -1699,7 +1800,7 @@ paths:
         `PATCH /control/vocabularies/{name}/values` does, and changes nothing else. With a
         different identity it is `409`.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/VocabularyName"
         - $ref: "#/components/parameters/Wait"
@@ -1725,7 +1826,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJsonOrPathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: The name is declared with a different value set, visibility, width or reserved list. A code's width is written into every row that carries one, so it cannot change.
           content:
@@ -1766,7 +1869,7 @@ paths:
         new name while every row carrying the code keeps its meaning. A page removes nothing. A
         page that adds no key and changes no title writes nothing.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/VocabularyName"
         - $ref: "#/components/parameters/Wait"
@@ -1786,7 +1889,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJsonOrPathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: No vocabulary has this name. A page does not create one, since a vocabulary's width and visibility are its declaration's to state.
           content:
@@ -1823,7 +1928,7 @@ paths:
         The name is the group's identity. Declaring it again with the same fields answers `200`
         and changes nothing; with any field different it is `409`.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - name: name
           in: path
@@ -1854,7 +1959,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJsonOrPathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: "`members` names no view group."
           content:
@@ -1905,7 +2012,7 @@ paths:
         changes nothing; with a different title, frame, projection, visibility or point default it is
         `409`.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - name: name
           in: path
@@ -1936,7 +2043,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJsonOrPathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           description: The name is declared with a different title, frame, projection, visibility or point default.
           content:
@@ -1981,7 +2090,7 @@ paths:
         A key held by a live view is `409`. A dropped key may be created again, and the new view
         starts with none of the old one's rows or artifacts.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/ViewGroup"
         - $ref: "#/components/parameters/ViewKey"
@@ -2002,7 +2111,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJsonOrPathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: No view group has this name.
           content:
@@ -2051,7 +2162,7 @@ paths:
         nothing afterwards: a later row carrying one of its unique values creates a new item, and
         one carrying its `tessera_id` is refused.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/ViewGroup"
         - $ref: "#/components/parameters/ViewKey"
@@ -2066,7 +2177,9 @@ paths:
         "400":
           $ref: "#/components/responses/PathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: No live view of this group holds this key, or no group has this name.
           content:
@@ -2103,7 +2216,7 @@ paths:
         held, is `422`, including a second request with the same declaration. A refusal means the
         layer does not exist.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/Wait"
       requestBody:
@@ -2122,7 +2235,9 @@ paths:
         "400":
           $ref: "#/components/responses/NotJson"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "413":
           $ref: "#/components/responses/DeclarationTooLarge"
         "415":
@@ -2163,7 +2278,7 @@ paths:
         The layer and its artifacts stop being served at once. Its name is never registered again,
         since bookmarks, edges and suppressions name a layer, and its entity ids are not reused.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/LayerName"
         - $ref: "#/components/parameters/Wait"
@@ -2177,7 +2292,9 @@ paths:
         "400":
           $ref: "#/components/responses/PathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "422":
           description: |
             - No layer is registered under this name
@@ -2226,7 +2343,7 @@ paths:
         membership's size. `shapes` reports what fitting each shape to each of the layer's views
         did.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/LayerName"
         - $ref: "#/components/parameters/Wait"
@@ -2253,7 +2370,9 @@ paths:
         "400":
           $ref: "#/components/responses/PathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: A member of a content's generating set, or with `strict=true` any member, names nothing the deployment holds. The detail names it by its artifact, list and row.
           content:
@@ -2325,7 +2444,7 @@ paths:
         publishes both under `limits.grow`. The answer never carries an ordinal or a membership's
         size.
       security:
-        - operatorCredential: []
+        - controlCredential: []
       parameters:
         - $ref: "#/components/parameters/LayerName"
         - $ref: "#/components/parameters/Wait"
@@ -2351,7 +2470,9 @@ paths:
         "400":
           $ref: "#/components/responses/PathNotUtf8"
         "401":
-          $ref: "#/components/responses/OperatorBadCredential"
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           description: With `strict=true`, a member names nothing the deployment holds. The detail names it by its artifact, list and row.
           content:
@@ -2390,22 +2511,905 @@ paths:
         "503":
           $ref: "#/components/responses/ExecutorNotReady"
 
+  /control/principals:
+    get:
+      tags: ["control: identity"]
+      operationId: listPrincipals
+      summary: "Every local principal."
+      security:
+        - controlCredential: []
+      responses:
+        "200":
+          description: "The principals, by name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalList"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    post:
+      tags: ["control: identity"]
+      operationId: createPrincipal
+      summary: "Create a local principal, a person or a service."
+      description: |
+        A new principal holds no password, no key, no term and no permission.
+      security:
+        - controlCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrincipalCreate"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "A principal of that name exists."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The name is empty or holds a control character, or `kind` is not `person` or `service`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/principals/{name}:
+    get:
+      tags: ["control: identity"]
+      operationId: showPrincipal
+      summary: "One local principal: its kind, flags, terms, permissions and groups."
+      description: |
+        The terms and permissions are those granted to the principal directly; its groups' are listed with each group.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      responses:
+        "200":
+          description: "The principal."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalRecord"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    patch:
+      tags: ["control: identity"]
+      operationId: changePrincipal
+      summary: "Disable or enable a principal, or set its `bypass`."
+      description: |
+        Each field present is applied. Disabling a principal ends its sessions and those minted
+        with its keys, and no credential of it is accepted until it is enabled. `bypass` lets a
+        principal with `write` write against the whole corpus.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrincipalChange"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The body sets neither field."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    delete:
+      tags: ["control: identity"]
+      operationId: deletePrincipal
+      summary: "Delete a principal with its password, API keys, grants and memberships."
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/principals/{name}/password:
+    put:
+      tags: ["control: identity"]
+      operationId: setPassword
+      summary: "Set a principal's password, replacing any previous one."
+      description: |
+        A password shorter than `[catalogue] min_password_length` is refused. The principal's
+        sessions end.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordSet"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The password is shorter than the configured minimum."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    delete:
+      tags: ["control: identity"]
+      operationId: clearPassword
+      summary: "Remove a principal's password, so no password authenticates it."
+      description: |
+        The principal's sessions end where it had a password.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/principals/{name}/keys:
+    get:
+      tags: ["control: identity"]
+      operationId: listKeys
+      summary: "A principal's API keys, by prefix, without their secrets."
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      responses:
+        "200":
+          description: "The keys."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyList"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    post:
+      tags: ["control: identity"]
+      operationId: createKey
+      summary: "Issue an API key for a principal."
+      description: |
+        The whole key, `tsk_<prefix>_<secret>`, is in this answer and nowhere else; the catalogue
+        keeps its SHA-256. With `permissions`, a credential made from the key holds at most those,
+        and never more than its principal holds. With `expires_at`, the key and every session
+        authorised with it end then.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyCreate"
+      responses:
+        "200":
+          description: "The key."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedKey"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "A permission is not one of `read`, `write`, `authorise-as` and `admin`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/keys/{prefix}:
+    delete:
+      tags: ["control: identity"]
+      operationId: revokeKey
+      summary: "Revoke an API key."
+      description: |
+        Every session authorised with the key ends, including those minted with it through
+        `authorise-as`.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/KeyPrefix"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No key has the prefix."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/groups:
+    get:
+      tags: ["control: identity"]
+      operationId: listGroups
+      summary: "Every local group."
+      security:
+        - controlCredential: []
+      responses:
+        "200":
+          description: "The groups, by name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupList"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    post:
+      tags: ["control: identity"]
+      operationId: createGroup
+      summary: "Create a local group."
+      security:
+        - controlCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroupCreate"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "A group of that name exists."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The name is empty or holds a control character."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/groups/{name}:
+    get:
+      tags: ["control: identity"]
+      operationId: showGroup
+      summary: "One group: its terms, permissions and members."
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/GroupName"
+      responses:
+        "200":
+          description: "The group."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupRecord"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No group has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    delete:
+      tags: ["control: identity"]
+      operationId: deleteGroup
+      summary: "Delete a group with its grants and memberships."
+      description: |
+        Its members' sessions end, and every session authorised through a provider with a role
+        mapping to it.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/GroupName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No group has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/groups/{name}/members/{principal}:
+    put:
+      tags: ["control: identity"]
+      operationId: addMember
+      summary: "Add a principal to a group."
+      description: |
+        The principal's sessions end where it was not a member.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/GroupName"
+        - $ref: "#/components/parameters/MemberName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No group or no principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    delete:
+      tags: ["control: identity"]
+      operationId: removeMember
+      summary: "Remove a principal from a group."
+      description: |
+        The principal's sessions end where it was a member.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/GroupName"
+        - $ref: "#/components/parameters/MemberName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No group or no principal has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/grants:
+    post:
+      tags: ["control: identity"]
+      operationId: grant
+      summary: "Grant a term or a permission to a principal or a group."
+      description: |
+        A grant already held changes nothing and ends no session. Otherwise the sessions of the
+        principal, or of every member of the group and of every identity a role mapping gives it,
+        end, so they pick up the grant when they authorise again.
+      security:
+        - controlCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Grant"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal or no group has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The body does not name exactly one grantee and one grant, the term is `public` or holds a control character, or the permission is unknown."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/grants/revoke:
+    post:
+      tags: ["control: identity"]
+      operationId: revokeGrant
+      summary: "Revoke a term or a permission from a principal or a group."
+      description: |
+        A grant not held changes nothing and ends no session. Otherwise the sessions it affected end.
+      security:
+        - controlCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Grant"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No principal or no group has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The body does not name exactly one grantee and one grant, or the permission is unknown."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/providers:
+    get:
+      tags: ["control: identity"]
+      operationId: listProviders
+      summary: "Every OIDC provider, declared through the API or in `tessera.toml`."
+      security:
+        - controlCredential: []
+      responses:
+        "200":
+          description: "The providers, by name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderList"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/providers/{name}:
+    get:
+      tags: ["control: identity"]
+      operationId: showProvider
+      summary: "One OIDC provider."
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderName"
+      responses:
+        "200":
+          description: "The provider."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderRecord"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No provider has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    put:
+      tags: ["control: identity"]
+      operationId: putProvider
+      summary: "Declare an OIDC provider, or replace one whole."
+      description: |
+        A `jwks_url` is `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`, unless the
+        service runs with `TESSERA_ALLOW_INSECURE_JWKS=1`. A claim rule whose template could produce
+        only `public`, or holds a control character, is refused. Replacing a provider ends every
+        session authorised through it.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderDeclaration"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "The provider is declared in `tessera.toml`; change it there and restart."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "A field is empty, the JWKS URL is refused, or a claim path or template is malformed."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+    delete:
+      tags: ["control: identity"]
+      operationId: dropProvider
+      summary: "Remove an OIDC provider."
+      description: |
+        Every session authorised through it ends.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderName"
+      responses:
+        "200":
+          description: "Committed, and every session it affected has ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "No provider has the name."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "The provider is declared in `tessera.toml`; remove it there and restart."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/sessions:
+    get:
+      tags: ["control: identity"]
+      operationId: listSessions
+      summary: "Live sessions: all of them, a local principal's, or a provider's."
+      description: |
+        A local principal's sessions include those minted for it through `authorise-as`.
+      security:
+        - controlCredential: []
+      parameters:
+        - $ref: "#/components/parameters/SessionsPrincipal"
+        - $ref: "#/components/parameters/SessionsProvider"
+      responses:
+        "200":
+          description: "The sessions, by `token_id`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionList"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: "Both `principal` and `provider` are sent, or the query names another parameter."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /control/sessions/end:
+    post:
+      tags: ["control: identity"]
+      operationId: endSessions
+      summary: "End one session by `token_id`, or every session of a local principal or a provider."
+      description: |
+        An ended session's token is answered `403 expired-token`.
+      security:
+        - controlCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionsEnd"
+      responses:
+        "200":
+          description: "The sessions have ended. The body says how many."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueChange"
+        "400":
+          $ref: "#/components/responses/NotJsonOrPathNotUtf8"
+        "401":
+          $ref: "#/components/responses/ControlBadCredential"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/NotJsonContentType"
+        "422":
+          description: "The body does not name exactly one of `token_id`, `principal` and `provider`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
 components:
   securitySchemes:
-    sessionCredential:
+    authoriseAsKey:
       type: http
       scheme: bearer
-      description: The session credential, a shared secret read from the file `serve.session_credential_file` names or the environment variable `serve.session_credential_env` names. Compared in constant time. Never handed to a browser.
-    operatorCredential:
+      description: "An API key, `tsk_<prefix>_<secret>`, whose principal holds `authorise-as`. It mints a session for any principal, so it belongs to an integrator's backend and is never handed to a browser. A key that is not accepted is `401`; an accepted key without `authorise-as` is `403 forbidden`. Checked before the body is read."
+    controlCredential:
       type: http
       scheme: bearer
-      description: The operator credential, a shared secret read from the file `serve.operator_credential_file` names or the environment variable `serve.operator_credential_env` names. Compared in constant time. Every path on the control listener requires it, and it is checked before the request's query or body is read, so a caller without it is answered `401` ahead of any other refusal.
+      description: "The operator credential, which authenticates the built-in superuser holding every permission and `bypass`; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes need `write` and `bypass`; status, flush, compaction and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`."
     sessionToken:
       type: http
       scheme: bearer
-      description: The `token` `POST /session/authorise` minted. A missing, malformed or unrecognised token, a revoked one included, is `401 bad-credential`; a recognised token past `expires_at` is `403 expired-token`. Either means the session has ended.
+      description: "The `token` `POST /v1/login` or `POST /session/authorise` minted. A missing, malformed or unrecognised token is `401 bad-credential`; a recognised token whose session has ended, by its deadline, a revocation, a logout or a catalogue change, is `403 expired-token`, and `401` once the registry has swept it. Either means the session has ended."
 
   parameters:
+    PrincipalName:
+      name: name
+      in: path
+      required: true
+      description: The local principal's name. A `/` in it is sent as `%2F`.
+      schema:
+        type: string
+    MemberName:
+      name: principal
+      in: path
+      required: true
+      description: The local principal's name. A `/` in it is sent as `%2F`.
+      schema:
+        type: string
+    GroupName:
+      name: name
+      in: path
+      required: true
+      description: The group's name. A `/` in it is sent as `%2F`.
+      schema:
+        type: string
+    KeyPrefix:
+      name: prefix
+      in: path
+      required: true
+      description: The API key's prefix, as the key listing names it.
+      schema:
+        type: string
+    ProviderName:
+      name: name
+      in: path
+      required: true
+      description: The provider's name.
+      schema:
+        type: string
+    SessionsPrincipal:
+      name: principal
+      in: query
+      required: false
+      description: Only this local principal's sessions, including those minted for it.
+      schema:
+        type: string
+    SessionsProvider:
+      name: provider
+      in: query
+      required: false
+      description: Only the sessions authorised through this provider.
+      schema:
+        type: string
     TesseraId:
       name: tessera_id
       in: path
@@ -2474,8 +3478,8 @@ components:
         type: string
 
   responses:
-    OperatorBadCredential:
-      description: "`401 bad-credential`: the operator credential is missing or wrong. Nothing about the request was read."
+    ControlBadCredential:
+      description: "`401 bad-credential`: the credential is missing, or is not the operator credential, an accepted API key or an accepted OIDC access token. Nothing about the request was read."
       content:
         application/json:
           schema:
@@ -2523,13 +3527,19 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     BadCredential:
-      description: "`401 bad-credential`: the bearer credential is missing, malformed or not recognised. On a token that worked before, the session was revoked, and a client treats it as it treats `403`."
+      description: "`401 bad-credential`: the credential is missing, malformed or not accepted. On a session token that worked before, the session ended and has since been swept, and a client treats it as it treats `403`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "`403 forbidden`: the credential was accepted and does not hold the permission the route needs, or, on a write, holds `write` without `bypass`. The detail names what is missing."
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     ExpiredToken:
-      description: "`403 expired-token`: the token is recognised and its `expires_at` has passed. Re-authorise."
+      description: "`403 expired-token`: the token is recognised and its session has ended: `expires_at` has passed, it was revoked or logged out, or a catalogue change affected what authorised it. Authorise again."
       content:
         application/json:
           schema:
@@ -2578,6 +3588,7 @@ components:
           enum:
             - bad-credential
             - expired-token
+            - forbidden
             - unknown
             - conflict
             - contract
@@ -2605,12 +3616,21 @@ components:
     AuthoriseRequest:
       type: object
       additionalProperties: false
-      required: [auth_data]
+      description: Exactly one of the two fields.
       properties:
-        auth_data:
+        principal:
           type: string
-          contentEncoding: base64
-          description: "Bytes the auth plugin evaluates, which the plugin defines. The passthrough plugin reads JSON `{\"terms\": [\"<label>\", ...]}`."
+          description: The local principal to act as, by name.
+        access_token:
+          type: string
+          description: The access token of the OIDC identity to act as, as its provider issued it.
+      oneOf:
+        - required: [principal]
+          not:
+            required: [access_token]
+        - required: [access_token]
+          not:
+            required: [principal]
 
     AuthoriseResponse:
       type: object
@@ -2623,11 +3643,11 @@ components:
         token_id:
           type: integer
           minimum: 0
-          description: The handle `POST /session/revoke` takes, which grants nothing.
+          description: The handle `POST /session/revoke` and `POST /control/sessions/end` take, which grants nothing.
         expires_at:
           type: integer
           minimum: 0
-          description: Seconds since the Unix epoch. It is the time of the request plus the server's `token_max_lifetime_secs`.
+          description: Seconds since the Unix epoch. The earliest of the time of the request plus `token_max_lifetime`, the minting key's expiry and the target access token's `exp`.
 
     RevokeRequest:
       type: object
@@ -2637,6 +3657,390 @@ components:
         token_id:
           type: integer
           minimum: 0
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      description: Exactly one credential, named by its key.
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        password:
+          type: object
+          additionalProperties: false
+          required: [principal, password]
+          properties:
+            principal:
+              type: string
+            password:
+              type: string
+        api_key:
+          type: string
+          description: "`tsk_<prefix>_<secret>`, as `POST /control/principals/{name}/keys` issued it."
+        access_token:
+          type: string
+          description: An OIDC access token, as a declared provider issued it.
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at]
+      properties:
+        token:
+          type: string
+          description: "The session token, sent as `Authorization: Bearer <token>` on the viewer plane."
+        expires_at:
+          type: integer
+          minimum: 0
+          description: Seconds since the Unix epoch. The earliest of the time of the request plus `token_max_lifetime`, the key's expiry and the access token's `exp`.
+
+    Permission:
+      type: string
+      enum: [read, write, authorise-as, admin]
+
+    CatalogueChange:
+      type: object
+      additionalProperties: false
+      required: [sessions_ended]
+      properties:
+        sessions_ended:
+          type: integer
+          minimum: 0
+          description: How many live sessions the change ended.
+
+    PrincipalCreate:
+      type: object
+      additionalProperties: false
+      required: [name, kind]
+      properties:
+        name:
+          type: string
+          description: Trimmed. Case-sensitive, and refused when empty or holding a control character.
+        kind:
+          type: string
+          enum: [person, service]
+
+    PrincipalChange:
+      type: object
+      additionalProperties: false
+      properties:
+        disabled:
+          type: boolean
+        bypass:
+          type: boolean
+
+    PrincipalRecord:
+      type: object
+      additionalProperties: false
+      required: [name, kind, disabled, bypass, has_password, terms, permissions, groups]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [person, service]
+        disabled:
+          type: boolean
+        bypass:
+          type: boolean
+        has_password:
+          type: boolean
+        terms:
+          type: array
+          description: Granted to the principal directly.
+          items:
+            type: string
+        permissions:
+          type: array
+          description: Granted to the principal directly.
+          items:
+            $ref: "#/components/schemas/Permission"
+        groups:
+          type: array
+          items:
+            type: string
+
+    PrincipalList:
+      type: object
+      additionalProperties: false
+      required: [principals]
+      properties:
+        principals:
+          type: array
+          items:
+            $ref: "#/components/schemas/PrincipalRecord"
+
+    PasswordSet:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+
+    KeyCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        expires_at:
+          type: integer
+          minimum: 0
+          description: Seconds since the Unix epoch. Absent, the key does not expire.
+        permissions:
+          type: array
+          description: Absent, the key holds its principal's permissions.
+          items:
+            $ref: "#/components/schemas/Permission"
+
+    IssuedKey:
+      type: object
+      additionalProperties: false
+      required: [prefix, key]
+      properties:
+        prefix:
+          type: string
+          description: The key's public identity, which listing and revoking use.
+        key:
+          type: string
+          description: "The whole key, `tsk_<prefix>_<secret>`. Shown here once."
+
+    KeyRecord:
+      type: object
+      additionalProperties: false
+      required: [prefix, principal, created_at, expires_at, permissions]
+      properties:
+        prefix:
+          type: string
+        principal:
+          type: string
+        created_at:
+          type: integer
+          minimum: 0
+        expires_at:
+          type: [integer, "null"]
+          minimum: 0
+        permissions:
+          type: [array, "null"]
+          items:
+            $ref: "#/components/schemas/Permission"
+
+    KeyList:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeyRecord"
+
+    GroupCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+
+    GroupRecord:
+      type: object
+      additionalProperties: false
+      required: [name, terms, permissions, members]
+      properties:
+        name:
+          type: string
+        terms:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+        members:
+          type: array
+          items:
+            type: string
+
+    GroupList:
+      type: object
+      additionalProperties: false
+      required: [groups]
+      properties:
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroupRecord"
+
+    Grant:
+      type: object
+      additionalProperties: false
+      description: Exactly one of `principal` and `group`, and exactly one of `term` and `permission`.
+      properties:
+        principal:
+          type: string
+        group:
+          type: string
+        term:
+          type: string
+          description: Trimmed. `public` in any case, an empty term and a control character are refused.
+        permission:
+          $ref: "#/components/schemas/Permission"
+      allOf:
+        - oneOf:
+            - required: [principal]
+              not:
+                required: [group]
+            - required: [group]
+              not:
+                required: [principal]
+        - oneOf:
+            - required: [term]
+              not:
+                required: [permission]
+            - required: [permission]
+              not:
+                required: [term]
+
+    ClaimRule:
+      type: object
+      additionalProperties: false
+      required: [claim, template]
+      properties:
+        claim:
+          type: string
+          description: "A claim path: dot-separated object keys, a key followed by `[*]` taking every element of an array, a key holding a dot or bracket written in double quotes."
+        template:
+          type: string
+          description: "The term produced from each value, holding `{value}` at most once, such as `group:{value}`."
+
+    RoleMapping:
+      type: object
+      additionalProperties: false
+      required: [claim, value, group]
+      properties:
+        claim:
+          type: string
+        value:
+          type: string
+          description: Matched exactly, whole, and only in the claim named.
+        group:
+          type: string
+          description: The local group whose terms and permissions an identity with the value receives. It never receives `bypass`.
+
+    ProviderDeclaration:
+      type: object
+      additionalProperties: false
+      required: [issuer, audience, jwks_url]
+      properties:
+        issuer:
+          type: string
+        audience:
+          type: string
+        jwks_url:
+          type: string
+        claim_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimRule"
+        role_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleMapping"
+
+    ProviderRecord:
+      type: object
+      additionalProperties: false
+      required: [name, issuer, audience, jwks_url, claim_rules, role_mappings, read_only]
+      properties:
+        name:
+          type: string
+        issuer:
+          type: string
+        audience:
+          type: string
+        jwks_url:
+          type: string
+        claim_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClaimRule"
+        role_mappings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleMapping"
+        read_only:
+          type: boolean
+          description: Declared in `tessera.toml`, so the API cannot change or remove it.
+
+    ProviderList:
+      type: object
+      additionalProperties: false
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderRecord"
+
+    SessionRecord:
+      type: object
+      additionalProperties: false
+      required: [token_id, principal, provider, subject, api_key, minted_by, permissions, created_at, expires_at]
+      properties:
+        token_id:
+          type: integer
+          minimum: 0
+        principal:
+          type: [string, "null"]
+          description: The local principal, or null for an OIDC identity.
+        provider:
+          type: [string, "null"]
+          description: The provider an OIDC identity was accepted by, or null for a local principal.
+        subject:
+          type: [string, "null"]
+          description: An OIDC identity's `sub`.
+        api_key:
+          type: [string, "null"]
+          description: The prefix of the key the session was authenticated or minted with.
+        minted_by:
+          type: [string, "null"]
+          description: The principal that minted the session through `authorise-as`.
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+        created_at:
+          type: integer
+          minimum: 0
+        expires_at:
+          type: integer
+          minimum: 0
+
+    SessionList:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionRecord"
+
+    SessionsEnd:
+      type: object
+      additionalProperties: false
+      description: Exactly one of the three.
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        token_id:
+          type: integer
+          minimum: 0
+        principal:
+          type: string
+        provider:
+          type: string
 
     Meta:
       type: object
