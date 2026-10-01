@@ -260,12 +260,14 @@ values scoped to those views. An identifier naming nothing and one naming an ite
 not see answer identically, both with a 404, so the response never distinguishes "does not exist"
 from "exists, but not for you."
 
-The response also names the item's own access labels, but only the ones this viewer holds, never
-the full set an item carries. A viewer learning that an item they can see also carries a label they
-do not hold would be a disclosure about how the corpus is labelled, not a filtered view of the item
-itself, so only the intersection of the item's labels with what the viewer's own credentials
-satisfy is served. A bulk read in stored order discloses part of what this withholds: which of the
-viewer's items share a full set of access terms, as [security](security.md#reading-in-bulk)
+The response also says why this viewer sees the item: one clause of its access label that the
+viewer satisfies, written as the terms whose conjunction satisfies it, every one a term the viewer
+holds. It never names the whole label. A viewer learning that an item they can see also carries a
+clause they do not satisfy, or names a term they do not hold, would be a disclosure about how the
+corpus is labelled, not a filtered view of the item itself. Where the viewer satisfies several
+clauses, the one with fewest terms, then the first in byte order, is served, so the answer depends
+on the item's labels and the viewer's terms and on no internal number. A bulk read in stored order discloses part of what this withholds: which of the
+viewer's items share a full set of index keys, as [security](security.md#reading-in-bulk)
 states.
 
 ## Reading items and artifacts in bulk
@@ -286,7 +288,8 @@ corpus. Rows returned before a flush and rows returned after it come from differ
 ### What a read of items returns
 
 A page holds `tessera_id`, then the named fields in the order named, then either or both of two
-system fields: `position`, and `labels`, the item's labels that this viewer also holds. A unique
+system fields: `position`, and `labels`, the clause of the item's label this viewer satisfies, as
+the item card serves it. A unique
 field is named like any other. Under `keep_unmatched` every visible item is returned, with a
 `tessera:matched` column. Every named field is present whether or not an item holds a value, and a
 value it does not hold is a null. A category arrives as its value keys, and each page's dictionary
@@ -312,8 +315,8 @@ value is read from: the view's rendered columns, a per-item value column, or the
 request with neither `order` nor a cursor is served in stored order if any named field's only home
 is the record store, and in map order otherwise. That choice may change.
 
-Stored order groups a viewer's items by their full set of access terms, including terms the viewer
-does not hold. [Security](security.md#reading-in-bulk) states what that discloses.
+Stored order groups a viewer's items by their full set of index keys, including keys the viewer
+does not satisfy. [Security](security.md#reading-in-bulk) states what that discloses.
 
 ### What a read of artifacts returns
 

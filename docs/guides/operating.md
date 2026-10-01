@@ -60,11 +60,11 @@ tessera serve: refused to start: there is no operator credential; set `operator_
 ```
 
 !!! warning
-    Not built yet: a plugin that checks a claim against your identity provider.
-    `builtin:passthrough` is the only plugin, and it grants whatever labels the caller of
-    `/session/authorise` asks for. The session credential is therefore all that stands between a
-    caller and every item in the corpus. Keep the session address away from browsers and the
-    network, and have your backend decide each person's labels from its own sign-in.
+    Not built yet: checking a claim against your identity provider. The service grants
+    whatever terms the caller of `/session/authorise` asks for. The session credential is
+    therefore all that stands between a caller and every item in the corpus. Keep the session
+    address away from browsers and the network, and have your backend decide each person's terms
+    from its own sign-in.
     [Deployment](../system/clients.md#deployment) in the clients chapter shows both ways this goes
     wrong.
 

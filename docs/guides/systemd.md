@@ -154,8 +154,8 @@ tessera serve: No such file or directory (os error 2)
 ```
 
 In a second `tessera` shell, ask the viewer address whether the server is ready, and ask the session
-address for a token the way your backend will. Under the passthrough plugin, `auth_data` is base64
-of a JSON object whose `terms` list the access labels to grant.
+address for a token the way your backend will. `auth_data` is base64 of a JSON object whose
+`terms` list the terms to grant.
 
 ```console
 tessera$ curl -sSi http://127.0.0.1:9151/readyz

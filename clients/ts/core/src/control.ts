@@ -303,7 +303,7 @@ export type IngestResponse = PublicationAck & {
   added: number;
   /** Rows that named an item and changed nothing. */
   unchanged: number;
-  /** Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored. */
+  /** Rows creating an item whose labels index it under more than 4,096 keys. They are stored. */
   over_bound: number;
   /** The positions of the first 100 of those rows. */
   over_bound_rows: number[];

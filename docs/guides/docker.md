@@ -210,8 +210,8 @@ NAME                       IMAGE     COMMAND                  SERVICE   CREATED 
 tessera-docker-tessera-1   tessera   "/usr/local/bin/tess…"   tessera   7 seconds ago   Up 7 seconds (healthy)   127.0.0.1:9161->8080/tcp, 127.0.0.1:9162->8081/tcp, 127.0.0.1:9163->8082/tcp
 ```
 
-From the host, ask for a token the way your application's backend will. Under the passthrough
-plugin, `auth_data` is base64 of a JSON object whose `terms` list the access labels to grant.
+From the host, ask for a token the way your application's backend will. `auth_data` is base64
+of a JSON object whose `terms` list the terms to grant.
 
 ```console
 $ curl -sS http://127.0.0.1:9162/session/authorise \

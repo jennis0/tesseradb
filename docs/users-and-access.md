@@ -1,11 +1,11 @@
 # Users, credentials and access expressions
 
-A design proposal. Nothing in it is built. The service as built is described in
-[system/access-control.md](system/access-control.md): three listeners, each gated by a shared
-secret or a token, and a built-in plugin that passes a credential's terms through unchanged. This
-note proposes what replaces that: principals stored by Tessera, standard ways to authenticate
-them, permissions for what a principal may do, and Accumulo-style access expressions for what a
-principal may see.
+A design proposal, part built. Access expressions, their index, and the removal of the plugin
+are built, and [system/access-control.md](system/access-control.md) describes them; where the build
+differs from this note, the note says so at the claim. The service as built has three listeners,
+each gated by a shared secret or a token, and takes a credential's terms as presented. This note
+proposes what replaces that: principals stored by Tessera, standard ways to authenticate them, and
+permissions for what a principal may do.
 
 ## Decisions
 
@@ -221,6 +221,14 @@ affects no access decision.
 Label ids are internal, as term ids are, and no response carries one. A compaction retires a label
 id whose items have all been removed.
 
+**As built:** an item carries a list of labels, as the access column and `access` always allowed,
+and admits a principal who satisfies any one of them. It is indexed under the union of its labels'
+keys: each term of a disjunction of terms, and one key of its own for each label holding a
+conjunction, whose dictionary ordinal is that label's id. The permission signature is the item's
+sorted set of keys, so two items share a signature exactly when their labels give them the same
+keys. The DAG is derived from those keys in the dictionary, and nothing else stores it. **Not
+built yet:** retiring a key at compaction; the dictionary keeps every key it has issued.
+
 ### The expression DAG
 
 Every label that holds a conjunction is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
@@ -250,7 +258,8 @@ The DAG's size is linear in the total size of the distinct expressions, so an ex
 disjuncts costs space in proportion to its length. Converting to disjunctive normal form would cost
 space exponential in the number of disjuncts. A label that holds a conjunction and is longer than a
 configured number of nodes is
-refused when it is written, with the count in the message.
+refused when it is written, with the count in the message. **Not built yet:** configuring the
+number; it is 1,024.
 
 ### Authorising
 
@@ -275,16 +284,18 @@ figures are paid at session start and never by a map request.
 
 - A label created by ingest after a session authorised is evaluated against that session's stored
   terms by the background refresh, and joins its authorised set if true. A term unknown at
-  authorise then widens the session once it appears.
+  authorise then widens the session once it appears. **Not built yet:** the session keeps the keys
+  it resolved at authorise, so it sees less than its terms admit until it authorises again, never
+  more, and the engine records that it is behind.
 - An item card shows, of the item's label, one clause the viewer satisfies. Walking the true nodes
   from the label's root gives it. The card never shows the whole expression, which could name terms
   the viewer does not hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
-- The plugin trait in `tessera-plugin` is removed. The two functions it held become the parser on
-  the item side and the catalogue on the credential side. Both use one vocabulary, so the service
+- The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
+  parser on the item side and the catalogue on the credential side. Both use one vocabulary, so the service
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
-- The bundle's format changes and its version is bumped.
+- The bundle's format changes and its version is bumped (built: 30, and the WAL's 32).
 - Pages in `docs/system/` that this note changes, and which are rewritten when it is built:
   - [write-path](system/write-path.md), where an item's permission signature is its sorted list of
     terms. Here it is the label id.

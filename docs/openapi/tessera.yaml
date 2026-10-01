@@ -116,12 +116,13 @@ paths:
     post:
       tags: [session]
       operationId: authorise
-      summary: Mint a viewer session from a credential the auth plugin understands.
+      summary: Mint a viewer session from a credential naming the terms a viewer holds.
       description: |
-        `auth_data` is base64 of bytes the deployment's auth plugin evaluates. What the bytes mean
-        is the plugin's to say; the built-in passthrough plugin reads them as JSON
-        `{"terms": [...]}`. The server hashes the decoded bytes to find a mask fragment it has
-        already built for them, so one credential has to arrive as the same bytes each time;
+        `auth_data` is base64 of the JSON `{"terms": [...]}`, the terms the viewer holds. Each
+        term is trimmed, and one that is empty, holds a control character or is `public` in any
+        case is dropped; every session holds `public`. The session sees each item whose access
+        label its terms satisfy. The server hashes the decoded bytes to find a mask fragment it
+        has already built for them, so one credential has to arrive as the same bytes each time;
         base64 keeps them exact.
 
         A valid credential that yields no terms still mints a token, which sees nothing. The
@@ -148,7 +149,7 @@ paths:
         "401":
           $ref: "#/components/responses/BadCredential"
         "422":
-          description: "`auth_data` is not base64, or the deployment's plugin refused it. The detail carries the plugin's reason, which only a holder of the session credential reads."
+          description: "`auth_data` is not base64, or is not JSON of the form `{\"terms\": [\"<term>\", ...]}`. Only a holder of the session credential reads the detail."
           content:
             application/json:
               schema:
@@ -682,7 +683,7 @@ paths:
         null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the centre of the
         step of the view's 32-bit grid the item is stored in, converted back through the view's
         projection and frame, so degrees on a geographic view, and within half a step of the
-        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the item's labels this principal holds, sorted. A rendered field is read
+        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the held terms of one clause of the item's label this principal satisfies, sorted, as the item card serves it. A rendered field is read
         from `view`, where the item card reads the first view the principal can reach, so the two
         can differ. An item joined into `view` before its own ingest is flushed has null record
         fields until that flush.
@@ -1315,7 +1316,9 @@ paths:
         A coordinate outside the view's extent is stored on its edge and counted in `clamped`; one
         outside the projection's domain is counted in `clipped`; a non-finite one is `422`.
         `access` holds the row's access labels: in JSON a string or a list of strings, in Arrow a
-        column of strings, lists of strings or a dictionary of strings. Left out or null, it keeps
+        column of strings, lists of strings or a dictionary of strings. Each label is an access
+        expression, such as `secret&(team_a|team_b)`, and a list admits a viewer who satisfies any
+        one of them; a label that is not an expression is `422`. Left out or null, it keeps
         the item's label, and a new item takes the view's `point_visibility.default`. An empty
         list, and a label empty once trimmed, is the view's default; a new item with no label on a
         view with no default is `422`. `tessera_id` is a string of decimal digits and names an
@@ -1879,7 +1882,7 @@ paths:
             - An extent that is not finite or has a maximum below its minimum
             - `members` naming a group that takes its own views from another, or with `metadata`
             - A metadata name declared twice, or of type `category`
-            - A `visibility` label or point default the auth plugin refuses
+            - A `visibility` label or point default that is not an access expression
           content:
             application/json:
               schema:
@@ -1953,7 +1956,7 @@ paths:
             - A name that is not a valid key, or a view group's
             - An unknown projection
             - An extent that is not finite or has a maximum below its minimum
-            - A `visibility` label or point default the auth plugin refuses
+            - A `visibility` label or point default that is not an access expression
           content:
             application/json:
               schema:
@@ -2025,7 +2028,7 @@ paths:
             - A key that is not valid
             - A metadata value that is null, an array or an object, or that does not match the type the group declares
             - A metadata name the group does not declare, or one it declares left out
-            - A `visibility` label the auth plugin refuses
+            - A `visibility` label that is not an access expression
             - A group that takes its views from another
           content:
             application/json:
@@ -2141,7 +2144,7 @@ paths:
             - Content, dependencies, levels, labels or a layout on an attribute layer
             - An unknown computed property
             - A repeated view, level title or content name
-            - A label the auth plugin cannot read
+            - A label that is not an access expression
             - A `spatial` layer over both projected and unprojected views
           content:
             application/json:
@@ -2610,7 +2613,7 @@ components:
         auth_data:
           type: string
           contentEncoding: base64
-          description: "Bytes the auth plugin evaluates, which the plugin defines. The passthrough plugin reads JSON `{\"terms\": [\"<label>\", ...]}`."
+          description: "The JSON `{\"terms\": [\"<term>\", ...]}`: the terms the viewer holds."
 
     AuthoriseResponse:
       type: object
@@ -3920,7 +3923,7 @@ components:
           type: array
           items:
             type: string
-          description: The item's access labels that this session holds, as the auth plugin presents them, sorted. Never the item's whole label set, so a viewer does not learn a label their credential lacks. Always present; empty where this principal holds none of the item's labels.
+          description: Why this session sees the item, as one clause of its access label that the session satisfies, written as the terms whose conjunction satisfies it, sorted. Every term is one the session holds. Never the item's whole label, so a viewer does not learn a clause they do not satisfy or a term they do not hold. Always present.
         views:
           type: array
           description: The views this item is in that this principal may reach, sorted by id, each with the position that view places it at. A view the principal may not reach is left out, as a view nobody declared is. Always present. `[]` means none of the item's views is reachable; an item in no view at all is a `404` instead.
@@ -4054,7 +4057,7 @@ components:
           type: [number, "null"]
           description: Latitude in degrees, on a projected view.
         access:
-          description: The row's access labels, one per element. Absent or `null` keeps the item's label, and gives a new item the view's `point_visibility.default`; `[]` is that default.
+          description: The row's access labels, one access expression per element; the item admits a viewer who satisfies any one of them. Absent or `null` keeps the item's label, and gives a new item the view's `point_visibility.default`; `[]` is that default.
           oneOf:
             - type: string
             - type: array
@@ -4099,7 +4102,7 @@ components:
         over_bound:
           type: integer
           minimum: 0
-          description: Rows creating an item whose labels resolve to more terms than the auth plugin's per-item bound. They are stored, not refused. A replay answers the first acceptance's count.
+          description: Rows creating an item whose labels index it under more than 4,096 keys. They are stored, not refused. A replay answers the first acceptance's count.
         over_bound_rows:
           type: array
           maxItems: 100
@@ -4451,7 +4454,7 @@ components:
           description: "`[min, max]` on the vertical axis."
 
     ViewVisibility:
-      description: The access labels a viewer must hold at least one of to reach the view, as one label or a list. It cannot be changed after it is declared.
+      description: The access labels a viewer must satisfy at least one of to reach the view, as one access expression or a list of them. It cannot be changed after it is declared.
       oneOf:
         - type: string
         - type: array
@@ -4463,7 +4466,7 @@ components:
       properties:
         default:
           type: [string, "null"]
-          description: The access label an ingested row with no label takes. Absent or `null`, such a row is refused.
+          description: The access label, an access expression, that an ingested row with no label takes. Absent or `null`, such a row is refused.
 
     Projection:
       type: string
@@ -4664,7 +4667,7 @@ components:
           description: "`closed` refuses a key no artifact holds when a batch names it; `open` creates the artifact."
         visibility:
           type: [string, "null"]
-          description: The access label a viewer must hold to know the layer exists. Absent or `null`, every viewer may.
+          description: The access label, an access expression, a viewer must satisfy to know the layer exists. Absent or `null`, every viewer may.
         artifact_visibility:
           type: object
           additionalProperties: false
@@ -4901,7 +4904,7 @@ components:
         access:
           type: [array, "null"]
           items: { type: string }
-          description: The artifact's own access labels. `null` or `[]` is no label, which `artifact_visibility.default` answers. Absent states none, which a layer whose `artifact_visibility` names a field refuses. Refused on a layer that names no field.
+          description: The artifact's own access labels, each an access expression; a viewer satisfying any one of them is admitted. `null` or `[]` is no label, which `artifact_visibility.default` answers. Absent states none, which a layer whose `artifact_visibility` names a field refuses. Refused on a layer that names no field.
 
     ContentItem:
       type: object

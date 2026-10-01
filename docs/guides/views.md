@@ -171,8 +171,9 @@ position.
 ## The gate: who may reach a view
 
 `visibility` on a `[[view]]` or `[[view_group]]` is an access label or `public` (the default), and
-means the same thing it means on a layer: a label the plugin resolves to a term set, satisfied
-where that set meets the principal's. A group's view may carry its own narrower `visibility` on the
+means the same thing it means on a layer: an access expression over terms, such as
+`finance&(eu|uk)`, satisfied by a principal whose terms satisfy it. A list of labels is satisfied
+by a principal who satisfies any one of them. A group's view may carry its own narrower `visibility` on the
 roster; a view carrying none takes the group's. The group's gate is the outer bound — a view's own
 gate can narrow it and never widen it.
 

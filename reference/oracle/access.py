@@ -82,6 +82,45 @@ def satisfies(tree, held: Callable[[str], bool]) -> bool:
     return any(satisfies(operand, held) for operand in tree.operands)
 
 
+def admits(labels, held: Callable[[str], bool]) -> bool:
+    """Whether a principal holding the terms `held` satisfies any one of the labels `labels`, as an
+    item, a view or an artifact carrying a list of labels admits it."""
+    return any(satisfies(parse(label), held) for label in labels)
+
+
+def held_term(term: str) -> str | None:
+    """A term a credential presents, as it is held: trimmed, and `None` where nothing is left,
+    where it holds a control character, or where it is `public` in any case. Every principal holds
+    `public` without presenting it."""
+    name = term.strip(WHITESPACE)
+    if not name or any(unicodedata.category(c) == "Cc" for c in name):
+        return None
+    if name.isascii() and name.lower() == PUBLIC:
+        return None
+    return name
+
+
+#: The first byte of a dictionary key that indexes one label holding a conjunction; the label's
+#: canonical text follows it.
+COMPOUND_KEY = b"\x00"
+
+
+def satisfied_keys(dictionary: dict[bytes, int], held_terms) -> set[int]:
+    """The ordinals of the dictionary keys a credential presenting `held_terms` satisfies: each term
+    it holds that the dictionary carries, `public`, and every key of a label holding a conjunction
+    whose label those terms satisfy. The label is read from the key's text and evaluated here, by
+    direct recursion, apart from the engine's DAG."""
+    held = {h for t in held_terms if (h := held_term(t)) is not None}
+    out: set[int] = set()
+    for key, ordinal in dictionary.items():
+        if key.startswith(COMPOUND_KEY):
+            if satisfies(parse(key[1:].decode("utf-8")), held.__contains__):
+                out.add(ordinal)
+        elif key == PUBLIC.encode() or key.decode("utf-8", "replace") in held:
+            out.add(ordinal)
+    return out
+
+
 def terms(tree) -> set[str]:
     """Every term the label names."""
     if isinstance(tree, Term):

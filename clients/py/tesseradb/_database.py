@@ -98,8 +98,8 @@ class Database:
     - `temporary`: `True` for a database `create()` made without a path, which `close()`
       deletes.
     - `built`: `True` once the first commit has built the database.
-    - `terms`: the access terms `viewer()` and `token()` hold when given none: every access label
-      the database's rows carry, and each view's default label.
+    - `terms`: the access terms `viewer()` and `token()` hold when given none: every term the
+      database's access labels name, and the terms of each view's default label.
     - `inserts`: the `Insert` records made before the first commit, which it builds from.
     - `pending`: the `Insert` records made since the last commit, which the next one sends.
     - `listening`: the addresses the server listens on, as `serve()` returns them, or `None`
@@ -1435,8 +1435,8 @@ class Database:
     def token(self, terms: Sequence[str] | None = None) -> Token:
         """A token for reading this database, made with its own session credential.
 
-        - `terms`: the access terms the token grants. By default it grants every access label the
-          database's rows carry, and each view's default label.
+        - `terms`: the access terms the token grants. By default it grants every term the
+          database's access labels name, and each view's default label's terms.
 
         Pass the token to `connect` or `Map` to read as that reader.
 
@@ -1449,8 +1449,9 @@ class Database:
     def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
         """A reader of this database holding only the access terms given.
 
-        - `terms`: the access terms. The reader sees an item when it holds one of the item's
-          labels. By default it holds every label the database's rows carry, which sees everything.
+        - `terms`: the access terms. The reader sees an item when its terms satisfy one of the
+          item's labels. By default it holds every term the database's labels name, which sees
+          everything.
 
         Every count, map and record the reader is given covers only what those terms let it see.
         An empty list is refused, since such a reader sees nothing. A term no row carries is
@@ -2325,6 +2326,46 @@ _WHITE_SPACE = (
 
 
 def _label_terms(value) -> list[str]:
-    """One access cell's labels as the server stores them: each trimmed, an empty one dropped."""
+    """The terms one access cell's labels name, each label trimmed and an empty one dropped. A
+    label is an access expression, such as `secret&(team_a|"team b")`, and a reader holding every
+    term it names satisfies it. `public`, and a word that is not an expression such as
+    `inherited`, are kept whole."""
     trimmed = (str(one).strip(_WHITE_SPACE) for one in C._labels(value) if one is not None)
-    return [label for label in trimmed if label]
+    terms: list[str] = []
+    for label in trimmed:
+        if label:
+            terms.extend(_expression_terms(label) or [label])
+    return terms
+
+
+_BARE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.:/")
+
+
+def _expression_terms(label: str) -> list[str]:
+    """The terms an access expression names, bare and quoted, or `[]` for `public` and for text
+    holding a character no expression holds. The server is what accepts or refuses a label."""
+    if label == "public":
+        return []
+    terms: list[str] = []
+    at = 0
+    while at < len(label):
+        c = label[at]
+        if c in "&|()":
+            at += 1
+        elif c == '"':
+            name, at = [], at + 1
+            while at < len(label) and label[at] != '"':
+                if label[at] == "\\" and at + 1 < len(label):
+                    at += 1
+                name.append(label[at])
+                at += 1
+            terms.append("".join(name))
+            at += 1
+        elif c in _BARE:
+            start = at
+            while at < len(label) and label[at] in _BARE:
+                at += 1
+            terms.append(label[start:at])
+        else:
+            return []
+    return terms

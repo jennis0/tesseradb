@@ -306,8 +306,8 @@ so that a change survives a crash.
 
 `[build]` names the declaration to build.
 
-`[plugin]` names the code that decides what each viewer may see. There's only one so far,
-`builtin:passthrough`, and the tutorial on access control explains it.
+`[plugin]` takes one value, `builtin:passthrough`: a viewer's token holds exactly the terms
+your backend asks for, and each place is shown to a viewer whose terms satisfy its access label.
 
 `token_max_lifetime` is how long a browser's permission to read the map lasts, in seconds. An hour
 is plenty here.

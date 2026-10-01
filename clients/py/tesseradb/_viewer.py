@@ -701,8 +701,9 @@ class Selection:
 class Viewer:
     """A reader of one Tessera database: an address and a token that says what it may see.
 
-    A reader holds a set of access terms, the labels its token grants. Each item carries labels
-    too, and the reader sees an item when they share one. Every count, map and record a reader
+    A reader holds a set of access terms, which its token grants. Each item carries access labels,
+    expressions over terms such as `secret&(team_a|team_b)`, and the reader sees an item when its
+    terms satisfy one of them. Every count, map and record a reader
     is given is computed over the items it may see, so two readers can get different answers
     from the same database.
 
@@ -812,7 +813,8 @@ class Viewer:
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
-        `labels` (the item's access labels that this reader also holds), `views` (the views
+        `labels` (why this reader sees the item: the terms, all held by this reader, of one clause
+        of its label that they satisfy), `views` (the views
         this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 
@@ -850,7 +852,8 @@ class Viewer:
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
           view's coordinates (degrees for a geographic view), and `"labels"`, the column
-          `tessera:labels` holding the item's labels this reader also holds.
+          `tessera:labels` holding, for each item, the held terms of one clause of its label that
+          this reader satisfies.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
           match are returned.
         - `keep_unmatched`: return every item, with a `tessera:matched` column saying whether it
