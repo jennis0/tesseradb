@@ -1,11 +1,14 @@
 # Users, credentials and access expressions
 
-A design proposal. Nothing in it is built. The service as built is described in
-[system/access-control.md](system/access-control.md): three listeners, each gated by a shared
-secret or a token, and a built-in plugin that passes a credential's terms through unchanged. This
-note proposes what replaces that: principals stored by Tessera, standard ways to authenticate
-them, permissions for what a principal may do, and Accumulo-style access expressions for what a
-principal may see.
+A design note. It proposes principals stored by Tessera, standard ways to authenticate them,
+permissions for what a principal may do, and Accumulo-style access expressions for what a principal
+may see. The catalogue, the three listeners' credentials, sessions and their ending, and the
+catalogue's verbs over HTTP and the CLI are built, and
+[system/access-control.md](system/access-control.md) describes them. **Not built yet:** access
+expressions and their index, removing the plugin, writes masked by the writer's terms, writes with
+a session token on the viewer listener, the audit log, and the catalogue's verbs in the TypeScript
+and Python clients. A write from a principal without `bypass` is refused until masked writes are
+built.
 
 ## Decisions
 

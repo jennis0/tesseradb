@@ -8,7 +8,7 @@ a size.
 
 ```mermaid
 flowchart LR
-  cred["a credential"] --> session["session plane<br/>mints a token"]
+  cred["a credential"] --> session["login or session plane<br/>mints a token"]
   session -- "token" --> client["client<br/>store"]
   client -- "token and request" --> viewer["viewer plane<br/>answers from the visible set"]
   viewer -- "counts, marks, artifacts:<br/>already masked" --> client
@@ -19,15 +19,16 @@ flowchart LR
 
 ## Deployment
 
-Of the three planes a deployment exposes, two concern a client. The session plane turns a credential into a token and must never
-be reached from a browser: it is gated by the deployment's own credential, which only the
-integrator's own server should hold. The viewer plane is what a client actually calls with a
-token, and it can be reached directly by a browser or a notebook page from an origin the
-deployment has named in advance.
+Of the three planes a deployment exposes, two concern a client. The session plane mints a token
+for any principal and must never be reached from a browser: it is gated by an API key holding
+`authorise-as`, which only the integrator's own server should hold. The viewer plane is what a
+client calls with a token, and it can be reached directly by a browser or a notebook page from an
+origin the deployment has named in advance. A viewer can also log in there with its own password,
+API key or OIDC access token, and receive a token for itself.
 
 | Plane | Reached by | Holds | Cross-origin access |
 |---|---|---|---|
-| Session | The integrator's own server | The deployment credential | Never opened to a browser |
+| Session | The integrator's own server | An API key holding `authorise-as` | Never opened to a browser |
 | Viewer | A browser, a notebook page, or a server on the client's behalf | A per-viewer token | An enumerated list of allowed origins, none by default |
 
 Two shapes of mistake pass every functional test and are invisible in a screenshot. The pooled
