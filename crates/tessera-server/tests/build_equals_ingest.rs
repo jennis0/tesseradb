@@ -36,6 +36,25 @@ use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs, BuildReport};
 use tessera_spatial::Bounds;
 
+/// Appends `line` to `build_equals_ingest.log` in the directory `TESSERA_TEST_TRACE_DIR` names,
+/// and does nothing when it is unset. Each line is written straight to the file, so the last phase
+/// reached can be read after the test process is killed.
+fn trace(line: &str) {
+    use std::io::Write;
+    let Some(dir) = std::env::var_os("TESSERA_TEST_TRACE_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).expect("the trace directory can be created");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(Path::new(&dir).join("build_equals_ingest.log"))
+        .expect("the trace file opens");
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs_f64();
+    let pid = std::process::id();
+    writeln!(file, "{now:.3} pid {pid} {line}").expect("the trace line is written");
+}
+
 const LAYER: &str = "groups";
 /// The access terms the relation gives items: every item one everyone is given, and some a
 /// narrower one. Each is the label of its digits at the service.
@@ -727,6 +746,7 @@ async fn seen(
     }
     let mut out = Vec::new();
     loop {
+        trace(&format!("items page of {view} after {} rows", out.len()));
         let resp = server
             .client
             .post(server.viewer_url("/v1/items"))
@@ -791,6 +811,7 @@ async fn state(server: &TestServer, two_fields: bool) -> BTreeMap<String, Value>
         let token = token_for(server, terms).await;
         let who = terms.join("+");
         for view in VIEWS {
+            trace(&format!("state of {who} {view}"));
             let items = seen(server, &token, view, two_fields, None).await;
             out.insert(format!("{who} {view} items"), json!(items));
 
@@ -849,7 +870,9 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     corpus.write(&empty, true);
     let empty_root = empty.join("bundle");
     build(&args(&empty, &declaration, &empty_root)).expect("the empty build runs");
+    trace(&format!("seed {seed}: built; spawning"));
     let ingested = spawn_server(&empty_root, &empty.join("cache"), &empty.join("wal.log")).await;
+    trace(&format!("seed {seed}: spawned"));
 
     let by_row = |entry: &Value| vec![entry["row"].as_u64().unwrap() as usize];
     for (source, object, rows, view) in [
@@ -861,6 +884,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         let refuses = !reported(&report, object).is_empty();
         let batch = format!("{seed}-{source}");
         let body = rows.ingest_body();
+        trace(&format!("seed {seed}: ingest {batch}"));
         let answer = send(
             &ingested,
             reqwest::Method::POST,
@@ -873,6 +897,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         .await;
         let what = format!("seed {seed}: {source}");
         assert_refused_alike(&report, object, &listed(&answer, by_row), rows, &what);
+        trace(&format!("seed {seed}: tick"));
         tick(&ingested).await;
     }
 
@@ -882,6 +907,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         let object = format!("attribute 'grade' in view '{view}'");
         let (rows, file_rows) = corpus.grades.of_view(key);
         let refuses = !reported(&report, &object).is_empty();
+        trace(&format!("seed {seed}: ingest grades of {view}"));
         let answer = send(
             &ingested,
             reqwest::Method::POST,
@@ -901,6 +927,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
             &corpus.grades,
             &what,
         );
+        trace(&format!("seed {seed}: tick"));
         tick(&ingested).await;
     }
 
@@ -909,6 +936,7 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
     let (body, rows_of) = corpus.relation.relation_body();
     let refuses = !reported(&report, object).is_empty();
     let batch = format!("{seed}-access");
+    trace(&format!("seed {seed}: ingest {batch}"));
     let answer = send(
         &ingested,
         reqwest::Method::POST,
@@ -928,10 +956,12 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         &corpus.relation,
         &what,
     );
+    trace(&format!("seed {seed}: tick"));
     tick(&ingested).await;
 
     let object = format!("layer '{LAYER}' members");
     let refuses = !reported(&report, &object).is_empty();
+    trace(&format!("seed {seed}: publish members"));
     let answer = send(
         &ingested,
         reqwest::Method::PUT,
@@ -961,13 +991,18 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
         &corpus.members,
         &what,
     );
+    trace(&format!("seed {seed}: tick"));
     tick(&ingested).await;
 
     // Compared as a restart replays it.
+    trace(&format!("seed {seed}: shutdown"));
     ingested.shutdown().await;
+    trace(&format!("seed {seed}: reopening"));
     let ingested = spawn_server(&empty_root, &empty.join("cache-2"), &empty.join("wal.log")).await;
     let built = spawn_server(&built_root, &full.join("cache"), &full.join("wal.log")).await;
+    trace(&format!("seed {seed}: reopened; comparing the build"));
     let left = state(&built, corpus.two_fields).await;
+    trace(&format!("seed {seed}: comparing the ingest"));
     let right = state(&ingested, corpus.two_fields).await;
     for (what, value) in &left {
         assert_eq!(Some(value), right.get(what), "seed {seed}: {what}");
@@ -998,8 +1033,10 @@ async fn build_equals_ingest(seed: u64) -> Vec<String> {
             .len();
         assert!(artifacts > 0, "seed {seed}: {view} serves artifacts");
     }
+    trace(&format!("seed {seed}: compared; shutting down both"));
     built.shutdown().await;
     ingested.shutdown().await;
+    trace(&format!("seed {seed}: done"));
     report
         .refused
         .iter()

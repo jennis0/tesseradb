@@ -93,6 +93,29 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
+      # A test process that runs past ten minutes is taken to be hung: the watchdog writes every
+      # thread's stack once per such process, attaching with gdb as root because Ubuntu's
+      # `ptrace_scope` of 1 refuses a non-root attach to a process that is not a child. gdb stops
+      # the process for the length of the dump and then detaches, so the watchdog kills nothing and
+      # changes no test's result. `continue-on-error` keeps a failed gdb install out of the gate.
+      # The runner ends the watchdog with the job. The stacks name functions without lines, since
+      # the job builds without debug info.
+      - name: watchdog for hung tests
+        continue-on-error: true
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq gdb
+          mkdir -p "$RUNNER_TEMP/hang/stacks"
+          nohup bash -c '
+            while sleep 60; do
+              ps -eo pid=,etimes= | while read -r pid age; do
+                exe=$(readlink "/proc/$pid/exe") || continue
+                case "$exe" in "$GITHUB_WORKSPACE"/target/*/deps/*) ;; *) continue ;; esac
+                out="$RUNNER_TEMP/hang/stacks/$pid.txt"
+                [ "$age" -gt 600 ] && [ ! -e "$out" ] || continue
+                { tr "\0" " " < "/proc/$pid/cmdline"; echo; date -u
+                  sudo gdb -p "$pid" -batch -ex "thread apply all bt"; } > "$out" 2>&1
+              done
+            done' > "$RUNNER_TEMP/hang/watchdog.log" 2>&1 &
       # The tests run once, instrumented, so the gate and Codacy's coverage come from one build.
       # `show-env` instruments only the workspace's crates, so the cached dependencies still serve.
       #
@@ -107,7 +130,15 @@ jobs:
       # The reachability check shares the step for the instrumented environment: `--quick` asks the
       # compiled harnesses what they would run, and would otherwise compile the workspace a second
       # time. It counts what the gate executes against what exists, and refuses a bare `#[ignore]`.
+      #
+      # The step's own time limit sits well under the job's six hours, so that a hang ends the step
+      # as a failure and the upload of the stacks and traces below still runs; a job cancelled at
+      # its own limit runs no further steps. The step took 18 minutes with a warm cache, measured
+      # 2026-10-01. `build_equals_ingest` appends each phase it reaches to the trace directory.
       - name: tests, instrumented for coverage
+        timeout-minutes: 90
+        env:
+          TESSERA_TEST_TRACE_DIR: ${{ runner.temp }}/hang/trace
         run: |
           source <(cargo llvm-cov show-env --sh)
           cargo llvm-cov clean --workspace
@@ -128,6 +159,12 @@ jobs:
         with:
           name: coverage-rust
           path: rust.lcov
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: hang-diagnostics
+          path: ${{ runner.temp }}/hang
+          if-no-files-found: ignore
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   checks:
