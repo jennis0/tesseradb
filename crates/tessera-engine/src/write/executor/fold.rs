@@ -854,7 +854,6 @@ impl Executor {
         to_prefix_dir: &std::path::Path,
         completed: &crate::compact::CompletedFold,
         manifest_n: u64,
-        data_plugin_hash: &str,
         pending: &PendingRetirement,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let plan = &completed.plan;
@@ -877,7 +876,7 @@ impl Executor {
             pending,
             index: Default::default(),
         };
-        let mut derived = self.write_containment_partitions(&mut pass, data_plugin_hash);
+        let mut derived = self.write_containment_partitions(&mut pass);
         // Layouts must be chosen before the files and the registry snapshot, or the fold would
         // publish a level in its old layout under a record claiming the new one.
         let layouts = self.choose_layouts(&pass.spaces, pending, &pass.segments);
@@ -1108,7 +1107,6 @@ impl Executor {
             &to_prefix_dir,
             &completed,
             manifest_n,
-            &live.bundle.manifest.data_plugin_hash,
             &pending,
         );
         stairs.record("8 derived");
@@ -1725,15 +1723,11 @@ impl Executor {
     fn write_containment_partitions(
         &self,
         pass: &mut DerivedPass<'_>,
-        data_plugin_hash: &str,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
         let n = pass.n;
         let pending = pass.pending;
-        if !crate::containment::signature_shaped(data_plugin_hash) {
-            return Vec::new();
-        }
         let postings_path = prefix_dir
             .join("partitions")
             .join(partition)

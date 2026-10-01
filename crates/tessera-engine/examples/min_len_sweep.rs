@@ -23,7 +23,6 @@ use std::path::PathBuf;
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
@@ -138,7 +137,6 @@ fn main() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 1000,

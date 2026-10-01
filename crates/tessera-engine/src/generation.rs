@@ -340,14 +340,10 @@ impl Generation {
         self.fragments.bundle_identity()
     }
 
-    /// What a containment partition is composed from, for this generation — the base postings and
-    /// the manifest's declared plugin, taken together so the gate cannot be applied to one
-    /// generation's postings on another generation's manifest
-    /// (see [`crate::containment::PartitionSource`]).
+    /// What a containment partition is composed from, for this generation: its base postings.
     pub(crate) fn partition_source(&self) -> crate::containment::PartitionSource<'_> {
         crate::containment::PartitionSource {
             postings: &self.postings,
-            data_plugin_hash: &self.bundle.manifest.data_plugin_hash,
         }
     }
 
@@ -360,12 +356,9 @@ impl Generation {
         overlay: Overlay,
         buffer: IngestBuffer,
     ) -> Generation {
-        use tessera_plugin::Plugin;
         let manifest = tessera_store::manifest::Manifest {
             bundle_format: 3,
             created_at: String::new(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
             vocabularies: vec![],
             small_term_threshold: 32,

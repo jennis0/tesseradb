@@ -309,7 +309,6 @@ impl Fixture {
             &self.root,
             &self.tmp.path().join(format!("cache-{name}")),
             &self.tmp.path().join(format!("{name}.log")),
-            tessera_plugin::Passthrough::new(),
             route_config(),
         )
         .expect("the engine opens")

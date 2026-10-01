@@ -1,5 +1,5 @@
 //! Mask fragment build and the frozen cache, tested against a brute-force `HashSet<u32>` union.
-//! `FragmentCache` is keyed on `bundle_identity ‖ auth_plugin_hash ‖ sorted term ids`, so a cache
+//! `FragmentCache` is keyed on `bundle_identity ‖ rule_hash ‖ sorted term ids`, so a cache
 //! dir reused across bundle rebuilds cannot serve a fragment naming a different entity set.
 
 use std::collections::HashSet;
@@ -90,7 +90,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
 
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [9u8; 32];
-    let auth_plugin_hash = [7u8; 32];
+    let rule_hash = [7u8; 32];
 
     let terms: Vec<TermId> = (0..10u32).map(TermId::new).collect();
 
@@ -100,7 +100,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
@@ -123,7 +123,7 @@ fn frozen_round_trip_second_call_does_not_rebuild() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
         assert_eq!(cache.rebuild_count(), 0);
 
         let frozen = cache
@@ -157,11 +157,11 @@ fn stale_bundle_identity_misses_the_cache() {
     let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
 
     let cache_dir = TempDir::new().unwrap();
-    let auth_plugin_hash = [7u8; 32];
+    let rule_hash = [7u8; 32];
     let terms: Vec<TermId> = (0..5u32).map(TermId::new).collect();
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), [9u8; 32], rule_hash);
         cache
             .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
@@ -169,7 +169,7 @@ fn stale_bundle_identity_misses_the_cache() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), [10u8; 32], rule_hash);
         cache
             .get_or_build(&terms, &reader, &[], 1)
             .unwrap();
@@ -182,7 +182,7 @@ fn stale_bundle_identity_misses_the_cache() {
 }
 
 #[test]
-fn stale_auth_plugin_hash_misses_the_cache() {
+fn stale_rule_hash_misses_the_cache() {
     let corpus_dir = TempDir::new().unwrap();
     let (path, _per_term) = write_random_postings(corpus_dir.path(), 13, 5);
     let reader = tessera_authz::PostingsReader::open(&path, false).unwrap();
@@ -207,7 +207,7 @@ fn stale_auth_plugin_hash_misses_the_cache() {
         assert_eq!(
             cache.rebuild_count(),
             1,
-            "different auth_plugin_hash must not hit a fragment keyed under the old plugin hash"
+            "different rule_hash must not hit a fragment keyed under the old rule hash"
         );
     }
 }
@@ -221,7 +221,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
 
     let cache_dir = TempDir::new().unwrap();
     let bundle_identity = [3u8; 32];
-    let auth_plugin_hash = [4u8; 32];
+    let rule_hash = [4u8; 32];
     let terms: Vec<TermId> = (0..8u32).map(TermId::new).collect();
 
     let mut expected: HashSet<u32> = HashSet::new();
@@ -230,7 +230,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
         cache
             .get_or_build(&terms, &reader, &[], 5)
             .unwrap();
@@ -249,7 +249,7 @@ fn bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds() {
     }
 
     {
-        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, auth_plugin_hash);
+        let cache = FragmentCache::new(cache_dir.path(), bundle_identity, rule_hash);
         let frozen = cache
             .get_or_build(&terms, &reader, &[], 5)
             .expect("a corrupted cache entry must fail closed to a rebuild, not an error");

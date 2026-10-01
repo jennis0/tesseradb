@@ -694,9 +694,6 @@ pub struct PartitionDescriptor {
 pub struct Manifest {
     pub bundle_format: u32,
     pub created_at: String,
-    pub data_plugin_hash: String,
-    #[serde(default)]
-    pub declared_bounds: serde_json::Value,
     #[serde(default)]
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The value sets `declared_scalars`' category columns draw their codes from; empty in a
@@ -2742,8 +2739,6 @@ mod tests {
         Manifest {
             bundle_format: tessera_types::BUNDLE_FORMAT,
             created_at: "2026-01-01T00:00:00Z".to_string(),
-            data_plugin_hash: "builtin".to_string(),
-            declared_bounds: serde_json::json!({}),
             declared_scalars: Vec::new(),
             vocabularies: Vec::new(),
             small_term_threshold: 32,

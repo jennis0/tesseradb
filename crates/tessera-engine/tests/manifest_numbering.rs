@@ -62,7 +62,6 @@ fn a_flush_publishes_above_a_side_manifest_a_second_writer_left() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         // Far enough out that the publication observed below is the requested flush's doing.
         EngineConfig {
             flush_max_age_secs: 3600,
@@ -171,7 +170,6 @@ fn an_executor_seeds_above_a_side_manifest_no_manifest_names() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             ..config()
@@ -239,7 +237,6 @@ fn a_refused_publication_re_plans_above_the_number_it_was_refused_at() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

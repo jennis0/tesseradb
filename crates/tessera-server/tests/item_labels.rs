@@ -1,15 +1,14 @@
-//! `POST /v1/items/{tessera_id}`'s `labels` array: **the satisfied terms only** (contracts §3.2,
-//! [decision 0114](../../../docs/decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)).
+//! `POST /v1/items/{tessera_id}`'s `labels` array: **one clause the session satisfies, in held
+//! terms only**.
 //!
-//! The ruling's own sentence is the test: an item's labels intersected with the session's
-//! satisfied set, and never the full set. What makes that worth its own file rather than a case
-//! in `http.rs` is the shape of the failure — the endpoint would still answer `200` with the right
-//! record while naming a compartment the viewer does not hold, so every assertion here is about
-//! what is *absent* from a successful response.
+//! What makes that worth its own file rather than a case in `http.rs` is the shape of the failure:
+//! the endpoint would still answer `200` with the right record while naming a compartment the
+//! viewer does not hold, so every assertion here is about what is *absent* from a successful
+//! response.
 //!
 //! The fixture's labelling is `common::terms_of`: every item carries `"0"`, and a multiple of
 //! three also carries `"1"`. So one bundle offers an item with two labels and an item with one,
-//! and three principals — `{0}`, `{1}`, `{0,1}` — see three different intersections of them.
+//! and three principals — `{0}`, `{1}`, `{0,1}` — each satisfy a different part of them.
 
 mod common;
 
@@ -96,10 +95,10 @@ async fn labels_of(server: &TestServer, token: &str, id: u64) -> Vec<String> {
         .collect()
 }
 
-/// **The ruling's own sentence.** An item with several labels, drilled down by a principal
-/// satisfying a subset, serves exactly that subset — and the principal holding both gets both.
+/// An item with several labels, drilled down by a principal satisfying some of them, serves one
+/// it satisfies: the first in byte order where it satisfies several.
 #[tokio::test]
-async fn a_drill_down_serves_the_intersection_and_not_the_item_s_label_set() {
+async fn a_drill_down_serves_one_satisfied_clause_and_not_the_item_s_label_set() {
     let fx = fixture().await;
     let both = authorise(&fx.server, &["0", "1"]).await;
     let both = both["token"].as_str().unwrap();
@@ -108,8 +107,8 @@ async fn a_drill_down_serves_the_intersection_and_not_the_item_s_label_set() {
 
     assert_eq!(
         labels_of(&fx.server, both, fx.two_labels).await,
-        vec!["0".to_string(), "1".to_string()],
-        "a principal holding both labels of a two-label item is served both"
+        vec!["0".to_string()],
+        "a principal holding both labels of a two-label item is served one clause"
     );
     assert_eq!(
         labels_of(&fx.server, only_zero, fx.two_labels).await,
@@ -141,11 +140,10 @@ async fn a_principal_satisfying_one_term_is_served_that_term_alone() {
     );
 }
 
-/// **The passthrough's presentation is the identity, and that is its real answer** (decision
-/// 0114): its descriptors *are* the caller's own label strings, so what comes back is byte-equal
-/// to what the credential presented — not a rendering of a term id, and not an internal name.
+/// What comes back is byte-equal to terms the credential presented: not a rendering of a term
+/// id, and not an internal name.
 #[tokio::test]
-async fn the_passthrough_serves_the_caller_s_own_strings_verbatim() {
+async fn a_drill_down_serves_the_caller_s_own_strings_verbatim() {
     let fx = fixture().await;
     // The credential presents these two exactly. The response must use the same bytes.
     let presented = ["0", "1"];
@@ -160,9 +158,10 @@ async fn the_passthrough_serves_the_caller_s_own_strings_verbatim() {
     }
 }
 
-/// **Deterministic order**: sorted by the presented string, so two identical requests agree and
-/// the order says nothing about the corpus's interning. Asserted against the sorted copy rather
-/// than a literal, so the rule survives a fixture whose labels change.
+/// **Deterministic**: the clause and its order depend on the item's labels and the session's terms
+/// alone, so two identical requests agree and the answer says nothing about the corpus's
+/// interning. Asserted against the sorted copy rather than a literal, so the rule survives a
+/// fixture whose labels change.
 #[tokio::test]
 async fn labels_are_sorted_and_the_same_on_every_request() {
     let fx = fixture().await;

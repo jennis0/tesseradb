@@ -23,6 +23,7 @@ enum Node {
     Or,
 }
 
+#[derive(Clone)]
 pub(super) struct Dag {
     node: Vec<Node>,
     /// Node `n`'s children are `child[child_off[n]..child_off[n + 1]]`.

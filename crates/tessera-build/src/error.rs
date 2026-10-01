@@ -29,7 +29,6 @@ pub enum BuildError {
     /// attribute and the rule, which is what an operator acts on; most of these are refusals
     /// whose whole content is the reason (see [`crate::schema`]'s module doc).
     Declaration(String),
-    Plugin(String),
     /// The input violates an invariant the bundle format depends on.
     Invalid(String),
     Store(tessera_store::error::StoreError),
@@ -74,7 +73,6 @@ impl std::fmt::Display for BuildError {
                 write!(f, "{}: unusable schema: {detail}", path.display())
             }
             BuildError::Declaration(detail) => write!(f, "schema: {detail}"),
-            BuildError::Plugin(detail) => write!(f, "plugin error: {detail}"),
             BuildError::Invalid(detail) => write!(f, "invalid input: {detail}"),
             BuildError::Store(e) => write!(f, "store error: {e}"),
             BuildError::Identity(e) => write!(f, "identity error: {e}"),
@@ -96,8 +94,3 @@ impl From<tessera_types::IdentityError> for BuildError {
     }
 }
 
-impl From<tessera_plugin::PluginError> for BuildError {
-    fn from(e: tessera_plugin::PluginError) -> Self {
-        BuildError::Plugin(e.to_string())
-    }
-}

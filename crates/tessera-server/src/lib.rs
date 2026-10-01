@@ -1,7 +1,7 @@
 //! `tessera-server`: the viewer, session and control planes, and the `tessera serve` entry point.
 //!
 //! [`prepare`] does everything that can fail before a listener is bound: it loads the config and
-//! opens the engine (bundle verification, WAL replay, plugin load). [`run`] binds the three
+//! opens the engine (bundle verification, WAL replay). [`run`] binds the three
 //! planes, announces their addresses on stdout and serves. A refusal to start is therefore
 //! testable without a socket.
 
@@ -28,7 +28,6 @@ use axum::serve::ListenerExt;
 use parking_lot::Mutex;
 
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 
 use tessera_config::{Config, ControlListen};
 use state::{AppState, ComputeGate, SessionRegistry};
@@ -94,7 +93,6 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         &config.bundle_path,
         &config.cache_dir,
         &config.wal_path,
-        Passthrough::new(),
         engine_config,
     )?;
     // Started here rather than in `Engine::open`, so an engine that never ingests starts no

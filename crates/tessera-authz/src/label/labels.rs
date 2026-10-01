@@ -6,6 +6,7 @@ use tessera_types::{LabelId, TermId};
 use super::dag::{Dag, Scratch};
 use super::{Expr, Label, Shape};
 
+#[derive(Clone)]
 enum Entry {
     Public,
     /// The label's term ids, sorted.
@@ -15,6 +16,7 @@ enum Entry {
 }
 
 /// Every distinct label, each with its label id. Label ids are issued in order from zero.
+#[derive(Clone)]
 pub struct Labels {
     entries: Vec<Entry>,
     any_of: FxHashMap<Box<[TermId]>, LabelId>,

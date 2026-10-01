@@ -28,13 +28,13 @@ What `tessera build` and `tessera check` read.
 
 ## `[plugin]`
 
-The authorisation plugin, which turns an access label into the terms a viewer's token is checked against.
+The rule that reads credentials and access labels. It has one value.
 
 The table is required.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `module` | string | required | The plugin. This build has one, `builtin:passthrough`, which makes each access label its own term, and refuses any other name. |
+| `module` | string | required | `builtin:passthrough`, the one value, and any other is refused: a credential's terms are taken as presented, and every access label is an access expression. |
 
 ## `[disclosure]`
 

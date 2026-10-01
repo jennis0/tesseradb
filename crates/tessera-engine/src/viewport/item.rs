@@ -11,11 +11,10 @@ use super::out::flat_families;
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    /// The satisfied terms only: the intersection of this item's own term set with the asking
-    /// session's satisfied set, presented through the plugin, sorted by the presented string.
-    /// Never the item's full label set. Taken against [`Session::satisfied_descriptors`], which
-    /// holds only the descriptors the credential presented, so a term outside the grant has no
-    /// name to be served under.
+    /// Why the asking session sees this item: one clause of its label the session satisfies, as
+    /// the terms whose conjunction satisfies it, sorted. Every term is one the credential holds,
+    /// so no clause the session does not satisfy and no term it does not hold is named. Never the
+    /// item's whole label.
     pub labels: Vec<String>,
     /// The views this item holds a row in that this session may reach, sorted by id, each with
     /// the position that view places it at. A view the gate refuses is absent, exactly as a view
@@ -87,25 +86,23 @@ impl Engine {
         )
     }
 
-    /// The drill-down's `labels` array: this entity's own terms, intersected with the session's
-    /// satisfied set, presented through the plugin. Satisfied-only, twice over: the intersection
-    /// reads [`Session::satisfied_descriptors`], which holds exactly the descriptors the
-    /// credential presented, plus `public`, so there is no descriptor in scope for a term outside
-    /// the grant even if the intersection were written wrongly. Nothing here reads the bundle
-    /// dictionary, so there is no route from an ordinal to a descriptor that bypasses the session.
-    /// Reached only after the visibility verdict, like every other read in [`Engine::item`]: the
-    /// transpose is never probed for an entity the principal cannot see. An entity the transpose
-    /// does not hold answers `[]` rather than refusing: it hides a label rather than inventing
-    /// one, reachable only while a prefix predates the transpose. Not built: plugin routing
-    /// beyond the built-in one. `present_terms` is answered by
-    /// `builtin:passthrough`, whose descriptors are the caller's own label strings.
+    /// The drill-down's `labels` array: why this session sees the entity, as one clause of its
+    /// label that the session satisfies, written as the terms whose conjunction satisfies it.
+    /// Each index key of the entity's that the session satisfies offers a clause: a term offers
+    /// itself, and a label holding a conjunction its [`tessera_types::label::Label::witness`]. Of
+    /// those, the one with fewest terms, then the first in byte order, is served, so the answer
+    /// depends on the item's labels and the session's terms and on no internal number. Every
+    /// string is a term the credential holds, so the clauses the session does not satisfy and the
+    /// terms it does not hold are never named. Reached only after the visibility verdict, like
+    /// every other read in [`Engine::item`]: the transpose is never probed for an entity the
+    /// principal cannot see. An entity the transpose does not hold answers `[]`.
     pub(crate) fn labels_for(
         &self,
         generation: &Generation,
         session: &Session,
         entity: u32,
     ) -> Result<Vec<String>> {
-        let Some(terms) = generation
+        let Some(keys) = generation
             .filter_columns
             .entity_terms()
             .terms_of(entity)
@@ -113,39 +110,35 @@ impl Engine {
         else {
             return Ok(Vec::new());
         };
-        let descriptors: Vec<Vec<u8>> = terms
-            .into_iter()
-            .filter_map(|term| {
-                session
-                    .satisfied_descriptors()
-                    .get(&TermId::new(term))
-                    .cloned()
-            })
-            .collect();
-        if descriptors.is_empty() {
-            return Ok(Vec::new());
+        let held = |term: &str| session.holds(term);
+        let mut best: Option<Vec<String>> = None;
+        for key in keys.into_iter().map(TermId::new) {
+            if !session.satisfied().contains(&key) {
+                continue;
+            }
+            let clause = match session.satisfied_descriptors().get(&key) {
+                Some(term) => Some(vec![String::from_utf8_lossy(term).into_owned()]),
+                None => generation
+                    .dict
+                    .descriptor(key)
+                    .and_then(tessera_authz::label::label_of_key)
+                    .and_then(|text| tessera_types::label::Label::parse(text, usize::MAX).ok())
+                    .and_then(|label| {
+                        label
+                            .witness(&held)
+                            .map(|terms| terms.into_iter().map(str::to_owned).collect())
+                    }),
+            };
+            if let Some(clause) = clause {
+                if best
+                    .as_ref()
+                    .is_none_or(|b| (clause.len(), &clause) < (b.len(), b))
+                {
+                    best = Some(clause);
+                }
+            }
         }
-        let mut labels = self
-            .plugin
-            .present_terms(&descriptors)
-            .map_err(EngineError::Plugin)?;
-        // One string per descriptor: more strings would put on the wire a label answering to no
-        // term this session satisfies. Fewer is refused too: positional is the contract, so a
-        // short list means the caller cannot say which label it failed to present.
-        if labels.len() != descriptors.len() {
-            return Err(EngineError::Plugin(tessera_plugin::PluginError::Malformed(
-                format!(
-                    "present_terms returned {} strings for {} descriptors; the mapping is \
-                     positional, and a longer list would serve a label answering to no term this \
-                     session satisfies",
-                    labels.len(),
-                    descriptors.len()
-                ),
-            )));
-        }
-        labels.sort_unstable();
-        labels.dedup();
-        Ok(labels)
+        Ok(best.unwrap_or_default())
     }
 
     /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test

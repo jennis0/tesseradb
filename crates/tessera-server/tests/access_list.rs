@@ -1,9 +1,9 @@
 //! `/control/ingest`'s `access` column, read by the rule the build reads a points file's access
 //! column by.
 //!
-//! What this proves, against a running server: every element is one label whatever it contains,
-//! so a label with a comma is one label, not two; a scalar string column and a dictionary are one
-//! label per row; each label is trimmed, and a credential holding the trimmed label sees the row;
+//! What this proves, against a running server: every element is one access expression, and a
+//! term holding a comma is written in quotes and is one term, not two; a scalar string column and
+//! a dictionary are one label per row; each label is trimmed, and a credential holding the trimmed label sees the row;
 //! an empty list, a null, an empty element and a null element are all no label, which the view's
 //! declared `point_visibility.default` fills and which a view declaring none refuses naming the
 //! count.
@@ -27,6 +27,9 @@ use common::*;
 
 const VIENNA: &str = "Natural History Museum, Vienna";
 const LONDON: &str = "Natural History Museum";
+/// The labels naming each of the two as a term, quoted because both hold spaces.
+const VIENNA_LABEL: &str = "\"Natural History Museum, Vienna\"";
+const LONDON_LABEL: &str = "\"Natural History Museum\"";
 
 /// One ingest body of `rows` new items with an `access` column of the caller's making, so the
 /// refusal cases can spell it wrong.
@@ -160,10 +163,9 @@ async fn a_field_sourced_view_fills_a_null_label_and_an_empty_list_alike() {
     assert_eq!(visible_to(&server, &[]).await, 0);
 }
 
-/// Every element is one label, verbatim. A label containing a comma is one term: the rows
-/// labelled `Natural History Museum, Vienna` are visible to a principal holding that label and
-/// to nobody holding `Natural History Museum`, which a comma grammar would have made its first
-/// fragment.
+/// Every element is one label. A quoted term containing a comma is one term: the rows labelled
+/// `"Natural History Museum, Vienna"` are visible to a principal holding that term and to nobody
+/// holding `Natural History Museum`, which a comma grammar would have made its first fragment.
 #[tokio::test]
 async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
     let tmp = TempDir::new().unwrap();
@@ -171,7 +173,7 @@ async fn a_list_column_ingests_and_each_element_is_one_label_verbatim() {
 
     let body = body_with_access(
         3,
-        Arc::new(access_lists(&[&[VIENNA], &[LONDON], &["0", VIENNA]])),
+        Arc::new(access_lists(&[&[VIENNA_LABEL], &[LONDON_LABEL], &["0", VIENNA_LABEL]])),
     );
     let resp = ingest(&server, "list-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
@@ -202,10 +204,10 @@ async fn a_scalar_and_a_dictionary_column_are_one_label_per_row() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA])));
+    let body = body_with_access(1, Arc::new(StringArray::from(vec![VIENNA_LABEL])));
     let resp = ingest(&server, "scalar-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    let dictionary: DictionaryArray<Int32Type> = vec![VIENNA].into_iter().collect();
+    let dictionary: DictionaryArray<Int32Type> = vec![VIENNA_LABEL].into_iter().collect();
     let body = body_with_access(1, Arc::new(dictionary));
     let resp = ingest(&server, "dictionary-1", body).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());

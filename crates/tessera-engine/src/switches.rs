@@ -58,6 +58,12 @@ pub(crate) struct TestSwitches {
     pub(crate) unique_round_paused: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) unique_round_holding: AtomicBool,
+    /// Whether every ingest call waits on entry, on the thread its handler runs on, and how many
+    /// are waiting.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_parked: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_parked_count: AtomicU64,
 }
 
 impl TestSwitches {
@@ -96,6 +102,20 @@ impl TestSwitches {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         self.unique_round_holding.store(false, Ordering::SeqCst);
+    }
+
+    /// Called on entry to an ingest call. Waits while a test parks ingest.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn park_ingest_while_wanted(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.ingest_parked.load(Ordering::SeqCst) {
+            return;
+        }
+        self.ingest_parked_count.fetch_add(1, Ordering::SeqCst);
+        while self.ingest_parked.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.ingest_parked_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Called by the executor before it drains its work queue. Waits while a test holds it.
@@ -139,6 +159,10 @@ impl Default for TestSwitches {
             unique_round_paused: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             unique_round_holding: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_parked: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_parked_count: AtomicU64::new(0),
         }
     }
 }

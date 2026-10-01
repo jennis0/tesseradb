@@ -123,13 +123,13 @@ pub fn delta_entities(terms: &[TermId], deltas: &[Arc<DeltaTier>]) -> io::Result
     Ok(entities)
 }
 
-/// The canonical cache key: SHA-256 over `bundle_identity ‖ auth_plugin_hash ‖ watermark ‖
-/// sorted, deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals, so a persistent
-/// cache directory reused across bundle rebuilds, or across an auth plugin upgrade, would
+/// The canonical cache key: SHA-256 over `bundle_identity ‖ rule_hash ‖ watermark ‖ sorted,
+/// deduplicated term_id u32 LEs`. Term ids are bundle-relative ordinals, so a persistent cache
+/// directory reused across bundle rebuilds, or across a change to the authorisation rule, would
 /// otherwise serve a frozen fragment naming a different entity set.
 fn canonical_key(
     bundle_identity: &[u8; 32],
-    auth_plugin_hash: &[u8; 32],
+    rule_hash: &[u8; 32],
     terms: &[TermId],
     watermark: u64,
 ) -> [u8; 32] {
@@ -139,7 +139,7 @@ fn canonical_key(
 
     let mut hasher = Sha256::new();
     hasher.update(bundle_identity);
-    hasher.update(auth_plugin_hash);
+    hasher.update(rule_hash);
     hasher.update(watermark.to_le_bytes());
     for term in &sorted {
         hasher.update(term.to_le_bytes());
@@ -352,9 +352,9 @@ impl CacheWeight for FrozenFragment {
 
 /// Frozen fragments, held in memory and persisted under a directory.
 ///
-/// An entry is named by its canonical key: SHA-256 over the bundle identity, the auth plugin's
-/// hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of one
-/// bundle, so a key narrower than that would serve one bundle's entity set under another's.
+/// An entry is named by its canonical key: SHA-256 over the bundle identity, the authorisation
+/// rule's hash, the watermark and the sorted, deduplicated granted terms. Term ids are ordinals of
+/// one bundle, so a key narrower than that would serve one bundle's entity set under another's.
 ///
 /// On disk an entry is `<hex key>.frag`, the `Frozen` bitmap bytes, and `<hex key>.meta`, which
 /// holds `watermark: u64 LE ‖ frozen_len: u64 LE ‖ sha256(frozen_bytes)`. Each file is written to
@@ -366,7 +366,7 @@ impl CacheWeight for FrozenFragment {
 pub struct FragmentCache {
     dir: PathBuf,
     bundle_identity: [u8; 32],
-    auth_plugin_hash: [u8; 32],
+    rule_hash: [u8; 32],
     slots: SingleFlightCache<[u8; 32], FrozenFragment>,
     rebuilds: AtomicU64,
 }
@@ -415,32 +415,32 @@ impl From<io::Error> for FragmentCacheError {
 }
 
 impl FragmentCache {
-    /// `dir` is the engine's local cache directory for this bundle/auth-plugin pair, never a
+    /// `dir` is the engine's local cache directory for this bundle and authorisation rule, never a
     /// path inside the bundle itself. Does not touch the filesystem; `get_or_build` creates
     /// `dir` and any missing ancestors on first write.
     ///
     /// The in-memory tier's byte bound is not a constructor argument; it arrives through
     /// [`Self::set_memory_bound`]. A cache built this way is unbounded, which is correct for
     /// tests and benches; `tessera_server::prepare` makes sure a server never gets one.
-    pub fn new(dir: &Path, bundle_identity: [u8; 32], auth_plugin_hash: [u8; 32]) -> Self {
+    pub fn new(dir: &Path, bundle_identity: [u8; 32], rule_hash: [u8; 32]) -> Self {
         FragmentCache {
             dir: dir.to_path_buf(),
             bundle_identity,
-            auth_plugin_hash,
+            rule_hash,
             slots: SingleFlightCache::new(u64::MAX),
             rebuilds: AtomicU64::new(0),
         }
     }
 
-    /// An empty cache over the same directory and auth plugin under a new bundle identity, which
-    /// is what a compaction's publication installs. Every slot is keyed under the old identity,
-    /// so none carries over; the persisted pairs become unreachable and are left to
+    /// An empty cache over the same directory and authorisation rule under a new bundle identity,
+    /// which is what a compaction's publication installs. Every slot is keyed under the old
+    /// identity, so none carries over; the persisted pairs become unreachable and are left to
     /// [`Self::sweep`]. The byte bound and the wait budget carry over.
     pub fn rotate(&self, bundle_identity: [u8; 32]) -> Self {
         FragmentCache {
             dir: self.dir.clone(),
             bundle_identity,
-            auth_plugin_hash: self.auth_plugin_hash,
+            rule_hash: self.rule_hash,
             slots: {
                 let slots = SingleFlightCache::new(self.slots.stats().bound_bytes);
                 slots.set_wait_budget_ms(self.slots.wait_budget_ms());
@@ -506,12 +506,12 @@ impl FragmentCache {
         self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
-    /// The canonical cache key for `satisfied` under this cache's bundle and plugin identity, the
+    /// The canonical cache key for `satisfied` under this cache's bundle and rule identity, the
     /// only way to name an entry from outside and so what [`Self::evict`] takes.
     pub fn canonical_key_for(&self, satisfied: &[TermId], watermark: u64) -> [u8; 32] {
         canonical_key(
             &self.bundle_identity,
-            &self.auth_plugin_hash,
+            &self.rule_hash,
             satisfied,
             watermark,
         )
@@ -558,7 +558,7 @@ impl FragmentCache {
     pub fn path_of(&self, satisfied: &[TermId], watermark: u64) -> PathBuf {
         self.frag_path(&canonical_key(
             &self.bundle_identity,
-            &self.auth_plugin_hash,
+            &self.rule_hash,
             satisfied,
             watermark,
         ))

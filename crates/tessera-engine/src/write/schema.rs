@@ -240,7 +240,6 @@ pub(in crate::write) fn scalar_code(scalar: &WalScalar) -> Option<u32> {
 #[cfg(test)]
 mod segment_schema_tests {
     use super::*;
-    use tessera_plugin::Plugin;
     use tessera_store::manifest::DeclaredScalar;
 
     /// A segment's writer schema is the render columns; this guards the line that makes it so.
@@ -252,8 +251,6 @@ mod segment_schema_tests {
         let manifest = tessera_store::manifest::Manifest {
             bundle_format: 3,
             created_at: String::new(),
-            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-            declared_bounds: serde_json::json!({}),
             vocabularies: vec![],
             small_term_threshold: 32,
             entity_id_high_water: 0,

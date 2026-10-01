@@ -44,7 +44,6 @@ use parquet::arrow::ArrowWriter;
 use tessera_engine::browse::{BrowseForm, BrowseRequest};
 use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 
 fn main() {
     let mut bundle: Option<PathBuf> = None;
@@ -76,7 +75,6 @@ fn engine_at(root: &Path, cache: &Path, wal: &Path, publishing: bool) -> Engine 
         root,
         cache,
         wal,
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             // No point is served here — the browse pass reads none — so the mark budget is set to

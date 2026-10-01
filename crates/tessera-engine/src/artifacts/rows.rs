@@ -99,8 +99,8 @@ pub struct ArtifactRows {
     /// rebuilds this wholesale a moment after cloning it ([`ArtifactRows::amend_derived`]), so the
     /// copy of its per-node bitmaps was thrown away every time.
     pub(super) index: Arc<TileIndex>,
-    /// The containment partition, where this level has one. `None` under any plugin but the
-    /// builtin — see [`crate::containment`] — and containment then stays on the masked-count route.
+    /// The containment partition, where this level has one ([`crate::containment`]). `None`
+    /// keeps containment on the masked-count route.
     pub(super) partition: Option<ContainmentPartition>,
     /// Which form this level is served in, and the row-addressed column where that form has one.
     /// A level recorded row-major whose column would not compose is served artifact-major, and

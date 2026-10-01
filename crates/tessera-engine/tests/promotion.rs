@@ -25,42 +25,9 @@ use std::time::Duration;
 use common::*;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::{DeclaredBounds, Descriptor, Passthrough, Plugin, PluginError};
 use tessera_types::EntityId;
 
 const WAIT: Duration = Duration::from_secs(20);
-
-/// [`Passthrough`] with a lower declared term ceiling, for the one bound promotion enforces.
-///
-/// A wrapper rather than a field on `Passthrough`: the mapping is identical and so are both
-/// plugin hashes — which matters, because a different hash would make `Engine::open` refuse the
-/// fixture rather than exercise the ceiling.
-#[derive(Debug, Clone, Copy)]
-struct CappedTerms(u64);
-
-impl Plugin for CappedTerms {
-    fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
-        Passthrough::new().terms_of_labels(labels)
-    }
-    fn terms_of_auth(&self, auth_data: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
-        Passthrough::new().terms_of_auth(auth_data)
-    }
-    fn present_terms(&self, descriptors: &[Vec<u8>]) -> Result<Vec<String>, PluginError> {
-        Passthrough::new().present_terms(descriptors)
-    }
-    fn declared_bounds(&self) -> DeclaredBounds {
-        DeclaredBounds {
-            max_distinct_terms: self.0,
-            ..Passthrough::new().declared_bounds()
-        }
-    }
-    fn data_plugin_hash(&self) -> String {
-        Passthrough::new().data_plugin_hash()
-    }
-    fn auth_plugin_hash(&self) -> String {
-        Passthrough::new().auth_plugin_hash()
-    }
-}
 
 /// Descriptors no fixture dictionary carries.
 const NOVEL: &[u8] = b"dept:secret";
@@ -77,7 +44,6 @@ fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):
@@ -104,7 +70,6 @@ fn reader_at(tmp: &Path, root: &Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             max_merged_segment_bytes: None,
@@ -322,56 +287,3 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
     );
 }
 
-/// **Obligation 7**: promotion past the plugin's declared `max_distinct_terms` fails the flush and
-/// retains the buffer.
-///
-/// The bound is enforced rather than declared for one reason: `EXTENSION_ID_START >
-/// max_distinct_terms` is what keeps a dictionary ordinal from ever aliasing a live extension id,
-/// and promotion is the only path by which a caller grows the dictionary at all.
-///
-/// Driven through a plugin declaring a ceiling the fixture's dictionary already sits at, since the
-/// real one is 200,000,000.
-#[test]
-fn promotion_past_the_declared_term_ceiling_refuses_the_flush() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = fixture_in(tmp.path());
-    let mut engine = Engine::open(
-        &root,
-        &tmp.path().join("cache"),
-        &tmp.path().join("wal.log"),
-        // The fixture's dictionary already holds two terms, so any promotion is over the line.
-        CappedTerms(2),
-        EngineConfig {
-            flush_max_age_secs: 1,
-            flush_max_items: 40_000,
-            max_merged_segment_bytes: None,
-            // Compaction §9's trigger is off unless a deployment configures one.
-            compaction: tessera_engine::CompactionSchedule::off(),
-            ..config()
-        },
-    )
-    .expect("engine opens");
-    engine
-        .start_write_executor(64)
-        .expect("the executor starts");
-
-    let id = ingest_with(&engine, "ext-1", &[NOVEL]);
-    wait_until("the flush to fail", WAIT, || {
-        engine.write_executor_stats().flush_failures >= 1
-    });
-
-    assert_eq!(
-        engine.write_executor_stats().flushes,
-        0,
-        "nothing published: a refused promotion is a failed flush, not a partial one"
-    );
-    assert!(
-        engine.generation().buffer.contains(id),
-        "and the row is retained, so ingest backpressure is what sheds — not the item"
-    );
-    assert_eq!(
-        extent_records(&root, &engine.generation().prefix),
-        vec![base_extent()],
-        "the build's extent and nothing else: a refused promotion commits no extent"
-    );
-}

@@ -189,7 +189,6 @@ fn engine_over(fx: &Fixture) -> Engine {
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the engine opens");
@@ -1087,7 +1086,6 @@ fn a_record_coalesce_publishes_over_a_blob_declared_at_a_running_service() {
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             // Every flush below is one this case asked for, and two extents are enough to select
             // a window — so the pass fires on a fixture of four.

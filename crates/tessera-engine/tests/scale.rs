@@ -185,7 +185,6 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, total: u64) -> Engin
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         scale_config(total),
     )
     .expect("engine opens");

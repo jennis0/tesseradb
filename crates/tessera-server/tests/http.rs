@@ -12,7 +12,6 @@ mod common;
 use tempfile::TempDir;
 
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_server::state::ComputeGate;
 use tessera_spatial::tiles_for_bbox;
 
@@ -1300,7 +1299,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
-        Passthrough::new(),
         config_1,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1308,7 +1306,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8() {
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
-        Passthrough::new(),
         config_8,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1425,7 +1422,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         &bundle_root,
         &tmp.path().join("cache-1"),
         &tmp.path().join("wal-1.log"),
-        Passthrough::new(),
         config_1,
     )
     .expect("engine should open against a freshly built bundle");
@@ -1433,7 +1429,6 @@ async fn viewport_response_body_is_byte_identical_at_compute_threads_1_and_8_wit
         &bundle_root,
         &tmp.path().join("cache-8"),
         &tmp.path().join("wal-8.log"),
-        Passthrough::new(),
         config_8,
     )
     .expect("engine should open against a freshly built bundle");

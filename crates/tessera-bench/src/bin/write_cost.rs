@@ -50,7 +50,6 @@ use tessera_engine::{ExecutorStats, WriteStage};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
 use tessera_lifecycle::{IngestBuffer, Overlay, UnallocatedRow};
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, TermId};
 
@@ -192,7 +191,6 @@ fn open_engine(fx: &Fixture, scratch: &Path, tag: &str) -> Result<Engine, Box<dy
         &fx.root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 5000,

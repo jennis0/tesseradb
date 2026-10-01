@@ -65,10 +65,10 @@ impl ArtifactVerdict {
     }
 }
 
-/// The access-label test for one layer's artifacts and one viewer: an artifact with a label is
-/// admitted when the viewer's credential holds any of its descriptors, and one with none by
-/// `unlabelled`, which the layer's `artifact_visibility.default` decided. It reads the credential
-/// and nothing a request can narrow, so a filter never moves it.
+/// The access-label test for one layer's artifacts and one viewer: an artifact with labels is
+/// admitted when the terms the viewer's credential holds satisfy any of them, and one with none
+/// by `unlabelled`, which the layer's `artifact_visibility.default` decided. It reads the
+/// credential and nothing a request can narrow, so a filter never moves it.
 #[derive(Clone, Copy)]
 pub struct LabelGate<'a> {
     held: &'a FxHashSet<Vec<u8>>,
@@ -85,7 +85,11 @@ impl<'a> LabelGate<'a> {
         if access.is_empty() {
             return self.unlabelled;
         }
-        access.iter().any(|d| self.held.contains(d))
+        let held = |term: &str| self.held.contains(term.as_bytes());
+        access.iter().any(|label| {
+            std::str::from_utf8(label)
+                .is_ok_and(|label| tessera_types::label::admits(&[label], &held))
+        })
     }
 }
 

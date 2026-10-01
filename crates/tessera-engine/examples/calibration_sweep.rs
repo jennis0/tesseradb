@@ -47,7 +47,6 @@ use std::path::{Path, PathBuf};
 use rand::{Rng, SeedableRng};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
@@ -260,7 +259,6 @@ fn main() {
         &bundle_root,
         &tmp1.path().join("cache"),
         &tmp1.path().join("wal.log"),
-        Passthrough::new(),
         cfg(1),
     )
     .expect("engine (threads=1) should open");
@@ -271,7 +269,6 @@ fn main() {
         &bundle_root,
         &tmp2.path().join("cache"),
         &tmp2.path().join("wal.log"),
-        Passthrough::new(),
         cfg(tessera_engine::default_compute_threads()),
     )
     .expect("engine (threads=default) should open");

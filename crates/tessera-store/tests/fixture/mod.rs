@@ -11,7 +11,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -133,8 +132,6 @@ pub fn build_bundle(root: &Path, n: u64) {
     let manifest = Manifest {
         bundle_format: tessera_types::BUNDLE_FORMAT,
         created_at: "2026-08-02T00:00:00Z".to_string(),
-        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
-        declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,

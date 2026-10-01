@@ -25,7 +25,6 @@ use tessera_engine::select::{decode_tier, DecodeTier};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{CancelToken, Engine, EngineConfig, EngineError, ViewportOut};
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{morton_of, tiles_for_bbox};
 use tessera_store::read::open_bundle;
 
@@ -352,7 +351,6 @@ fn theta_does_not_move_when_the_viewport_pans() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             k_max_marks: 128,
             theta_target_marks: 16,
@@ -419,7 +417,6 @@ fn no_visible_tile_is_ever_served_empty() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             k_max_marks: 128,
             theta_target_marks: 16,
@@ -644,7 +641,6 @@ fn open_engine_with(bundle_root: &Path, tmp: &Path, cfg: EngineConfig) -> Engine
         bundle_root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         cfg,
     )
     .unwrap()

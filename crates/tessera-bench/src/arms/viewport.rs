@@ -25,7 +25,6 @@
 use tessera_authz::PostingsReader;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 
 use crate::arms::{Context, Result};
@@ -174,7 +173,6 @@ pub fn run(
                     &fixture.root,
                     &tmp.join("cache"),
                     &tmp.join("wal.log"),
-                    Passthrough::new(),
                     EngineConfig {
                         token_max_lifetime_secs: 3600,
                         max_k: *ks.iter().max().unwrap_or(&200).max(&cap_marks),

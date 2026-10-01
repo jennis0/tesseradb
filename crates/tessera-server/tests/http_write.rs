@@ -19,7 +19,6 @@ use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 
 use common::*;
 
@@ -322,7 +321,6 @@ fn concurrent_ingest_and_change_both_survive() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,
@@ -941,7 +939,6 @@ async fn a_stepped_down_partition_is_not_ready() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .expect("a candidate with no deny state may be stepped past, so the bundle still opens");
@@ -992,7 +989,6 @@ async fn an_engine_without_a_write_executor_is_not_ready() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -1323,87 +1319,38 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
 // The admission bound, the batch caps, and the never-shed asymmetry
 // =================================================================================================
 
-/// A `Passthrough` that can be made to **park inside `terms_of_labels`**, on command.
-///
-/// `terms_of_labels` is called from inside `/control/ingest`'s `spawn_blocking` closure
-/// (`control::run_ingest`), which is precisely the blocking-pool thread the ingest admission bound
-/// exists to ration — so parking here holds exactly the resource under test, with no
-/// `fault-injection` dependency and no sleep anywhere.
-///
-/// Every other method delegates, **including both hashes**: the bundle's `MANIFEST.json` records
-/// the plugin hash and `Engine::open` refuses a mismatch, so this must be `builtin:passthrough`'s
-/// identity in every respect but its willingness to block.
-///
-/// `armed` is a switch rather than a permanent block because the fixture has to *use* the plugin
-/// before it can saturate anything: `/session/authorise` resolves auth terms.
-struct ParkingPlugin {
-    inner: tessera_plugin::Passthrough,
-    armed: Arc<std::sync::atomic::AtomicBool>,
-    arrived: tokio::sync::mpsc::UnboundedSender<()>,
-    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-}
-
-impl tessera_plugin::Plugin for ParkingPlugin {
-    fn terms_of_labels(
-        &self,
-        labels: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        // The wire path, and the one this fixture parks in.
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-            // Publish arrival **before** blocking, so the test waits on a condition this thread
-            // has actually reached rather than on a duration it hopes is enough.
-            let _ = self.arrived.send(());
-            let (lock, cv) = &*self.release;
-            let mut released = lock.lock().unwrap();
-            while !*released {
-                released = cv.wait(released).unwrap();
-            }
-        }
-        self.inner.terms_of_labels(labels)
-    }
-
-    fn terms_of_auth(
-        &self,
-        auth_data: &[u8],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        self.inner.terms_of_auth(auth_data)
-    }
-
-    fn present_terms(
-        &self,
-        descriptors: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
-        self.inner.present_terms(descriptors)
-    }
-
-    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
-        self.inner.declared_bounds()
-    }
-
-    fn data_plugin_hash(&self) -> String {
-        self.inner.data_plugin_hash()
-    }
-
-    fn auth_plugin_hash(&self) -> String {
-        self.inner.auth_plugin_hash()
-    }
-}
-
 /// Everything the two saturation tests share: a server whose ingest handlers can be parked on
 /// command, with the pool small enough that unbounded ingest would exhaust it.
+///
+/// An ingest call parks on entry to `Engine::ingest`, which `/control/ingest` calls inside its
+/// `spawn_blocking` closure (`control::run_ingest`): the blocking-pool thread the ingest admission
+/// bound exists to ration. Parking there holds exactly the resource under test, with no sleep in
+/// the request path.
 struct ParkedFixture {
     server: TestServer,
-    armed: Arc<std::sync::atomic::AtomicBool>,
-    arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
-    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     token: String,
 }
 
 impl ParkedFixture {
+    /// Park every ingest call that arrives from now on.
+    fn arm(&self) {
+        self.server.state.engine.set_ingest_parked_for_test(true);
+    }
+
+    /// Wait until `n` ingest calls are parked, each holding a blocking thread.
+    async fn parked(&self, n: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.server.state.engine.ingest_parked_for_test() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{n} ingest handlers did not park"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     fn release(&self) {
-        let (lock, cv) = &*self.release;
-        *lock.lock().unwrap() = true;
-        cv.notify_all();
+        self.server.state.engine.set_ingest_parked_for_test(false);
     }
 }
 
@@ -1428,20 +1375,10 @@ const PARKED_INGEST_ADMISSION: usize = 2;
 async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
     let bundle_root = build_fixture(tmp.path(), N_ITEMS);
 
-    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (arrived_tx, arrived) = tokio::sync::mpsc::unbounded_channel();
-    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-
     let mut engine = Engine::open(
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        ParkingPlugin {
-            inner: Passthrough::new(),
-            armed: Arc::clone(&armed),
-            arrived: arrived_tx,
-            release: Arc::clone(&release),
-        },
         default_engine_config(),
     )
     .expect("engine should open against a freshly built bundle");
@@ -1473,13 +1410,7 @@ async fn parked_fixture(tmp: &TempDir) -> ParkedFixture {
     assert_eq!(viewport_status(&server, &token).await, 200);
     assert_eq!(control_status(&server).await["ingest"]["in_flight"], 0);
 
-    ParkedFixture {
-        server,
-        armed,
-        arrived,
-        release,
-        token,
-    }
+    ParkedFixture { server, token }
 }
 
 /// One `/v1/viewport` on the warmed connection, returning its status.
@@ -1561,7 +1492,6 @@ async fn ingest_is_refused_by_buffer_occupancy() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2165,8 +2095,8 @@ async fn the_pin_names_the_generation_a_response_was_served_from_during_a_refres
 /// plane has.
 ///
 /// The construction: a 4-thread blocking pool, `ingest_admission = 2`, and two ingest handlers
-/// parked *inside* `terms_of_labels` — i.e. holding two of the four threads as a **fact**, since
-/// each publishes its arrival before blocking and the test waits on those arrivals. Two more ingest
+/// parked on entry to `Engine::ingest`, holding two of the four threads as a **fact**, since each
+/// counts itself parked before blocking and the test waits on that count. Two more ingest
 /// requests must then be refused **before** `spawn_blocking`, and a viewport must still run.
 ///
 /// **The mutation is the `try_admit` call in `control::ingest`** (delete it, or raise the bound to
@@ -2189,9 +2119,9 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 
     runtime.block_on(async {
         let tmp = TempDir::new().unwrap();
-        let mut fx = parked_fixture(&tmp).await;
+        let fx = parked_fixture(&tmp).await;
 
-        fx.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.arm();
 
         let mut parked = Vec::new();
         for i in 0..PARKED_INGEST_ADMISSION {
@@ -2212,11 +2142,9 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
                     .as_u16()
             }));
         }
-        // Both handlers are inside `terms_of_labels`, holding a blocking thread each. A fact, not a
-        // hope: each published its arrival before it blocked.
-        for _ in 0..PARKED_INGEST_ADMISSION {
-            fx.arrived.recv().await.expect("a handler must park");
-        }
+        // Both handlers are parked, holding a blocking thread each. A fact, not a
+        // hope: each counted itself parked before it blocked.
+        fx.parked(PARKED_INGEST_ADMISSION as u64).await;
 
         // Every admission permit is now held, and `/control/status` says so.
         let status = control_status(&fx.server).await;
@@ -2287,8 +2215,8 @@ fn ingest_admission_sheds_before_the_blocking_pool_fills() {
 /// unbounded lane by `Command::is_never_shed`, and `map_change_batch_error` contains no route from
 /// that lane to a 429 at all.
 ///
-/// The suppression is deliberately a bare `{field, value, op}` with **no `access` field**, so
-/// `run_changes` makes no `terms_of_labels` call and the parking plugin cannot block it. That is a
+/// The suppression is a `/control/changes` call, which never reaches `Engine::ingest`, where the
+/// fixture parks. That is a
 /// property of the fixture, not of the deny lane, and it is stated here so a later reader does not
 /// mistake it for part of what is being proved.
 ///
@@ -2317,9 +2245,9 @@ fn changes_never_429s() {
 
     runtime.block_on(async {
         let tmp = TempDir::new().unwrap();
-        let mut fx = parked_fixture(&tmp).await;
+        let fx = parked_fixture(&tmp).await;
 
-        fx.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        fx.arm();
 
         let mut parked = Vec::new();
         for i in 0..PARKED_INGEST_ADMISSION {
@@ -2340,9 +2268,7 @@ fn changes_never_429s() {
                     .as_u16()
             }));
         }
-        for _ in 0..PARKED_INGEST_ADMISSION {
-            fx.arrived.recv().await.expect("a handler must park");
-        }
+        fx.parked(PARKED_INGEST_ADMISSION as u64).await;
 
         // The state is genuinely one that sheds ingest — asserted here rather than assumed, or
         // this test would prove only that `/control/changes` works on an idle server.
@@ -2429,7 +2355,6 @@ async fn ingest_429s_when_the_queue_is_full() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2529,7 +2454,6 @@ async fn an_oversized_batch_is_422_not_a_queue_slot() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2613,7 +2537,6 @@ async fn an_oversized_body_is_422_not_413() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2708,7 +2631,6 @@ async fn backpressure_is_invisible_before_auth() {
         &bundle_root,
         &tmp.path().join("cache-a"),
         &tmp.path().join("wal-a.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2794,7 +2716,6 @@ async fn backpressure_is_invisible_before_auth() {
         &bundle_root_b,
         &tmp.path().join("cache-b"),
         &tmp.path().join("wal-b.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2880,7 +2801,6 @@ async fn the_overlay_soft_limit_alarms_and_does_not_act() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -2980,7 +2900,6 @@ async fn an_oversized_change_batch_is_422_not_413_and_never_before_auth() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();
@@ -4235,14 +4154,15 @@ async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     );
 }
 
-/// `over_bound_rows` names each row whose labels resolve past the plugin's bound by its position in
-/// the batch, and bounds warn, never exclude: the batch is accepted, the over-bound row included.
+/// `over_bound_rows` names each row whose labels index it under more keys than the bound by its
+/// position in the batch, and bounds warn, never exclude: the batch is accepted, the over-bound row
+/// included.
 #[tokio::test]
 async fn over_bound_rows_names_each_over_bound_row_by_its_position() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    // Passthrough declares `max_terms_per_item = 4096`; one more descriptor than that is the warn.
+    // `MAX_KEYS_PER_ITEM` is 4096; one more key than that is the warn.
     let labels = (0..4_097).map(|i| format!("t{i}")).collect::<Vec<_>>();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
 

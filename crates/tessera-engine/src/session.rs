@@ -33,10 +33,12 @@ pub struct Session {
     /// A process-local identity for this session, distinct from `token`: part of the
     /// row-projection cache key, so the cache never hashes or compares the full token string.
     token_id: u64,
-    /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown descriptor
-    /// is absent here, never an error. Resolved once, at authorise, and never re-resolved in
-    /// place: see [`Session::is_stale`]. A term promoted after authorise is not added; the remedy
-    /// is a new session.
+    /// The index keys the credential satisfies, as bundle-relative `TermId`s: each term it holds
+    /// that the dictionary carries, `public`, and the key of each label holding a conjunction
+    /// that its terms satisfy. A term the dictionary does not carry is absent here, never an
+    /// error. Resolved once, at authorise, and never re-resolved in place: see
+    /// [`Session::is_stale`]. A key promoted after authorise is not added; the remedy is a new
+    /// session.
     satisfied: FxHashSet<TermId>,
     /// The materialised mask fragment: the union of every satisfied term's postings, over the base
     /// and every delta tier live when this session authorised. Goes stale as flushes publish delta
@@ -48,16 +50,13 @@ pub struct Session {
     /// re-sorted per request. `Arc` so the row-projection cache can carry it for the background
     /// refresh, which has no session registry to look it up in.
     satisfied_sorted: Arc<Vec<TermId>>,
-    /// The descriptor the credential presented for each satisfied term: the only route by which a
-    /// term ordinal becomes a string a viewer is shown. The drill-down's `labels` array is built
-    /// from this map alone, intersected with an entity's own term list, so a term absent here has
-    /// no name and cannot be served: a bug here can only lose a label the viewer holds, never
-    /// invent one they do not. Holds `public` too, with no credential behind it, for the same
-    /// reason it is in [`Session::satisfied`].
+    /// The term the credential presented for each satisfied term ordinal, and `public`. A label
+    /// key has no entry: the item card names it by a witness drawn from [`Self::credentials`].
     satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
-    /// Every descriptor the credential resolved to, whether or not the dictionary carries it, and
-    /// `public`. What a layer's or an artifact's own label is tested against: those labels are
-    /// compared as descriptors, so a label no item carries is still one a credential can hold.
+    /// Every term the credential holds, whether or not the dictionary carries it, and `public`.
+    /// What a view's, a layer's or an artifact's own label is evaluated against, so a label no
+    /// item carries is still one a credential can satisfy. The item card's witness names only
+    /// terms from this set.
     credentials: Arc<FxHashSet<Vec<u8>>>,
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
@@ -114,9 +113,14 @@ impl Session {
         &self.satisfied_descriptors
     }
 
-    /// Whether the credential holds any of `descriptors`.
-    pub(crate) fn holds_any(&self, descriptors: &[Vec<u8>]) -> bool {
-        descriptors.iter().any(|d| self.credentials.contains(d))
+    /// Whether the credential holds the term `term`.
+    pub(crate) fn holds(&self, term: &str) -> bool {
+        self.credentials.contains(term.as_bytes())
+    }
+
+    /// Whether the credential satisfies any of the stored `labels`.
+    pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
+        tessera_types::label::admits(labels, &|term| self.holds(term))
     }
 
     /// `sha256(auth_data)`.
@@ -125,56 +129,75 @@ impl Session {
     }
 
 
-    /// Whether this session's mask may be behind the corpus: true iff the credential named a
-    /// descriptor the dictionary did not carry at authorise, and the dictionary has grown since.
-    /// A session with nothing unresolved is never hinted, and a stale session sees fewer items
-    /// than its principal is entitled to, never more. It is a hint, not a revocation; the only
-    /// remedy is a new session, since `satisfied` is never re-resolved in place.
+    /// Whether this session's mask may be behind the corpus: true iff the dictionary has grown
+    /// since authorise and either the credential named a term the dictionary did not then carry,
+    /// or a label holding a conjunction promoted since is one its terms satisfy. A stale session
+    /// sees fewer items than its principal is entitled to, never more. It is a hint, not a
+    /// revocation; the only remedy is a new session, since `satisfied` is never re-resolved in
+    /// place.
     ///
     /// A compaction that renumbers the dictionary must not reduce its length, or must keep a
     /// counter that never decreases: this predicate rests on that length being monotone.
     pub fn is_stale(&self, generation: &Generation) -> bool {
-        self.unresolved_count > 0 && generation.dict.len() > self.dict_len_at_authorise
+        let grown = generation.dict.len() > self.dict_len_at_authorise;
+        if !grown {
+            return false;
+        }
+        if self.unresolved_count > 0 {
+            return true;
+        }
+        let labels = generation.dict.labels();
+        (self.dict_len_at_authorise..generation.dict.len())
+            .map(TermId::new)
+            .any(|key| labels.satisfied(key, &|term| self.holds(term)))
     }
 }
 
 impl Engine {
-    /// Authorise a credential: `plugin.terms_of_auth` → dictionary lookup (an unknown descriptor
-    /// drops out, never an error) → `FragmentCache::get_or_build`. A zero-term credential, or one
-    /// whose every descriptor is unknown, is a valid, zero-visibility session, not an error. A
-    /// concurrent in-flight build on the same key surfaces here as
+    /// Authorise a credential: its terms → dictionary lookup (an unknown term drops out, never an
+    /// error), and the labels holding a conjunction that those terms satisfy, from the DAG → the
+    /// union of every satisfied key's postings, through `FragmentCache::get_or_build`. A zero-term
+    /// credential, or one whose every term is unknown, is a valid, zero-visibility session, not an
+    /// error. A concurrent in-flight build on the same key surfaces here as
     /// `Err(EngineError::FragmentBuilding)` rather than blocking.
     pub fn authorise(&self, auth_data: &[u8]) -> Result<Session> {
-        let auth_terms = self
-            .plugin
-            .terms_of_auth(auth_data)
-            .map_err(EngineError::Plugin)?;
+        let auth_terms = credential_terms(auth_data)?;
 
         // Loaded once and used for both the dictionary and the watermark below: resolving them
         // against different generations could pair `satisfied` with a dictionary a later flush
         // published while building a fragment against the watermark that preceded it.
         let generation = self.generation.load();
 
-        let mut credentials: FxHashSet<Vec<u8>> = auth_terms.iter().cloned().collect();
+        let mut credentials: FxHashSet<Vec<u8>> =
+            auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
         credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
         let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let mut unresolved_count = 0usize;
-        for descriptor in &auth_terms {
-            match generation.dict.lookup(descriptor) {
-                Some(term) => {
-                    satisfied.insert(term);
-                    satisfied_descriptors.insert(term, descriptor.clone());
+        let labels = generation.dict.labels();
+        for term in &auth_terms {
+            match generation.dict.lookup(term.as_bytes()) {
+                // A held term never names a label's own key, which starts with a control
+                // character `credential_terms` drops; the test keeps a key out of `satisfied`
+                // whatever a credential presents.
+                Some(id) if !labels.is_label_key(id) => {
+                    satisfied.insert(id);
+                    satisfied_descriptors.insert(id, term.as_bytes().to_vec());
                 }
-                // An unknown descriptor is unsatisfied, never an error: it is this session's
-                // exposure to a later promotion of that same descriptor.
+                Some(_) => {}
+                // An unknown term is unsatisfied, never an error: it is this session's exposure
+                // to a later promotion of that same term.
                 None => unresolved_count += 1,
             }
         }
+        let mut keys = Vec::new();
+        labels.authorise(auth_terms.iter().map(String::as_str), &mut keys);
+        satisfied.extend(keys);
 
-        // Every session holds `public`, and this is the only place it is added: not by the plugin
-        // and not by a grant. Looked up by descriptor, because in a bundle whose dictionary lacks
-        // it term 0 is some other label, and a hardcoded 0 would grant that to everyone.
+        // Every session holds `public`, and this is the only place it is added: not by a
+        // credential and not by a grant. Looked up by descriptor, because in a bundle whose
+        // dictionary lacks it term 0 is some other label, and a hardcoded 0 would grant that to
+        // everyone.
         if let Some(term) = generation.dict.lookup(tessera_authz::PUBLIC_LABEL) {
             debug_assert_eq!(
                 term,
@@ -188,7 +211,6 @@ impl Engine {
         let visible_views = Arc::new(crate::gate::resolve(
             &generation.bundle.manifest,
             &credentials,
-            self.plugin.as_ref(),
         ));
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
@@ -319,27 +341,19 @@ impl Engine {
             })
     }
 
-    /// Which layers this principal may know exist. A layer's label is put through the plugin and
-    /// compared with the credential's descriptors, the test an artifact's own label takes. A
-    /// gate-failed name and a never-registered one answer identically, so a name outside this set
-    /// reveals nothing about why.
+    /// Which layers this principal may know exist. A layer's label is evaluated against the
+    /// credential's terms, the test an artifact's own label takes. A gate-failed name and a
+    /// never-registered one answer identically, so a name outside this set reveals nothing about
+    /// why.
     pub(crate) fn reachable_layers(&self, session: &Session) -> tessera_lifecycle::ResolvedLayers {
         self.write
             .live()
-            .resolve_layers(|label| self.holds_label(session, label))
-    }
-
-    /// Whether `session` holds `label`, as the plugin maps it. A plugin refusal holds nothing.
-    pub(crate) fn holds_label(&self, session: &Session, label: &str) -> bool {
-        match self.plugin.terms_of_labels(&[label.as_bytes().to_vec()]) {
-            Ok(descriptors) => session.holds_any(&descriptors),
-            Err(_) => false,
-        }
+            .resolve_layers(|label| session.admits(&[label]))
     }
 
     /// The label test for one layer's artifacts, for this session: an artifact's own label is
-    /// admitted when the credential holds any of its descriptors, and an artifact with none by
-    /// the layer's `artifact_visibility.default`.
+    /// admitted when the credential satisfies any of its labels, and an artifact with none by the
+    /// layer's `artifact_visibility.default`.
     pub(crate) fn label_gate<'s>(
         &self,
         session: &'s Session,
@@ -350,7 +364,7 @@ impl Engine {
         let unlabelled = !declaration.artifact_visibility.carries_own_labels()
             || match &declaration.artifact_visibility.default {
                 MemberDefault::Inherited => true,
-                MemberDefault::Label(label) => self.holds_label(session, label),
+                MemberDefault::Label(label) => session.admits(&[label]),
             };
         crate::artifacts::LabelGate::new(&session.credentials, unlabelled)
     }
@@ -376,6 +390,30 @@ impl Engine {
             })
             .collect()
     }
+}
+
+/// The terms a credential presents. `auth_data` is the JSON `{"terms": ["<term>", ...]}`; each
+/// term is held as [`tessera_types::label::held_term`] says, and one it refuses is dropped. A
+/// credential that parses to no terms is valid, and its session sees what `public` admits.
+fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
+    let refused = || {
+        EngineError::Credential(
+            "`auth_data` must be JSON of the form {\"terms\": [\"<term>\", ...]}".to_string(),
+        )
+    };
+    let value: serde_json::Value = serde_json::from_slice(auth_data).map_err(|_| refused())?;
+    let terms = value
+        .get("terms")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(refused)?;
+    let mut held = Vec::with_capacity(terms.len());
+    for term in terms {
+        let term = term.as_str().ok_or_else(refused)?;
+        held.extend(tessera_types::label::held_term(term).map(str::to_owned));
+    }
+    held.sort_unstable();
+    held.dedup();
+    Ok(held)
 }
 
 /// The two fields a test may read directly. They live here rather than in `crate::test_hooks`

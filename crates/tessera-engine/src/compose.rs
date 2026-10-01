@@ -571,8 +571,8 @@ pub fn buffered_rows_of(buffer: &IngestBuffer, row_space: &RowSpace) -> Vec<Enti
 /// Compose the effective mask for one request. See this module's doc for the precedence rule
 /// and the clamp rationale. `base` is already the frozen fragment's row-space projection, so the
 /// fragment itself is not a parameter: an entity with no verdict falls through directly to it.
-/// `satisfied` is the viewer's granted term set, already resolved to `TermId`s by the auth
-/// plugin path; `row_space` is used only for per-entity `row_of` lookups (O(log k), not the
+/// `satisfied` is the set of index keys the viewer satisfies, resolved to `TermId`s at
+/// authorise; `row_space` is used only for per-entity `row_of` lookups (O(log k), not the
 /// O(bound) `project` cost).
 pub fn compose(
     satisfied: &FxHashSet<TermId>,

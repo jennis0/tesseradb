@@ -30,7 +30,6 @@ use common::*;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_types::EntityId;
 
@@ -185,7 +184,6 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             // Nothing here is about the tick: the flush is asked for explicitly.
             flush_max_age_secs: 3600,

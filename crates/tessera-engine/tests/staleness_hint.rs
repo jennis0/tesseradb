@@ -35,8 +35,7 @@ const NOVEL: &[u8] = b"dept:secret";
 /// The fixture's `ALL_TERM` — which resolves — plus [`NOVEL`], which does not.
 const PARTLY_UNRESOLVED: &[u8] = br#"{"terms": ["0", "dept:secret"]}"#;
 
-/// The fixture's `ALL_TERM`, named twice. The passthrough plugin hands descriptors on verbatim and
-/// deduplicates nothing, so this is two descriptors resolving to one ordinal.
+/// The fixture's `ALL_TERM`, named twice, which is one term held.
 const DOUBLED: &[u8] = br#"{"terms": ["0", "0"]}"#;
 
 fn engine_on_fixture(tmp: &Path) -> (Engine, PathBuf) {

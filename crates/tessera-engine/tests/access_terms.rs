@@ -29,7 +29,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use common::{extent, open_engine, test_key};
+use common::{extent, open_engine, open_engine_publishing, test_key, wait_until};
+use tessera_engine::{Engine, IngestRequest};
+use tessera_lifecycle::IngestRow;
+use tessera_types::TesseraId;
 use tessera_build::config::{AccessInput, AccessSource};
 use tessera_build::{build, BuildArgs};
 
@@ -268,16 +271,15 @@ fn a_default_alone_gives_every_point_the_declared_label() {
     assert_eq!(visible(dir.path(), &[]), N);
 }
 
-/// **A comma is an ordinary byte in a term.** The build hands the plugin the caller's terms as a
-/// *list*, so a term spelling `ir:analyst,ir:legal` interns as one descriptor and reaches exactly
-/// the principal who holds that whole string — never the holder of either half, which is what a
-/// comma-joined label would have done.
+/// **A term holding a comma is written in quotes**, and is then one term: it reaches exactly the
+/// principal who holds that whole string, never the holder of either half. Written bare, the comma
+/// is refused, so a build never reads one label as two terms.
 #[test]
-fn a_term_containing_a_comma_interns_as_one_term() {
+fn a_quoted_term_containing_a_comma_is_one_term() {
     let dir = tempfile::tempdir().unwrap();
     write_points(&dir.path().join("points.parquet"), |e| {
         if e == 2 {
-            Some(vec!["ir:analyst,ir:legal"])
+            Some(vec!["\"ir:analyst,ir:legal\""])
         } else {
             access_of(e)
         }
@@ -287,23 +289,30 @@ fn a_term_containing_a_comma_interns_as_one_term() {
         &dir.path().join("bundle"),
         Some("public"),
     ))
-    .expect("a term carrying a comma builds");
+    .expect("a quoted term carrying a comma builds");
 
     // Points 1 (null, filled) and 3 (`public`) and nothing else.
     assert_eq!(visible(dir.path(), &[]), 2);
-    // Neither half reaches point 2 — the whole of the point.
-    assert_eq!(
-        visible(dir.path(), &["ir:analyst"]),
-        4,
-        "public, point 0 and point 4 — not point 2"
-    );
-    assert_eq!(
-        visible(dir.path(), &["ir:legal"]),
-        3,
-        "public and point 0 — not point 2"
-    );
-    // The whole string is the descriptor, and it reaches its one point.
+    // Neither half reaches point 2.
+    assert_eq!(visible(dir.path(), &["ir:analyst"]), 4);
+    assert_eq!(visible(dir.path(), &["ir:legal"]), 3);
+    // The whole string is the term, and it reaches its one point.
     assert_eq!(visible(dir.path(), &["ir:analyst,ir:legal"]), 3);
+
+    let bare = tempfile::tempdir().unwrap();
+    write_points(&bare.path().join("points.parquet"), |e| {
+        if e == 2 {
+            Some(vec!["ir:analyst,ir:legal"])
+        } else {
+            access_of(e)
+        }
+    });
+    build(&args(
+        &bare.path().join("points.parquet"),
+        &bare.path().join("bundle"),
+        Some("public"),
+    ))
+    .expect_err("a bare comma is not an access expression");
 }
 
 /// A plain `string` column is the same declaration for a point carrying one term.
@@ -340,4 +349,172 @@ fn a_plain_string_access_column_is_one_term_per_point() {
     // no term at all, so that row is filled.
     assert_eq!(visible(dir.path(), &[]), 4);
     assert_eq!(visible(dir.path(), &["ir:analyst"]), 5);
+}
+
+/// Five points labelled with each shape of expression: a conjunction, a conjunction over a
+/// disjunction, a list holding a term and a conjunction, `public`, and a disjunction of terms.
+fn expressions_of(e: u64) -> Option<Vec<&'static str>> {
+    match e {
+        0 => Some(vec!["ir:analyst&ir:legal"]),
+        1 => Some(vec!["(ir:analyst|ir:audit)&eu"]),
+        2 => Some(vec!["ir:legal", "ir:audit&eu"]),
+        3 => Some(vec!["public"]),
+        _ => Some(vec!["ir:analyst|ir:legal"]),
+    }
+}
+
+fn credential(terms: &[&str]) -> Vec<u8> {
+    serde_json::json!({ "terms": terms }).to_string().into_bytes()
+}
+
+/// **A label holding a conjunction admits only a principal holding every term it needs**, and a
+/// list of labels admits a principal satisfying any one of them. Each count is the authorised set
+/// of a credential, so it is the set every count, sample and label a viewer is served is drawn
+/// from.
+#[test]
+fn a_conjunction_admits_only_a_principal_satisfying_it() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), expressions_of);
+    build(&args(
+        &dir.path().join("points.parquet"),
+        &dir.path().join("bundle"),
+        None,
+    ))
+    .expect("a corpus labelled with expressions builds");
+
+    assert_eq!(visible(dir.path(), &[]), 1, "point 3, `public`");
+    assert_eq!(visible(dir.path(), &["ir:analyst"]), 2, "points 3 and 4");
+    assert_eq!(visible(dir.path(), &["ir:analyst", "ir:legal"]), 4, "0, 2, 3 and 4");
+    assert_eq!(visible(dir.path(), &["ir:audit", "eu"]), 3, "1, 2 and 3");
+    assert_eq!(visible(dir.path(), &["ir:analyst", "eu"]), 3, "1, 3 and 4");
+    assert_eq!(visible(dir.path(), &["eu"]), 1, "half of a conjunction admits nothing");
+
+    // A credential naming a conjunction's own index key holds no term, so it sees `public` alone.
+    let engine = open_engine(
+        &dir.path().join("bundle"),
+        &dir.path().join("cache"),
+        &dir.path().join("wal.log"),
+    );
+    let session = engine
+        .authorise(&credential(&["\u{0}ir:analyst&ir:legal", "\u{0}ir:analyst"]))
+        .unwrap();
+    assert_eq!(
+        session.fragment_at_authorise_for_test().view().cardinality(),
+        1
+    );
+}
+
+/// **A label that is not an access expression refuses the build**, before anything is written.
+#[test]
+fn a_label_that_is_not_an_expression_refuses_the_build() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), |e| match e {
+        2 => Some(vec!["ir:analyst&ir:legal|eu"]),
+        _ => expressions_of(e),
+    });
+    let error = build(&args(
+        &dir.path().join("points.parquet"),
+        &dir.path().join("bundle"),
+        None,
+    ))
+    .expect_err("mixing `&` and `|` without brackets is refused");
+    assert!(error.to_string().contains("ir:analyst&ir:legal|eu"), "{error}");
+    assert!(!dir.path().join("bundle").join("MANIFEST.json").exists());
+}
+
+/// One batch of rows creating items at `positions`, each with its labels.
+fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<TesseraId> {
+    let mut body_hash = [0u8; 32];
+    body_hash[..batch.len()].copy_from_slice(batch.as_bytes());
+    let rows = rows
+        .iter()
+        .map(|(labels, at)| IngestRow {
+            tessera_id: None,
+            labels: Some(labels.iter().map(|l| l.as_bytes().to_vec()).collect()),
+            position: Some(*at),
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+            omitted: Vec::new(),
+        })
+        .collect();
+    engine
+        .ingest(IngestRequest {
+            batch_id: batch.to_string(),
+            body_hash,
+            view: Some("s0".to_string()),
+            rows,
+            artifacts: Default::default(),
+            strict: false,
+            tessera_id_column: false,
+        })
+        .unwrap_or_else(|e| panic!("{batch} is accepted: {e}"))
+        .tessera_ids
+        .into_iter()
+        .map(|id| id.expect("an accepted row has a tessera_id"))
+        .collect()
+}
+
+/// **A label ingested into a running service is read by the rule the build reads it by**: a
+/// conjunction is evaluated from a credential's terms once a flush has published it, the item
+/// card names one clause the viewer satisfies and nothing else, and both survive a restart.
+#[test]
+fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), expressions_of);
+    let bundle = dir.path().join("bundle");
+    build(&args(&dir.path().join("points.parquet"), &bundle, None)).expect("it builds");
+
+    let engine =
+        open_engine_publishing(&bundle, &dir.path().join("cache"), &dir.path().join("wal.log"));
+    let ids = create(
+        &engine,
+        "expressions",
+        &[
+            (&["eu&(ir:legal|ir:new)"], (10.0, 10.0)),
+            (&["ir:new|ir:other"], (20.0, 20.0)),
+        ],
+    );
+    let refused = engine.ingest(IngestRequest {
+        batch_id: "refused".to_string(),
+        body_hash: [1u8; 32],
+        view: Some("s0".to_string()),
+        rows: vec![IngestRow {
+            tessera_id: None,
+            labels: Some(vec![b"ir:new|".to_vec()]),
+            position: Some((30.0, 30.0)),
+            scalars: Vec::new(),
+            scoped: Vec::new(),
+            omitted: Vec::new(),
+        }],
+        artifacts: Default::default(),
+        strict: false,
+        tessera_id_column: false,
+    });
+    assert!(refused.is_err(), "a label that does not parse refuses the batch");
+
+    let before = engine.authorise(&credential(&["eu", "ir:new"])).unwrap();
+    engine.request_flush();
+    wait_until("the flush to publish", std::time::Duration::from_secs(30), || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    // A session authorised before the flush promoted the label is told it is behind, and sees
+    // less than its terms admit until it authorises again, never more.
+    assert!(before.is_stale(&engine.generation()));
+    assert!(engine.item(&before, ids[0]).unwrap().is_none());
+
+    let check = |engine: &Engine| {
+        let both = engine.authorise(&credential(&["eu", "ir:new", "ir:secret"])).unwrap();
+        let card = engine.item(&both, ids[0]).unwrap().expect("eu&ir:new satisfies it");
+        assert_eq!(card.labels, ["eu", "ir:new"], "one satisfied clause, held terms only");
+        let card = engine.item(&both, ids[1]).unwrap().expect("ir:new satisfies it");
+        assert_eq!(card.labels, ["ir:new"]);
+
+        let half = engine.authorise(&credential(&["ir:legal"])).unwrap();
+        assert!(engine.item(&half, ids[0]).unwrap().is_none(), "half of the conjunction");
+        assert!(engine.item(&half, ids[1]).unwrap().is_none());
+    };
+    check(&engine);
+    drop(engine);
+    let reopened = open_engine(&bundle, &dir.path().join("cache"), &dir.path().join("wal.log"));
+    check(&reopened);
 }

@@ -73,7 +73,6 @@ use tessera_authz::PostingsReader;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_plugin::Passthrough;
 use tessera_store::read::open_bundle;
 use tessera_types::EntityId;
 
@@ -198,7 +197,6 @@ pub fn run(ctx: &Context, ops: &[String], checkpoints: &[u64], seed: u64) -> Res
                 &fixture.root,
                 &tmp.join("cache"),
                 &tmp.join("wal.log"),
-                Passthrough::new(),
                 EngineConfig {
                     token_max_lifetime_secs: 3600,
                     max_k: 200,
@@ -461,7 +459,6 @@ pub fn run_deny_ack(
                     &fixture.root,
                     &tmp.join("cache"),
                     &tmp.join("wal.log"),
-                    Passthrough::new(),
                     EngineConfig {
                         token_max_lifetime_secs: 3600,
                         max_k: 200,
