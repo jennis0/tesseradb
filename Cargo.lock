@@ -3016,7 +3016,6 @@ name = "tessera-cli"
 version = "0.1.0"
 dependencies = [
  "arrow",
- "base64",
  "clap",
  "parquet",
  "reqwest",

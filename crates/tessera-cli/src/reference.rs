@@ -51,12 +51,15 @@ pub(crate) fn render() -> String {
         let sub = cli
             .find_subcommand_mut(&name)
             .expect("a name read from this command's own subcommands");
-        section(&mut out, sub);
+        section(&mut out, sub, "tessera");
     }
     out
 }
 
-fn section(out: &mut String, sub: &mut Command) {
+/// The section for `sub`, then one for each of its own subcommands, each headed with the whole
+/// command line that reaches it.
+fn section(out: &mut String, sub: &mut Command, parent: &str) {
+    let path = format!("{parent} {}", sub.get_name());
     let usage = sub.render_usage().to_string();
     let usage = usage.trim().trim_start_matches("Usage:").trim();
     let about = sub
@@ -64,7 +67,7 @@ fn section(out: &mut String, sub: &mut Command) {
         .or(sub.get_about())
         .map(|text| outside_code(&sentence(&text.to_string()), escape_angles))
         .unwrap_or_default();
-    let _ = writeln!(out, "\n## `tessera {}`\n", sub.get_name());
+    let _ = writeln!(out, "\n## `{path}`\n");
     let _ = writeln!(out, "```text\n{usage}\n```\n");
     let _ = writeln!(out, "{about}\n");
 
@@ -78,12 +81,26 @@ fn section(out: &mut String, sub: &mut Command) {
             )
         })
         .collect();
-    if args.is_empty() {
-        return;
+    let nested: Vec<String> = sub
+        .get_subcommands()
+        .filter(|s| !s.is_hide_set() && s.get_name() != "help")
+        .map(|s| s.get_name().to_string())
+        .collect();
+    if !args.is_empty() {
+        arguments(out, &args);
     }
+    for name in nested {
+        let child = sub
+            .find_subcommand_mut(&name)
+            .expect("a name read from this command's own subcommands");
+        section(out, child, &path);
+    }
+}
+
+fn arguments(out: &mut String, args: &[&Arg]) {
     out.push_str("| Argument | Value | Default | Description |\n");
     out.push_str("| --- | --- | --- | --- |\n");
-    for arg in args {
+    for &arg in args {
         let value = value_name(arg);
         let name = match arg.get_long() {
             Some(long) => format!("`--{long}`"),

@@ -20,11 +20,10 @@ use std::time::{Duration, Instant};
 use arrow::array::{Array, ArrayRef};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use base64::Engine;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-use common::{deployment, tessera, Ports, Server, SESSION_CREDENTIAL};
+use common::{deployment, tessera, Ports, Server, OPERATOR_CREDENTIAL};
 
 /// A served deployment, a token holding a hundred of its terms, and a proxy in front of it.
 struct Served {
@@ -40,15 +39,24 @@ fn serve() -> Served {
     let dir = TempDir::new().unwrap();
     deployment(dir.path(), &Ports::chosen());
     let (server, bound) = Server::announced(dir.path());
-    let terms: Vec<String> = std::iter::once("public".to_string())
-        .chain((0..100).map(|term| term.to_string()))
-        .collect();
-    let auth_data =
-        base64::engine::general_purpose::STANDARD.encode(json!({ "terms": terms }).to_string());
+    // A principal holding a hundred of the corpus's terms, logged in by an API key.
+    let control = |path: &str, body: Value| {
+        post(&format!("{}{path}", bound.control), OPERATOR_CREDENTIAL, &body)
+    };
+    control("/control/principals", json!({ "name": "reader", "kind": "service" }));
+    control("/control/grants", json!({ "principal": "reader", "permission": "read" }));
+    for term in 0..100 {
+        control(
+            "/control/grants",
+            json!({ "principal": "reader", "term": term.to_string() }),
+        );
+    }
+    let key: Value =
+        serde_json::from_slice(&control("/control/principals/reader/keys", json!({}))).unwrap();
     let answer: Value = serde_json::from_slice(&post(
-        &format!("{}/session/authorise", bound.session),
-        SESSION_CREDENTIAL,
-        &json!({ "auth_data": auth_data }),
+        &format!("{}/v1/login", bound.viewer),
+        "",
+        &json!({ "api_key": key["key"] }),
     ))
     .unwrap();
     Served {

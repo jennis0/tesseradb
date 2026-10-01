@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const SESSION_CREDENTIAL: &str = "session-credential";
+pub const OPERATOR_CREDENTIAL: &str = "operator-credential";
 
 pub fn tessera() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tessera"))
@@ -55,6 +55,11 @@ impl Ports {
 /// A generated corpus of 2,000 items built into a bundle in `dir`, with the viewer on `0.0.0.0`, so
 /// that a health check has to reach it on loopback.
 pub fn deployment(dir: &Path, ports: &Ports) {
+    deployment_with_control(dir, ports, &format!("127.0.0.1:{}", ports.control));
+}
+
+/// [`deployment`], with the control plane at `control`, an address or `unix:<path>`.
+pub fn deployment_with_control(dir: &Path, ports: &Ports, control: &str) {
     let materialised = tessera()
         .args(["corpus", "materialise", "--seed", "1", "--n", "2000", "--out"])
         .arg(dir)
@@ -62,8 +67,7 @@ pub fn deployment(dir: &Path, ports: &Ports) {
         .unwrap();
     assert!(materialised.status.success(), "{materialised:?}");
     std::fs::rename(dir.join("corpus-config.toml"), dir.join("schema.toml")).unwrap();
-    std::fs::write(dir.join("session.cred"), SESSION_CREDENTIAL).unwrap();
-    std::fs::write(dir.join("operator.cred"), "operator-credential").unwrap();
+    std::fs::write(dir.join("operator.cred"), OPERATOR_CREDENTIAL).unwrap();
     std::fs::write(
         dir.join("tessera.toml"),
         format!(
@@ -82,11 +86,13 @@ token_max_lifetime = 3600
 [serve]
 viewer  = "0.0.0.0:{}"
 session = "127.0.0.1:{}"
-control = "127.0.0.1:{}"
-session_credential_file  = "session.cred"
+control = "{}"
 operator_credential_file = "operator.cred"
+
+[catalogue]
+dir = "catalogue"
 "#,
-            ports.viewer, ports.session, ports.control
+            ports.viewer, ports.session, control
         ),
     )
     .unwrap();
@@ -115,6 +121,8 @@ pub struct Server(pub Child);
 pub struct Bound {
     pub viewer: String,
     pub session: String,
+    /// The control plane's `http://…` URL, or `unix:<path>`.
+    pub control: String,
     /// Held open for the life of the server, whose stdout it is.
     _stdout: ChildStdout,
 }
@@ -140,9 +148,15 @@ impl Server {
             let addr: std::net::SocketAddr = listening[plane].as_str().unwrap().parse().unwrap();
             format!("http://127.0.0.1:{}", addr.port())
         };
+        let control = listening["control"].as_str().unwrap();
         let bound = Bound {
             viewer: url("viewer"),
             session: url("session"),
+            control: if control.starts_with("unix:") {
+                control.to_owned()
+            } else {
+                url("control")
+            },
             _stdout: reader.into_inner(),
         };
         (server, bound)

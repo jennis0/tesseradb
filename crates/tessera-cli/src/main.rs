@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod identity;
 mod records;
 
 use clap::{Parser, Subcommand};
@@ -301,11 +302,11 @@ enum Command {
     /// again.
     ///
     /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
-    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or
-    /// operator credential is not set or its file cannot be read. Under `[serve]`,
-    /// `session_credential_file` or `session_credential_env` names the file or environment
-    /// variable holding the session credential, and `operator_credential_file` or
-    /// `operator_credential_env` the operator's. It also refuses when the bundle cannot be read
+    /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator
+    /// credential is not set or its file cannot be read: under `[serve]`,
+    /// `operator_credential_file` or `operator_credential_env` names the file or environment
+    /// variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there
+    /// cannot be opened or is held open by another process. It also refuses when the bundle cannot be read
     /// and when the write-ahead log fails its checksum. An address that cannot be bound, such as
     /// one already in use, stops it with exit 1 after the bundle has opened.
     Serve {
@@ -313,6 +314,61 @@ enum Command {
         /// directory.
         #[arg(long, value_name = "PATH")]
         deployment: Option<PathBuf>,
+    },
+    /// Log in on the viewer plane and print the session token and its `expires_at` as JSON.
+    ///
+    /// The password, API key or OIDC access token is read from the first line of stdin, never
+    /// from an argument. The principal must hold `read`.
+    ///
+    /// For example, `tessera login --server http://127.0.0.1:8080 --principal ann <
+    /// password.txt`.
+    Login(identity::LoginArgs),
+    /// End a session on the viewer plane.
+    Logout(identity::LogoutArgs),
+    /// Mint and revoke sessions for other principals on the session plane, and list and end
+    /// sessions on the control plane.
+    ///
+    /// The session plane's verbs read an API key holding `authorise-as` from `TESSERA_API_KEY`.
+    /// The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+    Session {
+        #[command(subcommand)]
+        command: identity::SessionCommand,
+    },
+    /// Manage local principals on the control plane: people and services.
+    ///
+    /// Every verb reads the control plane's credential from `TESSERA_CREDENTIAL`, which is the
+    /// operator credential, an API key or an OIDC access token, and needs `admin`. Each prints the
+    /// server's JSON answer; a change answers how many sessions it ended.
+    Principal {
+        #[command(subcommand)]
+        command: identity::PrincipalCommand,
+    },
+    /// Manage API keys on the control plane. The credential is read as `tessera principal` reads
+    /// it.
+    Key {
+        #[command(subcommand)]
+        command: identity::KeyCommand,
+    },
+    /// Manage local groups and their members on the control plane. The credential is read as
+    /// `tessera principal` reads it.
+    Group {
+        #[command(subcommand)]
+        command: identity::GroupCommand,
+    },
+    /// Grant a term or a permission to a principal or a group, on the control plane.
+    ///
+    /// A term says what the grantee may see, and a permission what it may do. The sessions the
+    /// grant affects end, so they pick it up when they authorise again. The credential is read as
+    /// `tessera principal` reads it.
+    Grant(identity::GrantArgs),
+    /// Revoke a term or a permission from a principal or a group, on the control plane. The
+    /// credential is read as `tessera principal` reads it.
+    RevokeGrant(identity::GrantArgs),
+    /// Manage OIDC providers on the control plane. The credential is read as `tessera principal`
+    /// reads it.
+    Provider {
+        #[command(subcommand)]
+        command: identity::ProviderCommand,
     },
 }
 
@@ -1603,6 +1659,15 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Command::Login(args) => identity::login(args),
+        Command::Logout(args) => identity::logout(args),
+        Command::Session { command } => identity::session(command),
+        Command::Principal { command } => identity::principal(command),
+        Command::Key { command } => identity::key(command),
+        Command::Group { command } => identity::group(command),
+        Command::Grant(args) => identity::grant(args, false),
+        Command::RevokeGrant(args) => identity::grant(args, true),
+        Command::Provider { command } => identity::provider(command),
         Command::Items(args) => records::items(args),
         Command::Artifacts(args) => records::artifacts(args),
         Command::Health {

@@ -139,7 +139,7 @@ For example, `tessera items --server http://127.0.0.1:8080 --view papers --field
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
-| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
+| `--token` | `TOKEN` |  | A session token, as `tessera login` or `tessera session authorise` prints one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
 | `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
 
@@ -171,7 +171,7 @@ For example, `tessera artifacts --server http://127.0.0.1:8080 --view papers --l
 | `--cursor` | `CURSOR` |  | Start after the last page of an earlier read: the cursor a read cut short printed. |
 | `--compression` | `COMPRESSION` |  | `zstd` compresses the pages on their way from the server. The output is written uncompressed either way. |
 | `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
-| `--token` | `TOKEN` |  | A session token, as the session plane's `/session/authorise` issues one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
+| `--token` | `TOKEN` |  | A session token, as `tessera login` or `tessera session authorise` prints one. Without it the token is read from `TESSERA_TOKEN`, and with neither the read is refused. |
 | `--out` | `PATH` |  | The file to write. Without it, or with `-`, the output goes to stdout. |
 | `--format` | `FORMAT` |  | `ipc` writes an Arrow IPC stream and `parquet` a Parquet file. Without it the format is the extension of `--out`, `.arrows` or `.parquet`; stdout and any other extension need it. A format that disagrees with the extension of `--out` is refused. |
 
@@ -187,8 +187,475 @@ Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path
 
 SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits 0. Stopping ends every viewer session, because sessions are held in memory. A write is acknowledged only once the write-ahead log holds it on disc, so stopping loses no acknowledged write. A deletion or suppression answered with 500 because the log could not be written is in force but not on disc, and a restart undoes it until the change is sent again.
 
-It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would refuse it or lacks one of the three `[serve]` addresses. It refuses when the session or operator credential is not set or its file cannot be read. Under `[serve]`, `session_credential_file` or `session_credential_env` names the file or environment variable holding the session credential, and `operator_credential_file` or `operator_credential_env` the operator's. It also refuses when the bundle cannot be read and when the write-ahead log fails its checksum. An address that cannot be bound, such as one already in use, stops it with exit 1 after the bundle has opened.
+It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator credential is not set or its file cannot be read: under `[serve]`, `operator_credential_file` or `operator_credential_env` names the file or environment variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there cannot be opened or is held open by another process. It also refuses when the bundle cannot be read and when the write-ahead log fails its checksum. An address that cannot be bound, such as one already in use, stops it with exit 1 after the bundle has opened.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--deployment` | `PATH` |  | Read this `tessera.toml` instead of searching for one upward from the working directory. |
+
+## `tessera login`
+
+```text
+tessera login --server <URL> <--principal <NAME>|--api-key|--access-token>
+```
+
+Log in on the viewer plane and print the session token and its `expires_at` as JSON.
+
+The password, API key or OIDC access token is read from the first line of stdin, never from an argument. The principal must hold `read`.
+
+For example, `tessera login --server http://127.0.0.1:8080 --principal ann < password.txt`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
+| `--principal` | `NAME` |  | Log in as this local principal, with the password read from the first line of stdin. |
+| `--api-key` |  |  | Log in with the API key read from the first line of stdin. |
+| `--access-token` |  |  | Log in with the OIDC access token read from the first line of stdin. |
+
+## `tessera logout`
+
+```text
+tessera logout [OPTIONS] --server <URL>
+```
+
+End a session on the viewer plane.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
+| `--token` | `TOKEN` |  | The session token to end. Without it the token is read from `TESSERA_TOKEN`. |
+
+## `tessera session`
+
+```text
+tessera session <COMMAND>
+```
+
+Mint and revoke sessions for other principals on the session plane, and list and end sessions on the control plane.
+
+The session plane's verbs read an API key holding `authorise-as` from `TESSERA_API_KEY`. The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+
+
+## `tessera session authorise`
+
+```text
+tessera session authorise [OPTIONS] --session <URL>
+```
+
+Mint a session for another principal on the session plane, with the API key in `TESSERA_API_KEY`, whose principal holds `authorise-as`.
+
+The session carries the target's terms and its `read` and `write`. It prints `token`, `token_id` and `expires_at` as JSON.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--session` | `URL` |  | The session plane's address, such as `http://127.0.0.1:8081`. |
+| `--principal` | `NAME` |  | Act as this local principal. |
+| `--access-token` |  |  | Act as the OIDC identity whose access token is read from the first line of stdin. |
+
+## `tessera session revoke`
+
+```text
+tessera session revoke --session <URL> --token-id <N>
+```
+
+End a session minted with a key of the same principal, by its `token_id`, on the session plane, with the API key in `TESSERA_API_KEY`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--session` | `URL` |  | The session plane's address, such as `http://127.0.0.1:8081`. |
+| `--token-id` | `N` |  | The `token_id` `tessera session authorise` printed. |
+
+## `tessera session list`
+
+```text
+tessera session list [OPTIONS] --control <ADDRESS>
+```
+
+List live sessions on the control plane: all of them, or a local principal's or a provider's.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `--principal` | `NAME` |  | Only this local principal's sessions, including those minted for it. |
+| `--provider` | `NAME` |  | Only the sessions authorised through this provider. |
+
+## `tessera session end`
+
+```text
+tessera session end --control <ADDRESS> <--token-id <N>|--principal <NAME>|--provider <NAME>>
+```
+
+End one session by `token_id`, or every session of a local principal or a provider, on the control plane.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `--token-id` | `N` |  | The one session with this `token_id`. |
+| `--principal` | `NAME` |  | Every session of this local principal, including those minted for it. |
+| `--provider` | `NAME` |  | Every session authorised through this provider. |
+
+## `tessera principal`
+
+```text
+tessera principal <COMMAND>
+```
+
+Manage local principals on the control plane: people and services.
+
+Every verb reads the control plane's credential from `TESSERA_CREDENTIAL`, which is the operator credential, an API key or an OIDC access token, and needs `admin`. Each prints the server's JSON answer; a change answers how many sessions it ended.
+
+
+## `tessera principal list`
+
+```text
+tessera principal list --control <ADDRESS>
+```
+
+List every local principal.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+
+## `tessera principal show`
+
+```text
+tessera principal show --control <ADDRESS> <NAME>
+```
+
+Show one principal: its kind, flags, terms, permissions and groups.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera principal create`
+
+```text
+tessera principal create --control <ADDRESS> --kind <KIND> <NAME>
+```
+
+Create a local principal, holding nothing.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+| `--kind` | `KIND` |  | `person` or `service`. |
+
+## `tessera principal delete`
+
+```text
+tessera principal delete --control <ADDRESS> <NAME>
+```
+
+Delete a principal with its password, API keys, grants and memberships.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera principal disable`
+
+```text
+tessera principal disable --control <ADDRESS> <NAME>
+```
+
+Disable a principal. Its sessions end, and none of its credentials is accepted.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera principal enable`
+
+```text
+tessera principal enable --control <ADDRESS> <NAME>
+```
+
+Enable a disabled principal.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera principal bypass`
+
+```text
+tessera principal bypass --control <ADDRESS> <NAME> <STATE>
+```
+
+Set whether a principal with `write` writes against the whole corpus.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+| `STATE` |  |  | `on` or `off`. |
+
+## `tessera principal set-password`
+
+```text
+tessera principal set-password --control <ADDRESS> <NAME>
+```
+
+Set a principal's password, read from the first line of stdin.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera principal clear-password`
+
+```text
+tessera principal clear-password --control <ADDRESS> <NAME>
+```
+
+Remove a principal's password.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The principal's name. |
+
+## `tessera key`
+
+```text
+tessera key <COMMAND>
+```
+
+Manage API keys on the control plane. The credential is read as `tessera principal` reads it.
+
+
+## `tessera key list`
+
+```text
+tessera key list --control <ADDRESS> <PRINCIPAL>
+```
+
+List a principal's API keys, by prefix, without their secrets.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `PRINCIPAL` |  |  | The principal's name. |
+
+## `tessera key create`
+
+```text
+tessera key create [OPTIONS] --control <ADDRESS> <PRINCIPAL>
+```
+
+Issue an API key for a principal. The whole key is printed once, here.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `PRINCIPAL` |  |  | The principal's name. |
+| `--expires-at` | `SECONDS` |  | When the key, and every session authorised with it, ends, in seconds since the Unix epoch. Without it the key does not expire. |
+| `--permission` | `NAME` |  | A permission the key holds: `read`, `write`, `authorise-as` or `admin`. Repeatable. Without it the key holds its principal's permissions. |
+
+## `tessera key revoke`
+
+```text
+tessera key revoke --control <ADDRESS> <PREFIX>
+```
+
+Revoke an API key by its prefix. Every session authorised or minted with it ends.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `PREFIX` |  |  | The key's prefix, as `tessera key list` prints it. |
+
+## `tessera group`
+
+```text
+tessera group <COMMAND>
+```
+
+Manage local groups and their members on the control plane. The credential is read as `tessera principal` reads it.
+
+
+## `tessera group list`
+
+```text
+tessera group list --control <ADDRESS>
+```
+
+List every local group.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+
+## `tessera group show`
+
+```text
+tessera group show --control <ADDRESS> <NAME>
+```
+
+Show one group: its terms, permissions and members.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The group's name. |
+
+## `tessera group create`
+
+```text
+tessera group create --control <ADDRESS> <NAME>
+```
+
+Create a local group.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The group's name. |
+
+## `tessera group delete`
+
+```text
+tessera group delete --control <ADDRESS> <NAME>
+```
+
+Delete a group with its grants and memberships.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The group's name. |
+
+## `tessera group add-member`
+
+```text
+tessera group add-member --control <ADDRESS> <GROUP> <PRINCIPAL>
+```
+
+Add a principal to a group.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `GROUP` |  |  | The group's name. |
+| `PRINCIPAL` |  |  | The principal's name. |
+
+## `tessera group remove-member`
+
+```text
+tessera group remove-member --control <ADDRESS> <GROUP> <PRINCIPAL>
+```
+
+Remove a principal from a group.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `GROUP` |  |  | The group's name. |
+| `PRINCIPAL` |  |  | The principal's name. |
+
+## `tessera grant`
+
+```text
+tessera grant --control <ADDRESS> <--principal <NAME>|--group <NAME>> <--term <TERM>|--permission <NAME>>
+```
+
+Grant a term or a permission to a principal or a group, on the control plane.
+
+A term says what the grantee may see, and a permission what it may do. The sessions the grant affects end, so they pick it up when they authorise again. The credential is read as `tessera principal` reads it.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `--principal` | `NAME` |  | The local principal the grant is made to. |
+| `--group` | `NAME` |  | The group the grant is made to. |
+| `--term` | `TERM` |  | A term, which says what the grantee may see. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
+
+## `tessera revoke-grant`
+
+```text
+tessera revoke-grant --control <ADDRESS> <--principal <NAME>|--group <NAME>> <--term <TERM>|--permission <NAME>>
+```
+
+Revoke a term or a permission from a principal or a group, on the control plane. The credential is read as `tessera principal` reads it.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `--principal` | `NAME` |  | The local principal the grant is made to. |
+| `--group` | `NAME` |  | The group the grant is made to. |
+| `--term` | `TERM` |  | A term, which says what the grantee may see. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
+
+## `tessera provider`
+
+```text
+tessera provider <COMMAND>
+```
+
+Manage OIDC providers on the control plane. The credential is read as `tessera principal` reads it.
+
+
+## `tessera provider list`
+
+```text
+tessera provider list --control <ADDRESS>
+```
+
+List every OIDC provider, declared through the API or in `tessera.toml`.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+
+## `tessera provider show`
+
+```text
+tessera provider show --control <ADDRESS> <NAME>
+```
+
+Show one provider.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The provider's name. |
+
+## `tessera provider put`
+
+```text
+tessera provider put [OPTIONS] --control <ADDRESS> --issuer <ISSUER> --audience <AUDIENCE> --jwks-url <URL> <NAME>
+```
+
+Declare an OIDC provider, or replace one whole. Every session authorised through a provider it replaces ends.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The provider's name. |
+| `--issuer` | `ISSUER` |  | The `iss` its tokens carry. |
+| `--audience` | `AUDIENCE` |  | The `aud` its tokens must hold. |
+| `--jwks-url` | `URL` |  | Where its signing keys are published: `https`, or `http` to a loopback address. |
+| `--claim-rule` | `CLAIM TEMPLATE` |  | A claim rule: a claim path and a template, such as `groups[*] {value}`. Repeatable. |
+| `--role-mapping` | `CLAIM VALUE GROUP` |  | A role mapping: a claim path, the exact value, and the local group it gives, such as `groups[*] tessera-admins admins`. Repeatable. |
+
+## `tessera provider delete`
+
+```text
+tessera provider delete --control <ADDRESS> <NAME>
+```
+
+Remove a provider. Every session authorised through it ends.
+
+| Argument | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
+| `NAME` |  |  | The provider's name. |
