@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {tableFromArrays} from 'apache-arrow';
 import {WORLD_SIZE} from '@tesseradb/client';
 import {mortonOfTile} from '@tesseradb/client/internal';
-import {binDensity, densityCellsOf, type DensityCell, type DensityCounts} from '../src/density.js';
+import {binDensity, densityCellsOf, equalised, type DensityCell, type DensityCounts} from '../src/density.js';
 import {resolvePick} from '../src/pick.js';
 
 /** One cell at `depth` with `count`, as {@link densityCellsOf} reads it from an answer. */
@@ -32,6 +32,23 @@ describe('densityCellsOf', () => {
 
   it('reads nothing from a table without cells', () => {
     expect(densityCellsOf({rows: tableFromArrays({count: BigUint64Array.from([3n])})}, 4)).toEqual([]);
+  });
+});
+
+describe('equalised', () => {
+  it('places each count by the share of cells below it, so many small counts spread over the low end', () => {
+    // Six cells of 1, one of 2, one of 3 and one of 1,000: ranked by distinct value the six would
+    // all sit at 0; equalised they sit at the middle of their run.
+    const cells = [1, 1, 1, 1, 1, 1, 2, 3, 1000].map((n, i) => cell(i, 0, 4, n));
+    const place = equalised(cells);
+    expect(place.get(1)).toBeCloseTo(2.5 / 8);
+    expect(place.get(2)).toBeCloseTo(6 / 8);
+    expect(place.get(3)).toBeCloseTo(7 / 8);
+    expect(place.get(1000)).toBe(1);
+  });
+
+  it('places a single count at the top', () => {
+    expect([...equalised([cell(0, 0, 1, 5), cell(1, 0, 1, 5)])]).toEqual([[5, 1]]);
   });
 });
 
