@@ -88,7 +88,7 @@ one directly.
 A probe of the two layouts measured authorise on 9.3 million per-document labels at 100 to 800 ms
 through the graph and 1.4 to 95 ms through term postings, and on 500,000 compartmented labels at 20
 to 95 ms through the graph, which term postings cannot express
-([probe](../../probes/2026-09-30-label-dag-authorise/results.md)). Indexing each label by its shape
+(`probes/2026-09-30-label-dag-authorise/results.md`). Indexing each label by its shape
 takes the faster figure for each. Authorise runs once per session, so these figures are paid at
 session start and never by a map request.
 

@@ -269,9 +269,49 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     assert_versions_survive_restarts(server, &tmp).await;
 }
 
+/// The layers the newest side-manifest under `dir`'s bundle names, sorted.
+fn published_layers(dir: &std::path::Path) -> Vec<String> {
+    fn newest(dir: &std::path::Path, best: &mut Option<(u64, std::path::PathBuf)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest(&path, best);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let n = name
+                .strip_prefix("SEGMENTS-")
+                .and_then(|rest| rest.strip_suffix(".json"))
+                .and_then(|n| n.parse::<u64>().ok());
+            if let Some(n) = n.filter(|&n| best.as_ref().is_none_or(|(b, _)| n > *b)) {
+                *best = Some((n, path));
+            }
+        }
+    }
+    let mut best = None;
+    newest(&dir.join("bundle"), &mut best);
+    let Some((_, path)) = best else {
+        return Vec::new();
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let mut names: Vec<String> = manifest["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|layer| layer["declaration"]["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
 /// Register a and b, drop b, optionally flush and fold so the log rotates past those records,
 /// then register c and crash before any side-manifest names it. Returns the layer versions served
 /// before the crash and after it.
+///
+/// The executor publishes a write's side-manifest after acknowledging it, so the drop's own
+/// publication is awaited before the pause is armed. Armed earlier, the pause parks the executor
+/// on the drop's publication, and the registration of c is never accepted.
 async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(String, u64)>, Vec<(String, u64)>) {
     use tessera_lifecycle::faults::{PauseAction, PauseSite};
     let tmp = TempDir::new().unwrap();
@@ -282,6 +322,12 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     if fold {
         flush_and_fold(&server, None).await;
     }
+    wait_until(
+        "a side-manifest naming the drop",
+        std::time::Duration::from_secs(60),
+        async || published_layers(tmp.path()) == ["clusters/a"],
+    )
+    .await;
 
     faults.arm_pause(PauseSite::BeforeManifestPublish, PauseAction::Stall);
     register(&server, declaration("clusters/c", None)).await;
@@ -293,6 +339,11 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     .await;
     let before = layer_versions(&server).await;
     assert_eq!(before.len(), 2);
+    assert_eq!(
+        published_layers(tmp.path()),
+        ["clusters/a"],
+        "the executor is parked on the publication of c, so no side-manifest names c"
+    );
     let crashed = crash_copy(&tmp);
     faults.release();
     server.shutdown().await;
