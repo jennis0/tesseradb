@@ -116,7 +116,6 @@ from __future__ import annotations
 import json
 import random
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,8 +124,8 @@ import pyarrow.parquet as pq
 
 from .bundle import Bundle
 from .harness import (
-    CLI_BIN,
-    REPO_ROOT,
+    build_argv,
+    cli_build,
     ensure_cli_built,
     fixture_dir,
     open_bundle_with_source,
@@ -1215,23 +1214,6 @@ def write_corpus(work_dir: Path) -> tuple[Path, Path, list[int]]:
     return points_path, pairs_path, fx
 
 
-def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
-    """The `tessera build` invocation, in one place so [`recipe`] records what is actually run.
-
-    Everything the build once carried on the command line is in the two documents beside the
-    corpus: the declaration names its own sources and its own extent, and the deployment file names
-    the declaration. The build generates the bundle's identity key.
-    """
-    return [
-        str(CLI_BIN),
-        "build",
-        "--deployment",
-        str(work_dir / DEPLOYMENT_NAME),
-        "--out",
-        str(bundle_root),
-    ]
-
-
 def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """**Every input the built bundle is a function of.** Stamped beside the bundle; a mismatch is
     a rebuild.
@@ -1248,7 +1230,9 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
     worktrees — the path a fixture was built from is not a property of the fixture, and including
     it would force a rebuild per worktree for no reason.
     """
-    argv = _build_argv(work_dir, bundle_root)[1:]  # the binary's own path is not an input
+    # The declaration names its sources and extent, and the deployment file names the declaration,
+    # so the invocation carries only those two paths. The binary's own path is not an input.
+    argv = build_argv(work_dir / DEPLOYMENT_NAME, bundle_root)[1:]
     return {
         # 10: both files name their items by `serial`, the source id offset past the entity-id
         #     range, which both carry in place of the source id (2026-09-27).
@@ -1373,11 +1357,7 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     write_deployment(
         work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
     )
-    subprocess.run(
-        _build_argv(work_dir, bundle_root),
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(work_dir / DEPLOYMENT_NAME, bundle_root)
     write_recipe(bundle_root, wanted)
     return bundle_root, fx_keys()
 

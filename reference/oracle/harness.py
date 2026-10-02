@@ -184,6 +184,22 @@ def ensure_cli_built() -> None:
     )
 
 
+def build_argv(deployment: Path, out: Path, *args: str) -> list[str]:
+    """The `tessera build` invocation [`cli_build`] runs, for a recipe to record. `args` follow
+    `--out`."""
+    return [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(out), *args]
+
+
+def cli_build(deployment: Path, out: Path, *args: str, capture_output: bool = False) -> None:
+    """Build the bundle `deployment` describes into `out`, raising `CalledProcessError` if the
+    build fails. The caller runs [`ensure_cli_built`] first."""
+    subprocess.run(
+        build_argv(deployment, out, *args),
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=capture_output,
+    )
+
 
 def write_deployment(path: Path, *, bundle: Path, schema: Path) -> Path:
     """Write the `tessera.toml` a build is invoked against, and hand back its path.
@@ -226,8 +242,8 @@ control = "127.0.0.1:45721"
 def run_build(args: list[str]) -> subprocess.CompletedProcess:
     """Run `tessera build` and hand back the completed process, refusal or not.
 
-    The fixture builders above and in `catalogue.py` run the CLI with `check=True`, because for
-    them a failed build is a broken harness. The schema-refusal catalogue is the opposite test:
+    The fixture builders build through [`cli_build`], which raises, because for them a failed
+    build is a broken harness. The schema-refusal catalogue is the opposite test:
     the refusal *is* the subject (records §2; decision 0013's naming discipline), so the caller
     asserts on the exit status and the message rather than having them converted into a
     `CalledProcessError`. Output is captured — stderr is where the CLI reports a refusal — and
@@ -328,7 +344,11 @@ def ensure_fixture_bundle(
         bundle=bundle_root,
         schema=_fixture_config_path(bundle_root),
     )
-    subprocess.run(args, cwd=REPO_ROOT, check=True)
+    cli_build(
+        _fixture_deployment_path(bundle_root),
+        bundle_root,
+        *_fixture_build_args(points=points, pairs=pairs, limit=limit),
+    )
     write_recipe(bundle_root, wanted)
 
 
@@ -397,18 +417,15 @@ def _fixture_build_argv(
     extent: str,
     view_id: str,
 ) -> list[str]:
-    args = [
-        str(CLI_BIN),
-        "build",
-        "--deployment",
-        str(_fixture_deployment_path(bundle_root)),
-        "--file",
-        f"points={points}",
-        "--file",
-        f"pairs={pairs}",
-        "--out",
-        str(bundle_root),
-    ]
+    return build_argv(
+        _fixture_deployment_path(bundle_root),
+        bundle_root,
+        *_fixture_build_args(points=points, pairs=pairs, limit=limit),
+    )
+
+
+def _fixture_build_args(*, points: str, pairs: str, limit: int | None) -> list[str]:
+    args = ["--file", f"points={points}", "--file", f"pairs={pairs}"]
     if limit is not None:
         args += ["--limit", str(limit)]
     return args

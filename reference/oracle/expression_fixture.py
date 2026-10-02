@@ -15,7 +15,6 @@ conjunction the principal does not satisfy, on an item it sees through another l
 from __future__ import annotations
 
 import random
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
@@ -23,9 +22,8 @@ import pyarrow.parquet as pq
 
 from . import access
 from .harness import (
-    CLI_BIN,
     JOIN_COLUMN,
-    REPO_ROOT,
+    cli_build,
     ensure_cli_built,
     join_attribute_toml,
     write_deployment,
@@ -132,9 +130,5 @@ def build_bundle(work_dir: Path) -> Path:
     config.write_text(CONFIG_TOML)
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
-    subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     return bundle

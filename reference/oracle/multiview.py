@@ -108,7 +108,6 @@ from __future__ import annotations
 import hashlib
 import random
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,8 +116,8 @@ import pyarrow.parquet as pq
 
 from .bundle import Bundle
 from .harness import (
-    CLI_BIN,
-    REPO_ROOT,
+    build_argv,
+    cli_build,
     ensure_cli_built,
     fixture_dir,
     recipe_matches,
@@ -625,25 +624,13 @@ def extent_of(view_id: str) -> tuple[float, float, float, float]:
     return SEALED_EXTENT if view_id.startswith(f"{SEALED_GROUP}:") else GROUP_EXTENT
 
 
-def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
-    """The `tessera build` invocation, in one place so [`recipe`] records what is run."""
-    return [
-        str(CLI_BIN),
-        "build",
-        "--deployment",
-        str(work_dir / DEPLOYMENT_NAME),
-        "--out",
-        str(bundle_root),
-    ]
-
-
 def recipe(work_dir: Path, bundle_root: Path) -> dict:
     """Every input the built bundle is a function of. Stamped beside it; a mismatch is a rebuild.
 
     Written out rather than computed, for the reason `catalogue.py`'s says at length: a recipe
     that omits an input is a reuse test that pins the suite to the older fixture.
     """
-    argv = _build_argv(work_dir, bundle_root)[1:]
+    argv = build_argv(work_dir / DEPLOYMENT_NAME, bundle_root)[1:]
     return {
         "recipe_version": 1,
         "n_items": N_ITEMS,
@@ -690,11 +677,7 @@ def build_multiview_bundle(work_dir: Path | None = None) -> Path:
     write_deployment(
         work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
     )
-    subprocess.run(
-        _build_argv(work_dir, bundle_root),
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(work_dir / DEPLOYMENT_NAME, bundle_root)
     write_recipe(bundle_root, wanted)
     return bundle_root
 

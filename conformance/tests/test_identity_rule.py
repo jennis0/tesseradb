@@ -20,7 +20,6 @@ import io
 import json
 import random
 import shutil
-import subprocess
 from itertools import count
 from pathlib import Path
 
@@ -32,8 +31,7 @@ import requests
 
 from oracle import naming
 from oracle.harness import (
-    CLI_BIN,
-    REPO_ROOT,
+    cli_build,
     ensure_cli_built,
     spawn_server,
     stop_server,
@@ -127,11 +125,7 @@ def pristine_bundle(tmp_path_factory) -> Path:
     (work / "identity.toml").write_text(CONFIG)
     bundle = work / "bundle"
     deployment = write_deployment(work / "tessera.toml", bundle=bundle, schema=work / "identity.toml")
-    subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     return bundle
 
 

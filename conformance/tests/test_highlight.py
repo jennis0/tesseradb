@@ -34,7 +34,14 @@ import subprocess
 
 import pytest
 
-from oracle.harness import CLI_BIN, REPO_ROOT, spawn_server, stop_server, write_deployment
+from oracle.harness import (
+    CLI_BIN,
+    REPO_ROOT,
+    cli_build,
+    spawn_server,
+    stop_server,
+    write_deployment,
+)
 from oracle.wire import (
     FRAME_POINTS,
     decode_viewport,
@@ -100,11 +107,7 @@ def highlight_server(tmp_path_factory):
     (work / "gated.toml").write_text(config_toml() + gated_layer_toml())
     bundle = work / "bundle-gated"
     deployment = write_deployment(work / "tessera-gated.toml", bundle=bundle, schema=work / "gated.toml")
-    subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     server, proc = spawn_server(
         bundle,
         tmp_path_factory.mktemp("highlight-server"),

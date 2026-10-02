@@ -41,16 +41,14 @@ can check by reading, which is the same argument `canary_fixture` makes for the 
 from __future__ import annotations
 
 import random
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .harness import (
-    CLI_BIN,
     JOIN_FIELD,
-    REPO_ROOT,
+    cli_build,
     ensure_cli_built,
     join_attribute_toml,
     write_deployment,
@@ -228,16 +226,5 @@ def build_label_bundle(work_dir: Path) -> Path:
 
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
-    subprocess.run(
-        [
-            str(CLI_BIN),
-            "build",
-            "--deployment",
-            str(deployment),
-            "--out",
-            str(bundle),
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     return bundle
