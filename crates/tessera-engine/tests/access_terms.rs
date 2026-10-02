@@ -30,7 +30,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::{extent, open_engine, open_engine_publishing, test_key, wait_until};
-use tessera_engine::{Engine, IngestRequest};
+use tessera_engine::{
+    Engine, IngestRequest, ItemsRequest, PageEnd, RecordsHead, RecordsLimits, RecordsSink,
+    Session, SinkResult,
+};
 use tessera_lifecycle::IngestRow;
 use tessera_types::TesseraId;
 use tessera_build::config::{AccessInput, AccessSource};
@@ -422,6 +425,65 @@ fn a_label_that_is_not_an_expression_refuses_the_build() {
     assert!(!dir.path().join("bundle").join("MANIFEST.json").exists());
 }
 
+/// Collects the pages of one bulk read.
+#[derive(Default)]
+struct Pages(Vec<RecordBatch>);
+
+impl RecordsSink for Pages {
+    fn head(&mut self, _: &RecordsHead) -> SinkResult {
+        Ok(())
+    }
+
+    fn page(&mut self, batch: &RecordBatch, _: &PageEnd) -> SinkResult {
+        self.0.push(batch.clone());
+        Ok(())
+    }
+}
+
+/// The `labels` column a bulk read of `s0` serves `session` for the item `id`.
+fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<String> {
+    let system = ["labels".to_string()];
+    let mut pages = Pages::default();
+    engine
+        .items_stream(
+            session,
+            ItemsRequest {
+                view: "s0",
+                fields: &[],
+                system_fields: &system,
+                filter: None,
+                keep_unmatched: false,
+                count: false,
+                order: None,
+                page_rows: None,
+                pages: None,
+                cursor: None,
+                limits: RecordsLimits {
+                    max_page_rows: 1024,
+                    max_page_bytes: 1 << 20,
+                    response_bytes: 1 << 24,
+                    response_time: std::time::Duration::from_secs(60),
+                },
+                cancel: None,
+            },
+            &mut pages,
+        )
+        .expect("the read is served");
+    for batch in &pages.0 {
+        let ids = batch.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+        let labels = batch
+            .column_by_name("tessera:labels")
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+            .expect("a labels column");
+        if let Some(row) = ids.values().iter().position(|&t| t == id.raw()) {
+            let row = labels.value(row);
+            let row = row.as_any().downcast_ref::<StringArray>().unwrap();
+            return row.iter().map(|l| l.unwrap().to_string()).collect();
+        }
+    }
+    panic!("the read serves no row for {id:?}");
+}
+
 /// One batch of rows creating items at `positions`, each with its labels.
 fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<TesseraId> {
     let mut body_hash = [0u8; 32];
@@ -456,8 +518,9 @@ fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<T
 
 /// **A label ingested into a running service is read by the rule the build reads it by**: a
 /// conjunction is evaluated from a credential's terms once a flush has published it, the item
-/// card names every term of the item's labels the viewer holds and one satisfied clause of each
-/// label holding a conjunction, and nothing else, and both survive a restart.
+/// card names each held term of a label that is a term or a disjunction of terms, and one
+/// satisfied clause of each label holding a conjunction, and nothing else, and both survive a
+/// restart. A held term that appears only inside a conjunction is not named on its own.
 #[test]
 fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -514,11 +577,24 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
         assert_eq!(
             card.labels,
             ["eu&ir:new", "ir:new", "ir:secret"],
-            "every held term, one clause of the conjunction, and nothing of `x&y`"
+            "the held terms of the disjunction, one clause of the conjunction, and nothing of `x&y`"
         );
         let secret = engine.authorise(&credential(&["ir:secret"])).unwrap();
         let card = engine.item(&secret, ids[2]).unwrap().expect("ir:secret satisfies it");
         assert_eq!(card.labels, ["ir:secret"]);
+
+        // `eu` is held, but on this item it appears only inside a conjunction the viewer does
+        // not satisfy, so neither the card nor the bulk read names it.
+        let secret_eu = engine.authorise(&credential(&["ir:secret", "eu"])).unwrap();
+        let card = engine.item(&secret_eu, ids[2]).unwrap().expect("ir:secret satisfies it");
+        assert_eq!(card.labels, ["ir:secret"]);
+        assert_eq!(labels_column(engine, &secret_eu, ids[2]), ["ir:secret"]);
+
+        // Both operands of the disjunction are held: one clause, the first in byte order.
+        let all = engine.authorise(&credential(&["eu", "ir:legal", "ir:new"])).unwrap();
+        let card = engine.item(&all, ids[0]).unwrap().expect("eu&ir:legal satisfies it");
+        assert_eq!(card.labels, ["eu&ir:legal"]);
+        assert_eq!(labels_column(engine, &all, ids[0]), ["eu&ir:legal"]);
 
         let half = engine.authorise(&credential(&["ir:legal"])).unwrap();
         assert!(engine.item(&half, ids[0]).unwrap().is_none(), "half of the conjunction");

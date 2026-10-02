@@ -288,10 +288,12 @@ figures are paid at session start and never by a map request.
   it resolved at authorise, so it sees less than its terms admit until it authorises again, never
   more. The engine can tell, from the keys promoted since, whether a session is behind, and
   nothing outside its tests asks.
-- An item card shows every term of the item's labels the viewer holds, and, for each of its labels
-  holding a conjunction that the viewer satisfies, one clause of it in held terms: at each
-  disjunction the satisfied operand with fewest terms, then the first in byte order (built). The
-  card never shows the whole of such a label, which could name terms the viewer does not hold.
+- An item card shows each held term of the item's labels that are a single term or a disjunction
+  of terms, and, for each of its labels holding a conjunction that the viewer satisfies, one clause
+  of it in held terms: at each disjunction the satisfied operand with fewest terms, then the first
+  in byte order (built). A held term that appears only inside a conjunction is not shown on its
+  own. The card never shows the whole of such a label, which could name terms the viewer does not
+  hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
 - The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the

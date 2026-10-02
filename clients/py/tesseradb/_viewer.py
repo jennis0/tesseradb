@@ -188,7 +188,7 @@ class Batches:
         self._pages = self._read(reader, rest, frames)
 
     def _read(self, reader: "Viewer", rest: dict, frames):
-        import pyarrow.ipc as ipc
+        from pyarrow import ipc
 
         what = f"POST /v1/{self._route}"
         while True:
@@ -274,7 +274,7 @@ class Batches:
 def _tables(payloads: Sequence[bytes]):
     """The Arrow streams of one frame kind joined in arrival order, or `None` if there were none."""
     import pyarrow as pa
-    import pyarrow.ipc as ipc
+    from pyarrow import ipc
 
     tables = [ipc.open_stream(payload).read_all() for payload in payloads]
     return pa.concat_tables(tables) if tables else None
@@ -813,9 +813,10 @@ class Viewer:
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
-        `labels` (why this reader sees the item: each term of its labels this reader holds, and one
-        satisfied clause of each label holding a conjunction, as label text), `views` (the views
-        this reader can find it in). An item this reader may not see is refused exactly as one that
+        `labels` (why this reader sees the item: each held term of a label that is a term or a
+        disjunction of terms, and one satisfied clause of each label holding a conjunction, as
+        label text; a held term that appears only inside a conjunction is not listed), `views`
+        (the views this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 
             v.item(sample.column("tessera_id")[0].as_py())
@@ -1024,7 +1025,7 @@ class Viewer:
             v.aggregate("papers", [{"cells": {"depth": 6}}], filters={"year": {"eq": 2023}}, reference={})
         """
         import pyarrow as pa
-        import pyarrow.ipc as ipc
+        from pyarrow import ipc
 
         request: dict = {"view": view, "groupings": list(groupings)}
         if filters is not None:

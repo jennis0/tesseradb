@@ -8,7 +8,8 @@ indexed a label under the wrong keys disagrees with the oracle rather than with 
 Each item's labels are chosen by its source id modulo the length of `LABELS`, so every shape occurs
 many times and in every part of the map. `PRINCIPALS` holds each shape's edge: half of a
 conjunction, the whole of it, one operand of a disjunction inside it, a term only a second label
-names, and the quoted term with and without its partner.
+names, the quoted term with and without its partner, and a held term that appears only inside a
+conjunction the principal does not satisfy, on an item it sees through another label.
 """
 
 from __future__ import annotations
@@ -61,6 +62,8 @@ PRINCIPALS: list[list[str]] = [
     ["d", "e"],
     ["s", "a", "b", "t", "c"],
     ["s"],
+    ["ir:secret", "eu"],
+    ["ir:new", "d"],
 ]
 
 

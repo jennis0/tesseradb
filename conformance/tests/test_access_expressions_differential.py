@@ -12,11 +12,10 @@ from __future__ import annotations
 import io
 
 import pytest
-from pyarrow import ipc
-
 from oracle import expression_fixture as fx
 from oracle import wire
 from oracle.harness import JOIN_FIELD, spawn_server, stop_server
+from pyarrow import ipc
 
 
 @pytest.fixture(scope="module")

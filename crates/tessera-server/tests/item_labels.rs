@@ -1,6 +1,6 @@
 //! `POST /v1/items/{tessera_id}`'s `labels` array: **the clauses the session satisfies, in held
-//! terms only**: each term of the item's labels the session holds, and one satisfied clause of each
-//! label holding a conjunction.
+//! terms only**: each held term of a label that is a term or a disjunction of terms, and one
+//! satisfied clause of each label holding a conjunction.
 //!
 //! What makes that worth its own file rather than a case in `http.rs` is the shape of the failure:
 //! the endpoint would still answer `200` with the right record while naming a compartment the

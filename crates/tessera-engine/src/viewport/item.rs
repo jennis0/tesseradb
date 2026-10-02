@@ -13,10 +13,11 @@ use tessera_types::label::{conjunction_text, Label};
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    /// Why the asking session sees this item: every term of its labels the session holds, and one
-    /// satisfied clause of each of its labels holding a conjunction, each written as label text,
-    /// sorted. Every term is one the credential holds, so no clause the session does not satisfy
-    /// and no term it does not hold is named. Never the item's whole label.
+    /// Why the asking session sees this item: each held term of its labels that are a term or a
+    /// disjunction of terms, and one satisfied clause of each of its labels holding a conjunction,
+    /// each written as label text, sorted. A held term that appears only inside a conjunction is
+    /// not named on its own. Every term is one the credential holds, so no clause the session does
+    /// not satisfy and no term it does not hold is named. Never the item's whole label.
     pub labels: Vec<String>,
     /// The views this item holds a row in that this session may reach, sorted by id, each with
     /// the position that view places it at. A view the gate refuses is absent, exactly as a view

@@ -269,30 +269,32 @@ async fn a_restart_after_a_drop_leaves_every_layer_version_where_it_was() {
     assert_versions_survive_restarts(server, &tmp).await;
 }
 
-/// The layers the newest side-manifest under `dir`'s bundle names, sorted.
-fn published_layers(dir: &std::path::Path) -> Vec<String> {
-    fn newest(dir: &std::path::Path, best: &mut Option<(u64, std::path::PathBuf)>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                newest(&path, best);
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let n = name
-                .strip_prefix("SEGMENTS-")
-                .and_then(|rest| rest.strip_suffix(".json"))
-                .and_then(|n| n.parse::<u64>().ok());
-            if let Some(n) = n.filter(|&n| best.as_ref().is_none_or(|(b, _)| n > *b)) {
-                *best = Some((n, path));
-            }
-        }
+/// Every side-manifest of each partition under the prefix `dir`'s bundle `CURRENT` names, by
+/// partition, highest-numbered first.
+fn side_manifests(dir: &std::path::Path) -> Vec<Vec<std::path::PathBuf>> {
+    let bundle = dir.join("bundle");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("CURRENT")).unwrap()).unwrap();
+    let partitions = bundle.join(current["prefix"].as_str().unwrap()).join("partitions");
+    let mut out = Vec::new();
+    for partition in std::fs::read_dir(partitions).unwrap().flatten() {
+        let mut numbered: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(partition.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let n = name.strip_prefix("SEGMENTS-")?.strip_suffix(".json")?.parse().ok()?;
+                Some((n, entry.path()))
+            })
+            .collect();
+        numbered.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+        out.push(numbered.into_iter().map(|(_, path)| path).collect());
     }
-    let mut best = None;
-    newest(&dir.join("bundle"), &mut best);
-    let Some((_, path)) = best else {
-        return Vec::new();
-    };
+    out
+}
+
+/// The layers one side-manifest names, sorted.
+fn layers_named_by(path: &std::path::Path) -> Vec<String> {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     let mut names: Vec<String> = manifest["layers"]
@@ -302,6 +304,19 @@ fn published_layers(dir: &std::path::Path) -> Vec<String> {
         .map(|layer| layer["declaration"]["name"].as_str().unwrap().to_string())
         .collect();
     names.sort();
+    names
+}
+
+/// The layers the newest side-manifest of each partition under the current prefix names, sorted
+/// and distinct.
+fn published_layers(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = side_manifests(dir)
+        .iter()
+        .filter_map(|manifests| manifests.first())
+        .flat_map(|path| layers_named_by(path))
+        .collect();
+    names.sort();
+    names.dedup();
     names
 }
 
@@ -339,11 +354,14 @@ async fn crash_before_the_manifest_naming_a_new_layer(fold: bool) -> (Vec<(Strin
     .await;
     let before = layer_versions(&server).await;
     assert_eq!(before.len(), 2);
-    assert_eq!(
-        published_layers(tmp.path()),
-        ["clusters/a"],
-        "the executor is parked on the publication of c, so no side-manifest names c"
-    );
+    assert_eq!(published_layers(tmp.path()), ["clusters/a"]);
+    for path in side_manifests(tmp.path()).iter().flatten() {
+        assert!(
+            !layers_named_by(path).iter().any(|name| name == "clusters/c"),
+            "the executor is parked on the publication of c, so {} does not name it",
+            path.display()
+        );
+    }
     let crashed = crash_copy(&tmp);
     faults.release();
     server.shutdown().await;

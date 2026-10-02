@@ -1154,8 +1154,9 @@ export type ItemDetail = {
    */
   scoped: Record<string, Record<string, unknown>>;
   /**
-   * Why this session sees the item, as label text, sorted: each term of its labels the session
-   * holds, and one satisfied clause of each label holding a conjunction. Every term is one the
+   * Why this session sees the item, as label text, sorted: each held term of a label that is a
+   * term or a disjunction of terms, and one satisfied clause of each label holding a conjunction.
+   * A held term that appears only inside a conjunction is not listed on its own. Every term is one the
    * session holds. It does not say how the item is labelled. An empty list is an answer.
    */
   labels: string[];

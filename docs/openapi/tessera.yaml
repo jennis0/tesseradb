@@ -3923,7 +3923,7 @@ components:
           type: array
           items:
             type: string
-          description: Why this session sees the item, as label text, sorted. Each term of the item's labels that the session holds is one entry, and each of its labels holding a conjunction that the session satisfies adds one clause of that label, written as the held terms joined by `&`; at each disjunction the satisfied operand with fewest terms, then the first in byte order, is taken. A term is quoted where the label grammar needs it. Every term is one the session holds, so a viewer does not learn a clause they do not satisfy or a term they do not hold. Always present.
+          description: Why this session sees the item, as label text, sorted. Each label that is a single term or a disjunction of terms gives each of its terms that the session holds, and a `public` label gives `public`. Each label holding a conjunction that the session satisfies gives one clause of that label, written as the held terms joined by `&`; at each disjunction the satisfied operand with fewest terms, then the first in byte order, is taken. A term is quoted where the label grammar needs it. Every term is one the session holds, so a viewer does not learn a clause they do not satisfy or a term they do not hold. Always present.
         views:
           type: array
           description: The views this item is in that this principal may reach, sorted by id, each with the position that view places it at. A view the principal may not reach is left out, as a view nobody declared is. Always present. `[]` means none of the item's views is reachable; an item in no view at all is a `404` instead.

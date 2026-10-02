@@ -261,13 +261,14 @@ not see answer identically, both with a 404, so the response never distinguishes
 from "exists, but not for you."
 
 The response also says why this viewer sees the item, as a sorted list of clauses, each written as
-label text. Every term of the item's labels that the viewer holds is one entry. Each of the item's
-labels holding a conjunction that the viewer satisfies gives one more: one clause of it, written as
-the held terms whose conjunction satisfies it. Within such a label, at each disjunction the
-satisfied operand with fewest terms, then the first in byte order, is taken, so the answer depends
-on the item's labels and the viewer's terms and on no internal number. The response never names a
-whole label holding a conjunction, a clause the viewer does not satisfy, or a term the viewer does
-not hold. Learning that an item they can see also carries one of those would tell the viewer how
+label text. Each label that is a single term or a disjunction of terms gives each of its terms
+that the viewer holds, and a `public` label gives `public`. Each label holding a conjunction that
+the viewer satisfies gives one clause of it, written as the held terms whose conjunction satisfies
+it. Within that label, at each disjunction the satisfied operand with fewest terms, then the first
+in byte order, is taken. A held term that appears only inside a conjunction is not listed on its
+own. The answer depends on the item's labels and the viewer's terms and on no internal number.
+The response never names a whole label holding a conjunction, a clause the viewer does not
+satisfy, or a term the viewer does not hold. Learning that an item they can see also carries one of those would tell the viewer how
 the corpus is labelled beyond what they may see. A bulk read in stored order discloses part of what
 this withholds: which of the viewer's items share a full set of index keys, as
 [security](security.md#reading-in-bulk) states.

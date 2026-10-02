@@ -812,8 +812,9 @@ export class TesseraClient {
   /**
    * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
    * a category given as its vocabulary key and a column the item has no value for left out.
-   * `labels` is why this session sees the item: each term of its labels the session holds, and
-   * one satisfied clause of each label holding a conjunction, as label text, and nothing else. `views` and
+   * `labels` is why this session sees the item: each held term of a label that is a term or a
+   * disjunction of terms, and one satisfied clause of each label holding a conjunction, as label
+   * text, and nothing else. A held term that appears only inside a conjunction is not listed. `views` and
    * `scoped` cover only the views this principal may reach.
    *
    * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.
