@@ -609,12 +609,7 @@ async fn drive(
     k: usize,
     storm: StormOptions,
 ) -> Result<Vec<Sample>> {
-    let client = reqwest::Client::builder()
-        // One connection per virtual user: a shared, smaller pool would serialise users behind
-        // each other inside the client and report the client's queueing as the server's latency.
-        .pool_max_idle_per_host(concurrency.max(1))
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    let client = http_client(concurrency, Duration::from_secs(120))?;
 
     let deadline = Instant::now() + duration;
     let issued = Arc::new(AtomicU64::new(0));
@@ -717,6 +712,16 @@ async fn drive(
     }
     let samples = std::mem::take(&mut *collected.lock().await);
     Ok(samples)
+}
+
+/// The generator's HTTP client: an idle connection kept for each of `users`, and `timeout` on
+/// every request. A shared, smaller pool would serialise users behind each other inside the
+/// client and report the client's queueing as the server's latency.
+pub(crate) fn http_client(users: usize, timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(users.max(1))
+        .timeout(timeout)
+        .build()
 }
 
 /// Turn one request's `Result<RawOutcome, _>` into a [`Sample`]. Shared by the plain and

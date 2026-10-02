@@ -6,6 +6,7 @@ pub mod gather;
 pub mod ingest;
 pub mod load;
 pub mod matrix;
+pub mod replay;
 pub mod tiles;
 pub mod viewport;
 
@@ -125,7 +126,7 @@ impl ArmRun {
     }
 }
 
-fn run_id() -> String {
+pub(crate) fn run_id() -> String {
     // No wall clock dependency beyond process start: the run id only has to be unique within a
     // campaign, and the ledger — not the id — is what makes a run resumable.
     format!(
@@ -139,7 +140,7 @@ fn run_id() -> String {
 }
 
 /// What this process is running on, captured once.
-fn capture_env() -> Env {
+pub(crate) fn capture_env() -> Env {
     let (total_gib, avail_gib) = crate::metrics::memory_gib();
     let (minor, major) = crate::metrics::faults();
     Env {
