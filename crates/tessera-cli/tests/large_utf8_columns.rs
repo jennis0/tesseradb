@@ -421,7 +421,10 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
     );
     // Each build generates its own identity key, so the manifests differ in the key and the
     // columns differ in each row's `tessera_id`. Everything else is compared byte for byte, and a
-    // `tessera_id` column as the entity each row names under its own bundle's key.
+    // `tessera_id` column as the entity each row names under its own bundle's key. The identity
+    // bands and the labels copied in their order select rows by identity, so each bundle's are
+    // checked against its own columns by `verify --deep` instead.
+    let by_identity = |name: &str| name.ends_with("/bands.bin") || name.contains("/band-labels/");
     let manifest_of = |files: &BTreeMap<String, Vec<u8>>| -> serde_json::Value {
         let (_, bytes) = files
             .iter()
@@ -444,6 +447,9 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
                     if file.ends_with("columns.arrow") {
                         entry["sha256"] = serde_json::Value::Null;
                     }
+                    if by_identity(file) {
+                        *entry = serde_json::Value::Null;
+                    }
                 }
                 value
             };
@@ -454,7 +460,7 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
             );
             continue;
         }
-        if name == "CURRENT" {
+        if name == "CURRENT" || by_identity(name) {
             continue;
         }
         if name.ends_with("columns.arrow") {
@@ -472,6 +478,10 @@ fn a_corpus_at_both_offset_widths_checks_and_builds_the_same() {
             left_bytes.len(),
             right_bytes.len()
         );
+    }
+    for dir in [narrow.path(), wide.path()] {
+        let verified = run(dir, &["verify", "--deep", "bundles/corpus"]);
+        assert!(verified.status.success(), "{}", stderr(&verified));
     }
 }
 
