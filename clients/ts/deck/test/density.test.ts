@@ -14,7 +14,7 @@ const counts = (depth: number, cells: DensityCell[]): DensityCounts => ({depth, 
 
 describe('densityCellsOf', () => {
   it('places each row at its cell’s centre, at the viewport’s depths and past them', () => {
-    for (const depth of [3, 16, 20]) {
+    for (const depth of [3, 16, 20, 30]) {
       const span = WORLD_SIZE / 2 ** depth;
       const table = tableFromArrays({cell: BigUint64Array.from([mortonOfTile(1, 2, depth), mortonOfTile(5, 3, depth)]), count: BigUint64Array.from([7n, 40n])});
       expect(densityCellsOf({rows: table}, depth)).toEqual([
@@ -22,6 +22,12 @@ describe('densityCellsOf', () => {
         {x: 5, y: 3, position: [5.5 * span, 3.5 * span], count: 40}
       ]);
     }
+  });
+
+  it('reads a cell’s column and row from every bit of a deep cell', () => {
+    const [x, y] = [2 ** 30 - 3, 2 ** 29 + 7];
+    const table = tableFromArrays({cell: BigUint64Array.from([mortonOfTile(x, y, 30)]), count: BigUint64Array.from([1n])});
+    expect(densityCellsOf({rows: table}, 30).map((c) => [c.x, c.y])).toEqual([[x, y]]);
   });
 
   it('reads nothing from a table without cells', () => {

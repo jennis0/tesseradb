@@ -1,5 +1,4 @@
 import {WORLD_SIZE, type AggregateTable} from '@tesseradb/client';
-import {tileXY} from '@tesseradb/client/internal';
 import {RAMPS, rampAt, type Rgb} from './colour.js';
 
 /**
@@ -131,10 +130,30 @@ export function densityCellsOf(table: Pick<AggregateTable, 'rows'>, depth: numbe
   for (let i = 0; i < rows.numRows; i++) {
     const n = Number(count.get(i) as bigint | number);
     if (!(n > 0)) continue;
-    const {x, y} = tileXY(BigInt(cell.get(i) as bigint | number), depth);
+    const {x, y} = cellXY(BigInt(cell.get(i) as bigint | number));
     cells.push({x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: n});
   }
   return cells;
+}
+
+/** The even bits of a 32-bit number, packed into its low 16. */
+function evenBits(v: number): number {
+  v &= 0x55555555;
+  v = (v | (v >>> 1)) & 0x33333333;
+  v = (v | (v >>> 2)) & 0x0f0f0f0f;
+  v = (v | (v >>> 4)) & 0x00ff00ff;
+  return (v | (v >>> 8)) & 0x0000ffff;
+}
+
+/**
+ * A cell's column and row from its Morton prefix: x on the even bits and y on the odd, as
+ * `mortonOfTile` writes them. Split into two 32-bit halves, since a row of a table holds thousands
+ * of cells and bigint arithmetic per bit would cost more than the rest of the read.
+ */
+function cellXY(cell: bigint): {x: number; y: number} {
+  const lo = Number(cell & 0xffffffffn);
+  const hi = Number(cell >> 32n);
+  return {x: evenBits(lo) + evenBits(hi) * 65536, y: evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536};
 }
 
 /**
