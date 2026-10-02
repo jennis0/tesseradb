@@ -1,4 +1,4 @@
-import {Aggregates, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, joinedAggregate, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
@@ -21,7 +21,8 @@ import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
-import {regionOperand, withRegion} from './region.js';
+import {insideBox, regionOperand, withRegion} from './region.js';
+import type {RegionOperand} from './types.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 import {Suggestions, type SuggestState} from './suggestions.js';
@@ -273,6 +274,33 @@ export type ViewProjection = {
    * arrive. A plain mark count, not a masked count.
    */
   provisional: number;
+  /** The counts over the camera's box or the selected region; `null` before the view's first. */
+  inView: InViewCounts | null;
+};
+
+/**
+ * Counts over the camera's box, or over the selected region while one is selected, from `POST
+ * /v1/aggregate`. They are asked for once the camera has rested for 250 ms, and again when the
+ * filters, the highlight or the selection change. The frame's own counts cover whole tiles, which
+ * reach past the box by an amount that changes with the depth drawn; these count the area itself,
+ * so `visible` does not move when only a filter changes.
+ *
+ * @category Projections
+ */
+export type InViewCounts = {
+  /**
+   * `loading` while a count for the current camera, filters and selection is out, the previous
+   * figures standing until it lands; `shown` once it has; `refused` where it was refused.
+   */
+  status: 'loading' | 'shown' | 'refused';
+  /** The items this viewer can see in the area. */
+  visible: Masked;
+  /** How many of `visible` the filters admit. */
+  matched: Masked;
+  /** How many of `matched` the highlight also admits; equal to `matched` where none is set. */
+  highlighted: Masked;
+  /** The held marks of the frame's exact tiles that lie in the area. */
+  shown: number;
 };
 
 /**
@@ -617,6 +645,8 @@ export interface Store {
    * current camera. A value that is not a finite number above zero is ignored.
    */
   setBudget(budget: number): void;
+  /** The marks the store aims to draw: `budget` as created, else 500000, until `setBudget` changes it. */
+  readonly budget: number;
   /**
    * Make `id` the view the store answers from. An id `meta.views` does not list is ignored, as is
    * the current id. Called before `/v1/meta` arrives, it names the view to open with, in place of
@@ -718,8 +748,11 @@ export interface Store {
 
 /** The `view` projection before a frame has been drawn in view `id`. */
 function noFrame(id: string): ViewProjection {
-  return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0};
+  return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0, inView: null};
 }
+
+/** How long the camera rests before the counts in view are asked for. */
+const IN_VIEW_REST_MS = 250;
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -846,12 +879,18 @@ export function createStore(options: StoreOptions): Store {
     trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
   });
 
+  /** `client.aggregate`, with the requests asked for in one task over the same set joined. */
+  const aggregate = joinedAggregate(
+    (token, req, signal) => client.aggregate(token, req, signal),
+    () => meta?.selection.maxAggregateGroupings ?? 1
+  );
+
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
       const filters = aggregateFilters(spec);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
-      const result = await client.aggregate(
+      const result = await aggregate(
         asked.token,
         {view: asked.view, groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})},
         signal
@@ -864,6 +903,35 @@ export function createStore(options: StoreOptions): Store {
     clock,
     {...RETRY_DEFAULTS, ...options.driver}
   );
+
+  /**
+   * The counts in view: `counts` is the set under the filters against the area as its reference,
+   * `highlighted` the set under the highlight as well, registered only while one is set.
+   */
+  const inView = new Aggregates(
+    async (spec, signal) => {
+      const asked = await viewed();
+      const area = countedArea()!;
+      const box = area.selected ? null : lastView!.input.bbox;
+      const filters = withArea(aggregateFilters(spec), area);
+      const result = await aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
+      if (box) boxOf.set(result, box);
+      if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
+      return {result, view: asked.view};
+    },
+    (entries) => publishInView(entries),
+    clock,
+    {...RETRY_DEFAULTS, ...options.driver}
+  );
+  /** The pending ask after the camera moved. */
+  let inViewTimer: unknown = null;
+  /** The camera's box each count in view was taken over; a selected region's count has none. */
+  const boxOf = new WeakMap<object, [number, number, number, number]>();
+  /** The box the counts in view on show were taken over, which the shown count is taken over too. */
+  let countedBox: [number, number, number, number] | null = null;
+  /** Whether `inView` holds its two specs, and the highlighted one. */
+  let inViewRegistered = false;
+  let inViewHighlighted = false;
 
   const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
 
@@ -1037,7 +1105,9 @@ export function createStore(options: StoreOptions): Store {
       {
         kMaxMarks: m.selection.kMaxMarks,
         maxTilesPerRequest: m.maxTilesPerRequest,
-        thetaTargetMarks: m.selection.thetaTargetMarks
+        thetaTargetMarks: m.selection.thetaTargetMarks,
+        kMin: m.selection.kMin,
+        filtered: () => requestFilters() !== null
       },
       clock,
       scheduler,
@@ -1301,7 +1371,8 @@ export function createStore(options: StoreOptions): Store {
       highlighted: {value: Number(highlighted), exact: true},
       highlighting: requestHighlight() !== null,
       served: {shown: served, total: Number(visible), exact: true},
-      provisional: frame.provisional
+      provisional: frame.provisional,
+      inView: projections.view.inView && {...projections.view.inView, shown: shownInArea(frame.exact)}
     });
     replaceProjection('marks', {
       bands: frame.exact,
@@ -1322,6 +1393,10 @@ export function createStore(options: StoreOptions): Store {
       matched: Number(matched),
       narrowed: filtersBesideRegion(projections.filters.draft) !== null
     });
+    const counted = projections.view.inView;
+    if (counted && region.selected && counted.shown !== shownInArea(frame.exact)) {
+      replaceProjection('view', {...projections.view, inView: {...counted, shown: shownInArea(frame.exact)}});
+    }
     legend.accumulate(frame, meta?.declaredScalars ?? []);
     colours.refresh();
     checkColourCoverage();
@@ -1523,6 +1598,7 @@ export function createStore(options: StoreOptions): Store {
     }
 
     aggregates.refresh(true);
+    askInView(false, true);
     onTrace('view-switch', {from, to: id, sameFrame: kept ? 1 : 0});
   }
 
@@ -1538,6 +1614,8 @@ export function createStore(options: StoreOptions): Store {
     const v = toDriverView(input);
     current.presenter.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
     current.channel.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
+    // A selected region is counted as it is wherever the camera goes.
+    if (!region.selected) askInView(true);
   }
 
   /**
@@ -1641,6 +1719,102 @@ export function createStore(options: StoreOptions): Store {
     return filters === null ? highlight : {all_of: [filters, highlight]};
   }
 
+  /**
+   * The area the counts in view are taken over: the selected region, else the camera's box. `null`
+   * before the camera has been set. The selected region is already in the filters; the box is not.
+   */
+  function countedArea(): {operand: RegionOperand; outside: boolean; selected: boolean} | null {
+    const selected = region.selected;
+    if (selected) return {operand: regionOperand(selected), outside: selected.outside ?? false, selected: true};
+    if (!lastView) return null;
+    return {operand: regionOperand({kind: 'box', bbox: lastView.input.bbox}), outside: false, selected: false};
+  }
+
+  /** `expr` joined with the area's leaf, which the selected region's filters already carry. */
+  function withArea(expr: FilterExpr | null, area: {operand: RegionOperand; outside: boolean; selected: boolean}): FilterExpr | null {
+    if (area.selected && expr !== null) return expr;
+    return withRegion(expr, area.operand, area.outside);
+  }
+
+  /** Ask for the counts in view again, now or once the camera has rested. */
+  function askInView(rest: boolean, drop = false): void {
+    if (inViewTimer !== null) clock.cancel(inViewTimer);
+    inViewTimer = null;
+    if (countedArea() === null) return;
+    if (!rest) {
+      const highlighting = requestHighlight() !== null;
+      if (highlighting !== inViewHighlighted) {
+        inViewHighlighted = highlighting;
+        inView.set('highlighted', highlighting ? {groupings: [{}], highlighted: true} : null);
+      }
+      if (!inViewRegistered) {
+        inViewRegistered = true;
+        inView.set('counts', {groupings: [{}]});
+        return;
+      }
+      inView.refresh(drop);
+      return;
+    }
+    inViewTimer = clock.after(IN_VIEW_REST_MS, () => {
+      inViewTimer = null;
+      askInView(false);
+    });
+  }
+
+  function publishInView(entries: AggregatesProjection): void {
+    const counts = entries.get('counts');
+    const lit = entries.get('highlighted');
+    const total = counts?.result?.tables[0];
+    if (counts?.status === 'refused') {
+      // The last counts stand, marked refused; with none, the frame's own figures.
+      const v = projections.view;
+      const last = v.inView ?? {visible: v.visible, matched: v.matched, highlighted: v.highlighted, shown: v.served.shown};
+      replaceProjection('view', {...v, inView: {...last, status: 'refused'}});
+      return;
+    }
+    if (!counts || !total || counts.view !== views.id) {
+      if (projections.view.inView !== null && (!counts || counts.result === null)) replaceProjection('view', {...projections.view, inView: null});
+      return;
+    }
+    countedBox = counts.result ? (boxOf.get(counts.result) ?? null) : null;
+    const exact = (counts.result?.region?.exact ?? true) && !(region.selected?.outside ?? false);
+    const masked = (value: number) => ({value, exact});
+    const visible = masked(total.referenceTotal ?? total.total);
+    const matched = masked(total.total);
+    const litTotal = lit?.result?.tables[0]?.total;
+    const highlighted = litTotal === undefined ? matched : masked(litTotal);
+    const loading = counts.status === 'loading' || counts.status === 'retrying' || lit?.status === 'loading' || lit?.status === 'retrying';
+    const status = lit?.status === 'refused' ? 'refused' : loading ? 'loading' : 'shown';
+    replaceProjection('view', {...projections.view, inView: {status, visible, matched, highlighted, shown: shownInArea(projections.marks.bands)}});
+    if (status === 'shown' && region.selected) region.counted({visible, matched, verdict: counts.result?.region ?? null});
+  }
+
+  /** The held marks of `bands` inside the area, by the server's predicate; the region's own count while one is selected. */
+  function shownInArea(bands: Composition['exact']): number {
+    const q = frameOrNull();
+    if (!q) return 0;
+    if (region.selected) return projections.region?.held.count ?? 0;
+    const counted = countedBox ?? lastView?.input.bbox;
+    if (!counted) return 0;
+    const [bx0, by0, bx1, by1] = counted;
+    const [wx0, wy0] = dataToWorldXY(bx0, by0, q);
+    const [wx1, wy1] = dataToWorldXY(bx1, by1, q);
+    const box: [number, number, number, number] = [Math.min(wx0, wx1), Math.min(wy0, wy1), Math.max(wx0, wx1), Math.max(wy0, wy1)];
+    let shown = 0;
+    for (const band of bands) {
+      const span = WORLD_SIZE / 2 ** band.depth;
+      const x0 = band.x * span;
+      const y0 = band.y * span;
+      if (x0 >= box[0] && y0 >= box[1] && x0 + span <= box[2] && y0 + span <= box[3]) {
+        shown += band.ids.length;
+        continue;
+      }
+      if (x0 > box[2] || y0 > box[3] || x0 + span < box[0] || y0 + span < box[1]) continue;
+      for (let i = 0; i < band.ids.length; i++) if (insideBox(band.positions[i * 2]!, band.positions[i * 2 + 1]!, box)) shown += 1;
+    }
+    return shown;
+  }
+
   /** `expr` with the selected region's leaf joined. */
   function withSelected(expr: FilterExpr | null): FilterExpr | null {
     const selected = region.selected;
@@ -1669,6 +1843,7 @@ export function createStore(options: StoreOptions): Store {
     // Each suggestion count is taken under the filter.
     suggestions.refresh();
     aggregates.refresh(false);
+    askInView(false);
   }
 
   async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
@@ -1849,6 +2024,7 @@ export function createStore(options: StoreOptions): Store {
     void ready().catch(() => {});
     // Each asks under the meta and token the read above brings.
     aggregates.refresh(true);
+    askInView(false, true);
   }
 
   function refresh(): void {
@@ -1857,6 +2033,7 @@ export function createStore(options: StoreOptions): Store {
     region.loading(projections.marks);
     if (lastView) setView(lastView.input);
     aggregates.refresh(false);
+    askInView(false);
   }
 
   /** Thrown into an answer {@link admit} refused, so nothing in it is held. */
@@ -1875,6 +2052,8 @@ export function createStore(options: StoreOptions): Store {
     records.dispose();
     legend.dispose();
     aggregates.dispose();
+    inView.dispose();
+    if (inViewTimer !== null) clock.cancel(inViewTimer);
     for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.cancel();
@@ -1915,6 +2094,9 @@ export function createStore(options: StoreOptions): Store {
     setSizeBy,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
+    get budget() {
+      return budget;
+    },
     setCurrentView,
     frame: frameOrNull,
     pick,

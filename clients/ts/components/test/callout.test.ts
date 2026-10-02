@@ -53,6 +53,44 @@ describe('placing a card beside its point', () => {
     expect(at.leader.y2).toBe(150);
   });
 
+  it('keeps its side and its place along it while the camera moves, until the card would leave the map', () => {
+    const first = placeCallout([400, 450], CARD, MAP)!;
+    expect(first.side).toBe('right');
+    // The point moves right: the left side now has more room, but a firm placement stays.
+    const moved = placeCallout([900, 400], CARD, MAP, [], undefined, {side: first.side, offset: first.offset, firm: true})!;
+    expect(moved.side).toBe('right');
+    expect(moved.top - 400).toBe(first.offset);
+    // Near the right edge the card would leave the map, so it is placed afresh.
+    expect(placeCallout([1300, 400], CARD, MAP, [], undefined, {side: 'right', offset: first.offset, firm: true})!.side).toBe('left');
+  });
+
+  it('at rest keeps its side where that is still clear, and moves where a card is in the way', () => {
+    const kept = {side: 'left' as const, offset: -100, firm: false};
+    expect(placeCallout([900, 450], CARD, MAP, [], undefined, kept)!.side).toBe('left');
+    const leftCard = {left: 500, top: 300, width: 400, height: 300};
+    expect(placeCallout([900, 450], CARD, MAP, [leftCard], undefined, kept)!.side).toBe('right');
+  });
+
+  it('grows down from where it sat when its content grows', () => {
+    const first = placeCallout([400, 450], CARD, MAP)!;
+    const taller = placeCallout([400, 450], {width: 300, height: 400}, MAP, [], undefined, {side: first.side, offset: first.offset, firm: false})!;
+    expect(taller.top).toBe(first.top);
+    expect(taller.height).toBe(400);
+  });
+
+  it('is shortened to the clear span beside its point where it fits nowhere whole, clear of the cards over the map', () => {
+    const map = {width: 900, height: 560};
+    const panel = {left: 12, top: 12, width: 300, height: 176};
+    const info = {left: 617, top: 12, width: 271, height: 236};
+    const tall = {width: 300, height: 420};
+    const at = placeCallout([490, 290], tall, map, [panel, info], undefined, null, 180)!;
+    expect(at.height).toBeLessThan(tall.height);
+    expect(at.height).toBeGreaterThanOrEqual(180);
+    const r = {left: at.left, top: at.top, width: 300, height: at.height};
+    for (const a of [panel, info]) expect(r.left < a.left + a.width && a.left < r.left + r.width && r.top < a.top + a.height && a.top < r.top + r.height).toBe(false);
+    expect(at.top + at.height).toBeLessThanOrEqual(map.height - 8);
+  });
+
   it('hides while its point is off the map', () => {
     expect(placeCallout([-1, 300], CARD, MAP)).toBeNull();
     expect(placeCallout([300, 901], CARD, MAP)).toBeNull();

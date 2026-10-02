@@ -45,6 +45,9 @@ const graphemes = new Intl.Segmenter('en', {granularity: 'grapheme'});
 /** A name's length as a reader counts it: characters, not UTF-16 units. */
 const lengthOf = (text: string): number => [...graphemes.segment(text)].length;
 
+/** The width of the hue bar's knob, which its travel along the bar allows for. */
+const HUE_KNOB = 12;
+
 /** How far each lighter colour in the colour picker is taken towards white. */
 const LIGHTER = 0.45;
 
@@ -134,8 +137,9 @@ type Picking = {column: string; key: string; title: string};
  * @csspart level-select - The Level select.
  * @csspart swatches - The list of rows, with `data-columns` set to `1` or `2`.
  * @csspart entry - One row, with `data-key` for a category value and `data-state`: `out` for a
- *   value the column's filter leaves out; for one it keeps, `lit` or `dim` while the column is
- *   highlighted, else `filtered` while it is filtered; else empty. `data-clause` names the clauses
+ *   value the column's filter leaves out, or a cluster the filters leave no member of; `lit` for a
+ *   value the column's highlight lights; `filtered` for one the filter keeps; `dim` for one a
+ *   highlight with no filter leaves out; else empty. `data-clause` names the clauses
  *   the value itself is in: `filter`, `highlight`, or both separated by a space.
  * @csspart swatch - A row's colour: for a category value, the button that opens the colour picker.
  * @csspart name - A row's name, with `data-unnamed` on a cluster that has none.
@@ -206,9 +210,11 @@ export class TesseraLegend extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* The Level choice: a short label, with the select over it taking the clicks and keys. */
+      /* The Level choice: a short label, with the select over it taking the clicks and keys. On a
+         line of its own it keeps to the right, under the Colour by name. */
       [part='level'] {
         flex: 0 0 auto;
+        margin-left: auto;
         font-size: 12px;
         font-weight: 400;
         letter-spacing: 0;
@@ -230,11 +236,12 @@ export class TesseraLegend extends TesseraElement {
         outline: 2px solid var(--_tessera-accent);
         outline-offset: 1px;
       }
+      /* As tall as a whole number of rows, so the last row shown is not cut through. */
       [part='swatches'] {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
         row-gap: 1px;
-        max-height: 340px;
+        max-height: calc(13 * 25px - 1px);
         overflow-y: auto;
         margin: 0 -4px;
         font-size: 12px;
@@ -243,6 +250,7 @@ export class TesseraLegend extends TesseraElement {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         column-gap: 4px;
         row-gap: 2px;
+        max-height: calc(15 * 22px - 2px);
       }
       [part~='entry'] {
         position: relative;
@@ -880,7 +888,7 @@ export class TesseraLegend extends TesseraElement {
     const counts = countsByKey(this.counts.entry());
     // A count of `false` draws no count cell; `null` draws an empty one, for a row not counted.
     const plain = (c: Rgba | readonly number[], text: string, title = text, unnamed = false, count: number | null | false = false) =>
-      html`<div part="entry" role="listitem"><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title} ?data-unnamed=${unnamed}>${text}</span>${count === false
+      html`<div part="entry" role="listitem" data-state=${count === 0 ? 'out' : ''}><span part="swatch" style=${`--c:${rgb(c as Rgba)}`}></span><span part="name" title=${title} ?data-unnamed=${unnamed}>${text}</span>${count === false
         ? nothing
         : html`<span part="count">${count === null ? '' : count.toLocaleString('en-GB')}</span>`}</div>`;
     if (cluster) {
@@ -903,7 +911,7 @@ export class TesseraLegend extends TesseraElement {
     if (error) return wrap(html`<span part="state" data-state="refused"><span class="dot refuse"></span><span part="refusal" data-code=${error.code}>Values unavailable</span></span>`);
     if (column.category) {
       const values = legend.categories[column.name];
-      if (!values) return wrap(renderState('loading', s.get('status')));
+      if (!values) return wrap(renderState('loading', s.get('status'), {first: true}));
       return wrap(html`<span part="state" data-state="shown"></span>${this.categoryRows(s, column.name, values, legend.ranks[column.name] ?? {}, colouring, countsByKey(this.counts.entry()))}`);
     }
     const domain = legend.domains[column.name];
@@ -954,8 +962,10 @@ export class TesseraLegend extends TesseraElement {
     const filtered = keysIn('filter');
     const lit = keysIn('highlight');
     const has = (keys: string[], key: string | null) => key !== null && keys.includes(key);
+    // A value the filter keeps keeps its colour beside the ones it leaves out, highlighted or not;
+    // without a filter, a highlight greys the values it does not light.
     const stateOfKey = (key: string | null) =>
-      filtered.length > 0 && !has(filtered, key) ? 'out' : lit.length > 0 ? (has(lit, key) ? 'lit' : 'dim') : filtered.length > 0 ? 'filtered' : '';
+      filtered.length > 0 && !has(filtered, key) ? 'out' : lit.length > 0 && has(lit, key) ? 'lit' : filtered.length > 0 ? 'filtered' : lit.length > 0 ? 'dim' : '';
     const chosen = colouring.values[column] ?? {};
     const shown = paletteValues(values, ranks, colouring.palette);
     const counted = counts !== null;
@@ -1186,7 +1196,11 @@ export class TesseraLegend extends TesseraElement {
       <div role="radiogroup" aria-labelledby="colour-by-label">
         ${options.map(
           (o, i) => html`<button part="option" type="button" role="radio" data-value=${o.value} data-kind=${o.cluster ? 'layer' : o.kind.toLowerCase() || 'none'} aria-checked=${o.checked ? 'true' : 'false'}
-            tabindex=${i === at ? '0' : '-1'} @click=${() => this.choose(o.value)}
+            tabindex=${i === at ? '0' : '-1'} @click=${() => {
+              // A choice made by pointer closes the menu; the arrow keys move through the choices and leave it open.
+              this.choose(o.value);
+              this.closePopovers(true);
+            }}
             @keydown=${(e: KeyboardEvent) => radioKeys(e, options.length, i, (j) => this.choose(options[j]!.value))}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
         )}
       </div>
@@ -1256,9 +1270,12 @@ export class TesseraLegend extends TesseraElement {
       const y = r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1 - val;
       return [h, x, 1 - y];
     };
+    // The hue knob's centre runs from half a knob in from one end of the bar to half a knob from the
+    // other, so the knob stays on the bar.
     const hueAt = (e: PointerEvent): Hsv => {
       const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      return [r.width > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left) / r.width) * 360)) : h, sat, val];
+      const run = r.width - HUE_KNOB;
+      return [run > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left - HUE_KNOB / 2) / run) * 360)) : h, sat, val];
     };
     const drag = (read: (e: PointerEvent) => Hsv) => ({
       down: (e: PointerEvent) => {
@@ -1317,7 +1334,7 @@ export class TesseraLegend extends TesseraElement {
         </div>
         <div part="hue" role="slider" tabindex="0" aria-label="Hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow=${Math.round(h)}
           @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @keydown=${hueKey}>
-          <span class="knob" style=${`left:${((h / 360) * 100).toFixed(1)}%`}></span>
+          <span class="knob" style=${`left:calc(${HUE_KNOB / 2}px + (100% - ${HUE_KNOB}px) * ${(h / 360).toFixed(4)})`}></span>
         </div>
         <label>Hex<input part="hex" type="text" spellcheck="false" .value=${custom.toUpperCase()}
           @change=${(e: Event) => {
@@ -1425,7 +1442,8 @@ export class TesseraLegend extends TesseraElement {
     const vh = typeof innerHeight === 'number' ? innerHeight : 768;
     const menu = pop.classList.contains('menu');
     let left = menu ? a.right - width : own.right + 12;
-    let top = menu ? a.bottom + 6 : a.top - 40;
+    // The picker's top edge is level with the swatch's row.
+    let top = menu ? a.bottom + 6 : a.top - 8;
     if (!menu && left + width > vw - 8) left = own.left - width - 12;
     left = Math.max(8, Math.min(left, vw - width - 8));
     top = Math.max(8, Math.min(top, vh - height - 8));

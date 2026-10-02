@@ -118,9 +118,13 @@ describe('<tessera-artifact-list>', () => {
     // The counts are the aggregate's, under the store's filters, over the artifacts listed.
     expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('');
     expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'clusters', artifacts: [2n, 3n, 4n]}}]}]);
-    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 1}]}]));
+    // Not coloured by the layer listed, so the rows carry no swatch.
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(0);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 0}]}]));
     await settle(host);
     expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('6');
+    // A cluster none of whose members pass the filters is greyed.
+    expect(deepAll(host, '[part="item"][data-empty]').map((r) => r.getAttribute('data-id'))).toEqual(['4']);
     // Largest first by the exact counts.
     expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['2', '3', '4']);
     const fits: unknown[] = [];
@@ -128,6 +132,28 @@ describe('<tessera-artifact-list>', () => {
     (deep(host, '[part="item"][data-id="3"]') as HTMLElement).click();
     expect(fits).toEqual([{id: '3'}]);
     expect(store.calls.find((c) => c.name === 'openArtifact')).toBeUndefined();
+  });
+
+  it('is one tab stop: the arrow keys, Home and End move among the rows', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    const served = [artifact(1n, 100n), artifact(2n, 60n), artifact(3n, 40n)];
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    const rows = () => deepAll(host, '[part="item"]') as HTMLElement[];
+    const tabbable = () => rows().map((r) => r.tabIndex);
+    expect(tabbable()).toEqual([0, -1, -1]);
+    const press = async (key: string) => {
+      const active = rows().find((r) => r.tabIndex === 0)!;
+      active.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, composed: true, cancelable: true}));
+      await settle(host);
+    };
+    await press('ArrowDown');
+    expect(tabbable()).toEqual([-1, 0, -1]);
+    await press('End');
+    expect(tabbable()).toEqual([-1, -1, 0]);
+    await press('Home');
+    expect(tabbable()).toEqual([0, -1, -1]);
   });
 
   it('lists the level the map draws: each branch cut at it, or on a levelled layer that level alone', async () => {
@@ -162,6 +188,7 @@ describe('<tessera-artifact-list>', () => {
     (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
     expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['7']);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(1);
   });
 
   it('puts a member_of clause on a row’s artifact from its Highlight and Filter buttons, named by the row, without fitting', async () => {
@@ -302,8 +329,12 @@ describe('<tessera-legend selectable>', () => {
     store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
-    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
+    // The choice closed the menu; it shows on the button, and as checked when the menu opens again.
+    expect(deep(host, '[part="option"]')).toBeNull();
     expect(deep(host, '[part="colour-by"]')?.textContent?.trim()).toBe('clusters');
+    (deep(host, '[part="colour-by"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
   });
 
   it('is a readout without selectable', async () => {

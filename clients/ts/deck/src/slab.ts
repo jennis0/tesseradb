@@ -158,7 +158,7 @@ class Partition {
   private size: SizeEncoding = NO_SIZE;
   draw: SlabDraw = emptyDraw();
 
-  sync(bands: readonly Band[], encoding: Encoding, encodingKey: string, colourBy: string | null, membershipLayer: string, size: SizeEncoding): SlabDraw {
+  sync(bands: readonly Band[], encoding: Encoding, encodingKey: string, colourBy: string | null, membershipLayer: string, size: SizeEncoding, cap: number): SlabDraw {
     // A partition reactivated under a changed encoding recolours everything it holds.
     const recolour = encodingKey !== this.encodingKey;
     this.encodingKey = encodingKey;
@@ -190,9 +190,10 @@ class Partition {
     // Compact when residency drifts past the frame, when appends will not fit, or when a band
     // cannot reuse its tile's slot. A superseded slot's marks are a subset of the new band's and
     // would draw twice.
+    // Resident marks are drawn, so residency stays within the mark budget as well as the slack.
     const wouldLive = this.live + appending;
     const compact =
-      stale > 0 || wouldLive > Math.max(MIN_RESIDENT, SLACK * wanted) || wouldLive > this.capacity;
+      stale > 0 || wouldLive > Math.min(Math.max(MIN_RESIDENT, SLACK * wanted), Math.max(cap, wanted)) || wouldLive > this.capacity;
 
     if (compact) {
       this.rebuild(bands, encoding, colourBy);
@@ -480,7 +481,7 @@ export class MarkSlab {
    * `membershipLayer`, the layer whose ordinals every mark carries (`''` for none). `size` is the
    * size encoding the size attribute holds.
    */
-  sync(bands: readonly Band[], depth: number, encoding: Encoding, colourBy: string | null, membershipLayer = '', size: SizeEncoding = NO_SIZE): SlabDraw {
+  sync(bands: readonly Band[], depth: number, encoding: Encoding, colourBy: string | null, membershipLayer = '', size: SizeEncoding = NO_SIZE, cap = Number.POSITIVE_INFINITY): SlabDraw {
     // An empty frame changes nothing resident. A principal change reaches here through clear().
     if (bands.length === 0) {
       const p = this.active;
@@ -515,7 +516,7 @@ export class MarkSlab {
     this.activeSlot = slot;
     const partition = this.parts[slot]!;
     partition.lastUsed = ++this.clock;
-    const draw = partition.sync(bands, encoding, encodingSignature(encoding), colourBy, membershipLayer, size);
+    const draw = partition.sync(bands, encoding, encodingSignature(encoding), colourBy, membershipLayer, size, cap);
     this.enforceBudget();
     return draw;
   }

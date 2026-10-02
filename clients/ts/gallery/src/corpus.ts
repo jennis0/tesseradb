@@ -363,7 +363,8 @@ export function mapState(opts: MapOptions = {}): {marks: MarksProjection; tiles:
       highlighted: {value: highlighted, exact: true},
       highlighting: opts.highlight !== undefined,
       served: {shown, total: matched, exact: true},
-      provisional: 0
+      provisional: 0,
+      inView: {status: 'shown', visible: {value: visible, exact: true}, matched: {value: matched, exact: true}, highlighted: {value: highlighted, exact: true}, shown}
     },
     artifacts: {
       layer: 'topics',

@@ -52,6 +52,8 @@ export type StateActions = {
   onRetry?: (() => void) | null;
   /** The Sign in button, shown on expiry when the host gave the element a renewal. */
   onReauthorise?: (() => void) | null;
+  /** Whether the panel has shown nothing yet, which loading then names Loading rather than Updating. */
+  first?: boolean;
 };
 
 /**
@@ -98,8 +100,10 @@ export function renderState(
     case 'detached':
       // Empty: "empty" and "refused" are answers, and a detached panel has none.
       return html`<span part="state" data-state="detached"></span>`;
-    case 'loading':
-      return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${stateWord(state, status)}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;
+    case 'loading': {
+      const words = actions.first && status?.sessionWarm ? 'Loading' : stateWord(state, status);
+      return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${words}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;
+    }
     case 'retrying':
       return html`<span part="state" data-state="retrying"><span class="dot warn"></span>${stateWord(state, status)}</span>`;
     case 'shown':

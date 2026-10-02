@@ -48,6 +48,17 @@ describe('plan', () => {
     expect(none.background.filter((b) => b.kind === 'deeper')).toHaveLength(0);
   });
 
+  it('draws a buffer round the view only as wide as the budget pays for', () => {
+    const area = (r: {x0: number; y0: number; x1: number; y1: number}) => rectArea(r);
+    // A corpus that fills the budget in view: the buffer narrows towards the view itself.
+    const full = plan({...BASE});
+    const marks = (r: {x0: number; y0: number; x1: number; y1: number}) => area(r) * BASE.mTarget;
+    expect(marks(full.render)).toBeLessThanOrEqual(Math.max(BASE.budget, marks(full.visible.rect)));
+    // A budget with room for it keeps the widest buffer, 2.6 views across.
+    const roomy = plan({...BASE, budget: 10 ** 9, depthLayers: 0});
+    expect(area(roomy.render)).toBeGreaterThan(area(roomy.visible.rect) * 4);
+  });
+
   it('chooses depth for the visible box, not the margined one', () => {
     // The margin does not lower the depth, which would spend the budget off screen.
     const visibleOnly = plan({...BASE});

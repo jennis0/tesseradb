@@ -14,6 +14,14 @@ import {chrome, tokens} from './tokens.js';
 const SEARCH_DEBOUNCE_MS = 250;
 /** The top-level clusters asked for, to rank by count while the box is empty. */
 const TOP_LEVEL_ROWS = 50;
+/**
+ * A path of `n` of its nearest parents, nearest last, led by an ellipsis where parents further up
+ * are left out.
+ */
+function pathText(path: readonly string[], beyond: boolean, n: number): string {
+  return `${beyond || n < path.length ? '… › ' : ''}${path.slice(path.length - n).join(' › ')}`;
+}
+
 /** How many parents a match's path is walked up, nearest first. */
 const PATH_DEPTH = 3;
 
@@ -137,10 +145,8 @@ export class TesseraClusterFilter extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* Cut from the left, so the nearest parents stay. */
+      /* Shortened from the left a whole name at a time, so the nearest parents stay; see pathText. */
       [part='path'] {
-        direction: rtl;
-        text-align: left;
         font-size: 12px;
         font-weight: 400;
         color: var(--_tessera-ink-3);
@@ -379,9 +385,43 @@ export class TesseraClusterFilter extends TesseraElement {
     else super.focus(options);
   }
 
+  /** How many of each offer's parents its path names, where all of them do not fit; by `tessera_id`. */
+  private pathFits = new Map<bigint, number>();
+  /** The rows and width {@link fitPaths} last measured. */
+  private pathsMeasured = '';
+
+  /**
+   * Name as many of each listed path's nearest parents as fit its line, dropping whole names from
+   * the left. Measured with the line's own font, after the list is placed.
+   */
+  private fitPaths(): void {
+    // Only while the list shows, and only when its rows or its width changed since last measured.
+    const shown = this.listOpen ? Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part="path"][data-id]')) : [];
+    const key = `${shown[0]?.clientWidth ?? 0}|${shown.map((el) => `${el.dataset.id}:${el.title}`).join(',')}`;
+    if (shown.length === 0 || key === this.pathsMeasured) return;
+    this.pathsMeasured = key;
+    const context = typeof document === 'undefined' ? null : document.createElement('canvas').getContext('2d');
+    if (!context) return;
+    let changed = false;
+    for (const el of shown) {
+      const id = BigInt(el.dataset.id!);
+      const o = this.listed()?.find((x) => x.row.tesseraId === id);
+      if (!o?.path || el.clientWidth === 0) continue;
+      context.font = getComputedStyle(el).font;
+      let n = o.path.length;
+      while (n > 1 && context.measureText(pathText(o.path, o.beyond, n)).width > el.clientWidth) n -= 1;
+      if ((this.pathFits.get(id) ?? o.path.length) !== n) {
+        this.pathFits.set(id, n);
+        changed = true;
+      }
+    }
+    if (changed) this.requestUpdate();
+  }
+
   protected override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
     this.floating.update();
+    this.fitPaths();
     // Counted only while the list is open: a closed list shows no counts, so asks for none.
     const layer = this.declared();
     const limits = this.resolvedStore?.get('meta')?.selection;
@@ -419,11 +459,12 @@ export class TesseraClusterFilter extends TesseraElement {
       const name = artifactName(o.row);
       const count = countOf(o);
       const left = out(o);
-      const path = o.path && o.path.length > 0 ? `${o.beyond ? '… › ' : ''}${o.path.join(' › ')}` : '';
+      const full = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, o.path.length) : '';
+      const path = o.path && o.path.length > 0 ? pathText(o.path, o.beyond, this.pathFits.get(o.row.tesseraId) ?? o.path.length) : '';
       return html`<button type="button" part="option" role="option" id=${`c-${o.row.tesseraId}`} tabindex="-1" data-id=${idString(o.row.tesseraId)} ?data-active=${o === active}
         aria-selected=${on.has(o.row.tesseraId) ? 'true' : 'false'} aria-disabled=${left ? 'true' : 'false'}
         @mousedown=${(e: Event) => e.preventDefault()} @click=${() => !left && this.toggle(o.row)}>
-        <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" title=${path}><bdi>${path}</bdi></span>` : nothing}</span>
+        <span class="opt"><span part="name" ?data-unnamed=${name === null}>${name ?? UNNAMED}</span>${path ? html`<span part="path" data-id=${idString(o.row.tesseraId)} title=${full}><bdi>${path}</bdi></span>` : nothing}</span>
         ${count === undefined ? nothing : html`<span part="value-count">${count.toLocaleString('en-GB')}</span>`}
       </button>`;
     };
@@ -449,7 +490,7 @@ export class TesseraClusterFilter extends TesseraElement {
             this.listOpen = false;
           }
         }} /></div>
-      ${open ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${title} clusters`}>${repeat(offers, (o) => o.row.tesseraId, option)}</div>` : nothing}
+      ${open ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${title}>${repeat(offers, (o) => o.row.tesseraId, option)}</div>` : nothing}
     </div>`;
     const typed = this.search.trim() !== '';
     const note = this.refusal

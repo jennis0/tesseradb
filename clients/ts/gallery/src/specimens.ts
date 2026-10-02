@@ -273,12 +273,12 @@ export const SECTIONS: Section[] = [
       {
         fit: true,
         state: 'shown, highlight active',
-        build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, highlighting: true, highlighted: {value: 2_812_336, exact: true}}})})
+        build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, highlighting: true, inView: {...SHOWN_VIEW.inView!, highlighted: {value: 2_812_336, exact: true}}}})})
       },
       {
         fit: true,
         state: 'shown, inexact counts',
-        build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, served: {...SHOWN_VIEW.served, exact: false}, matched: {value: 12_465_020, exact: false}}})})
+        build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, inView: {...SHOWN_VIEW.inView!, matched: {value: 12_465_020, exact: false}}}})})
       },
       {fit: true, state: 'shown, compact', build: () => make('tessera-status', {store: store({view: SHOWN_VIEW})}, {compact: ''})},
       {fit: true, state: 'shown, expanded card', build: () => make('tessera-status', {store: store({view: {...SHOWN_VIEW, provisional: 1_204}, replica: {bytes: 48_812_000, points: 6_390, bands: 58, views: 1, lastPlan: null}}), expanded: true})},
