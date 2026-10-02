@@ -15,7 +15,8 @@ import {RAMPS, rampAt, type Rgb} from './colour.js';
  * Density is coloured by count alone: a bin coloured by its majority cluster would take its colour
  * from the sample. Every mode places a count on one {@link DensityScale} from 0 to the largest
  * count among the cells drawn ({@link densityPosition}), and picks its colour, alpha or contour
- * level from that position.
+ * level from that position. The cells drawn are those of the area counted, which runs past the
+ * viewport ({@link DensityCounter}), so the top of the scale holds while the camera pans within it.
  *
  * {@link filterDensity} smooths the binned image so the cells do not show as hard-edged squares.
  */
@@ -247,13 +248,21 @@ export function drawnCells(counts: DensityCounts, mode: DensityMode): DensityCou
 const CONTOUR_POSITIONS = [0.2, 0.4, 0.6, 0.8];
 
 /**
- * The counts contour lines are drawn at: four, at evenly spaced positions on `scale` between no
- * items and the largest count among `cells`, ascending. Empty where no cell has a count.
+ * The counts contour lines are drawn at, ascending: evenly spaced positions on `scale` between no
+ * items and the largest count among `cells`, up to four. Of the levels between the same two whole
+ * counts only the lowest is kept, since the cells above each are the same. Empty where no cell has
+ * a count.
  */
 export function contourThresholds(cells: readonly DensityCell[], scale: DensityScale): number[] {
   const max = maxCount(cells);
   if (max === 0) return [];
-  return CONTOUR_POSITIONS.map((p) => densityCountAt(p, max, scale));
+  const levels: number[] = [];
+  for (const p of CONTOUR_POSITIONS) {
+    const level = densityCountAt(p, max, scale);
+    const last = levels[levels.length - 1];
+    if (last === undefined || Math.ceil(level) !== Math.ceil(last)) levels.push(level);
+  }
+  return levels;
 }
 
 export type DensityImage = {
@@ -275,6 +284,8 @@ export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], d
 
 /** The most alpha {@link binDensity} writes, so an intensity is `alpha / BIN_ALPHA_MAX`. */
 const BIN_ALPHA_MAX = 178;
+/** The alpha {@link binDensity} writes for a count at the bottom of the scale. */
+const BIN_ALPHA_MIN = 28;
 
 /** The columns and rows `cells` span, inclusive. */
 function extentOf(cells: readonly DensityCell[]): {x0: number; y0: number; x1: number; y1: number} {
@@ -311,7 +322,7 @@ export function binDensity(counts: DensityCounts, scale: DensityScale = DEFAULT_
     const t = densityPosition(cell.count, max, scale);
     const i = ((cell.y - y0) * width + (cell.x - x0)) * 4;
     // Faint at the low end and never opaque, so the points stay legible over the densest bin.
-    data[i + 3] = Math.round(28 + t * (BIN_ALPHA_MAX - 28));
+    data[i + 3] = Math.round(BIN_ALPHA_MIN + t * (BIN_ALPHA_MAX - BIN_ALPHA_MIN));
   }
 
   const span = WORLD_SIZE / 2 ** depth;
@@ -343,8 +354,10 @@ function texelsPerCell(cells: number, most: number): number {
  * The binned image as a soft field: one padding cell around it so a halo can extend past an
  * edge cell, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
  * centres and box-blurred by one texel. Under a hue, alpha is proportional to intensity. Under a
- * ramp, the intensity picks the colour and the alpha rises from nothing to opaque over the lower
- * part of the range.
+ * ramp, the alpha rises from nothing to opaque over the lower part of the intensity, and the
+ * colour is the position on the scale the intensity stands for, the binned alpha's floor taken
+ * off. The blur averages a cell with its neighbours, so a lone dense cell among sparse ones is
+ * drawn below its own position.
  */
 export function filterDensity(image: DensityImage, depth: number, paint: DensityPaint = {kind: 'hue', rgb: WASH_HUE.light}): DensityImage {
   const W = image.width + 2;
@@ -414,7 +427,7 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
         data[i + 3] = a;
       } else {
         const t = Math.min(1, a / BIN_ALPHA_MAX);
-        const c = rampAt(paint.stops, t);
+        const c = rampAt(paint.stops, Math.min(1, Math.max(0, (a - BIN_ALPHA_MIN) / (BIN_ALPHA_MAX - BIN_ALPHA_MIN))));
         data[i] = c[0];
         data[i + 1] = c[1];
         data[i + 2] = c[2];
@@ -426,6 +439,14 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
   const span = WORLD_SIZE / 2 ** depth;
   const [bx0, by0, bx1, by1] = image.bounds;
   return {width, height, data, bounds: [bx0 - span, by0 - span, bx1 + span, by1 + span], filled};
+}
+
+/**
+ * `steps` colours of `stops`, sparse to dense, each taken at the middle of its equal share of the
+ * scale: a position in `[i / steps, (i + 1) / steps)` draws in colour `i`.
+ */
+export function densitySteps(stops: readonly Rgb[], steps: number): Rgb[] {
+  return Array.from({length: steps}, (_, i) => rampAt(stops, (i + 0.5) / steps));
 }
 
 /** The most texels per cell the grid's image takes, enough to leave a hairline between cells. */
@@ -445,7 +466,7 @@ export function gridImage(counts: DensityCounts, stops: readonly Rgb[], steps: n
   const columns = x1 - x0 + 1;
   const rows = y1 - y0 + 1;
   const max = maxCount(cells);
-  const colours = Array.from({length: steps}, (_, i) => rampAt(stops, i / (steps - 1)));
+  const colours = densitySteps(stops, steps);
   const S = texelsPerCell(columns * rows, GRID_SUPERSAMPLE);
   const fill = S >= 4 ? S - 1 : S;
   const width = columns * S;

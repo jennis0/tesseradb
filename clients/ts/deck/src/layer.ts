@@ -20,9 +20,9 @@ import {
 } from '@tesseradb/client';
 import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
-import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
+import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {DEFAULT_DENSITY_SCALE, binDensity, contourThresholds, densityPaint, densityPosition, densityStops, drawnCells, filterDensity, gridImage, maxCount, type DensityCell, type DensityColours, type DensityCounts, type DensityMode, type DensityScale} from './density.js';
+import {DEFAULT_DENSITY_SCALE, binDensity, contourThresholds, densityPaint, densityPosition, densitySteps, densityStops, drawnCells, filterDensity, gridImage, maxCount, type DensityCell, type DensityColours, type DensityCounts, type DensityMode, type DensityScale} from './density.js';
 import {DEFAULT_DENSITY_CELL_PX, DensityCounter} from './density-counter.js';
 import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {importAggregation} from './aggregation-loader.js';
@@ -369,6 +369,8 @@ type WashState = {
 const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.counts === b.counts && a.kind === b.kind && a.scheme === b.scheme && a.colours === b.colours && a.scale === b.scale;
 /** The colours a hexagon or grid cell takes, sparse to dense, in equal steps of the scale. */
 const DENSITY_STEPS = 8;
+/** The hexagons' colour domain: positions on the density scale. One array, so deck sees no change between paints. */
+const UNIT_DOMAIN: [number, number] = [0, 1];
 /** The share of a hexagon drawn, so neighbouring hexagons show a hairline gap. */
 const DENSITY_COVERAGE = 0.94;
 
@@ -1226,9 +1228,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
    *
    * Every mode places counts on `densityScale` up to the largest count among the cells it draws
    * ({@link drawnCells}). The grid is one image, a square per cell in the colour of its count's
-   * position. The hexagons colour each bin by the position of the mean count of the cells whose
-   * centres fall in it, so a bin that happens to hold two cell centres does not read as twice as
-   * dense. The contours are drawn at the counts {@link contourThresholds} picks, in the label ink.
+   * position. The hexagons colour each bin by the position of the densest cell whose centre falls
+   * in it, so the densest bin reaches the top of the scale and a bin that happens to hold two cell
+   * centres does not read as twice as dense. The contours are drawn at the counts {@link contourThresholds} picks, in the label ink.
    * The hexagons and contours come from `@deck.gl/aggregation-layers`, loaded the first time one
    * is asked for ({@link loadAggregationLayers}); nothing of theirs is drawn until it has loaded.
    */
@@ -1271,7 +1273,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
         const max = maxCount(aggregated.cells);
         let held = this.state.hexColour;
         if (!held || held.scale !== scale || held.max !== max) {
-          held = {scale, max, value: (cells) => densityPosition(cells.reduce((n, c) => n + c.count, 0) / cells.length, max, scale)};
+          held = {scale, max, value: (cells) => densityPosition(maxCount(cells), max, scale)};
           this.state.hexColour = held;
         }
         layers.push(
@@ -1284,8 +1286,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
             // deck takes a new accessor but recomputes the bins' values only on a changed trigger.
             updateTriggers: {getColorValue: `${scale}|${max}`},
             colorScaleType: 'quantize',
-            colorDomain: [0, 1],
-            colorRange: Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]),
+            colorDomain: UNIT_DOMAIN,
+            colorRange: densitySteps(stops, DENSITY_STEPS).map((c) => [...c] as [number, number, number]),
             coverage: DENSITY_COVERAGE,
             extruded: false,
             radius: span

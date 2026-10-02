@@ -197,7 +197,7 @@ describe('density modes', () => {
     expect(h.props<{contours: {threshold: number}[]}>('density-contours').contours.map((c) => c.threshold)).toEqual(contourThresholds(counts.cells, 'log'));
   });
 
-  it.each(['linear', 'log'] as const)('colours a hexagon by the %s position of its cells’ mean count, up to the largest count drawn', (densityScale) => {
+  it.each(['linear', 'log'] as const)('colours a hexagon by the %s position of its densest cell, up to the largest count drawn', (densityScale) => {
     const h = host();
     h.draw({density: 'hex', densityScale});
     const hex = h.hexColour([cell(4, 4, 80_000)]);
@@ -205,8 +205,38 @@ describe('density modes', () => {
     expect(hex.type).toBe('quantize');
     expect(hex.value).toBe(1);
     expect(h.hexColour([cell(8, 4, 300)]).value).toBe(densityPosition(300, 80_000, densityScale));
-    // Two cells in one bin read as their mean, not their sum.
-    expect(h.hexColour([cell(8, 4, 300), cell(9, 4, 100)]).value).toBe(densityPosition(200, 80_000, densityScale));
+    // Two cells in one bin read as the denser, not their sum.
+    expect(h.hexColour([cell(8, 4, 300), cell(9, 4, 100)]).value).toBe(densityPosition(300, 80_000, densityScale));
+  });
+
+  it('aggregates the hexagons’ colour values again when only the scale changes, the densest bin at the top', () => {
+    const h = host();
+    const binValues = () => {
+      const aggregator = (h.sublayer('density-hex')!.state as unknown as {aggregator: {getResult(channel: number): {value: ArrayLike<number>} | null}}).aggregator;
+      return Array.from(aggregator.getResult(0)!.value).sort((a, b) => a - b);
+    };
+    h.draw({density: 'hex', densityScale: 'linear'});
+    expect(binValues()).toEqual([Math.fround(densityPosition(300, 80_000, 'linear')), 1]);
+    h.draw({density: 'hex', densityScale: 'log'});
+    expect(binValues()).toEqual([Math.fround(densityPosition(300, 80_000, 'log')), 1]);
+  });
+
+  it('washes a cell more strongly when only the scale changes from linear to log', () => {
+    const h = host();
+    const alphaAt = (world: [number, number]) => {
+      const props = h.sublayer('wash')!.props as unknown as {image: {data: Uint8ClampedArray; width: number; height: number}; bounds: [number, number, number, number]};
+      const [left, bottom, right, top] = props.bounds;
+      const {data, width, height} = props.image;
+      const px = Math.floor(((world[0] - left) / (right - left)) * width);
+      const py = Math.floor(((world[1] - top) / (bottom - top)) * height);
+      return data[(py * width + px) * 4 + 3]!;
+    };
+    h.draw({density: 'smooth', densityScale: 'linear'});
+    const linear = alphaAt(centre(8, 4));
+    const denseLinear = alphaAt(centre(4, 4));
+    h.draw({density: 'smooth', densityScale: 'log'});
+    expect(alphaAt(centre(8, 4))).toBeGreaterThan(linear);
+    expect(alphaAt(centre(4, 4))).toBe(denseLinear);
   });
 
   it('keeps the hexagons’ colour value across repaints until the scale changes', () => {

@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {WORLD_SIZE} from '@tesseradb/client';
 import {DEFAULT_DENSITY_SCALE, densityCountAt, densityPosition} from '../src/index.js';
-import {binDensity, contourThresholds, densityStops, drawnCells, gridImage, maxCount, type DensityCell, type DensityCounts} from '../src/density.js';
+import {binDensity, contourThresholds, densityPaint, densitySteps, densityStops, drawnCells, filterDensity, gridImage, maxCount, type DensityCell, type DensityCounts} from '../src/density.js';
 import {rampAt} from '../src/colour.js';
 
 /**
@@ -78,7 +78,32 @@ describe('the modes on one scale', () => {
     for (const [x, n] of [1, 10, 100].entries()) {
       const i = x * per * 4;
       const step = Math.min(steps - 1, Math.floor(densityPosition(n, 100, scale) * steps));
-      expect([...image.data.slice(i, i + 3)]).toEqual([...rampAt(stops, step / (steps - 1))]);
+      expect([...image.data.slice(i, i + 3)]).toEqual([...rampAt(stops, (step + 0.5) / steps)]);
+    }
+  });
+
+  it('takes each step’s colour at the middle of its share of the scale', () => {
+    const stops = densityStops('greys', 'light');
+    expect(densitySteps(stops, 4)).toEqual([0.125, 0.375, 0.625, 0.875].map((t) => rampAt(stops, t)));
+  });
+
+  it('colours the wash under a ramp by the position its intensity stands for, the alpha floor taken off', () => {
+    const stops = densityStops('viridis', 'dark');
+    // A broad field of one count is drawn at its own position in its middle, where the blur has nothing to average in.
+    const flat = (count: number, max: number) => {
+      const cells: DensityCell[] = [];
+      for (let x = 0; x < 9; x++) for (let y = 0; y < 9; y++) cells.push({...cell(x, count), y});
+      cells.push({...cell(20, max), y: 20});
+      return filterDensity(binDensity({depth: 4, cells}, 'linear')!, 4, densityPaint('viridis', 'dark'));
+    };
+    const at = (image: {data: Uint8ClampedArray; width: number}, x: number, y: number) => [...image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 3)];
+    // Cell (4, 4) is at texels 4·(4 + 1) + 2 with the padding cell, inside the field.
+    const centre = 4 * 5 + 2;
+    for (const [count, max] of [[0.0001, 1], [50, 100], [100, 100]] as const) {
+      const image = flat(count, max);
+      const p = densityPosition(count, max, 'linear');
+      const want = rampAt(stops, p);
+      at(image, centre, centre).forEach((v, k) => expect(Math.abs(v - want[k]!)).toBeLessThanOrEqual(3));
     }
   });
 
@@ -87,6 +112,14 @@ describe('the modes on one scale', () => {
     expect(thresholds).toHaveLength(4);
     expect(thresholds.map((t) => densityPosition(t, 1000, scale))).toEqual([0.2, 0.4, 0.6, 0.8].map((p) => expect.closeTo(p, 9)));
     expect([...thresholds].sort((a, b) => a - b)).toEqual(thresholds);
+  });
+
+  it('keeps one contour of the levels between the same two whole counts', () => {
+    // A largest count of 1: every level of either scale lies between 0 and 1.
+    expect(contourThresholds(counts(1, 1).cells, 'linear')).toEqual([0.2]);
+    expect(contourThresholds(counts(1).cells, 'log')).toHaveLength(1);
+    // A largest count of 3 under linear: 0.6, 1.2, 1.8 and 2.4 fall between 0–1, 1–2, 1–2 and 2–3.
+    expect(contourThresholds(counts(3).cells, 'linear').map((t) => Math.ceil(t))).toEqual([1, 2, 3]);
   });
 
   it('draws no contours where no cell has a count', () => {
