@@ -25,8 +25,17 @@ use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
 use crate::select::{served_count, SelectParams, SelectionPart, Threshold};
 
-/// The band route answers requests at zooms below this; the shipped scan answers the rest.
-pub const BANDS_BELOW_ZOOM: u8 = 6;
+/// The band route answers requests at zooms below this; the scan answers the rest.
+///
+/// Measured 2026-10-02 on GeoNames (13.5 million rows) and the 64-partition GBIF slice (25.8
+/// million), with whole-map requests at zooms 0 to 9 and 289-tile windows at zooms 8 to 14, for
+/// principals seeing 1% to 100%, warm and cold. Wherever the bands answered tiles the request took
+/// the same time or less and served the same bytes: the 100% principal on the GBIF slice took
+/// 144 ms by the scan and 3 ms by the bands at zoom 5, and the 85% one 116 ms and 61 ms at zoom 9.
+/// Where the threshold is wider than the widest band the route declines each tile and costs what
+/// the scan costs. On those corpora no tile deeper than zoom 9 was answered from the bands, so the
+/// deeper zooms keep the scan until a larger corpus measures them.
+pub const BANDS_BELOW_ZOOM: u8 = 10;
 
 /// What the bands answer for one tile.
 pub(crate) enum BandAnswer {

@@ -1387,7 +1387,7 @@ fn stage_header(
 ) -> Option<String> {
     // Append only: consumers read this CSV by position.
     Some(format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
         t.view_lookup_ns,
@@ -1415,6 +1415,7 @@ fn stage_header(
         // The walk that resolves the occupied-tile count, the one part of θ that scales with the
         // corpus.
         t.theta_occupancy_ns,
+        t.tiles_from_bands,
     ))
 }
 

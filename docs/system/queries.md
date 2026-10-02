@@ -123,6 +123,17 @@ A request's `k` defaults to the deployment's cap on marks per tile, and a client
 
 Every tile's answer is computed fresh from the viewer's own visible set at request time.
 
+At the shallow zooms a tile serves a few of its many visible items, and those are the items with
+the smallest ranks, so they are read from a segment's identity bands rather than from every visible
+item. Band `j` holds each item whose `tessera_id` has at least `j` leading zero bits, about one item
+in `2^j`, with its position and rendered values copied beside it. A tile is answered from the
+narrowest band that holds every rank below the threshold. Each entry is tested against the
+viewer's visible set before it is counted, and the band answers when it holds at least as many
+visible entries as the tile serves; otherwise a wider band is tried. A tile whose visible items are
+too few for the widest band is read from the full identity column. Either way the served items are
+the same. A deletion or suppression takes effect through the visible set, so nothing in the bands
+changes when one is accepted.
+
 ## Filters
 
 A filter is built from five families of predicate, one per kind of declared field:

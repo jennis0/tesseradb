@@ -343,7 +343,9 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
             .filter(|e| e % 13 == 0 && *e != LONE)
             .map(|e| (entity_of(&map, e), ChangeOp::Suppress)),
     );
-    engine.accept_changes(changes).expect("the changes are accepted");
+    engine
+        .accept_changes(changes)
+        .expect("the changes are accepted");
     tick(&engine);
     check_all(&engine);
 

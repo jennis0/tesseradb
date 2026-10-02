@@ -1182,30 +1182,45 @@ impl<'a> Gather<'a> {
                 self.presence[*s] = within;
             }
             let presence = (!every).then_some(self.presence.as_slice());
-            // A point's band entry, where its tile was answered from the bands and its segment
-            // holds a copy of the column.
-            let entry = |point: usize, copy: bool| entries.filter(|_| copy).map(|e| e[point] as usize);
+            // A tile answered from the bands reads each value from its entry's copy where the
+            // segment holds one; a tile answered by the scan reads every value from the column.
             macro_rules! gather {
                 ($(($v:ident, $t:ty)),* $(,)?) => {
                     match &column.values {
                         $(ColumnSlices::$v { values, copies } => {
-                            let (out, present) = gather_column(placed, presence, |point, s, local| {
-                                match (entry(point, copies[s].is_some()), copies[s], values[s]) {
-                                    (Some(e), Some(copy), _) => copy[e],
-                                    (_, _, Some(v)) => v[local],
-                                    _ => <$t>::default(),
-                                }
-                            });
+                            let (out, present) = match entries {
+                                Some(entries) => gather_column(placed, presence, |point, s, local| {
+                                    match (copies[s], values[s]) {
+                                        (Some(copy), _) => copy[entries[point] as usize],
+                                        (None, Some(v)) => v[local],
+                                        (None, None) => <$t>::default(),
+                                    }
+                                }),
+                                None => gather_column(placed, presence, |_, s, local| {
+                                    match values[s] {
+                                        Some(v) => v[local],
+                                        None => <$t>::default(),
+                                    }
+                                }),
+                            };
                             (ColumnBuf::$v(out), present)
                         })*
                         ColumnSlices::Bool { values, copies } => {
-                            let (out, present) = gather_column(placed, presence, |point, s, local| {
-                                match (entry(point, copies[s].is_some()), copies[s], values[s]) {
-                                    (Some(e), Some(copy), _) => copy[e] != 0,
-                                    (_, _, Some(a)) => a.value(local),
-                                    _ => false,
-                                }
-                            });
+                            let (out, present) = match entries {
+                                Some(entries) => gather_column(placed, presence, |point, s, local| {
+                                    match (copies[s], values[s]) {
+                                        (Some(copy), _) => copy[entries[point] as usize] != 0,
+                                        (None, Some(a)) => a.value(local),
+                                        (None, None) => false,
+                                    }
+                                }),
+                                None => gather_column(placed, presence, |_, s, local| {
+                                    match values[s] {
+                                        Some(a) => a.value(local),
+                                        None => false,
+                                    }
+                                }),
+                            };
                             (ColumnBuf::Bool(out), present)
                         }
                         ColumnSlices::Utf8(arrays) => {

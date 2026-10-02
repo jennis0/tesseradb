@@ -665,14 +665,16 @@ impl Bands {
     }
 
     /// Ask for the pages holding `range` of `slice`, a section of this file, to be read now and in
-    /// the background, so the reads that follow find them in the page cache.
+    /// the background, so the reads that follow find them in the page cache. A range within one
+    /// page is not asked for: its one fault reads no more than the advice would.
     pub fn will_need<T>(&self, slice: &[T], range: std::ops::Range<usize>) {
-        if range.is_empty() {
-            return;
-        }
+        const PAGE: usize = 4096;
         let size = std::mem::size_of::<T>();
         let at = slice.as_ptr() as usize + range.start * size - self.map.as_ptr() as usize;
         let len = range.len() * size;
+        if len == 0 || at / PAGE == (at + len - 1) / PAGE {
+            return;
+        }
         debug_assert!(at + len <= self.map.len(), "a range outside the band file");
         // Advice only, as above.
         let _ = self.map.advise_range(memmap2::Advice::WillNeed, at, len);

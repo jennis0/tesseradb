@@ -2573,12 +2573,22 @@ pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
     order.sort_unstable_by_key(|&i| tiles[i].code_range().0);
 
     let mut floor = 0usize;
+    // The last tile's end, as a cell and its row: in a run of adjacent tiles it is the next one's
+    // start, and the cut index is then read once a tile.
+    let mut last = (usize::MAX, 0u32);
+    let mut row_of = |cell: usize| {
+        if cell != last.0 {
+            last = (cell, cell_row(seg, cell));
+        }
+        last.1
+    };
     for i in order {
         let (lo, hi) = tiles[i].code_range();
         let start = gallop(codes, floor, lo);
         let end = gallop(codes, start, hi);
         floor = start;
-        out[i] = cell_row(seg, start)..cell_row(seg, end);
+        let first = row_of(start);
+        out[i] = first..row_of(end);
     }
     out
 }
