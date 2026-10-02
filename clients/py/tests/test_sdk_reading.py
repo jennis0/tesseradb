@@ -122,6 +122,21 @@ def test_a_sample_carries_the_rendered_columns_and_the_served_count(db):
     assert json.loads(table.schema.metadata[b"tessera.trailer"])["points"] == table.num_rows
 
 
+def test_a_sample_naming_its_columns_carries_those_alone_over_the_same_points(db):
+    """`point_rows` as a list: the fixed columns and the named ones, the points unchanged."""
+    meta = db.meta()
+    rendered = sorted(s["name"] for s in meta["declared_scalars"] if s["render"])
+    full = db.view("s0").sample(k=64)
+    named = db.view("s0").sample(k=64, point_rows=[rendered[0]])
+    assert named.column_names == ["tessera_id", "code", rendered[0]]
+    assert named.column("tessera_id") == full.column("tessera_id")
+    assert named.column("code") == full.column("code")
+    assert named.column(rendered[0]) == full.column(rendered[0])
+    assert named.schema.metadata[b"tessera.counts"] == full.schema.metadata[b"tessera.counts"]
+    with pytest.raises(Refusal):
+        db.view("s0").sample(k=64, point_rows=["no_such_column"])
+
+
 def test_item_is_the_record_for_a_point_a_sample_served(db):
     """The drill-down: the record by declared column name, and the satisfied terms only."""
     table = db.view("s0").sample(k=8)

@@ -24,7 +24,7 @@ import pytest
 
 import declared_fixture as fx
 from declared_fixture import Column, Corpus, Deployment
-from oracle.wire import decode_viewport_points
+from oracle.wire import decode_viewport, decode_viewport_points
 
 BUILT = list(range(fx.N_BUILT))
 INGESTED = list(range(fx.N_BUILT, fx.N_ITEMS))
@@ -95,3 +95,30 @@ def test_an_absent_rendered_value_is_null_through_a_restart_and_a_fold(deploymen
     check(deployment, "restart")
     deployment.fold()
     check(deployment, "fold")
+
+
+def test_points_naming_their_columns_carry_those_alone_with_the_corpus_values(deployment):
+    """`point_rows` as a list: `tessera_id`, `code` and the named rendered columns, each value the
+    corpus's, over the points and counts the full answer serves. A name no rendered column has is
+    a 422."""
+    d = deployment
+    token = d.server.authorise(list(fx.PRINCIPALS["everyone"]))["token"]
+    full = d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K)
+    named = d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=["fx", "heat"])
+    table = decode_viewport_points(named)
+    assert table.column_names == ["tessera_id", "code", "fx", "heat"]
+    items = values(table, "fx")
+    assert sorted(items) == BUILT + INGESTED
+    heat = COLUMNS[0]
+    assert dict(zip(items, values(table, "heat"))) == {i: heat.value(i) for i in items}
+    assert decode_viewport(named) == decode_viewport(full)
+
+    bare = decode_viewport_points(
+        d.server.viewport(token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=[])
+    )
+    assert bare.column_names == ["tessera_id", "code"]
+
+    refused = d.server.viewport_request(
+        token, fx.WORLD, 0, fx.BBOX, k=fx.K, point_rows=["heat", "no_such_column"]
+    )
+    assert refused.status_code == 422

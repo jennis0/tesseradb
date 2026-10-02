@@ -15,7 +15,7 @@ import struct
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, Union
 
 from ._auth import Token, TokenSource, minted
 from ._refusal import Refusal
@@ -535,7 +535,7 @@ class Selection:
         computed: Optional[Sequence[str]] = None,
         artifact_budget: Optional[int] = None,
         artifact_rows: Optional[str] = None,
-        point_rows: Optional[str] = None,
+        point_rows: Union[str, Sequence[str], None] = None,
         underlay_offset: Optional[int] = None,
         pin: Any = None,
         on_counts: Optional[Callable[[Any, Any], None]] = None,
@@ -560,8 +560,11 @@ class Selection:
           annotations to return, and `artifact_rows="identity"` a short set of their columns.
         - `underlay_offset`: also count the items in tiles this many levels finer than `zoom`,
           returned as `sub_cells`.
-        - `point_rows`: `"highlight"` returns each point as `tessera_id` and `highlighted`
-          only, which is enough to update a highlight on points already held.
+        - `point_rows`: which columns each point carries. A list of rendered columns returns
+          `tessera_id`, `code` and those columns only, and the server reads no other; `[]` is
+          position alone. Leave it out, or pass `"full"`, for every rendered column. `"highlight"`
+          returns each point as `tessera_id` and `highlighted` only, which is enough to update a
+          highlight on points already held. Fetch the rest of an item with `items`.
         - `pin`: the `x-tessera-pin` value from an earlier answer. The answer then says whether
           the data has changed since.
         - `on_counts`: a function called once with the per-tile counts as a pyarrow table, and
@@ -589,7 +592,12 @@ class Selection:
             ("computed", None if computed is None else list(computed)),
             ("artifact_budget", artifact_budget),
             ("artifact_rows", artifact_rows),
-            ("point_rows", point_rows),
+            (
+                "point_rows",
+                point_rows
+                if point_rows is None or isinstance(point_rows, str)
+                else list(point_rows),
+            ),
             ("underlay_offset", underlay_offset),
             ("pin", pin),
         ):

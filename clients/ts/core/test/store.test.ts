@@ -21,7 +21,7 @@ const META = meta({
 });
 
 /** What the fake sees of a request. */
-type FakeRequest = {view?: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'};
+type FakeRequest = {view?: string; zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number; layers?: string[] | 'all'; pointRows?: 'full' | 'highlight' | readonly string[]};
 
 /**
  * A response that answers every tile the request spans, 1,000 items each with the served points on
@@ -2258,5 +2258,130 @@ describe('counts before points', () => {
     store.clear();
     expect(store.get('tiles').tiles).toEqual([]);
     expect(store.get('view').visible.value).toBe(0);
+  });
+});
+
+describe('a point request names the render columns the store reads', () => {
+  const COLUMNS: Meta = {
+    ...META,
+    declaredScalars: [
+      ...META.declaredScalars,
+      scalar('score', 'f32', {render: true, homes: ['rendered']}),
+      scalar('title', 'utf8', {render: false, index: false})
+    ],
+    scopedScalars: [
+      {name: 'heat', arrowType: 'f32', scope: {group: 'g'}, category: null, analyser: null, render: true, index: false, views: ['s0']},
+      {name: 'chill', arrowType: 'f32', scope: {group: 'h'}, category: null, analyser: null, render: true, index: false, views: ['s1']}
+    ]
+  };
+
+  /** Answers as the server does: each point carries the render columns the request names, and only those. */
+  function answer(req: FakeRequest): ViewportResponse {
+    const r = response('ck');
+    const n = r.result.ids.length;
+    const all = {
+      archive: {arrowType: 'u16' as const, values: Uint16Array.from({length: n}, () => 5)},
+      score: {arrowType: 'f32' as const, values: Float32Array.from({length: n}, (_, i) => i + 1)},
+      heat: {arrowType: 'f32' as const, values: Float32Array.from({length: n}, () => 2)}
+    };
+    const named = Array.isArray(req.pointRows) ? req.pointRows : Object.keys(all);
+    const scalars = Object.fromEntries(Object.entries(all).filter(([name]) => named.includes(name)));
+    return {...r, result: {...r.result, scalars}, columnsAsked: Array.isArray(req.pointRows) ? [...req.pointRows] : null};
+  }
+
+  async function open() {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(answer, COLUMNS);
+    /** Called once, the next time a whole answer has been stored and before its ground is marked held. */
+    let onStored: (() => void) | null = null;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false,
+      replica: {
+        revalidateAfterMs: Infinity,
+        onPhase: (kind) => {
+          if (kind !== 'store' || !onStored) return;
+          const run = onStored;
+          onStored = null;
+          run();
+        }
+      }
+    });
+    await clock.advance(1);
+    const settle = async () => {
+      await clock.advance(600);
+      scheduler.flush();
+      await clock.advance(600);
+      scheduler.flush();
+    };
+    /** The point requests sent, oldest first. */
+    const asked = () => viewport.mock.calls.map((c) => c[1] as FakeRequest).filter((r) => r.k !== 0);
+    const whenStored = (run: () => void) => (onStored = run);
+    return {store, settle, asked, whenStored};
+  }
+
+  it('names no column while nothing colours, sizes or asks, then the colour, size and asked columns the view renders', async () => {
+    const {store, settle, asked} = await open();
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    expect(asked().length).toBeGreaterThan(0);
+    for (const r of asked()) expect(r.pointRows).toEqual([]);
+
+    const before = asked().length;
+    store.setColourBy('archive');
+    store.setSizeBy('score');
+    // `title` is not rendered and `chill` renders under another view, so neither is named.
+    store.setPointColumns('hover', ['chill', 'heat', 'title']);
+    await settle();
+    const after = asked().slice(before);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.at(-1)!.pointRows).toEqual(['archive', 'score', 'heat']);
+    for (const band of store.get('marks').bands) expect(Object.keys(band.scalars).sort()).toEqual(['archive', 'heat', 'score']);
+
+    // Withdrawing the ask leaves the colour and size columns.
+    store.setPointColumns('hover', []);
+    store.setView({bbox: [0, 0, 50, 50], width: 400, height: 400});
+    await settle();
+    expect(asked().at(-1)!.pointRows).toEqual(['archive', 'score']);
+  });
+
+  it('fetches the held bands again when the colour column changes to one they lack, and not when it changes back', async () => {
+    const {store, settle, asked} = await open();
+    store.setColourBy('archive');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    expect(asked().at(-1)!.pointRows).toEqual(['archive']);
+    for (const band of store.get('marks').bands) expect('score' in band.scalars).toBe(false);
+
+    const before = asked().length;
+    store.setColourBy('score');
+    await settle();
+    const refetched = asked().slice(before);
+    expect(refetched.length).toBeGreaterThan(0);
+    for (const r of refetched) expect(r.pointRows).toEqual(['score']);
+    const bands = store.get('marks').bands;
+    expect(bands.length).toBeGreaterThan(0);
+    for (const band of bands) expect('score' in band.scalars).toBe(true);
+    expect(store.get('legend').domains.score).toBeDefined();
+
+    // The refetched bands kept the column they were fetched without, so going back asks for nothing.
+    const settled = asked().length;
+    store.setColourBy('archive');
+    await settle();
+    expect(asked().length).toBe(settled);
+  });
+
+  it('fetches again a band stored under the old colour column and marked held after the colour changed', async () => {
+    const {store, settle, asked, whenStored} = await open();
+    store.setColourBy('archive');
+    whenStored(() => store.setColourBy('score'));
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    expect(asked()[0]!.pointRows).toEqual(['archive']);
+    await settle();
+    await settle();
+    expect(asked().some((r) => Array.isArray(r.pointRows) && r.pointRows.includes('score'))).toBe(true);
+    const bands = store.get('marks').bands;
+    expect(bands.length).toBeGreaterThan(0);
+    for (const band of bands) expect('score' in band.scalars).toBe(true);
   });
 });

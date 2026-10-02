@@ -216,13 +216,13 @@ fn score_below(bound: i32) -> FilterExpr {
     }
 }
 
-struct Ask {
+struct Ask<'a> {
     filter: Option<FilterExpr>,
     highlight: Option<FilterExpr>,
-    point_rows: PointRows,
+    point_rows: PointRows<'a>,
 }
 
-impl Ask {
+impl<'a> Ask<'a> {
     fn new() -> Self {
         Ask {
             filter: None,
@@ -238,7 +238,7 @@ impl Ask {
         self.highlight = Some(expr);
         self
     }
-    fn point_rows(mut self, rows: PointRows) -> Self {
+    fn point_rows(mut self, rows: PointRows<'a>) -> Self {
         self.point_rows = rows;
         self
     }
@@ -249,7 +249,7 @@ fn viewport(
     credential: &[u8],
     zoom: u8,
     bbox: [f64; 4],
-    ask: Ask,
+    ask: Ask<'_>,
 ) -> ViewportOut {
     let session = engine.authorise(credential).unwrap();
     let mut request =
@@ -587,6 +587,61 @@ fn the_highlight_projection_serves_the_same_rows_in_the_same_split() {
         let plain = viewport(&fx.engine, &credential, 2, WHOLE_MAP, Ask::new());
         assert_eq!(bare, plain, "without a highlight the projection is the full answer");
     }
+}
+
+/// **`point_rows` naming columns serves those render columns and no other, over the same points
+/// and counts.** A name that is not a render column is refused.
+#[test]
+fn named_point_columns_serve_only_those_columns_over_the_same_points() {
+    let fx = fixture();
+    let score = ["score".to_string()];
+    let none: [String; 0] = [];
+    for credential in [full_coverage_credential(), subset_credential()] {
+        for (zoom, bbox) in CELLS {
+            let ask = || {
+                Ask::new()
+                    .filter(score_below(30))
+                    .highlight(category_is(&fx, "archive", "xx"))
+            };
+            let full = viewport(&fx.engine, &credential, zoom, bbox, ask());
+            let named = viewport(
+                &fx.engine,
+                &credential,
+                zoom,
+                bbox,
+                ask().point_rows(PointRows::Columns(&score)),
+            );
+            assert_eq!(full.tiles, named.tiles, "the counts moved");
+            assert_eq!(full.points.tessera_ids, named.points.tessera_ids);
+            assert_eq!(full.points.codes, named.points.codes);
+            assert_eq!(full.points.highlighted, named.points.highlighted);
+            assert_eq!(named.scalar_names, ["score"]);
+            let at = full.scalar_names.iter().position(|n| n == "score").unwrap();
+            assert_eq!(named.points.scalars, [full.points.scalars[at].clone()]);
+
+            let bare = viewport(
+                &fx.engine,
+                &credential,
+                zoom,
+                bbox,
+                ask().point_rows(PointRows::Columns(&none)),
+            );
+            assert_eq!(full.tiles, bare.tiles);
+            assert_eq!(full.points.codes, bare.points.codes);
+            assert!(bare.scalar_names.is_empty() && bare.points.scalars.is_empty());
+        }
+    }
+    let session = fx.engine.authorise(&full_coverage_credential()).unwrap();
+    let unknown = ["nonesuch".to_string()];
+    let refused = fx.engine.viewport(
+        &session,
+        ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize)
+            .point_rows(PointRows::Columns(&unknown)),
+    );
+    assert!(matches!(
+        refused,
+        Err(tessera_engine::EngineError::PointRowsRefused(_))
+    ));
 }
 
 /// **Every per-tile prefix stays sound with the new columns.**

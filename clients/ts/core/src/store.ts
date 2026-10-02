@@ -625,16 +625,27 @@ export interface Store {
    * or `null` for uniform. Publishes `legend`. Colouring by a layer fetches its artifacts into
    * `artifacts.colourServed`, and its labels into `artifacts.attached`, without drawing them. A
    * `cluster:` layer that `meta` does not list as one that can colour is named in no request, and
-   * the points draw uniform.
+   * the points draw uniform. A `render` column is carried by the points from then on, and the held
+   * bands without it are fetched again (see {@link Store.setPointColumns}).
    */
   setColourBy(column: string | null): void;
   /**
    * Size points by a declared number column, or `null` for one size. Publishes `legend`, whose
    * `domains` and `missing` then accumulate the column from the marks drawn, and with `rank` set
-   * `samples` too, for sizing by rank. A `render` column arrives with every point, so choosing one
-   * sends no request. A column that is a category, not a number or not rendered sizes nothing.
+   * `samples` too, for sizing by rank. The column is carried by the points as the colour column is.
+   * A column that is a category, not a number or not rendered sizes nothing.
    */
   setSizeBy(column: string | null, options?: {rank?: boolean}): void;
+  /**
+   * Have each point carry the render columns `columns` names, on behalf of `id`, beside the colour
+   * and size columns; `[]` withdraws `id`'s ask. A point request names the union of every ask with
+   * the colour and size columns, and the server reads no other render column, so a column read
+   * from {@link Band.scalars} (a hover's fields, say) must be asked for here. A name that is not a
+   * render column of the current view is left out of the request. Each held band without a column
+   * newly asked for is fetched again, in view or not, and stays drawn until its replacement
+   * arrives; dropping a column sends no request. The asks hold for every view.
+   */
+  setPointColumns(id: string, columns: readonly string[]): void;
   /**
    * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
    * use does nothing.
@@ -726,8 +737,8 @@ export interface Store {
    * `status` as `idle`, before it returns. It then asks `authorise` for a token, reads `/v1/meta`
    * with it and asks again for the camera. A store given a fixed `token` keeps it.
    *
-   * The filters set with `setFilters`, the layers, the colouring, the current view and the camera
-   * are kept. A filter draft the store seeded from `meta` is seeded again from the next. A filter
+   * The filters set with `setFilters`, the layers, the colouring, the columns asked for with
+   * `setPointColumns`, the current view and the camera are kept. A filter draft the store seeded from `meta` is seeded again from the next. A filter
    * control, layer or colouring naming a column or layer the next `meta` does not list is dropped.
    * Where the next `meta` does not list the current view, the store opens on its first view and
    * drops the camera.
@@ -839,6 +850,10 @@ export function createStore(options: StoreOptions): Store {
   );
   /** The served-set version each colour-stale band was last fetched again under. */
   const colourAsked = new Map<BandKey, number>();
+  /** The render columns each caller of {@link setPointColumns} asked for, by its id. */
+  const pointColumnAsks = new Map<string, readonly string[]>();
+  /** What the last {@link checkPointColumns} looked at, so a frame that changed none of it costs nothing. */
+  let pointColumnsChecked: {replica: Replica; version: number; columns: string} | null = null;
 
   const legend = new Legend(
     async (column, codes) => client.categories(await tokens.get(), column, {codes, view: views.id}),
@@ -1046,11 +1061,13 @@ export function createStore(options: StoreOptions): Store {
     const built = new Replica(
       async (req, signal, background, onPart, onCounts) => {
         const tok = await tokens.use();
-        // The layers named put a membership column on each band. A counts-only revalidation
-        // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
+        // The layers named put a membership column on each band, and the columns named are the
+        // render columns it carries. A counts-only revalidation (`k = 0`) absorbs no points, so it
+        // names neither. The artifact budget and levels are the
         // channel's, so a point's membership names an artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
         const layers = req.k === 0 ? [] : pointLayers();
+        const columns = req.k === 0 ? undefined : pointColumns(id);
         const response = await client.viewport(
           tok,
           {
@@ -1059,6 +1076,7 @@ export function createStore(options: StoreOptions): Store {
             filters: requestFilters(),
             highlight: requestHighlight(),
             layers,
+            ...(columns === undefined ? {} : {pointRows: columns}),
             ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
@@ -1399,6 +1417,7 @@ export function createStore(options: StoreOptions): Store {
     }
     legend.accumulate(frame, meta?.declaredScalars ?? []);
     colours.refresh();
+    checkPointColumns();
     checkColourCoverage();
 
     if (replica) {
@@ -1512,6 +1531,50 @@ export function createStore(options: StoreOptions): Store {
     if (a.coverage.current !== current || a.coverage.stale !== stale) {
       replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale}});
     }
+  }
+
+  /**
+   * The render columns of `view` a point request names, in the order `meta` lists them: the colour
+   * column, the size column and those {@link setPointColumns} asked for. A name that is not a
+   * render column of the view is left out.
+   */
+  function pointColumns(view: string): string[] {
+    const wanted = new Set<string>();
+    const colourBy = legend.colourBy;
+    if (colourBy !== null && !colourBy.startsWith(CLUSTER_PREFIX)) wanted.add(colourBy);
+    if (legend.sizeBy !== null) wanted.add(legend.sizeBy);
+    for (const names of pointColumnAsks.values()) for (const name of names) wanted.add(name);
+    if (!meta || wanted.size === 0) return [];
+    const rendered = [
+      ...meta.declaredScalars.filter((c) => c.render).map((c) => c.name),
+      ...meta.scopedScalars.filter((c) => c.render && c.views.includes(view)).map((c) => c.name)
+    ];
+    return rendered.filter((name) => wanted.has(name));
+  }
+
+  /**
+   * Fetch again every band the current view holds, in view or not, that lacks a column
+   * {@link pointColumns} names and its request did not, so panning does not reveal a band without
+   * it. A band asked for every column, or for this one, is not fetched again for lacking it: the
+   * server served what there is. A band stays drawn until its replacement arrives, and is withdrawn
+   * again if the piece it came in marks it covered after. A band with no points has nothing to
+   * carry.
+   */
+  function checkPointColumns(): void {
+    const machinery = views.current;
+    // As in the colour coverage, asking while a switch settles would request a passing view.
+    if (!machinery || views.settling) return;
+    const replica = machinery.replica;
+    const columns = pointColumns(views.id);
+    const checked = {replica, version: replica.version, columns: `${views.id}\0${columns.join('\0')}`};
+    const last = pointColumnsChecked;
+    if (last && last.replica === checked.replica && last.version === checked.version && last.columns === checked.columns) return;
+    pointColumnsChecked = checked;
+    const unasked = (b: Band, c: string) => !(c in b.scalars) && b.columnsAsked != null && !b.columnsAsked.includes(c);
+    const lacking = replica
+      .heldBands()
+      .filter((b) => b.ids.length > 0 && columns.some((c) => unasked(b, c)));
+    if (replica.retract(lacking) > 0) machinery.presenter.reschedule();
   }
 
   function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
@@ -1883,13 +1946,20 @@ export function createStore(options: StoreOptions): Store {
     legend.setColourBy(column);
     traceUnknownColourLayer();
     if (colourLayer() !== before) askLayers();
-    // Every declared column is in the held bands, so a column needs no refetch.
+    checkPointColumns();
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
   function setSizeBy(column: string | null, options: {rank?: boolean} = {}): void {
     legend.setSizeBy(column, options.rank ?? false);
+    checkPointColumns();
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
+  }
+
+  function setPointColumns(id: string, columns: readonly string[]): void {
+    if (columns.length === 0) pointColumnAsks.delete(id);
+    else pointColumnAsks.set(id, [...columns]);
+    checkPointColumns();
   }
 
   function setBudget(next: number): void {
@@ -2092,6 +2162,7 @@ export function createStore(options: StoreOptions): Store {
     setLayers,
     setColourBy,
     setSizeBy,
+    setPointColumns,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
     get budget() {

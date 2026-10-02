@@ -90,7 +90,7 @@ pub(crate) use row_filter::{
 };
 pub(crate) use served::ServedView;
 pub(crate) use sweep::{
-    scoped_render_families, segment_holding, segment_row_of, RowPresence,
+    scoped_family_views, scoped_render_families, segment_holding, segment_row_of, RowPresence,
 };
 
 pub(crate) use geometry::OpenView;
@@ -250,11 +250,33 @@ impl Engine {
         let (mask, region) =
             self.narrow_to_filters(&served, mask, &tiling, theta.v_total, &req, &mut probe)?;
 
-        // `point_rows = "highlight"` is a column projection only — the row set and tile split are
-        // unaffected — so the gather reads no render column and builds no membership resolver: a
-        // client re-requesting only the highlight is not served the payload it already holds.
+        // `point_rows` is a column projection only — the row set and tile split are unaffected —
+        // so the gather reads exactly the render columns it names and no other. Under
+        // `"highlight"` it reads none and builds no membership resolver: a client re-requesting
+        // only the highlight is not served the payload it already holds.
         let highlight_only = req.point_rows == PointRows::Highlight && mask.has_highlight();
-        let render_scalars: &[DeclaredScalar] = if highlight_only { &[] } else { &render_scalars };
+        let render_scalars: Vec<DeclaredScalar> = match req.point_rows {
+            PointRows::Highlight if highlight_only => Vec::new(),
+            PointRows::Full | PointRows::Highlight => render_scalars,
+            PointRows::Columns(names) => {
+                if let Some(unknown) = names
+                    .iter()
+                    .find(|name| !render_scalars.iter().any(|d| &d.name == *name))
+                {
+                    return Err(EngineError::PointRowsRefused(format!(
+                        "`point_rows` names '{unknown}', which is not a render column of view \
+                         '{}'; name only columns `/v1/meta` lists as rendered for this view, or \
+                         write \"full\"",
+                        req.view
+                    )));
+                }
+                render_scalars
+                    .into_iter()
+                    .filter(|d| names.contains(&d.name))
+                    .collect()
+            }
+        };
+        let render_scalars = render_scalars.as_slice();
 
         // The head, delivered before the sweep: the region verdict is settled by the decomposition
         // above and never by a row. A refusal from the sink means the consumer is gone.

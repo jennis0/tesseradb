@@ -294,7 +294,7 @@ export type PointsPart = {
   projection: PointsProjection;
 };
 
-/** The two shapes a points frame comes in (`point_rows`). */
+/** The two shapes a points frame comes in (`point_rows`): a list of columns decodes as `'full'`. */
 export type PointsProjection = 'full' | 'highlight';
 
 /**
@@ -346,7 +346,7 @@ export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
     world[i * 2 + 1] = y / CELLS_PER_WORLD_UNIT;
   }
 
-  // Every frame carries the full declared schema, so the first table's fields are the response's.
+  // Every frame of a response carries one schema, so the first table's fields are the response's.
   const scalars: Record<string, ScalarColumn> = {};
   const membership: Record<string, MembershipColumn> = {};
   if (pointTables.length > 0) {

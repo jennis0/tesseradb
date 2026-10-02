@@ -564,6 +564,132 @@ async fn a_scoped_render_column_reaches_every_view_of_its_group_with_that_views_
     );
 }
 
+/// **`point_rows` naming a column serves `tessera_id`, `code` and that column alone, over the same
+/// points and counts; a name that is not a render column of the view is a 422.**
+#[tokio::test]
+async fn named_point_columns_serve_only_those_columns_and_an_unknown_one_is_refused() {
+    let served = Served::build(build_with_families).await;
+    let view = format!("quarter:{}", QUARTERS[0].0);
+    let ask = |point_rows: Option<Value>| {
+        let mut body = json!({
+            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        });
+        if let Some(rows) = point_rows {
+            body["point_rows"] = rows;
+        }
+        served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/viewport"))
+            .bearer_auth(&served.token)
+            .json(&body)
+            .send()
+    };
+    let full = ask(None).await.unwrap().bytes().await.unwrap();
+    let named = ask(Some(json!(["heat"]))).await.unwrap();
+    assert_eq!(named.status(), 200);
+    let named = named.bytes().await.unwrap();
+    let (full_names, full_heat) = points_columns(&full);
+    let (names, heat) = points_columns(&named);
+    assert_eq!(full_names, ["tessera_id", "code", "heat"]);
+    assert_eq!(names, full_names);
+    assert_eq!(heat, full_heat, "the same points with the same values");
+    assert_eq!(decode_tiles_and_codes(&named), decode_tiles_and_codes(&full));
+
+    let bare = ask(Some(json!([]))).await.unwrap().bytes().await.unwrap();
+    assert_eq!(points_columns(&bare).0, ["tessera_id", "code"]);
+    assert_eq!(decode_tiles_and_codes(&bare), decode_tiles_and_codes(&full));
+
+    let refused = ask(Some(json!(["heat", "nonesuch"]))).await.unwrap();
+    assert_eq!(refused.status(), 422);
+}
+
+/// **Every column `/v1/meta` lists as rendered under a view is one `point_rows` accepts for it**,
+/// owning, sharing and plain views alike, and the points carry exactly those columns.
+#[tokio::test]
+async fn every_render_column_meta_lists_for_a_view_is_accepted_by_point_rows() {
+    let served = Served::build(build_with_families).await;
+    let meta: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&served.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let views: Vec<String> = meta["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(views.len() > 2, "{views:?}");
+    let mut scoped_somewhere = false;
+    for view in &views {
+        let mut rendered: Vec<String> = meta["declared_scalars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["render"] == true)
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        for family in meta["scoped_scalars"].as_array().unwrap() {
+            let under = family["views"].as_array().unwrap().iter().any(|v| v == view);
+            if family["render"] == true && under {
+                rendered.push(family["name"].as_str().unwrap().to_string());
+                scoped_somewhere = true;
+            }
+        }
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/viewport"))
+            .bearer_auth(&served.token)
+            .json(&json!({
+                "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+                "point_rows": rendered,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{view}: {rendered:?}");
+        let names = points_columns(&resp.bytes().await.unwrap()).0;
+        if !names.is_empty() {
+            assert_eq!(names[2..], rendered[..], "{view}");
+        }
+    }
+    assert!(scoped_somewhere, "the fixture renders a scoped family under some view");
+}
+
+/// The tiles frame's rows and the points' `(tessera_id, code)` pairs.
+fn decode_tiles_and_codes(body: &[u8]) -> (Vec<u8>, Vec<(u64, u64)>) {
+    let mut tiles = Vec::new();
+    let mut points = Vec::new();
+    for (kind, payload) in tessera_wire::split_frames(body).expect("well-formed frames") {
+        if kind == tessera_wire::FRAME_TILES {
+            tiles.extend_from_slice(payload);
+        }
+        if kind != tessera_wire::FRAME_POINTS {
+            continue;
+        }
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
+                .unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let ids = batch.column_by_name("tessera_id").unwrap();
+            let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
+            let codes = batch.column_by_name("code").unwrap();
+            let codes = codes.as_any().downcast_ref::<UInt64Array>().unwrap();
+            points.extend((0..batch.num_rows()).map(|r| (ids.value(r), codes.value(r))));
+        }
+    }
+    (tiles, points)
+}
+
 /// **A view outside the group gets nothing** — not a column of zeros, not a column of nulls: no
 /// column, and no byte in its row space.
 ///

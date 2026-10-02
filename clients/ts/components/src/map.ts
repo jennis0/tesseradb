@@ -99,6 +99,9 @@ type ViewState = {target: [number, number, number]; zoom: number; minZoom: numbe
 
 const VIEW = new OrthographicView({id: 'ortho', flipY: true});
 
+/** How many maps have been made, which numbers each one's ask for point columns. */
+let mapsMade = 0;
+
 /**
  * The map: the points, the density wash, the artifacts' outlines and labels, hover, pick and the
  * selection, drawn with deck.gl in an orthographic view. The refused, expired and empty states are
@@ -376,13 +379,15 @@ export class TesseraMap extends TesseraElement {
   /** How many marks to aim for on screen. `0` leaves the store's budget, which starts at 500000. */
   @property({type: Number}) accessor budget = 0;
   /**
-   * Columns shown beneath a hovered point's title, space- or comma-separated. Only a rendered
-   * column's value is in the marks; another shows nothing.
+   * Columns shown beneath a hovered point's title, space- or comma-separated. The map asks the
+   * store for them with `setPointColumns`. Only a rendered column's value is in the marks; another
+   * shows nothing.
    */
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   /**
-   * The field a hovered point is titled by, read from the marks where they carry it, else from the
-   * item's record once the pointer has rested on it for 140 ms. Unset, the title is the point's
+   * The field a hovered point is titled by, read from the marks where they carry it (the map asks
+   * the store for a rendered one with `setPointColumns`), else from the item's record once the
+   * pointer has rested on it for 140 ms. Unset, the title is the point's
    * `tessera_id`.
    */
   @property({attribute: 'title-field'}) accessor titleField = '';
@@ -598,6 +603,7 @@ export class TesseraMap extends TesseraElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.askPointColumns(this.resolvedStore);
     if (this.finalizeTimer) {
       clearTimeout(this.finalizeTimer);
       this.finalizeTimer = null;
@@ -607,6 +613,7 @@ export class TesseraMap extends TesseraElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.askPointColumns(null);
     if (this.describeTimer !== null) {
       clearTimeout(this.describeTimer);
       this.describeTimer = null;
@@ -637,6 +644,7 @@ export class TesseraMap extends TesseraElement {
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
       if (changed.has('palette')) s.setPalette(this.palette);
+      if (changed.has('tooltipFields') || changed.has('titleField')) this.askPointColumns(s);
       // The ground also sets the positional palette's lightness in the store.
       if (changed.has('ground')) s.setScheme(this.scheme());
       this.pushColouring(s, changed);
@@ -666,6 +674,24 @@ export class TesseraMap extends TesseraElement {
     if (touched('sizeMax') && this.sizeMax !== null) patch.max = this.sizeMax;
     if (touched('sizeScale') && this.sizeScale !== '') patch.scale = this.sizeScale;
     if (Object.keys(patch).length > 0) setSizing(store, patch);
+  }
+
+  /** The id the map's ask for the hover's columns goes under, its own among the maps on one store. */
+  private readonly pointColumnsId = `map#${++mapsMade}`;
+  /** The store the hover's columns were last asked of, and what was asked. */
+  private pointColumnsAsked: {store: Store; columns: string} | null = null;
+
+  /**
+   * Ask `store` for the columns the hover reads from the marks, `tooltip-fields` and
+   * `title-field`, withdrawing the ask from a store the map has left; `null` withdraws it.
+   */
+  private askPointColumns(store: Store | null): void {
+    const columns = [...new Set([...this.tooltipFields.split(/[\s,]+/), this.titleField].filter(Boolean))];
+    const asked = this.pointColumnsAsked;
+    if (asked?.store === store && asked.columns === columns.join(' ')) return;
+    if (asked && asked.store !== store) asked.store.setPointColumns(this.pointColumnsId, []);
+    this.pointColumnsAsked = store ? {store, columns: columns.join(' ')} : null;
+    store?.setPointColumns(this.pointColumnsId, columns);
   }
 
   /** Whether the store was last told to sample the size column, for sizing by rank. */
@@ -752,6 +778,7 @@ export class TesseraMap extends TesseraElement {
     this.pickedAt = null;
     this.regionWorld = null;
     this.regionPolygon = null;
+    this.askPointColumns(store);
     if (!store) {
       this.paint();
       return;

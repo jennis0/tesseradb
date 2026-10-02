@@ -608,6 +608,39 @@ pub(crate) fn scoped_render_families<'a>(
     manifest: &'a tessera_store::manifest::Manifest,
     view: &str,
 ) -> Vec<&'a tessera_store::manifest::ScopedScalar> {
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.scoped_scalars.iter())
+        .filter(|f| f.render && scoped_column_under(manifest, f, view))
+        .collect()
+}
+
+/// Every view whose row tail carries a column of `family`, in roster order: the one list
+/// [`scoped_render_families`] and `/v1/meta` both read. Unfiltered by the gate.
+pub(crate) fn scoped_family_views(
+    manifest: &tessera_store::manifest::Manifest,
+    family: &tessera_store::manifest::ScopedScalar,
+) -> Vec<String> {
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| {
+            g.views
+                .iter()
+                .map(move |v| format!("{}{}{}", g.name, tessera_store::GROUP_SEPARATOR, v.key))
+        })
+        .filter(|view| scoped_column_under(manifest, family, view))
+        .collect()
+}
+
+/// Whether `view`'s row tail carries a column of `family`: `view` is a view of the family's group,
+/// or of a group declaring members of it, and the family has a column for that key.
+fn scoped_column_under(
+    manifest: &tessera_store::manifest::Manifest,
+    family: &tessera_store::manifest::ScopedScalar,
+    view: &str,
+) -> bool {
     // Matched against the roster rather than parsed out of the id, since the roster decides which
     // group and key a view id names.
     let Some(roster) = manifest.groups.iter().find_map(|g| {
@@ -619,7 +652,7 @@ pub(crate) fn scoped_render_families<'a>(
             .any(|v| v.key == key)
             .then_some((g.name.as_str(), key))
     }) else {
-        return Vec::new();
+        return false;
     };
     let members_of = |name: &str| {
         manifest
@@ -629,22 +662,14 @@ pub(crate) fn scoped_render_families<'a>(
             .members_of
             .as_deref()
     };
-    manifest
-        .groups
-        .iter()
-        .flat_map(|g| g.scoped_scalars.iter())
-        .filter(|f| f.render)
-        .filter(|f| {
-            // A view of the group with no column — created since the build — renders nothing.
-            owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
-                f.views.contains(&format!(
-                    "{}{}{key}",
-                    f.group,
-                    tessera_store::GROUP_SEPARATOR
-                ))
-            })
-        })
-        .collect()
+    // A view of the group with no column — created since the build — carries none.
+    owning_key_of(roster, members_of, &family.group).is_some_and(|key| {
+        family.views.contains(&format!(
+            "{}{}{key}",
+            family.group,
+            tessera_store::GROUP_SEPARATOR
+        ))
+    })
 }
 
 /// Resolve `declared` against one segment's columns, once.
@@ -807,6 +832,56 @@ pub(super) struct Gather<'a> {
     placed: Vec<(u32, u32)>,
     /// Each segment's presence over the rows the current tile spans in it, for the current column.
     presence: Vec<RowPresence<'a>>,
+    /// The first tile whose pages have not been asked for, and the points from the tile being
+    /// gathered up to it.
+    ahead: usize,
+    ahead_points: usize,
+    /// Page addresses, reused across tiles.
+    pages: Vec<usize>,
+}
+
+/// How many points ahead of the gather a sparse tile's pages are asked for.
+const PREFETCH_POINTS: usize = 16_384;
+
+/// A tile is sparse, and its pages asked for ahead, where its points are at least this many rows
+/// apart on average. Denser, consecutive points share pages the kernel's read-ahead already serves,
+/// and the calls cost more than they save.
+const SPARSE_ROWS_PER_POINT: u64 = 64;
+
+fn is_sparse(ts: &TileSweepOut<'_>) -> bool {
+    let spanned: u64 = ts.tile_parts.iter().map(|(_, r)| (r.end - r.start) as u64).sum();
+    spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
+}
+
+/// The address of `slice[i]`, which need not be read to be named.
+fn element<T>(slice: &[T], i: usize) -> usize {
+    slice.as_ptr() as usize + std::mem::size_of::<T>() * i
+}
+
+/// `MADV_WILLNEED` over every page in `pages`, one call per run of adjacent pages. The pages are
+/// read in the background, so the gather's faults that follow find them in the page cache, and
+/// the kernel's read-ahead around a fault, sized for a sequential reader, is not triggered.
+fn will_need(pages: &mut [usize]) {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: `sysconf` reads a constant of the running system.
+    let page = *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize);
+    for at in pages.iter_mut() {
+        *at &= !(page - 1);
+    }
+    pages.sort_unstable();
+    let mut i = 0;
+    while i < pages.len() {
+        let start = pages[i];
+        let mut end = start + page;
+        i += 1;
+        while i < pages.len() && pages[i] <= end {
+            end = end.max(pages[i] + page);
+            i += 1;
+        }
+        // SAFETY: advice only; `MADV_WILLNEED` changes no mapping and no byte. Every page named
+        // holds a column the gather is about to read.
+        unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_WILLNEED) };
+    }
 }
 
 impl<'a> Gather<'a> {
@@ -885,14 +960,69 @@ impl<'a> Gather<'a> {
             columns,
             placed: Vec::new(),
             presence: vec![RowPresence::NoRow; view.len()],
+            ahead: 0,
+            ahead_points: 0,
+            pages: Vec::new(),
         })
+    }
+
+    /// Ask for the pages of the sparse tiles not yet asked for, until [`PREFETCH_POINTS`] points
+    /// lie ahead of the tile being gathered.
+    fn prefetch(&mut self, swept: &[TileSweepOut<'_>]) {
+        while self.ahead < swept.len() && self.ahead_points < PREFETCH_POINTS {
+            let ts = &swept[self.ahead];
+            self.ahead += 1;
+            self.ahead_points += ts.rows.len();
+            if !is_sparse(ts) {
+                continue;
+            }
+            self.pages.clear();
+            for &row in &ts.rows {
+                let (segment, local) = segment_holding(self.view, row)
+                    .expect("a selected row lies in the view's row space");
+                let rows = &self.segments[segment];
+                let local = local as usize;
+                self.pages.push(element(rows.tessera_id, local));
+                self.pages.push(element(rows.morton, local));
+                self.pages.push(element(rows.residual, local));
+                for column in &self.columns {
+                    macro_rules! page {
+                        ($(($v:ident, $t:ty)),* $(,)?) => {
+                            match &column.values {
+                                $(ColumnSlices::$v(slices) => {
+                                    slices[segment].map(|v: &[$t]| element(v, local))
+                                })*
+                                ColumnSlices::Bool(arrays) => arrays[segment].map(|a| {
+                                    let bits = a.values();
+                                    element(bits.values(), (bits.offset() + local) / 8)
+                                }),
+                                // The offsets only: the value bytes' place is read from them, so
+                                // asking for it would fault the offsets now. Those pages fault
+                                // as the gather reads them.
+                                ColumnSlices::Utf8(arrays) => {
+                                    arrays[segment].map(|a| element(a.value_offsets(), local))
+                                }
+                            }
+                        };
+                    }
+                    self.pages.extend(flat_families!(page));
+                }
+            }
+            will_need(&mut self.pages);
+        }
     }
 
     /// Gather one tile's selected rows column-major. `rows` are view-space, ascending by
     /// `tessera_id` and not by segment, so consecutive rows can land in different segments; they
     /// are placed as `(segment, local)` once, and every column then walks that placement, leaving
     /// the inner loop a bounds-checked index into a typed slice.
-    pub(super) fn tile(&mut self, ts: &TileSweepOut<'_>) -> PointColumns {
+    ///
+    /// `swept[at]` is the tile; the tiles are gathered in order, and the pages of sparse tiles
+    /// ahead are asked for first.
+    pub(super) fn tile(&mut self, swept: &[TileSweepOut<'_>], at: usize) -> PointColumns {
+        self.prefetch(swept);
+        let ts = &swept[at];
+        self.ahead_points -= ts.rows.len();
         let view = self.view;
         self.placed.clear();
         self.placed.extend(ts.rows.iter().map(|&row| {

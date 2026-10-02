@@ -78,7 +78,10 @@ export type Band = {
    * point.
    */
   positions: Float32Array;
-  /** The rendered columns the response carried, by name, one value per point. */
+  /**
+   * The rendered columns the band's points carry, by name, one value per point: those its request
+   * named, and those an earlier fetch of the same points carried.
+   */
   scalars: Record<string, ScalarColumn>;
   /**
    * For each layer the request named, each point's artifact ordinal on the session's
@@ -123,6 +126,11 @@ export type Band = {
    * touched first within a depth.
    */
   touchedAt: number;
+  /**
+   * The render columns the band's request named in `pointRows`; absent or `null` where it asked
+   * for every one.
+   */
+  columnsAsked?: readonly string[] | null;
 };
 
 /**
@@ -293,7 +301,15 @@ function tableCleared(): Error {
 export function bandSplitter(
   result: ViewportResult,
   depth: number,
-  meta: {identityKey: string; contentKey: string; capUsed: number; now: number; table?: SessionArtifactTable; onRemap?: (ms: number) => void}
+  meta: {
+    identityKey: string;
+    contentKey: string;
+    capUsed: number;
+    now: number;
+    columnsAsked?: readonly string[] | null;
+    table?: SessionArtifactTable;
+    onRemap?: (ms: number) => void;
+  }
 ): BandSplitter {
   let offset = 0;
   let i = 0;
@@ -354,7 +370,8 @@ export function bandSplitter(
           identityKey: meta.identityKey,
           contentKey: meta.contentKey,
           bytes: bandBytes(ids, positions, scalars, membership, highlightBits),
-          touchedAt: meta.now
+          touchedAt: meta.now,
+          columnsAsked: meta.columnsAsked ?? null
         });
         offset = end;
       }
@@ -671,9 +688,17 @@ export class BandCache {
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
     if (previous) {
-      // A layer's column survives a refetch that did not name the layer, provided the served set is
-      // the same, so turning a layer back on costs nothing. Under a new content key nothing carries.
+      // A layer's or a render column's values survive a refetch that did not name them, provided
+      // the served set is the same, so asking for them again costs nothing. Under a new content key
+      // nothing carries.
       const sameSet = previous.contentKey === band.contentKey && previous.ids.length === band.ids.length;
+      if (sameSet) {
+        for (const [name, column] of Object.entries(previous.scalars)) {
+          if (name in band.scalars) continue;
+          band.scalars[name] = column;
+          band.bytes += scalarBytes(column);
+        }
+      }
       for (const [layer, held] of Object.entries(previous.membership)) {
         if (sameSet && !(layer in band.membership)) {
           band.membership[layer] = held;
@@ -710,12 +735,15 @@ export class BandCache {
   /**
    * Withdraws coverage over each band's tile so the next plan fetches it again. Used for a band
    * that is colour-stale: its ordinals no longer resolve, or it lacks the column for a layer now
-   * on. The band stays drawn until its replacement arrives.
+   * on or a render column now asked for. The band stays drawn until its replacement arrives.
+   * Returns how many bands had coverage to withdraw.
    */
-  retract(bands: readonly Band[]): void {
+  retract(bands: readonly Band[]): number {
+    let withdrawn = 0;
     for (const band of bands) {
-      if (this.bands.get(bandKey(band.depth, band.prefix)) === band) this.retractCoverage(band.depth, band.x, band.y);
+      if (this.bands.get(bandKey(band.depth, band.prefix)) === band && this.retractCoverage(band.depth, band.x, band.y)) withdrawn++;
     }
+    return withdrawn;
   }
 
   /** Drops everything. Called when the token changes. */
@@ -887,11 +915,14 @@ export class BandCache {
    * region and the discarded points would not be fetched again. The whole containing rectangle
    * goes, since a rectangle less one tile is not a rectangle; the cost is a refetch.
    */
-  private retractCoverage(depth: number, x: number, y: number): void {
+  private retractCoverage(depth: number, x: number, y: number): boolean {
+    const before = this.covered.length;
     this.covered = this.covered.filter(
       (c) => c.depth !== depth || !rectContainsTile(c.rect, x, y)
     );
+    if (this.covered.length === before) return false;
     this.changes++;
+    return true;
   }
 
   /** Cuts a band to its first `keep` points and lowers its bound to match. */

@@ -488,7 +488,7 @@ pub trait ViewportSink {
 
 /// The columns every points chunk of one response carries: the render columns the head published,
 /// read from the view's segments, and the membership resolver where the artifacts frame carried
-/// anything to resolve against. `point_rows = "highlight"` empties both.
+/// anything to resolve against. `point_rows` narrows the first, and `"highlight"` empties both.
 pub(super) struct PointSchema<'a> {
     pub(super) render_scalars: &'a [DeclaredScalar],
     pub(super) segments: &'a [(&'a SegmentData, u32)],
@@ -527,11 +527,11 @@ pub(super) fn emit_points<'a>(
     let mut buf_bytes = 0usize;
     let mut gather = Gather::new(schema.segments, swept, schema.render_scalars)?;
     probe.lap(|t| &mut t.gather_ns);
-    for ts in swept {
+    for (at, ts) in swept.iter().enumerate() {
         // Per-tile cancellation checkpoint, so an abandoned stream stops within one tile.
         check_cancelled(cancel)?;
         let mut stats = TileProbe::new();
-        let mut tile_points = gather.tile(ts);
+        let mut tile_points = gather.tile(swept, at);
         if let Some(membership) = &schema.membership {
             tile_points.membership = membership.columns_for(&ts.rows);
         }

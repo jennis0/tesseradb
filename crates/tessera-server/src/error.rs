@@ -200,6 +200,9 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
         EngineError::UnknownView(view) => ApiError::Unknown(format!("unknown view '{view}'")),
         // The caller can ask for less; the detail names only its numbers and the configured bounds.
         EngineError::UnderlayRefused(detail) => ApiError::Contract(detail),
+        // The detail names the column the caller sent and the view, whose render columns
+        // `/v1/meta` publishes.
+        EngineError::PointRowsRefused(detail) => ApiError::Contract(detail),
         // The detail names columns and families, which `/v1/meta` publishes to every principal.
         // `FilterRefused` is an unreadable artefact and stays a 500.
         EngineError::FilterMalformed(detail) => ApiError::Contract(detail),

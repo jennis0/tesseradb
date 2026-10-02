@@ -159,6 +159,28 @@ describe('a hover under a highlight', () => {
   });
 });
 
+describe('the columns a hover reads', () => {
+  /** The columns the map has asked of `store`, as its last `setPointColumns` left them. */
+  const askedOf = (store: ReturnType<typeof fakeStore>): unknown[] =>
+    (store.calls.filter((c) => c.name === 'setPointColumns').at(-1)?.args[1] as unknown[] | undefined) ?? [];
+
+  it('are asked of the store, again when they change, and withdrawn from a store the map leaves', async () => {
+    const {el, store} = await map([{name: 'name', arrowType: 'text'}], 'title-field="name" tooltip-fields="score, year"');
+    expect(askedOf(store)).toEqual(['score', 'year', 'name']);
+
+    const host = (el as unknown as HTMLElement).parentElement!;
+    (el as unknown as {tooltipFields: string}).tooltipFields = 'year';
+    await settle(host);
+    expect(askedOf(store)).toEqual(['year', 'name']);
+
+    const next = fakeStore({status: status({}), meta: meta([])});
+    el.store = next;
+    await settle(host);
+    expect(askedOf(store)).toEqual([]);
+    expect(askedOf(next)).toEqual(['year', 'name']);
+  });
+});
+
 describe('the map in the tab order', () => {
   it('is one stop, after its tools and before the other corners, and focus() lands on it', async () => {
     const {el} = await map([]);

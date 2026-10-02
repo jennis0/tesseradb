@@ -60,7 +60,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
    * The colouring and sizing, in place of the store's `legend`. Its `colourBy` names a column, or
    * `cluster:<layer>` to colour each mark by the artifact it belongs to, and its `sizeBy` a number
    * column to size each mark by. Defaults to `null`, which draws every mark in one colour and one
-   * size.
+   * size. The store's points carry a column only when the store is asked for it, through
+   * `setColourBy`, `setSizeBy` or `setPointColumns`.
    */
   legend?: LegendProjection | null;
   /**

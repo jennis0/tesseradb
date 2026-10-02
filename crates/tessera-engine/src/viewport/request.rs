@@ -65,16 +65,19 @@ pub enum ArtifactRows {
 }
 
 /// Which columns each served point answers with, mirroring [`ArtifactRows`]. The row set and the
-/// `served` split are identical under either value, because the served set never depends on the
-/// highlight.
+/// `served` split are identical under every value: the served set never depends on which columns
+/// are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PointRows {
-    /// Every column — the default, and the answer a caller who has read nothing receives.
+pub enum PointRows<'a> {
+    /// Every render column — the default, and the answer a caller who has read nothing receives.
     #[default]
     Full,
     /// `tessera_id` and `highlighted` alone. Without a `highlight` on the request there is
     /// nothing to project to, so this answers as [`PointRows::Full`] does.
     Highlight,
+    /// `tessera_id`, the position and these render columns, in declaration order; no other render
+    /// column is read. A name that is not one of the view's render columns is refused.
+    Columns(&'a [String]),
 }
 
 /// One `/v1/viewport` request, as the engine sees it.
@@ -145,7 +148,7 @@ pub struct ViewportRequest<'a> {
     /// bit per served point, a bit per served artifact.
     pub highlight: Option<crate::filter::FilterExpr>,
     /// Which columns each served point answers with — see [`PointRows`].
-    pub point_rows: PointRows,
+    pub point_rows: PointRows<'a>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -215,7 +218,7 @@ impl<'a> ViewportRequest<'a> {
     }
 
     /// Answer each point with these columns. See [`PointRows`].
-    pub fn point_rows(mut self, rows: PointRows) -> Self {
+    pub fn point_rows(mut self, rows: PointRows<'a>) -> Self {
         self.point_rows = rows;
         self
     }
