@@ -250,15 +250,17 @@ const CONTOUR_POSITIONS = [0.2, 0.4, 0.6, 0.8];
 /**
  * The counts contour lines are drawn at, ascending: evenly spaced positions on `scale` between no
  * items and the largest count among `cells`, up to four. Of the levels between the same two whole
- * counts only the lowest is kept, since the cells above each are the same. Empty where no cell has
- * a count.
+ * counts only the lowest is kept, since the cells above each are the same. A level under 1 is left
+ * out: it would ring every cell holding one item, which at a deep zoom is a ring round each point.
+ * Empty where no cell has more than one item.
  */
 export function contourThresholds(cells: readonly DensityCell[], scale: DensityScale): number[] {
   const max = maxCount(cells);
-  if (max === 0) return [];
+  if (max <= 1) return [];
   const levels: number[] = [];
   for (const p of CONTOUR_POSITIONS) {
     const level = densityCountAt(p, max, scale);
+    if (level < 1) continue;
     const last = levels[levels.length - 1];
     if (last === undefined || Math.ceil(level) !== Math.ceil(last)) levels.push(level);
   }

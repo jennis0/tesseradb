@@ -114,12 +114,12 @@ describe('the modes on one scale', () => {
     expect([...thresholds].sort((a, b) => a - b)).toEqual(thresholds);
   });
 
-  it('keeps one contour of the levels between the same two whole counts', () => {
-    // A largest count of 1: every level of either scale lies between 0 and 1.
-    expect(contourThresholds(counts(1, 1).cells, 'linear')).toEqual([0.2]);
-    expect(contourThresholds(counts(1).cells, 'log')).toHaveLength(1);
-    // A largest count of 3 under linear: 0.6, 1.2, 1.8 and 2.4 fall between 0–1, 1–2, 1–2 and 2–3.
-    expect(contourThresholds(counts(3).cells, 'linear').map((t) => Math.ceil(t))).toEqual([1, 2, 3]);
+  it('keeps one contour of the levels between the same two whole counts, and none under one item', () => {
+    // A largest count of 1: every level of either scale lies under 1, and would ring each point.
+    expect(contourThresholds(counts(1, 1).cells, 'linear')).toEqual([]);
+    expect(contourThresholds(counts(1).cells, 'log')).toEqual([]);
+    // A largest count of 3 under linear: 0.6 is under 1; 1.2, 1.8 and 2.4 fall between 1–2, 1–2 and 2–3.
+    expect(contourThresholds(counts(3).cells, 'linear').map((t) => Math.ceil(t))).toEqual([2, 3]);
   });
 
   it('draws no contours where no cell has a count', () => {
