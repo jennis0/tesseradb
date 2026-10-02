@@ -1,0 +1,56 @@
+source /home/joe/code/tessera/data/ladder/gbif/points.parquet (55.1 GB, 3,495,729,729 rows, 5,469 row groups)
+output /home/joe/code/tessera/data/ladder/gbif-terms
+free   181.9 GB
+[rewrite points.parquet] ...
+    200/5,469 row groups, 125,789,091 rows, 2.1 GB written (0.9 GB, 140 GB free)
+    400/5,469 row groups, 253,671,183 rows, 4.2 GB written (0.9 GB, 137 GB free)
+    600/5,469 row groups, 378,280,351 rows, 6.1 GB written (1.0 GB, 135 GB free)
+    800/5,469 row groups, 501,511,572 rows, 7.2 GB written (1.0 GB, 134 GB free)
+    1,000/5,469 row groups, 628,777,671 rows, 8.8 GB written (1.0 GB, 133 GB free)
+    1,200/5,469 row groups, 755,224,696 rows, 10.3 GB written (1.0 GB, 131 GB free)
+    1,400/5,469 row groups, 875,335,357 rows, 12.0 GB written (1.0 GB, 129 GB free)
+    1,600/5,469 row groups, 1,001,387,618 rows, 13.5 GB written (1.0 GB, 126 GB free)
+    1,800/5,469 row groups, 1,121,541,498 rows, 15.4 GB written (1.1 GB, 124 GB free)
+    2,000/5,469 row groups, 1,246,426,221 rows, 17.7 GB written (1.1 GB, 122 GB free)
+    2,200/5,469 row groups, 1,373,554,127 rows, 20.3 GB written (1.1 GB, 120 GB free)
+    2,400/5,469 row groups, 1,501,731,206 rows, 23.0 GB written (1.1 GB, 117 GB free)
+    2,600/5,469 row groups, 1,630,378,946 rows, 25.7 GB written (1.1 GB, 113 GB free)
+    2,800/5,469 row groups, 1,756,255,190 rows, 28.3 GB written (1.1 GB, 110 GB free)
+    3,000/5,469 row groups, 1,882,987,141 rows, 31.3 GB written (1.1 GB, 107 GB free)
+    3,200/5,469 row groups, 2,008,264,274 rows, 34.6 GB written (1.1 GB, 104 GB free)
+    3,400/5,469 row groups, 2,133,148,589 rows, 37.8 GB written (1.1 GB, 101 GB free)
+    3,600/5,469 row groups, 2,265,359,068 rows, 40.9 GB written (1.1 GB, 98 GB free)
+    3,800/5,469 row groups, 2,392,836,842 rows, 43.8 GB written (1.1 GB, 93 GB free)
+    4,000/5,469 row groups, 2,524,222,580 rows, 47.0 GB written (1.1 GB, 90 GB free)
+    4,200/5,469 row groups, 2,653,871,345 rows, 50.0 GB written (1.1 GB, 87 GB free)
+    4,400/5,469 row groups, 2,784,025,422 rows, 52.8 GB written (1.1 GB, 84 GB free)
+    4,600/5,469 row groups, 2,916,852,098 rows, 55.6 GB written (1.1 GB, 81 GB free)
+    4,800/5,469 row groups, 3,052,906,578 rows, 58.5 GB written (1.1 GB, 78 GB free)
+    5,000/5,469 row groups, 3,187,097,694 rows, 61.3 GB written (1.1 GB, 75 GB free)
+    5,200/5,469 row groups, 3,315,230,484 rows, 63.7 GB written (1.1 GB, 147 GB free)
+    5,400/5,469 row groups, 3,450,209,904 rows, 65.7 GB written (1.1 GB, 145 GB free)
+[rewrite points.parquet] 1972.33s
+access: 1,399,205 distinct terms, 10,124,084,726 pairs (2.896 a row); country 253 terms / 3,495,729,729 pairs, species 1,398,425 terms / 3,221,136,771 pairs, year 527 terms / 3,407,218,226 pairs
+[the rest of the rung] ...
+  .env                                     0.00 MB copied
+  country-ranks.json                       0.01 MB copied
+  country-terms.txt                        0.00 MB copied
+  members-taxonomy.parquet             22955.85 MB linked
+  vocab-kingdom.parquet                    0.00 MB linked
+[the rest of the rung] 0.01s
+
+wrote to /home/joe/code/tessera/data/ladder/gbif-terms:
+  .env                                     0.00 MB
+  corpus.toml                              0.01 MB
+  country-ranks.json                       0.01 MB
+  country-terms.txt                        0.00 MB
+  manifest.json                            0.00 MB
+  members-taxonomy.parquet             22955.85 MB
+  points.parquet                       66518.54 MB
+  tessera.toml                             0.00 MB
+  vocab-kingdom.parquet                    0.00 MB
+
+32.9 min, 144.0 GB free
+
+next:
+  cd /home/joe/code/tessera/data/ladder/gbif-terms && tessera check --payloads && tessera build --stage-timings

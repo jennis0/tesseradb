@@ -1,0 +1,52 @@
+bundle /home/joe/code/tessera/data/ladder/gbif-64p-terms/bundle view geo: bound 25846007, base_rows 25846007, total_rows 25846007, 0 extents, 186179 terms, images 25846007 terms, seed 20260917
+principal p1: 4 terms
+  walk        cold    0.003 s  warm    0.002 s  route walk  258459 rows
+  chooser     cold    0.013 s  warm    0.000 s  route split  258459 rows
+  split       cold    0.000 s  warm    0.000 s  route split  258459 rows
+  complement  cold    0.171 s  warm    0.185 s  route complement  258459 rows
+principal p5: 6 terms
+  walk        cold    0.008 s  warm    0.008 s  route walk  1292304 rows
+  chooser     cold    0.011 s  warm    0.000 s  route split  1292304 rows
+  split       cold    0.000 s  warm    0.000 s  route split  1292304 rows
+  complement  cold    0.161 s  warm    0.141 s  route complement  1292304 rows
+principal p10: 5 terms
+  walk        cold    0.017 s  warm    0.016 s  route walk  2584596 rows
+  chooser     cold    0.004 s  warm    0.000 s  route split  2584596 rows
+  split       cold    0.000 s  warm    0.000 s  route split  2584596 rows
+  complement  cold    0.136 s  warm    0.132 s  route complement  2584596 rows
+principal p25: 7 terms
+  walk        cold    0.041 s  warm    0.040 s  route walk  6461499 rows
+  chooser     cold    0.014 s  warm    0.000 s  route split  6461499 rows
+  split       cold    0.000 s  warm    0.000 s  route split  6461499 rows
+  complement  cold    0.124 s  warm    0.121 s  route complement  6461499 rows
+principal p50: 7 terms
+  walk        cold    0.094 s  warm    0.078 s  route walk  12923003 rows
+  chooser     cold    0.012 s  warm    0.001 s  route split  12923003 rows
+  split       cold    0.001 s  warm    0.001 s  route split  12923003 rows
+  complement  cold    0.082 s  warm    0.085 s  route complement  12923003 rows
+principal all: 252 terms
+  walk        cold    0.000 s  warm    0.000 s  route walk  25846007 rows
+  chooser     cold    0.000 s  warm    0.000 s  route whole_domain  25846007 rows
+  split       cold    0.035 s  warm    0.002 s  route split  25846007 rows
+  complement  cold    0.001 s  warm    0.000 s  route complement  25846007 rows
+principal year300: 300 terms
+  walk        cold    0.085 s  warm    0.074 s  route walk  12186941 rows
+  chooser     cold    0.041 s  warm    0.013 s  route split  12186941 rows
+  split       cold    0.014 s  warm    0.013 s  route split  12186941 rows
+  complement  cold    0.087 s  warm    0.078 s  route complement  12186941 rows
+principal species1000: 1000 terms
+  walk        cold    0.096 s  warm    0.078 s  route walk  13355838 rows
+  chooser     cold    0.051 s  warm    0.026 s  route split  13355838 rows
+  split       cold    0.028 s  warm    0.027 s  route split  13355838 rows
+  complement  cold    0.092 s  warm    0.093 s  route complement  13355838 rows
+principal species10000: 10000 terms
+  walk        cold    0.122 s  warm    0.126 s  route walk  21017298 rows
+  chooser     cold    0.043 s  warm    0.040 s  route complement  21017298 rows
+  split       cold    0.076 s  warm    0.067 s  route split  21017298 rows
+  complement  cold    0.043 s  warm    0.041 s  route complement  21017298 rows
+principal species100000: 100000 terms
+  walk        cold    0.131 s  warm    0.134 s  route walk  23786088 rows
+  chooser     cold    0.023 s  warm    0.022 s  route complement  23786088 rows
+  split       cold    0.122 s  warm    0.120 s  route split  23786088 rows
+  complement  cold    0.026 s  warm    0.024 s  route complement  23786088 rows
+wrote probes/2026-09-17-term-images-rung6/gbif-64p-terms-f14/results.json
