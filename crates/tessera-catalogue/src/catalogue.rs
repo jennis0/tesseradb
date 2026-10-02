@@ -741,14 +741,34 @@ impl Catalogue {
 
     /// Grants a term, trimmed. `public` and an empty term are refused.
     pub fn grant_term(&self, to: Grantee<'_>, term: &str) -> Result<Affected, Error> {
-        self.term_grant(to, names::term(term)?, true)
+        self.grant_terms(to, &[term])
     }
 
     pub fn revoke_term(&self, from: Grantee<'_>, term: &str) -> Result<Affected, Error> {
-        self.term_grant(from, term.trim().to_owned(), false)
+        self.revoke_terms(from, &[term])
     }
 
-    fn term_grant(&self, who: Grantee<'_>, term: String, grant: bool) -> Result<Affected, Error> {
+    /// Grants every term in one transaction, each checked as [`Catalogue::grant_term`] checks
+    /// one. One refused term refuses them all.
+    pub fn grant_terms(&self, to: Grantee<'_>, terms: &[&str]) -> Result<Affected, Error> {
+        let terms = terms
+            .iter()
+            .map(|t| names::term(t))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        self.term_grant(to, terms, true)
+    }
+
+    pub fn revoke_terms(&self, from: Grantee<'_>, terms: &[&str]) -> Result<Affected, Error> {
+        let terms = terms.iter().map(|t| t.trim().to_owned()).collect();
+        self.term_grant(from, terms, false)
+    }
+
+    fn term_grant(
+        &self,
+        who: Grantee<'_>,
+        terms: BTreeSet<String>,
+        grant: bool,
+    ) -> Result<Affected, Error> {
         let owned = trimmed(who);
         let who = owned.as_grantee();
         self.affecting(|st, tx| {
@@ -762,7 +782,11 @@ impl Catalogue {
                     (g.id, &g.terms, "group_term", "group_id")
                 }
             };
-            if held.contains(&term) == grant {
+            let changed: Vec<String> = terms
+                .into_iter()
+                .filter(|t| held.contains(t) != grant)
+                .collect();
+            if changed.is_empty() {
                 return Ok((nothing(), Affected::default()));
             }
             let sql = if grant {
@@ -770,7 +794,10 @@ impl Catalogue {
             } else {
                 format!("DELETE FROM {table} WHERE {column} = ?1 AND term = ?2")
             };
-            tx.execute(&sql, params![id, term])?;
+            let mut statement = tx.prepare(&sql)?;
+            for term in &changed {
+                statement.execute(params![id, term])?;
+            }
             let affected = st.affected_by_grantee(&who);
             let owner = OwnedGrantee::from(who);
             let apply: Apply = Some(Box::new(move |st| {
@@ -780,10 +807,12 @@ impl Catalogue {
                     }
                     OwnedGrantee::Group(n) => &mut st.groups.get_mut(n).expect("validated").terms,
                 };
-                if grant {
-                    held.insert(term);
-                } else {
-                    held.remove(&term);
+                for term in changed {
+                    if grant {
+                        held.insert(term);
+                    } else {
+                        held.remove(&term);
+                    }
                 }
             }));
             Ok((apply, affected))

@@ -44,9 +44,13 @@ async fn person(server: &TestServer, name: &str, terms: &[&str]) {
     )
     .await;
     control(server, post.clone(), "/control/grants", json!({ "principal": name, "permission": "read" })).await;
-    for term in terms {
-        control(server, post.clone(), "/control/grants", json!({ "principal": name, "term": term })).await;
-    }
+    control(
+        server,
+        post.clone(),
+        "/control/grants",
+        json!({ "principal": name, "terms": terms }),
+    )
+    .await;
 }
 
 async fn login(server: &TestServer, body: Value) -> reqwest::Response {

@@ -88,14 +88,30 @@ enum Source {
         provider: String,
         claims: Value,
     },
+    /// A set of terms the superuser named.
+    Terms(Vec<String>),
 }
 
 impl Source {
     fn resolve(&self, catalogue: &Catalogue) -> Option<Resolution> {
         match self {
-            Source::Superuser => Some(Caller::superuser().resolution),
+            Source::Superuser => Some(Resolution {
+                generation: catalogue.generation(),
+                ..Caller::superuser().resolution
+            }),
             Source::Local { principal, api_key } => catalogue.resolve(principal, api_key.as_deref()),
             Source::Claims { provider, claims } => catalogue.resolve_claims(provider, claims),
+            Source::Terms(terms) => Some(Resolution {
+                terms: terms
+                    .iter()
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                permissions: [Permission::Read].into_iter().collect(),
+                bypass: false,
+                generation: catalogue.generation(),
+            }),
         }
     }
 }
@@ -217,6 +233,21 @@ pub async fn access_token(state: &AppState, token: &str) -> Result<Caller, ApiEr
         expires_at: Some(accepted.expires_at),
         source,
     })
+}
+
+/// The superuser reading as a set of terms, which only the operator credential may name: the
+/// session holds those terms, each trimmed and otherwise as given, and `read`. Nothing is stored,
+/// so the rules for what a grant may hold do not apply. No catalogue change ends it.
+pub fn terms(catalogue: &Catalogue, terms: Vec<String>) -> Caller {
+    let source = Source::Terms(terms);
+    let resolution = source.resolve(catalogue).expect("a set of terms always resolves");
+    Caller {
+        principal: Principal::Superuser,
+        api_key: None,
+        resolution,
+        expires_at: None,
+        source,
+    }
 }
 
 /// A local principal named by an `authorise-as` caller. An unknown or disabled principal is

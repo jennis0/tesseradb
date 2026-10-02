@@ -55,7 +55,8 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
     let created = answer(admin_run(&["principal", "create", "ann", "--kind", "person"], ""));
     assert_eq!(created["sessions_ended"], 0);
     answer(admin_run(&["grant", "--principal", "ann", "--permission", "read"], ""));
-    answer(admin_run(&["grant", "--principal", "ann", "--term", "0"], ""));
+    answer(admin_run(&["grant", "--principal", "ann", "--term", "0", "--term", "x"], ""));
+    answer(admin_run(&["revoke-grant", "--principal", "ann", "--term", "x"], ""));
     let shown = answer(admin_run(&["principal", "show", "ann"], ""));
     assert_eq!(shown["terms"], serde_json::json!(["0"]));
     assert!(!admin_run(&["principal", "show", "nobody"], "").status.success());
@@ -113,6 +114,24 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
     assert!(out.status.success(), "{out:?}");
     let listed = answer(admin_run(&["session", "list", "--principal", "ann"], ""));
     assert_eq!(listed["sessions"].as_array().unwrap().len(), 0);
+
+    // The operator credential mints a session for the terms it names, which a key may not.
+    let by_terms = [
+        "session",
+        "authorise",
+        "--session",
+        &bound.session,
+        "--term",
+        "0",
+        "--term",
+        "1",
+    ];
+    assert!(!run(&by_terms, &integrator, "").status.success());
+    let operator = [("TESSERA_API_KEY", OPERATOR_CREDENTIAL)];
+    let minted = answer(run(&by_terms, &operator, ""));
+    let token = minted["token"].as_str().unwrap();
+    let out = run(&["logout", "--server", &bound.viewer, "--token", token], &[], "");
+    assert!(out.status.success(), "{out:?}");
 
     // Groups, a provider mapping to one, and revoking a grant.
     answer(admin_run(&["group", "create", "admins"], ""));

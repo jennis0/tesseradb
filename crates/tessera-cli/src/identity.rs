@@ -3,7 +3,7 @@
 //! server's JSON answer is printed on stdout, and a refusal on stderr with exit 1.
 //!
 //! Secrets are never arguments, which other users of the machine can read: a password, an API key
-//! or an access token to log in with is read from stdin, the session plane's key from
+//! or an access token to log in with is read from stdin, the session plane's credential from
 //! `TESSERA_API_KEY`, and the control plane's credential from `TESSERA_CREDENTIAL`.
 
 use std::io::{BufRead, Read, Write};
@@ -255,24 +255,22 @@ pub(crate) fn logout(args: LogoutArgs) -> ExitCode {
 
 #[derive(Subcommand)]
 pub(crate) enum SessionCommand {
-    /// Mint a session for another principal on the session plane, with the API key in
-    /// `TESSERA_API_KEY`, whose principal holds `authorise-as`.
+    /// Mint a session on the session plane, with the credential in `TESSERA_API_KEY`: an API key
+    /// whose principal holds `authorise-as`, or the operator credential.
     ///
-    /// The session carries the target's terms and its `read` and `write`. It prints `token`,
-    /// `token_id` and `expires_at` as JSON.
+    /// A session for a principal carries the target's terms and its `read` and `write`. A session
+    /// for `--term`s, which only the operator credential may mint, holds those terms and `read`.
+    /// It prints `token`, `token_id` and `expires_at` as JSON.
     Authorise {
         /// The session plane's address, such as `http://127.0.0.1:8081`.
         #[arg(long, value_name = "URL")]
         session: String,
-        /// Act as this local principal.
-        #[arg(long, value_name = "NAME", required_unless_present = "access_token")]
-        principal: Option<String>,
-        /// Act as the OIDC identity whose access token is read from the first line of stdin.
-        #[arg(long, conflicts_with = "principal")]
-        access_token: bool,
+        #[command(flatten)]
+        target: AuthoriseTarget,
     },
-    /// End a session minted with a key of the same principal, by its `token_id`, on the session
-    /// plane, with the API key in `TESSERA_API_KEY`.
+    /// End a session by its `token_id` on the session plane, with the credential in
+    /// `TESSERA_API_KEY`: an API key ends a session minted with a key of the same principal, and
+    /// the operator credential ends any session.
     Revoke {
         /// The session plane's address, such as `http://127.0.0.1:8081`.
         #[arg(long, value_name = "URL")]
@@ -301,6 +299,20 @@ pub(crate) enum SessionCommand {
         #[command(flatten)]
         which: EndWhich,
     },
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub(crate) struct AuthoriseTarget {
+    /// Act as this local principal.
+    #[arg(long, value_name = "NAME")]
+    principal: Option<String>,
+    /// Act as the OIDC identity whose access token is read from the first line of stdin.
+    #[arg(long)]
+    access_token: bool,
+    /// A term the session holds, with the operator credential. Repeatable.
+    #[arg(long = "term", value_name = "TERM")]
+    terms: Vec<String>,
 }
 
 #[derive(Args)]
@@ -336,22 +348,24 @@ impl Control {
 
 pub(crate) fn session(command: SessionCommand) -> ExitCode {
     let answer = match command {
-        SessionCommand::Authorise {
-            session,
-            principal,
-            access_token,
-        } => (|| {
-            let target = Target::parse(&session)?;
-            let key = env_secret("TESSERA_API_KEY", "API key")?;
-            let body = match (principal, access_token) {
-                (Some(principal), _) => json!({ "principal": principal }),
-                _ => json!({ "access_token": stdin_secret("access token")? }),
+        SessionCommand::Authorise { session, target } => (|| {
+            let at = Target::parse(&session)?;
+            let key = env_secret("TESSERA_API_KEY", "session-plane credential")?;
+            let body = match target {
+                AuthoriseTarget {
+                    principal: Some(principal),
+                    ..
+                } => json!({ "principal": principal }),
+                AuthoriseTarget {
+                    access_token: true, ..
+                } => json!({ "access_token": stdin_secret("access token")? }),
+                AuthoriseTarget { terms, .. } => json!({ "terms": terms }),
             };
-            send(&target, "POST", "/session/authorise", Some(&key), Some(&body))
+            send(&at, "POST", "/session/authorise", Some(&key), Some(&body))
         })(),
         SessionCommand::Revoke { session, token_id } => (|| {
             let target = Target::parse(&session)?;
-            let key = env_secret("TESSERA_API_KEY", "API key")?;
+            let key = env_secret("TESSERA_API_KEY", "session-plane credential")?;
             let body = json!({ "token_id": token_id });
             send(&target, "POST", "/session/revoke", Some(&key), Some(&body))
         })(),
@@ -652,9 +666,10 @@ pub(crate) struct Grantee {
 #[derive(Args)]
 #[group(required = true, multiple = false)]
 pub(crate) struct Granted {
-    /// A term, which says what the grantee may see.
-    #[arg(long, value_name = "TERM")]
-    term: Option<String>,
+    /// A term, which says what the grantee may see. Repeatable: the terms are granted or revoked
+    /// in one change, and one refused term refuses them all.
+    #[arg(long = "term", value_name = "TERM")]
+    terms: Vec<String>,
     /// A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or
     /// `admin`.
     #[arg(long, value_name = "NAME")]
@@ -667,9 +682,9 @@ pub(crate) fn grant(args: GrantArgs, revoke: bool) -> ExitCode {
         (Some(p), _) => body["principal"] = p.into(),
         (None, g) => body["group"] = g.into(),
     }
-    match (args.granted.term, args.granted.permission) {
-        (Some(t), _) => body["term"] = t.into(),
-        (None, p) => body["permission"] = p.into(),
+    match args.granted.permission {
+        Some(p) => body["permission"] = p.into(),
+        None => body["terms"] = args.granted.terms.into(),
     }
     let path = if revoke {
         "/control/grants/revoke"

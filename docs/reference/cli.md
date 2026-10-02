@@ -231,26 +231,27 @@ End a session on the viewer plane.
 tessera session <COMMAND>
 ```
 
-Mint and revoke sessions for other principals on the session plane, and list and end sessions on the control plane.
+Mint and revoke sessions on the session plane, and list and end sessions on the control plane.
 
-The session plane's verbs read an API key holding `authorise-as` from `TESSERA_API_KEY`. The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding `authorise-as`, or the operator credential, which alone may name the session's terms. The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
 
 
 ## `tessera session authorise`
 
 ```text
-tessera session authorise [OPTIONS] --session <URL>
+tessera session authorise --session <URL> <--principal <NAME>|--access-token|--term <TERM>>
 ```
 
-Mint a session for another principal on the session plane, with the API key in `TESSERA_API_KEY`, whose principal holds `authorise-as`.
+Mint a session on the session plane, with the credential in `TESSERA_API_KEY`: an API key whose principal holds `authorise-as`, or the operator credential.
 
-The session carries the target's terms and its `read` and `write`. It prints `token`, `token_id` and `expires_at` as JSON.
+A session for a principal carries the target's terms and its `read` and `write`. A session for `--term`s, which only the operator credential may mint, holds those terms and `read`. It prints `token`, `token_id` and `expires_at` as JSON.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--session` | `URL` |  | The session plane's address, such as `http://127.0.0.1:8081`. |
 | `--principal` | `NAME` |  | Act as this local principal. |
 | `--access-token` |  |  | Act as the OIDC identity whose access token is read from the first line of stdin. |
+| `--term` | `TERM` |  | A term the session holds, with the operator credential. Repeatable. |
 
 ## `tessera session revoke`
 
@@ -258,7 +259,7 @@ The session carries the target's terms and its `read` and `write`. It prints `to
 tessera session revoke --session <URL> --token-id <N>
 ```
 
-End a session minted with a key of the same principal, by its `token_id`, on the session plane, with the API key in `TESSERA_API_KEY`.
+End a session by its `token_id` on the session plane, with the credential in `TESSERA_API_KEY`: an API key ends a session minted with a key of the same principal, and the operator credential ends any session.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
@@ -576,7 +577,7 @@ A term says what the grantee may see, and a permission what it may do. The sessi
 | `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
-| `--term` | `TERM` |  | A term, which says what the grantee may see. |
+| `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
 | `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
 
 ## `tessera revoke-grant`
@@ -592,7 +593,7 @@ Revoke a term or a permission from a principal or a group, on the control plane.
 | `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
-| `--term` | `TERM` |  | A term, which says what the grantee may see. |
+| `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
 | `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
 
 ## `tessera provider`

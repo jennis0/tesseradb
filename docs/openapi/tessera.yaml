@@ -120,13 +120,17 @@ paths:
     post:
       tags: [session]
       operationId: authorise
-      summary: Mint a session for another principal, with an API key holding `authorise-as`.
+      summary: Mint a session for another principal, with an API key holding `authorise-as` or the operator credential.
       description: |
-        The bearer is an API key whose principal holds `authorise-as`. The body names the
-        principal to act as: a local principal by `principal`, or an OIDC identity by its
-        `access_token`, which is checked as `POST /v1/login` checks one. The session carries that
-        principal's terms and its `read` and `write`, and never its `admin`, `authorise-as` or
-        `bypass`. The target must hold `read`.
+        The bearer is an API key whose principal holds `authorise-as`, or the operator
+        credential. The body names the principal to act as: a local principal by `principal`, or
+        an OIDC identity by its `access_token`, which is checked as `POST /v1/login` checks one.
+        The session carries that principal's terms and its `read` and `write`, and never its
+        `admin`, `authorise-as` or `bypass`. The target must hold `read`.
+
+        With the operator credential, the body may instead name `terms`: the session holds those
+        terms and `read`, for no principal of the catalogue, and no catalogue change ends it. A
+        local operator reads as any set of terms this way without setting up principals.
 
         The session ends at the earliest of `token_max_lifetime` after the request, the expiry of
         the key that minted it, and the target access token's `exp`. It also ends when a catalogue
@@ -166,7 +170,7 @@ paths:
         "415":
           $ref: "#/components/responses/NotJsonContentType"
         "422":
-          description: "The body names neither or both of `principal` and `access_token`, or the access token was not accepted."
+          description: "The body names other than exactly one of `principal`, `access_token` and `terms`, or the access token was not accepted."
           content:
             application/json:
               schema:
@@ -183,9 +187,9 @@ paths:
       summary: End a session this principal minted, by its `token_id`, which is not the token itself.
       description: |
         Revocation names the session by `token_id`, so the token is sent once, when it is minted,
-        and never again. Only a session minted by the caller's own principal is ended. A
-        `token_id` that names no such live session is also answered `204`, since any other answer
-        would let a caller enumerate sessions.
+        and never again. Only a session minted by the caller's own principal is ended, or any
+        session with the operator credential. A `token_id` that names no such live session is
+        also answered `204`, since any other answer would let a caller enumerate sessions.
       security:
         - authoriseAsKey: []
       requestBody:
@@ -3053,7 +3057,7 @@ paths:
     post:
       tags: ["control: identity"]
       operationId: grant
-      summary: "Grant a term or a permission to a principal or a group."
+      summary: "Grant terms or a permission to a principal or a group."
       description: |
         A grant already held changes nothing and ends no session. Otherwise the sessions of the
         principal, or of every member of the group and of every identity a role mapping gives it,
@@ -3088,7 +3092,7 @@ paths:
         "415":
           $ref: "#/components/responses/NotJsonContentType"
         "422":
-          description: "The body does not name exactly one grantee and one grant, the term is `public` or holds a control character, or the permission is unknown."
+          description: "The body does not name exactly one grantee and one grant, a term is `public` or holds a control character, or the permission is unknown."
           content:
             application/json:
               schema:
@@ -3100,7 +3104,7 @@ paths:
     post:
       tags: ["control: identity"]
       operationId: revokeGrant
-      summary: "Revoke a term or a permission from a principal or a group."
+      summary: "Revoke terms or a permission from a principal or a group."
       description: |
         A grant not held changes nothing and ends no session. Otherwise the sessions it affected end.
       security:
@@ -3350,7 +3354,7 @@ components:
     authoriseAsKey:
       type: http
       scheme: bearer
-      description: "An API key, `tsk_<prefix>_<secret>`, whose principal holds `authorise-as`. It mints a session for any principal, so it belongs to an integrator's backend and is never handed to a browser. A key that is not accepted is `401`; an accepted key without `authorise-as` is `403 forbidden`. Checked before the body is read."
+      description: "An API key, `tsk_<prefix>_<secret>`, whose principal holds `authorise-as`, or the operator credential, which authenticates the superuser. It mints a session for any principal, so it belongs to an integrator's backend and is never handed to a browser. A key that is not accepted is `401`; an accepted key without `authorise-as` is `403 forbidden`. Checked before the body is read."
     controlCredential:
       type: http
       scheme: bearer
@@ -3616,7 +3620,7 @@ components:
     AuthoriseRequest:
       type: object
       additionalProperties: false
-      description: Exactly one of the two fields.
+      description: Exactly one of the three fields.
       properties:
         principal:
           type: string
@@ -3624,13 +3628,27 @@ components:
         access_token:
           type: string
           description: The access token of the OIDC identity to act as, as its provider issued it.
+        terms:
+          type: array
+          description: "The terms the session holds, with `read` and no other permission, for no principal of the catalogue. Accepted with the operator credential alone; an API key sending it is `403 forbidden`. Each term is trimmed and an empty one is dropped. The rest are held as given, since nothing is stored: a term no grant could hold, such as one holding a control character, admits the items labelled with it. No catalogue change ends the session."
+          items:
+            type: string
       oneOf:
         - required: [principal]
           not:
-            required: [access_token]
+            anyOf:
+              - required: [access_token]
+              - required: [terms]
         - required: [access_token]
           not:
-            required: [principal]
+            anyOf:
+              - required: [principal]
+              - required: [terms]
+        - required: [terms]
+          not:
+            anyOf:
+              - required: [principal]
+              - required: [access_token]
 
     AuthoriseResponse:
       type: object
@@ -3875,7 +3893,7 @@ components:
     Grant:
       type: object
       additionalProperties: false
-      description: Exactly one of `principal` and `group`, and exactly one of `term` and `permission`.
+      description: Exactly one of `principal` and `group`, and exactly one of `term`, `terms` and `permission`.
       properties:
         principal:
           type: string
@@ -3884,6 +3902,11 @@ components:
         term:
           type: string
           description: Trimmed. `public` in any case, an empty term and a control character are refused.
+        terms:
+          type: array
+          description: Many terms, granted or revoked in one change, each read as `term` is. One refused term refuses them all.
+          items:
+            type: string
         permission:
           $ref: "#/components/schemas/Permission"
       allOf:
@@ -3897,10 +3920,19 @@ components:
         - oneOf:
             - required: [term]
               not:
-                required: [permission]
+                anyOf:
+                  - required: [terms]
+                  - required: [permission]
+            - required: [terms]
+              not:
+                anyOf:
+                  - required: [term]
+                  - required: [permission]
             - required: [permission]
               not:
-                required: [term]
+                anyOf:
+                  - required: [term]
+                  - required: [terms]
 
     ClaimRule:
       type: object

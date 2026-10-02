@@ -680,14 +680,37 @@ async fn authorise_and_revoke_match_the_description() {
     };
     let principal = principal_for(&f.server, &["0"]);
 
-    // A key that is not accepted, and the operator credential, which this plane does not take.
+    // A key that is not accepted.
     let resp = authorise("tsk_nope_nope", json!({ "principal": principal }))
         .await
         .unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
-    let resp = authorise(OPERATOR_CREDENTIAL, json!({ "principal": principal }))
+    // The operator credential mints for a principal, or for a set of terms, which a key may not.
+    for body in [
+        json!({ "principal": principal }),
+        json!({ "terms": ["0", "public"] }),
+    ] {
+        assert_valid(&doc, "AuthoriseRequest", &body);
+        let resp = authorise(OPERATOR_CREDENTIAL, body).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let minted: Value = resp.json().await.unwrap();
+        assert_valid(&doc, "AuthoriseResponse", &minted);
+        let resp = f
+            .server
+            .client
+            .get(f.server.viewer_url("/v1/meta"))
+            .bearer_auth(minted["token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    let resp = authorise(&f.server.integrator_key, json!({ "terms": ["0"] }))
         .await
         .unwrap();
+    assert_refusal(&doc, resp, 403, "forbidden").await;
+    // A viewer's own session token is no credential here, so it cannot name its terms.
+    let resp = authorise(token, json!({ "terms": ["0", "1"] })).await.unwrap();
     assert_refusal(&doc, resp, 401, "bad-credential").await;
     // An accepted key whose principal lacks `authorise-as`.
     let catalogue = &f.server.state.catalogue;
@@ -980,6 +1003,7 @@ async fn the_catalogue_routes_match_the_description() {
     for (path, method) in [("/control/grants", &post), ("/control/grants/revoke", &post)] {
         for body in [
             json!({ "principal": "ann", "term": "0" }),
+            json!({ "principal": "ann", "terms": ["0", "1"] }),
             json!({ "group": "analysts", "permission": "read" }),
         ] {
             let resp = send(method, path, Some(("Grant", body)));

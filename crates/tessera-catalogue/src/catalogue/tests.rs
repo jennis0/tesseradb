@@ -760,3 +760,24 @@ fn the_catalogue_is_shared_between_threads() {
         assert_eq!(r.terms, set(&[&format!("t{i}")]));
     }
 }
+
+#[test]
+fn many_terms_are_granted_and_revoked_as_one_change() {
+    let fx = Fixture::new();
+    let cat = fx.open();
+    let ada = Grantee::Principal("ada");
+    cat.create_principal("ada", PrincipalKind::Person).unwrap();
+    let before = cat.generation();
+    let granted = cat.grant_terms(ada, &["a", " b ", "c", "a"]).unwrap();
+    assert_eq!(granted.generation, before + 1);
+    assert_eq!(granted.principals, set(&["ada"]));
+    // One refused term refuses them all, and nothing is granted.
+    cat.grant_terms(ada, &["d", "public"]).unwrap_err();
+    cat.revoke_terms(ada, &["a", "z"]).unwrap();
+    drop(cat);
+
+    let cat = fx.open();
+    assert_eq!(cat.resolve("ada", None).unwrap().terms, set(&["b", "c"]));
+    let unchanged = cat.grant_terms(ada, &["b", "c"]).unwrap();
+    assert!(unchanged.is_empty());
+}

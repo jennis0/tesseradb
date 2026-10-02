@@ -412,7 +412,7 @@ async fn remove_member(
     change(&state, move |c| c.remove_member(&group, &principal)).await
 }
 
-/// One grant: to exactly one of `principal` and `group`, of exactly one of `term` and
+/// One grant: to exactly one of `principal` and `group`, of exactly one of `term`, `terms` and
 /// `permission`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -420,11 +420,12 @@ struct GrantReq {
     principal: Option<String>,
     group: Option<String>,
     term: Option<String>,
+    terms: Option<Vec<String>>,
     permission: Option<String>,
 }
 
 enum Granted {
-    Term(String),
+    Terms(Vec<String>),
     Permission(Permission),
 }
 
@@ -438,12 +439,13 @@ fn grant_parts(req: GrantReq) -> Result<(bool, String, Granted), ApiError> {
             ))
         }
     };
-    let what = match (req.term, req.permission) {
-        (Some(t), None) => Granted::Term(t),
-        (None, Some(p)) => Granted::Permission(Permission::parse(&p).map_err(refusal)?),
+    let what = match (req.term, req.terms, req.permission) {
+        (Some(t), None, None) => Granted::Terms(vec![t]),
+        (None, Some(ts), None) => Granted::Terms(ts),
+        (None, None, Some(p)) => Granted::Permission(Permission::parse(&p).map_err(refusal)?),
         _ => {
             return Err(ApiError::Contract(
-                "send exactly one of `term` and `permission`".into(),
+                "send exactly one of `term`, `terms` and `permission`".into(),
             ))
         }
     };
@@ -477,8 +479,14 @@ async fn grant_or_revoke(
             Grantee::Principal(&name)
         };
         match (what, give) {
-            (Granted::Term(t), true) => c.grant_term(who, &t),
-            (Granted::Term(t), false) => c.revoke_term(who, &t),
+            (Granted::Terms(ts), give) => {
+                let ts: Vec<&str> = ts.iter().map(String::as_str).collect();
+                if give {
+                    c.grant_terms(who, &ts)
+                } else {
+                    c.revoke_terms(who, &ts)
+                }
+            }
             (Granted::Permission(p), true) => c.grant_permission(who, p),
             (Granted::Permission(p), false) => c.revoke_permission(who, p),
         }

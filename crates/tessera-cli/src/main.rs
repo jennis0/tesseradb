@@ -325,10 +325,11 @@ enum Command {
     Login(identity::LoginArgs),
     /// End a session on the viewer plane.
     Logout(identity::LogoutArgs),
-    /// Mint and revoke sessions for other principals on the session plane, and list and end
-    /// sessions on the control plane.
+    /// Mint and revoke sessions on the session plane, and list and end sessions on the control
+    /// plane.
     ///
-    /// The session plane's verbs read an API key holding `authorise-as` from `TESSERA_API_KEY`.
+    /// The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding
+    /// `authorise-as`, or the operator credential, which alone may name the session's terms.
     /// The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
     Session {
         #[command(subcommand)]
