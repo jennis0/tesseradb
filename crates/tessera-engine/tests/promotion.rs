@@ -287,3 +287,52 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
     );
 }
 
+
+/// Promotion past the dictionary's term ceiling fails the flush and retains the buffer.
+///
+/// The bound is enforced because `EXTENSION_ID_START > MAX_DISTINCT_TERMS` is what keeps a
+/// dictionary ordinal from aliasing a live in-memory extension id, and promotion is the only path
+/// by which a caller grows the dictionary. The real ceiling is 200,000,000, so this lowers it to
+/// the two terms the fixture's dictionary already holds.
+#[test]
+fn promotion_past_the_term_ceiling_refuses_the_flush() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = fixture_in(tmp.path());
+    let mut engine = Engine::open(
+        &root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        EngineConfig {
+            flush_max_age_secs: 1,
+            flush_max_items: 40_000,
+            max_merged_segment_bytes: None,
+            compaction: tessera_engine::CompactionSchedule::off(),
+            ..config()
+        },
+    )
+    .expect("engine opens");
+    engine.set_max_distinct_terms_for_test(2);
+    engine
+        .start_write_executor(64)
+        .expect("the executor starts");
+
+    let id = ingest_with(&engine, "ext-1", &[NOVEL]);
+    wait_until("the flush to fail", WAIT, || {
+        engine.write_executor_stats().flush_failures >= 1
+    });
+
+    assert_eq!(
+        engine.write_executor_stats().flushes,
+        0,
+        "nothing published: a refused promotion is a failed flush, not a partial one"
+    );
+    assert!(
+        engine.generation().buffer.contains(id),
+        "and the row is retained, so ingest backpressure is what sheds, not the item"
+    );
+    assert_eq!(
+        extent_records(&root, &engine.generation().prefix),
+        vec![base_extent()],
+        "the build's extent and nothing else: a refused promotion commits no extent"
+    );
+}

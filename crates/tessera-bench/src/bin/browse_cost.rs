@@ -107,7 +107,7 @@ fn engine_at(root: &Path, cache: &Path, wal: &Path, publishing: bool) -> Engine 
     engine
 }
 
-/// A credential the passthrough plugin reads as "every term this corpus has" — the broadest
+/// A credential holding every term this corpus has — the broadest
 /// principal, which is the one whose gate pass is the most expensive.
 fn credential(terms: &[String]) -> Vec<u8> {
     let terms: Vec<String> = terms.iter().map(|t| format!("\"{t}\"")).collect();
@@ -151,7 +151,7 @@ fn measure_pages(root: &Path, view: &str, layer: Option<&str>, repeat: usize) {
     let layer = layer.map(str::to_string).expect("--layer names the layer to browse");
     let session = engine
         .authorise(&credential(&all_terms(root)))
-        .expect("the passthrough plugin authorises");
+        .expect("the credential authorises");
     println!("bundle {}  view {view}  layer {layer}", root.display());
 
     let ask = |what: &str, form: BrowseForm, filter: Option<FilterExpr>| {
@@ -196,7 +196,7 @@ fn measure_pages(root: &Path, view: &str, layer: Option<&str>, repeat: usize) {
     for _ in 0..repeat {
         let cold = engine
             .authorise(&credential(&all_terms(root)))
-            .expect("the passthrough plugin authorises");
+            .expect("the credential authorises");
         let started = Instant::now();
         engine
             .browse(
@@ -253,7 +253,7 @@ fn measure_scan(rows: u64, repeat: usize) {
         .expect("the artifact publishes");
     let session = engine
         .authorise(&credential(&all_terms(&bundle)))
-        .expect("the passthrough plugin authorises");
+        .expect("the credential authorises");
     let scan = FilterExpr::Leaf {
         column: "score".into(),
         operand: FilterOperand::Range {

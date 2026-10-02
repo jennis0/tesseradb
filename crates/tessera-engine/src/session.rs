@@ -69,11 +69,7 @@ pub struct Session {
     auth_data_hash: [u8; 32],
     /// Unix timestamp (seconds) after which this session is no longer valid.
     expires_at: u64,
-    /// How many of the credential's granted descriptors had no dictionary entry at authorise. No
-    /// accessor: this count says how many of the viewer's descriptors the corpus does not carry,
-    /// which is more than [`Session::is_stale`]'s boolean and must not reach the wire.
-    unresolved_count: usize,
-    /// See [`Self::unresolved_count`].
+    /// The dictionary's length at authorise: every key from here on was promoted since.
     dict_len_at_authorise: u32,
 }
 
@@ -129,27 +125,25 @@ impl Session {
     }
 
 
-    /// Whether this session's mask may be behind the corpus: true iff the dictionary has grown
-    /// since authorise and either the credential named a term the dictionary did not then carry,
-    /// or a label holding a conjunction promoted since is one its terms satisfy. A stale session
-    /// sees fewer items than its principal is entitled to, never more. It is a hint, not a
-    /// revocation; the only remedy is a new session, since `satisfied` is never re-resolved in
-    /// place.
+    /// Whether this session's mask is behind the corpus: true iff a key promoted since authorise
+    /// is a term the credential holds, or a label holding a conjunction that its terms satisfy. A
+    /// stale session sees fewer items than its principal is entitled to, never more. It is a
+    /// hint, not a revocation; the only remedy is a new session, since `satisfied` is never
+    /// re-resolved in place.
     ///
     /// A compaction that renumbers the dictionary must not reduce its length, or must keep a
     /// counter that never decreases: this predicate rests on that length being monotone.
     pub fn is_stale(&self, generation: &Generation) -> bool {
-        let grown = generation.dict.len() > self.dict_len_at_authorise;
-        if !grown {
-            return false;
-        }
-        if self.unresolved_count > 0 {
-            return true;
-        }
         let labels = generation.dict.labels();
         (self.dict_len_at_authorise..generation.dict.len())
             .map(TermId::new)
-            .any(|key| labels.satisfied(key, &|term| self.holds(term)))
+            .any(|key| match labels.is_label_key(key) {
+                true => labels.satisfied(key, &|term| self.holds(term)),
+                false => generation
+                    .dict
+                    .descriptor(key)
+                    .is_some_and(|term| self.credentials.contains(term)),
+            })
     }
 }
 
@@ -173,21 +167,16 @@ impl Engine {
         credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
         let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
-        let mut unresolved_count = 0usize;
         let labels = generation.dict.labels();
         for term in &auth_terms {
-            match generation.dict.lookup(term.as_bytes()) {
-                // A held term never names a label's own key, which starts with a control
-                // character `credential_terms` drops; the test keeps a key out of `satisfied`
-                // whatever a credential presents.
-                Some(id) if !labels.is_label_key(id) => {
+            // A held term never names a label's own key, which starts with a control character
+            // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
+            // credential presents. An unknown term is unsatisfied, never an error.
+            if let Some(id) = generation.dict.lookup(term.as_bytes()) {
+                if !labels.is_label_key(id) {
                     satisfied.insert(id);
                     satisfied_descriptors.insert(id, term.as_bytes().to_vec());
                 }
-                Some(_) => {}
-                // An unknown term is unsatisfied, never an error: it is this session's exposure
-                // to a later promotion of that same term.
-                None => unresolved_count += 1,
             }
         }
         let mut keys = Vec::new();
@@ -258,7 +247,6 @@ impl Engine {
             visible_views,
             auth_data_hash,
             expires_at,
-            unresolved_count,
             dict_len_at_authorise: generation.dict.len(),
         })
     }

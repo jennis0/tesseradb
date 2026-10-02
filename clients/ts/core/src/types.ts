@@ -1154,9 +1154,9 @@ export type ItemDetail = {
    */
   scoped: Record<string, Record<string, unknown>>;
   /**
-   * Why this session sees the item: one clause of its access label that the session satisfies,
-   * as the terms whose conjunction satisfies it, sorted. Every term is one the session holds. It
-   * does not say how the item is labelled. An empty list is an answer.
+   * Why this session sees the item, as label text, sorted: each term of its labels the session
+   * holds, and one satisfied clause of each label holding a conjunction. Every term is one the
+   * session holds. It does not say how the item is labelled. An empty list is an answer.
    */
   labels: string[];
 };
@@ -1331,8 +1331,8 @@ export type ItemsRequest = {
   /**
    * System columns, after the fields, in this order. `position` is `tessera:x` and `tessera:y`
    * (`float64`) in the view's coordinates, so degrees on a geographic view. `labels` is
-   * `tessera:labels` (`list<utf8>`), the held terms of one clause of each item's label that this
-   * principal satisfies, sorted.
+   * `tessera:labels` (`list<utf8>`), the clauses of each item's labels that this principal
+   * satisfies, as the item card gives them.
    */
   systemFields?: ('position' | 'labels')[];
   /** The viewport's filter. Only the items matching it are returned, unless `keepUnmatched` is set. */

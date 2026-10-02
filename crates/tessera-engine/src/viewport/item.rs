@@ -2,6 +2,8 @@
 
 use super::*;
 use super::out::flat_families;
+use rustc_hash::FxHashMap;
+use tessera_types::label::{conjunction_text, Label};
 
 /// `POST /v1/items/{handle}`'s payload: a visible item's full record — every declared field that
 /// carries a value, by declared name. Names, not tags: a blob field's tag is a declaration position and an index internal, resolved to the
@@ -11,10 +13,10 @@ use super::out::flat_families;
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    /// Why the asking session sees this item: one clause of its label the session satisfies, as
-    /// the terms whose conjunction satisfies it, sorted. Every term is one the credential holds,
-    /// so no clause the session does not satisfy and no term it does not hold is named. Never the
-    /// item's whole label.
+    /// Why the asking session sees this item: every term of its labels the session holds, and one
+    /// satisfied clause of each of its labels holding a conjunction, each written as label text,
+    /// sorted. Every term is one the credential holds, so no clause the session does not satisfy
+    /// and no term it does not hold is named. Never the item's whole label.
     pub labels: Vec<String>,
     /// The views this item holds a row in that this session may reach, sorted by id, each with
     /// the position that view places it at. A view the gate refuses is absent, exactly as a view
@@ -86,21 +88,21 @@ impl Engine {
         )
     }
 
-    /// The drill-down's `labels` array: why this session sees the entity, as one clause of its
-    /// label that the session satisfies, written as the terms whose conjunction satisfies it.
-    /// Each index key of the entity's that the session satisfies offers a clause: a term offers
-    /// itself, and a label holding a conjunction its [`tessera_types::label::Label::witness`]. Of
-    /// those, the one with fewest terms, then the first in byte order, is served, so the answer
-    /// depends on the item's labels and the session's terms and on no internal number. Every
-    /// string is a term the credential holds, so the clauses the session does not satisfy and the
+    /// The drill-down's `labels` array: why this session sees the entity, as the clauses of its
+    /// labels that the session satisfies, each written as label text and sorted. Each index key
+    /// of the entity's that the session satisfies offers one clause: a term offers itself, and a
+    /// label holding a conjunction its [`Label::witness`]. Every term
+    /// written is one the credential holds, so the clauses the session does not satisfy and the
     /// terms it does not hold are never named. Reached only after the visibility verdict, like
     /// every other read in [`Engine::item`]: the transpose is never probed for an entity the
-    /// principal cannot see. An entity the transpose does not hold answers `[]`.
+    /// principal cannot see. An entity the transpose does not hold answers `[]`. `parsed` holds
+    /// the label behind each key read so far, so a page of rows parses each label once.
     pub(crate) fn labels_for(
         &self,
         generation: &Generation,
         session: &Session,
         entity: u32,
+        parsed: &mut FxHashMap<TermId, Option<Label>>,
     ) -> Result<Vec<String>> {
         let Some(keys) = generation
             .filter_columns
@@ -111,34 +113,30 @@ impl Engine {
             return Ok(Vec::new());
         };
         let held = |term: &str| session.holds(term);
-        let mut best: Option<Vec<String>> = None;
+        let mut clauses = Vec::new();
         for key in keys.into_iter().map(TermId::new) {
             if !session.satisfied().contains(&key) {
                 continue;
             }
             let clause = match session.satisfied_descriptors().get(&key) {
-                Some(term) => Some(vec![String::from_utf8_lossy(term).into_owned()]),
-                None => generation
-                    .dict
-                    .descriptor(key)
-                    .and_then(tessera_authz::label::label_of_key)
-                    .and_then(|text| tessera_types::label::Label::parse(text, usize::MAX).ok())
-                    .and_then(|label| {
-                        label
-                            .witness(&held)
-                            .map(|terms| terms.into_iter().map(str::to_owned).collect())
-                    }),
-            };
-            if let Some(clause) = clause {
-                if best
+                Some(term) => Some(conjunction_text(&[String::from_utf8_lossy(term).as_ref()])),
+                None => parsed
+                    .entry(key)
+                    .or_insert_with(|| {
+                        generation
+                            .dict
+                            .descriptor(key)
+                            .and_then(tessera_authz::label::label_of_key)
+                            .and_then(|text| Label::parse(text, usize::MAX).ok())
+                    })
                     .as_ref()
-                    .is_none_or(|b| (clause.len(), &clause) < (b.len(), b))
-                {
-                    best = Some(clause);
-                }
-            }
+                    .and_then(|label| label.witness(&held).map(|terms| conjunction_text(&terms))),
+            };
+            clauses.extend(clause);
         }
-        Ok(best.unwrap_or_default())
+        clauses.sort_unstable();
+        clauses.dedup();
+        Ok(clauses)
     }
 
     /// `POST /v1/items/{handle}`: invert `id` to its number and the entity holding it, test
@@ -218,7 +216,7 @@ impl Engine {
         let fields = record_fields(&generation, segment, local, entity_raw)?;
         Ok(Some(ItemOut {
             fields,
-            labels: self.labels_for(&generation, session, entity_raw)?,
+            labels: self.labels_for(&generation, session, entity_raw, &mut FxHashMap::default())?,
             views,
             scoped,
         }))

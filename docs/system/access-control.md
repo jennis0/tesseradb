@@ -181,7 +181,8 @@ difference rather than rebuilding either from scratch.
 **Not built yet:** adding to an open session a term the credential named that the dictionary did
 not carry at authorise, or a label holding a conjunction that a flush promoted after it and that
 the credential's terms satisfy. The session sees fewer items than its terms admit until it
-authorises again, never more, and the engine records that it is behind. **Not built yet:** a
+authorises again, never more. The engine can tell whether a session is behind in this way, from
+the keys promoted since it authorised, but nothing outside its tests asks. **Not built yet:** a
 signal to the client when this happens; nothing on the wire announces it. A client that wants to stay
 current has to re-authorise on its own schedule, bounded only by the token's configured lifetime.
 The signal that does exist on the wire is a `403 expired-token` refusal once a token has expired

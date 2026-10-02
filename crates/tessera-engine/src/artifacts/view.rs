@@ -7,6 +7,7 @@ use rustc_hash::FxHashSet;
 
 use tessera_lifecycle::membership::Attachment;
 use tessera_lifecycle::Overlay;
+use tessera_types::label::Label;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::EntityId;
 
@@ -80,16 +81,17 @@ impl<'a> LabelGate<'a> {
         LabelGate { held, unlabelled }
     }
 
-    /// Whether an artifact carrying `access` is admitted.
-    pub fn admits(&self, access: &[Vec<u8>]) -> bool {
+    /// Whether an artifact carrying `access` is admitted. A label that did not parse admits
+    /// nobody.
+    pub fn admits(&self, access: &[Option<Label>]) -> bool {
         if access.is_empty() {
             return self.unlabelled;
         }
         let held = |term: &str| self.held.contains(term.as_bytes());
-        access.iter().any(|label| {
-            std::str::from_utf8(label)
-                .is_ok_and(|label| tessera_types::label::admits(&[label], &held))
-        })
+        access
+            .iter()
+            .flatten()
+            .any(|label| label.satisfied_by(&held))
     }
 }
 
@@ -422,7 +424,7 @@ mod tests {
         let d = declaration(true, None);
         let mut rows = attached_rows(&[1, 2, 3]);
         let records = Arc::make_mut(&mut rows.records);
-        records.access = vec![Some(Arc::from(vec![b"x".to_vec()].as_slice()))];
+        records.access = vec![Some(super::super::rows::parse_access(&[b"x".to_vec()]))];
         let mask = Bitmap::of(&[1, 2, 3]);
         let never = |_: &Attachment| -> bool { panic!("a withheld label asked its target") };
         let held = FxHashSet::default();

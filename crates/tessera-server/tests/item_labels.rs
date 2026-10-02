@@ -1,5 +1,6 @@
-//! `POST /v1/items/{tessera_id}`'s `labels` array: **one clause the session satisfies, in held
-//! terms only**.
+//! `POST /v1/items/{tessera_id}`'s `labels` array: **the clauses the session satisfies, in held
+//! terms only**: each term of the item's labels the session holds, and one satisfied clause of each
+//! label holding a conjunction.
 //!
 //! What makes that worth its own file rather than a case in `http.rs` is the shape of the failure:
 //! the endpoint would still answer `200` with the right record while naming a compartment the
@@ -8,7 +9,7 @@
 //!
 //! The fixture's labelling is `common::terms_of`: every item carries `"0"`, and a multiple of
 //! three also carries `"1"`. So one bundle offers an item with two labels and an item with one,
-//! and three principals — `{0}`, `{1}`, `{0,1}` — each satisfy a different part of them.
+//! and three principals — `{0}`, `{1}`, `{0,1}` — see three different parts of them.
 
 mod common;
 
@@ -95,10 +96,10 @@ async fn labels_of(server: &TestServer, token: &str, id: u64) -> Vec<String> {
         .collect()
 }
 
-/// An item with several labels, drilled down by a principal satisfying some of them, serves one
-/// it satisfies: the first in byte order where it satisfies several.
+/// An item with several labels, drilled down by a principal satisfying some of them, serves
+/// exactly those, and the principal holding both gets both.
 #[tokio::test]
-async fn a_drill_down_serves_one_satisfied_clause_and_not_the_item_s_label_set() {
+async fn a_drill_down_serves_the_satisfied_labels_and_not_the_item_s_label_set() {
     let fx = fixture().await;
     let both = authorise(&fx.server, &["0", "1"]).await;
     let both = both["token"].as_str().unwrap();
@@ -107,8 +108,8 @@ async fn a_drill_down_serves_one_satisfied_clause_and_not_the_item_s_label_set()
 
     assert_eq!(
         labels_of(&fx.server, both, fx.two_labels).await,
-        vec!["0".to_string()],
-        "a principal holding both labels of a two-label item is served one clause"
+        vec!["0".to_string(), "1".to_string()],
+        "a principal holding both labels of a two-label item is served both"
     );
     assert_eq!(
         labels_of(&fx.server, only_zero, fx.two_labels).await,
@@ -158,8 +159,8 @@ async fn a_drill_down_serves_the_caller_s_own_strings_verbatim() {
     }
 }
 
-/// **Deterministic**: the clause and its order depend on the item's labels and the session's terms
-/// alone, so two identical requests agree and the answer says nothing about the corpus's
+/// **Deterministic**: the clauses and their order depend on the item's labels and the session's
+/// terms alone, so two identical requests agree and the answer says nothing about the corpus's
 /// interning. Asserted against the sorted copy rather than a literal, so the rule survives a
 /// fixture whose labels change.
 #[tokio::test]

@@ -683,7 +683,7 @@ paths:
         null. `position` is two `float64` columns, `tessera:x` and `tessera:y`: the centre of the
         step of the view's 32-bit grid the item is stored in, converted back through the view's
         projection and frame, so degrees on a geographic view, and within half a step of the
-        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the held terms of one clause of the item's label this principal satisfies, sorted, as the item card serves it. A rendered field is read
+        position the item was given. `labels` is `list<utf8>` as `tessera:labels`: the clauses of the item's labels this principal satisfies, as the item card serves them. A rendered field is read
         from `view`, where the item card reads the first view the principal can reach, so the two
         can differ. An item joined into `view` before its own ingest is flushed has null record
         fields until that flush.
@@ -3923,7 +3923,7 @@ components:
           type: array
           items:
             type: string
-          description: Why this session sees the item, as one clause of its access label that the session satisfies, written as the terms whose conjunction satisfies it, sorted. Every term is one the session holds. Never the item's whole label, so a viewer does not learn a clause they do not satisfy or a term they do not hold. Always present.
+          description: Why this session sees the item, as label text, sorted. Each term of the item's labels that the session holds is one entry, and each of its labels holding a conjunction that the session satisfies adds one clause of that label, written as the held terms joined by `&`; at each disjunction the satisfied operand with fewest terms, then the first in byte order, is taken. A term is quoted where the label grammar needs it. Every term is one the session holds, so a viewer does not learn a clause they do not satisfy or a term they do not hold. Always present.
         views:
           type: array
           description: The views this item is in that this principal may reach, sorted by id, each with the position that view places it at. A view the principal may not reach is left out, as a view nobody declared is. Always present. `[]` means none of the item's views is reachable; an item in no view at all is a `404` instead.

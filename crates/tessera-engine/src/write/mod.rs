@@ -1247,10 +1247,6 @@ pub(crate) struct MaintenanceDeps {
     /// The shared compute pool. A flush's segment write runs on it, off this thread, because this
     /// thread is the one that must reach a queued deny promptly.
     pub(crate) pool: Arc<rayon::ThreadPool>,
-    /// [`tessera_authz::MAX_DISTINCT_TERMS`], carried here because promotion is the one path by
-    /// which a caller grows the dictionary, and so where the bound is enforced. See
-    /// `flush::promote`.
-    pub(crate) max_distinct_terms: u64,
     /// Whether the coalesce and the merge run at all (`coalesce_enabled`, `merge_enabled`);
     /// whether a fold holds between its last pass and its submission (`fold_paused`), which lets a
     /// test land a flush inside a fold's flight; and whether a completed fold or merge is left

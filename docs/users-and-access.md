@@ -286,10 +286,12 @@ figures are paid at session start and never by a map request.
   terms by the background refresh, and joins its authorised set if true. A term unknown at
   authorise then widens the session once it appears. **Not built yet:** the session keeps the keys
   it resolved at authorise, so it sees less than its terms admit until it authorises again, never
-  more, and the engine records that it is behind.
-- An item card shows, of the item's label, one clause the viewer satisfies. Walking the true nodes
-  from the label's root gives it. The card never shows the whole expression, which could name terms
-  the viewer does not hold.
+  more. The engine can tell, from the keys promoted since, whether a session is behind, and
+  nothing outside its tests asks.
+- An item card shows every term of the item's labels the viewer holds, and, for each of its labels
+  holding a conjunction that the viewer satisfies, one clause of it in held terms: at each
+  disjunction the satisfied operand with fewest terms, then the first in byte order (built). The
+  card never shows the whole of such a label, which could name terms the viewer does not hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
 - The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
@@ -422,5 +424,6 @@ A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks 
 from a principal to its terms and permissions. It depends on nothing that can see a row id or an
 entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
 `tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
-parser, normalisation and the DAG belong in `tessera-authz`, beside the index they replace.
-`tessera-plugin` is deleted.
+parser and normalisation are in `tessera-types`, and the DAG and the index over labels are in
+`tessera-authz` (built). A leaf crate, `tessera-access`, holding the parser and the DAG together,
+is not built yet. `tessera-plugin` is deleted (built).

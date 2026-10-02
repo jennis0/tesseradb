@@ -437,6 +437,14 @@ impl Engine {
         self.switches.write_check_hold_wanted.store(true, Ordering::SeqCst);
     }
 
+    /// Lower the number of terms a flush may carry the dictionary to, so a small fixture reaches
+    /// the bound promotion enforces.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_max_distinct_terms_for_test(&self, terms: u64) {
+        self.switches.max_distinct_terms.store(terms, Ordering::Relaxed);
+    }
+
     /// Park every ingest call on entry, on the thread its handler runs on, until unparked.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

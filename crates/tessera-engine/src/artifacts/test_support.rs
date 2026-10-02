@@ -131,7 +131,7 @@ impl Fixture {
             records.access.resize_with(idx + 1, || None);
         }
         let access: Vec<Vec<u8>> = access.iter().map(|d| d.to_vec()).collect();
-        records.access[idx] = Some(Arc::from(access.as_slice()));
+        records.access[idx] = Some(super::rows::parse_access(&access));
     }
 }
 

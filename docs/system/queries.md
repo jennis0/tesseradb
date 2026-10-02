@@ -260,15 +260,17 @@ values scoped to those views. An identifier naming nothing and one naming an ite
 not see answer identically, both with a 404, so the response never distinguishes "does not exist"
 from "exists, but not for you."
 
-The response also says why this viewer sees the item: one clause of its access label that the
-viewer satisfies, written as the terms whose conjunction satisfies it, every one a term the viewer
-holds. It never names the whole label. A viewer learning that an item they can see also carries a
-clause they do not satisfy, or names a term they do not hold, would be a disclosure about how the
-corpus is labelled, not a filtered view of the item itself. Where the viewer satisfies several
-clauses, the one with fewest terms, then the first in byte order, is served, so the answer depends
-on the item's labels and the viewer's terms and on no internal number. A bulk read in stored order discloses part of what this withholds: which of the
-viewer's items share a full set of index keys, as [security](security.md#reading-in-bulk)
-states.
+The response also says why this viewer sees the item, as a sorted list of clauses, each written as
+label text. Every term of the item's labels that the viewer holds is one entry. Each of the item's
+labels holding a conjunction that the viewer satisfies gives one more: one clause of it, written as
+the held terms whose conjunction satisfies it. Within such a label, at each disjunction the
+satisfied operand with fewest terms, then the first in byte order, is taken, so the answer depends
+on the item's labels and the viewer's terms and on no internal number. The response never names a
+whole label holding a conjunction, a clause the viewer does not satisfy, or a term the viewer does
+not hold. Learning that an item they can see also carries one of those would tell the viewer how
+the corpus is labelled beyond what they may see. A bulk read in stored order discloses part of what
+this withholds: which of the viewer's items share a full set of index keys, as
+[security](security.md#reading-in-bulk) states.
 
 ## Reading items and artifacts in bulk
 
@@ -288,8 +290,8 @@ corpus. Rows returned before a flush and rows returned after it come from differ
 ### What a read of items returns
 
 A page holds `tessera_id`, then the named fields in the order named, then either or both of two
-system fields: `position`, and `labels`, the clause of the item's label this viewer satisfies, as
-the item card serves it. A unique
+system fields: `position`, and `labels`, the clauses of the item's labels this viewer satisfies,
+as the item card serves them. A unique
 field is named like any other. Under `keep_unmatched` every visible item is returned, with a
 `tessera:matched` column. Every named field is present whether or not an item holds a value, and a
 value it does not hold is a null. A category arrives as its value keys, and each page's dictionary

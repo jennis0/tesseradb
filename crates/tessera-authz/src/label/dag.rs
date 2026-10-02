@@ -218,30 +218,6 @@ impl Dag {
             Node::Or => self.children(n).iter().any(|&c| self.eval(c, held)),
         }
     }
-
-    /// Appends to `out` held terms whose conjunction satisfies the expression rooted at `n`, and
-    /// returns whether there are such terms. On `false`, `out` may hold terms of a partial attempt.
-    pub(super) fn witness(
-        &self,
-        n: u32,
-        held: &impl Fn(TermId) -> bool,
-        out: &mut Vec<TermId>,
-    ) -> bool {
-        match self.node[n as usize] {
-            Node::Leaf(t) => {
-                out.push(t);
-                held(t)
-            }
-            Node::And => self.children(n).iter().all(|&c| self.witness(c, held, out)),
-            Node::Or => {
-                let mark = out.len();
-                self.children(n).iter().any(|&c| {
-                    out.truncate(mark);
-                    self.witness(c, held, out)
-                })
-            }
-        }
-    }
 }
 
 #[cfg(test)]

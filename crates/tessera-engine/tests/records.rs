@@ -1910,8 +1910,7 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
     assert_eq!(sink.head.unwrap().page_rows, 128);
     assert_eq!(sink.pages[0].0.num_rows(), 128);
 
-    // Labels are one clause of each row's label the viewer satisfies, in its own terms: `0`, which
-    // every item carries and comes first in byte order, on every row.
+    // Labels are the viewer's own terms of each row's labels, sorted, on every row.
     let system = names(&["labels"]);
     let both = fx.engine.authorise(&both_credential()).unwrap();
     let mut req = request("s0", &none);
@@ -1925,7 +1924,11 @@ fn the_order_follows_the_fields_and_malformed_requests_are_refused() {
         let row = labels.value(i);
         let row = row.as_any().downcast_ref::<StringArray>().unwrap();
         let got: Vec<&str> = row.iter().map(|l| l.unwrap()).collect();
-        assert_eq!(got, vec!["0"], "item {}", by_tid[&tid]);
+        let expected: Vec<&str> = match subset_sees(by_tid[&tid]) {
+            true => vec!["0", "1"],
+            false => vec!["0"],
+        };
+        assert_eq!(got, expected, "item {}", by_tid[&tid]);
     }
 }
 

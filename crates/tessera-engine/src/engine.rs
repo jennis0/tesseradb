@@ -1122,7 +1122,6 @@ impl Engine {
             bundle_root: self.bundle_root.clone(),
             identity_key: self.identity_key,
             pool: Arc::clone(&self.pool),
-            max_distinct_terms: tessera_authz::MAX_DISTINCT_TERMS,
         }
     }
 

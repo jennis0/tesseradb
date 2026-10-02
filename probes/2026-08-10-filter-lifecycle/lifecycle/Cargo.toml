@@ -18,7 +18,6 @@ tessera-build = { path = "../../../crates/tessera-build" }
 tessera-engine = { path = "../../../crates/tessera-engine", features = ["fault-injection"] }
 tessera-filter = { path = "../../../crates/tessera-filter" }
 tessera-lifecycle = { path = "../../../crates/tessera-lifecycle" }
-tessera-plugin = { path = "../../../crates/tessera-plugin" }
 tessera-spatial = { path = "../../../crates/tessera-spatial" }
 tessera-store = { path = "../../../crates/tessera-store" }
 tessera-types = { path = "../../../crates/tessera-types" }

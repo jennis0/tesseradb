@@ -813,8 +813,8 @@ class Viewer:
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
-        `labels` (why this reader sees the item: the terms, all held by this reader, of one clause
-        of its label that they satisfy), `views` (the views
+        `labels` (why this reader sees the item: each term of its labels this reader holds, and one
+        satisfied clause of each label holding a conjunction, as label text), `views` (the views
         this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 
@@ -852,8 +852,8 @@ class Viewer:
           named `"<column>@<key>"` to say which of the group's views to read it in.
         - `system_fields`: any of `"position"`, the columns `tessera:x` and `tessera:y` in the
           view's coordinates (degrees for a geographic view), and `"labels"`, the column
-          `tessera:labels` holding, for each item, the held terms of one clause of its label that
-          this reader satisfies.
+          `tessera:labels` holding, for each item, the clauses of its labels that this reader
+          satisfies, as `item` gives them.
         - `filters`: a filter expression, as `Selection.filter` takes one. Only the items that
           match are returned.
         - `keep_unmatched`: return every item, with a `tessera:matched` column saying whether it

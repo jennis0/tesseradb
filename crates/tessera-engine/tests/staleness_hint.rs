@@ -204,6 +204,36 @@ fn a_credential_naming_one_descriptor_twice_is_never_hinted() {
     );
 }
 
+/// A term the dictionary carries only inside a label holding a conjunction is not a key of its
+/// own, and leaves the session behind only once it, or a label it satisfies, is promoted.
+#[test]
+fn a_term_named_only_inside_a_conjunction_is_hinted_only_by_its_own_promotion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (engine, _root) = engine_on_fixture(tmp.path());
+    promote(&engine, &tmp.path().join("label"), b"\x000&dept:secret");
+
+    let session = engine
+        .authorise(br#"{"terms": ["0", "dept:secret"]}"#)
+        .expect("authorises");
+    assert_eq!(
+        resolved(&session),
+        2,
+        "the term `0` and the label `0&dept:secret`, and no key for `dept:secret` alone"
+    );
+
+    promote(&engine, &tmp.path().join("unrelated"), b"dept:unrelated");
+    assert!(
+        !session.is_stale(&engine.generation()),
+        "a promotion of a term this session does not hold leaves it current"
+    );
+
+    promote(&engine, &tmp.path().join("own"), NOVEL);
+    assert!(
+        session.is_stale(&engine.generation()),
+        "the promotion of the held term as a key of its own leaves it behind"
+    );
+}
+
 /// This session's total visible count over the whole extent.
 fn visible(engine: &Engine, session: &Session) -> u64 {
     engine

@@ -133,37 +133,32 @@ impl Label {
     }
 
     /// Held terms whose conjunction satisfies this label, sorted and distinct, or `None` where
-    /// `held` does not satisfy it; `public` needs none. Of a disjunction, the first operand in
-    /// the label's canonical order that `held` satisfies is taken, so the answer depends on the
-    /// label and the terms held and on nothing else.
+    /// `held` does not satisfy it; `public` needs none. Of a disjunction, the satisfied operand
+    /// whose terms are fewest, then first in byte order, is taken, so the answer depends on the
+    /// label and the terms held and on nothing else. The choice is made at each disjunction, so
+    /// where operands of a conjunction share terms a smaller set can exist.
     pub fn witness(&self, held: &impl Fn(&str) -> bool) -> Option<Vec<&str>> {
-        let mut out = Vec::new();
-        if let Some(e) = &self.0 {
-            if !e.witness(held, &mut out) {
-                return None;
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        Some(out)
+        self.0.as_ref().map_or(Some(Vec::new()), |e| e.witness(held))
     }
 }
 
 impl Expr {
-    fn witness<'a>(&'a self, held: &impl Fn(&str) -> bool, out: &mut Vec<&'a str>) -> bool {
+    fn witness<'a>(&'a self, held: &impl Fn(&str) -> bool) -> Option<Vec<&'a str>> {
         match self {
-            Expr::Term(t) => {
-                out.push(t);
-                held(t)
+            Expr::Term(t) => held(t).then(|| vec![&**t]),
+            Expr::And(v) => {
+                let mut out = Vec::new();
+                for e in v {
+                    out.extend(e.witness(held)?);
+                }
+                out.sort_unstable();
+                out.dedup();
+                Some(out)
             }
-            Expr::And(v) => v.iter().all(|e| e.witness(held, out)),
-            Expr::Or(v) => {
-                let mark = out.len();
-                v.iter().any(|e| {
-                    out.truncate(mark);
-                    e.witness(held, out)
-                })
-            }
+            Expr::Or(v) => v
+                .iter()
+                .filter_map(|e| e.witness(held))
+                .min_by(|a, b| (a.len(), a).cmp(&(b.len(), b))),
         }
     }
 
@@ -190,6 +185,16 @@ impl Expr {
             Expr::Term(_) => std::slice::from_ref(self),
             Expr::And(v) | Expr::Or(v) => v,
         }
+    }
+}
+
+/// The label text of the conjunction of `terms`, in the order given: a term alone, or the terms
+/// joined by `&`, each quoted where the grammar needs it.
+pub fn conjunction_text(terms: &[&str]) -> String {
+    let mut operands: Vec<Expr> = terms.iter().map(|&t| Expr::Term(t.into())).collect();
+    match operands.len() {
+        1 => normal::canonical(&operands.remove(0)),
+        _ => normal::canonical(&Expr::And(operands)),
     }
 }
 
@@ -436,10 +441,16 @@ mod tests {
     }
 
     #[test]
-    fn a_witness_is_the_first_satisfied_clause_in_canonical_order() {
+    fn a_witness_is_the_satisfied_clause_with_fewest_terms_then_first_in_byte_order() {
         let l = label("(t&c)|(s&(b|a))");
         let all = |_: &str| true;
-        assert_eq!(l.witness(&all), Some(vec!["c", "t"]));
+        assert_eq!(l.witness(&all), Some(vec!["a", "s"]));
+        let wide_first = label("(a&b&c)|(d&e)");
+        assert_eq!(wide_first.witness(&all), Some(vec!["d", "e"]));
+        assert_eq!(
+            label("(x&((a&b&c)|z))|(d&e&f)").witness(&all),
+            Some(vec!["x", "z"])
+        );
         assert_eq!(
             l.witness(&|t| ["s", "b", "c"].contains(&t)),
             Some(vec!["b", "s"])
@@ -447,6 +458,18 @@ mod tests {
         assert_eq!(l.witness(&|t| t == "s"), None);
         assert_eq!(label("y|x").witness(&all), Some(vec!["x"]));
         assert_eq!(label("public").witness(&|_| false), Some(vec![]));
+    }
+
+    #[test]
+    fn a_conjunction_is_written_as_a_label_that_reads_back_as_itself() {
+        assert_eq!(conjunction_text(&["eu"]), "eu");
+        assert_eq!(conjunction_text(&["s", "team b"]), "s&\"team b\"");
+        for terms in [&["eu"][..], &["s", "team b"], &["a\"b", "c"]] {
+            let text = conjunction_text(terms);
+            let back = label(&text);
+            assert_eq!(back.canonical(), text);
+            assert_eq!(back.witness(&|t| terms.contains(&t)), Some(terms.to_vec()));
+        }
     }
 
     #[test]

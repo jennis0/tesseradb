@@ -456,7 +456,8 @@ fn create(engine: &Engine, batch: &str, rows: &[(&[&str], (f64, f64))]) -> Vec<T
 
 /// **A label ingested into a running service is read by the rule the build reads it by**: a
 /// conjunction is evaluated from a credential's terms once a flush has published it, the item
-/// card names one clause the viewer satisfies and nothing else, and both survive a restart.
+/// card names every term of the item's labels the viewer holds and one satisfied clause of each
+/// label holding a conjunction, and nothing else, and both survive a restart.
 #[test]
 fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -472,6 +473,7 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
         &[
             (&["eu&(ir:legal|ir:new)"], (10.0, 10.0)),
             (&["ir:new|ir:other"], (20.0, 20.0)),
+            (&["eu&(ir:legal|ir:new)", "ir:new|ir:secret", "x&y"], (40.0, 40.0)),
         ],
     );
     let refused = engine.ingest(IngestRequest {
@@ -505,13 +507,23 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
     let check = |engine: &Engine| {
         let both = engine.authorise(&credential(&["eu", "ir:new", "ir:secret"])).unwrap();
         let card = engine.item(&both, ids[0]).unwrap().expect("eu&ir:new satisfies it");
-        assert_eq!(card.labels, ["eu", "ir:new"], "one satisfied clause, held terms only");
+        assert_eq!(card.labels, ["eu&ir:new"], "one satisfied clause, held terms only");
         let card = engine.item(&both, ids[1]).unwrap().expect("ir:new satisfies it");
         assert_eq!(card.labels, ["ir:new"]);
+        let card = engine.item(&both, ids[2]).unwrap().expect("each of three labels admits it");
+        assert_eq!(
+            card.labels,
+            ["eu&ir:new", "ir:new", "ir:secret"],
+            "every held term, one clause of the conjunction, and nothing of `x&y`"
+        );
+        let secret = engine.authorise(&credential(&["ir:secret"])).unwrap();
+        let card = engine.item(&secret, ids[2]).unwrap().expect("ir:secret satisfies it");
+        assert_eq!(card.labels, ["ir:secret"]);
 
         let half = engine.authorise(&credential(&["ir:legal"])).unwrap();
         assert!(engine.item(&half, ids[0]).unwrap().is_none(), "half of the conjunction");
         assert!(engine.item(&half, ids[1]).unwrap().is_none());
+        assert!(engine.item(&half, ids[2]).unwrap().is_none());
     };
     check(&engine);
     drop(engine);
