@@ -72,8 +72,11 @@ const TOP_VALUES = 5;
  * @csspart aside - The heading's right-hand text: how many values a category has, or a number or
  *   date control's Clear button.
  * @csspart entry - A text, number or date input, with `aria-invalid` on a date that does not read.
- * @csspart hint - The line under a text column's box saying how to write a query.
- * @csspart mode - The keyword column's operator select.
+ * @csspart hint - The line under a text column's box saying how to write a query, and under a
+ *   date range saying how to write a date.
+ * @csspart mode - The keyword column's operator button, which opens its menu.
+ * @csspart operators - The menu of a keyword column's operators.
+ * @csspart operator - One operator in the menu, with `aria-checked`.
  * @csspart values - The typeahead's suggestions.
  * @csspart tick - One suggested value, with `aria-selected`, and `aria-disabled` in the highlight
  *   position where it is counted 0 and not chosen.
@@ -127,6 +130,54 @@ export class TesseraFilter extends TesseraElement {
       .ctl-row .grow {
         flex: 1 1 0;
         min-width: 0;
+      }
+      /* The operator: a button that opens a menu, as the explorer's choices do. */
+      .op {
+        position: relative;
+        flex: none;
+      }
+      [part='mode'] {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 32px;
+        padding: 0 8px 0 10px;
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        background: var(--_tessera-surface);
+        font-size: 13px;
+        color: var(--_tessera-ink);
+        white-space: nowrap;
+      }
+      [part='operators'] {
+        position: fixed;
+        inset: auto;
+        margin: 0;
+        box-sizing: border-box;
+        min-width: 120px;
+        padding: 4px;
+        border: 1px solid var(--_tessera-line);
+        border-radius: var(--_tessera-radius-control);
+        background: var(--_tessera-surface);
+        color: var(--_tessera-ink);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+      }
+      [part~='operator'] {
+        display: block;
+        width: 100%;
+        padding: 6px 8px;
+        border-radius: 4px;
+        font-size: 13px;
+        text-align: left;
+        white-space: nowrap;
+      }
+      [part~='operator']:hover,
+      [part~='operator']:focus-visible,
+      [part~='operator'][aria-checked='true'] {
+        background: var(--_tessera-surface-2);
+      }
+      [part~='operator'][aria-checked='true'] {
+        font-weight: 500;
       }
       .range {
         display: grid;
@@ -245,7 +296,10 @@ export class TesseraFilter extends TesseraElement {
       :host([verb='highlight']) [aria-selected='true'] [part='bar'] {
         background: var(--_tessera-highlight);
       }
+      /* Every count in a list as wide as the widest, so the bars' tracks end together. */
       [part='value-count'] {
+        min-width: var(--_count-width, auto);
+        text-align: right;
         font-size: 12px;
         font-weight: 400;
         font-variant-numeric: tabular-nums;
@@ -327,12 +381,19 @@ export class TesseraFilter extends TesseraElement {
   @state() accessor focused = false;
   /** The date inputs whose text did not read as a date, which keep the text typed. @internal */
   @state() accessor invalid: {gte?: string; lte?: string} = {};
+  /** Whether a keyword column's operator menu is open. @internal */
+  @state() accessor operatorsOpen = false;
   private sent: ColumnDraft | null = null;
   /** The commonest values under a category's box. */
   private readonly top = new HeldAggregate('filter');
   private readonly floating = new FloatingList(() => {
     const list = this.renderRoot.querySelector<HTMLElement>('[part="values"]');
     const anchor = this.renderRoot.querySelector<HTMLElement>('.combo');
+    return list && anchor ? {list, anchor} : null;
+  });
+  private readonly operatorMenu = new FloatingList(() => {
+    const list = this.renderRoot.querySelector<HTMLElement>('[part="operators"]');
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.op');
     return list && anchor ? {list, anchor} : null;
   });
   private typing: ReturnType<typeof setTimeout> | null = null;
@@ -403,6 +464,7 @@ export class TesseraFilter extends TesseraElement {
     this.ask('');
     this.top.set(null, null);
     this.floating.stop();
+    this.operatorMenu.stop();
     super.disconnectedCallback();
   }
 
@@ -451,6 +513,7 @@ export class TesseraFilter extends TesseraElement {
     if (this.draft && isPopulated(this.draft)) this.setAttribute('data-on', '');
     else this.removeAttribute('data-on');
     this.floating.update();
+    this.operatorMenu.update();
     const category = this.isConnected && this.resolvedOperand?.family === 'category';
     this.top.set(
       this.resolvedStore,
@@ -546,16 +609,58 @@ export class TesseraFilter extends TesseraElement {
       <span part="hint" id="hint">${hint}</span>`;
   }
 
-  /** A keyword control, offering the operators the column publishes. */
+  /** A keyword control, offering the operators the column publishes in a menu. */
   private keyword(o: FilterOperandSet, draft: ColumnDraft & {family: 'keyword'}) {
     const ops = o.operands.filter((op): op is KeywordOperator => (KEYWORD_OPERATORS as readonly string[]).includes(op));
+    const caption = columnCaption(this.column);
+    const close = (refocus: boolean) => {
+      this.operatorsOpen = false;
+      if (refocus) void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part="mode"]')?.focus());
+    };
+    const choose = (op: KeywordOperator) => {
+      close(true);
+      if (op !== draft.op) this.change({...draft, op}, true);
+    };
+    const at = Math.max(0, ops.indexOf(draft.op));
+    const keys = (e: KeyboardEvent, i: number) => {
+      const items = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="operator"]'));
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        close(true);
+        return;
+      }
+      const next = {ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1}[e.key];
+      if (next === undefined) return;
+      e.preventDefault();
+      items[next]?.focus();
+    };
+    const open = () => {
+      this.operatorsOpen = true;
+      void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>('[part~="operator"][aria-checked="true"]')?.focus());
+    };
     return html`<div class="ctl-row">
-      <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off"
+      <div class="input grow">${icon('search', 14)}<input id="ctl" part="entry" type="search" .value=${draft.needle} autocomplete="off" aria-label=${caption}
         @input=${(e: Event) => this.change({...draft, needle: (e.target as HTMLInputElement).value}, false)} /></div>
-      <select part="mode" style="width:auto" aria-label=${`${columnCaption(this.column)} operator`} .value=${draft.op}
-        @change=${(e: Event) => this.change({...draft, op: (e.target as HTMLSelectElement).value as KeywordOperator}, true)}>
-        ${ops.map((op) => html`<option value=${op} ?selected=${draft.op === op}>${OPERATOR_WORDS[op]}</option>`)}
-      </select>
+      <div class="op" @focusout=${(e: FocusEvent) => {
+        const to = e.relatedTarget as Node | null;
+        if (this.operatorsOpen && !(to && (e.currentTarget as HTMLElement).contains(to))) this.operatorsOpen = false;
+      }}>
+        <button part="mode" type="button" aria-haspopup="menu" aria-expanded=${this.operatorsOpen ? 'true' : 'false'} aria-label=${`${caption} operator: ${OPERATOR_WORDS[draft.op]}`}
+          @click=${() => (this.operatorsOpen ? close(false) : open())}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+            e.preventDefault();
+            open();
+          }}>${OPERATOR_WORDS[draft.op]}${icon('chev', 12, 1.4)}</button>
+        ${this.operatorsOpen
+          ? html`<div part="operators" popover="manual" role="menu" aria-label=${`${caption} operator`}>
+              ${ops.map(
+                (op, i) => html`<button part="operator" type="button" role="menuitemradio" data-op=${op} aria-checked=${op === draft.op ? 'true' : 'false'} tabindex=${i === at ? '0' : '-1'}
+                  @click=${() => choose(op)} @keydown=${(e: KeyboardEvent) => keys(e, i)}>${OPERATOR_WORDS[op]}</button>`
+              )}
+            </div>`
+          : nothing}
+      </div>
     </div>`;
   }
 
@@ -639,13 +744,13 @@ export class TesseraFilter extends TesseraElement {
     };
     const list =
       rows.length > 0
-        ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${columnCaption(this.column)} values`}>${repeat(rows, (v) => v.code, option)}</div>`
+        ? html`<div part="values" id="values" popover="manual" role="listbox" aria-label=${`${columnCaption(this.column)} values`} style=${countWidth(rows.map((v) => v.count))}>${repeat(rows, (v) => v.code, option)}</div>`
         : nothing;
     const top = this.topValues();
     const topKeys = new Set(top?.values.map((v) => v.key) ?? []);
     const topList =
       top && top.values.length > 0
-        ? html`<div part="top" role="group" aria-label=${`Commonest ${columnCaption(this.column)} values`}>
+        ? html`<div part="top" role="group" aria-label=${`Commonest ${columnCaption(this.column)} values`} style=${countWidth(top.values.map((v) => v.count))}>
             ${top.values.map((v) => {
               const title = v.title ?? keyTitle(s, this.column, v.key);
               const on = chosen.has(v.key);
@@ -712,8 +817,14 @@ export class TesseraFilter extends TesseraElement {
         aria-label=${`${caption} ${which === 'gte' ? 'from' : 'to'}`} aria-invalid=${invalid !== undefined ? 'true' : 'false'}
         @change=${commit} @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && commit(e)} />`;
     };
-    return html`<div class="range">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>`;
+    return html`<div class="range">${bound('gte')}<span class="to">to</span>${bound('lte')}</div>${date ? html`<span part="hint">e.g. 2015 or Mar 2015</span>` : nothing}`;
   }
+}
+
+/** The width of the widest of `counts` as written, for `--_count-width`. */
+function countWidth(counts: readonly (number | undefined)[]): string {
+  const widest = Math.max(0, ...counts.map((n) => (n === undefined ? 0 : n.toLocaleString('en-GB').length)));
+  return widest > 0 ? `--_count-width:${widest}ch` : '';
 }
 
 attachContextRoot();

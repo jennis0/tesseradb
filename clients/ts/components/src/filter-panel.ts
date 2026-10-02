@@ -48,7 +48,7 @@ const MODES: [ClauseVerb, string][] = [
  * user has opened or changed. A listed field shows its control while it holds a clause in the
  * current position or the user opened or changed it, and otherwise a row reading "Any" that opens
  * it. Add filter lists every field, the columns then the layers, with a search box, and the listed
- * ones are checked; its list opens over what sits below it. Choosing an unchecked field lists and
+ * ones are checked and say Shown; its list opens under the card, as wide as the card. Choosing an unchecked field lists and
  * opens it. Choosing a checked one takes it off the panel and empties its clauses in both
  * positions; a column in `pinned` stays, since the host lists it. Enter in the search box adds the
  * first match not yet listed and never takes one off.
@@ -263,7 +263,7 @@ export class TesseraFilterPanel extends TesseraElement {
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
       }
       [part='add-list'] .input {
-        margin-bottom: 4px;
+        margin: 2px 2px 6px;
       }
       [part~='add-option'] {
         display: flex;
@@ -275,22 +275,14 @@ export class TesseraFilterPanel extends TesseraElement {
         text-align: left;
       }
       [part~='add-option']:hover,
-      [part~='add-option']:focus-visible,
-      [part~='add-option'][aria-checked='true'] {
+      [part~='add-option']:focus-visible {
         background: var(--_tessera-surface-2);
-      }
-      [part~='add-option'][aria-checked='true'] {
-        font-weight: 500;
       }
       [part~='add-option']:focus-visible {
         outline-offset: -2px;
       }
       [part~='add-option'][aria-disabled='true'] {
         cursor: default;
-      }
-      .adder .anchor {
-        height: 0;
-        margin-bottom: 0;
       }
       [part~='add-option'] .kind {
         font-size: 12px;
@@ -333,9 +325,12 @@ export class TesseraFilterPanel extends TesseraElement {
 
   /** The control to open, scroll to and focus once the controls are drawn. */
   private editing: string | null = null;
+  /** The keys of the fields shown, in the order they were first shown. */
+  private listOrder: string[] = [];
   private readonly floating = new FloatingList(() => {
     const list = this.renderRoot.querySelector<HTMLElement>('[part="add-list"]');
-    const anchor = this.renderRoot.querySelector<HTMLElement>('.adder .anchor');
+    // The list opens under the card's own edge and as wide as the card.
+    const anchor = this.renderRoot.querySelector<HTMLElement>('.adder');
     return list && anchor ? {list, anchor} : null;
   });
 
@@ -518,7 +513,11 @@ export class TesseraFilterPanel extends TesseraElement {
     ];
     const pinned = new Set(this.pinned.split(/[\s,]+/).filter(Boolean));
     const holdsField = (f: (typeof fields)[number], verb: ClauseVerb) => (f.layer ? members.some((m) => m.layer === f.layer!.name && m.verb === verb) : holds(f.key, verb));
-    const listed = fields.filter((f) => pinned.has(f.key) || this.opened.has(f.key) || holdsField(f, 'filter') || holdsField(f, 'highlight'));
+    const shown = fields.filter((f) => pinned.has(f.key) || this.opened.has(f.key) || holdsField(f, 'filter') || holdsField(f, 'highlight'));
+    // A field joins the end of the list, so the fields already shown do not move.
+    const keys = new Set(shown.map((f) => f.key));
+    this.listOrder = [...this.listOrder.filter((k) => keys.has(k)), ...shown.map((f) => f.key).filter((k) => !this.listOrder.includes(k))];
+    const listed = this.listOrder.map((k) => shown.find((f) => f.key === k)!);
     const at = MODES.findIndex(([v]) => v === this.mode);
     const heading = this.controlsOnly ? nothing : html`<div class="head top"><h2 part="title">Filters${clear}</h2></div><span part="state" data-state="shown"></span>`;
     const modeSwitch = html`<div class="head mode-row"><div part="mode" role="radiogroup" aria-label="Edit">
@@ -554,7 +553,7 @@ export class TesseraFilterPanel extends TesseraElement {
                 this.adding = !this.adding;
                 this.addSearch = '';
                 this.addActive = 0;
-              }}>${icon('plus', 14, 1.4)}Add filter</button><div class="anchor"></div>
+              }}>${icon('plus', 14, 1.4)}Add filter</button>
             ${this.adding
               ? html`<div part="add-list" id="add-list" popover="manual" @keydown=${(e: KeyboardEvent) => {
                   if (e.key !== 'Escape') return;
@@ -581,7 +580,7 @@ export class TesseraFilterPanel extends TesseraElement {
                         return html`<button part="add-option" type="button" role="menuitemcheckbox" data-column=${o.layer ? nothing : o.key} data-layer=${o.layer ? o.layer.name : nothing}
                           aria-checked=${added ? 'true' : 'false'}
                           aria-disabled=${kept ? 'true' : nothing} title=${kept ? 'Always shown here' : added ? 'Remove from the panel' : nothing} tabindex=${i === tabbed ? '0' : '-1'}
-                          @click=${() => choose(o.key)} @keydown=${(e: KeyboardEvent) => this.addKeys(e, i)}><span>${o.title}</span>${o.layer ? html`<span class="kind">Clusters</span>` : nothing}</button>`;
+                          @click=${() => choose(o.key)} @keydown=${(e: KeyboardEvent) => this.addKeys(e, i)}><span>${o.title}</span>${added ? html`<span class="kind">Shown</span>` : o.layer ? html`<span class="kind">Clusters</span>` : nothing}</button>`;
                       })}</div>`
                     : html`<span class="none">No field by that name</span>`}
                 </div>`

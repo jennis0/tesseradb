@@ -388,8 +388,12 @@ export const chrome = css`
   .btn svg {
     flex: none;
   }
-  /* Quiet text at the right of a section heading, such as Clear all. */
+  /* Quiet text at the right of a section heading, such as Clear all, no taller than the heading's
+     line, so the heading does not move as it comes and goes. */
   .quiet {
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: 16px;
     font-size: 12px;
     font-weight: 500;
     letter-spacing: 0;
