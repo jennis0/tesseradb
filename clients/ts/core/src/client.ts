@@ -285,7 +285,9 @@ export class TesseraClient {
         ? {principal: target.principal}
         : 'terms' in target
           ? {terms: target.terms}
-          : {access_token: target.accessToken};
+          : 'readAll' in target
+            ? {read_all: true}
+            : {access_token: target.accessToken};
     const response = await this.send(`${this.opts.sessionUrl}/session/authorise`, {
       method: 'POST',
       headers: {authorization: `Bearer ${credential}`, 'content-type': 'application/json'},

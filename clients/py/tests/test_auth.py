@@ -41,6 +41,8 @@ def test_authorise_and_revoke_refuse_without_a_credential_or_with_two_targets():
     with pytest.raises(ValueError):
         authorise("http://127.0.0.1:1", "cred", principal="ann", terms=["a"])
     with pytest.raises(ValueError):
+        authorise("http://127.0.0.1:1", "cred", terms=["a"], read_all=True)
+    with pytest.raises(ValueError):
         revoke("http://127.0.0.1:1", "", 1)
 
 
@@ -70,6 +72,15 @@ def test_authorise_names_the_terms_with_the_operator_credential(monkeypatch):
     assert "2 term(s)" in repr(token) and "tok-1" not in repr(token)
     token.renew()
     assert json.loads(seen[-1].data) == {"terms": terms}
+
+
+def test_authorise_asks_for_the_operators_own_token_with_read_all(monkeypatch):
+    seen = answering(monkeypatch, {"token_id": 3, "expires_at": 1800000000})
+    token = authorise("http://session.test", "operator", read_all=True)
+    assert token.terms is None and token.principal is None
+    assert json.loads(seen[0].data) == {"read_all": True}
+    token.renew()
+    assert json.loads(seen[-1].data) == {"read_all": True}
 
 
 def test_login_sends_exactly_one_credential_in_the_body_and_no_bearer(monkeypatch):

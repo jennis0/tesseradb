@@ -409,7 +409,7 @@ export type MembershipsGrown = PublicationAck & {
  *
  * @category Control plane
  */
-export type Permission = 'read' | 'write' | 'authorise-as' | 'admin';
+export type Permission = 'read' | 'write' | 'authorise-as' | 'admin' | 'read-all' | 'write-all';
 
 /**
  * The answer of every catalogue change.
@@ -433,8 +433,6 @@ export type PrincipalRecord = {
   kind: 'person' | 'service';
   /** Whether its credentials are refused. */
   disabled: boolean;
-  /** Whether, holding `write`, it writes against the whole corpus. */
-  bypass: boolean;
   /** Whether a password is set. */
   has_password: boolean;
   /** The terms granted to the principal directly. */
@@ -446,15 +444,13 @@ export type PrincipalRecord = {
 };
 
 /**
- * What `changePrincipal` changes. Each field present is applied, `disabled` first.
+ * What `changePrincipal` changes.
  *
  * @category Control plane
  */
 export type PrincipalChange = {
   /** `true` ends the principal's sessions and refuses each of its credentials. */
-  disabled?: boolean;
-  /** `true` lets a principal holding `write` write against the whole corpus. */
-  bypass?: boolean;
+  disabled: boolean;
 };
 
 /**
@@ -607,8 +603,8 @@ export type ControlOptions = {
   controlUrl: string;
   /**
    * The credential sent as the bearer token on every request: the operator credential, an API key
-   * or an OIDC access token. Writes need `write` and `bypass`; status, flush, compaction and the
-   * catalogue's verbs need `admin`.
+   * or an OIDC access token. Writes need `write`; flush and compaction need `write` and
+   * `write-all`; status and the catalogue's verbs need `admin`.
    */
   credential: string;
   /** Used for every request in place of the global `fetch`. */
@@ -1023,7 +1019,7 @@ export class Control {
     return this.sendJson('POST', '/control/principals', {name, kind}, options) as Promise<Answer<CatalogueChange>>;
   }
 
-  /** `PATCH /control/principals/{name}`: disables or enables a principal, or sets its `bypass`. */
+  /** `PATCH /control/principals/{name}`: disables or enables a principal. */
   changePrincipal(name: string, change: PrincipalChange, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
     return this.sendJson('PATCH', `/control/principals/${segment(name)}`, change, options) as Promise<Answer<CatalogueChange>>;
   }

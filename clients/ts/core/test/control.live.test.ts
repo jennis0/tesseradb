@@ -334,6 +334,15 @@ describe('Control against a live server', () => {
     await expect(client.meta(session.token)).rejects.toMatchObject({status: 403, code: 'expired-token'});
   });
 
+  it("mints the operator's own session, which reads every item, and refuses it to a key", async (ctx) => {
+    live(ctx);
+    const own = await client.authorise({readAll: true});
+    const narrow = await client.authorise({terms: [TERM]});
+    expect((await seen(own.token)).visible).toBeGreaterThanOrEqual((await seen(narrow.token)).visible);
+    await client.revoke(own.tokenId);
+    await client.revoke(narrow.tokenId);
+  });
+
   it('manages a principal, its credentials and its sessions through the catalogue', async (ctx) => {
     live(ctx);
     const name = 'ts-live-ann';
@@ -372,6 +381,7 @@ describe('Control against a live server', () => {
     await portal.revoke(minted.tokenId);
     await expect(client.meta(minted.token)).rejects.toMatchObject({status: 403, code: 'expired-token'});
     await expect(portal.authorise({terms: [TERM]})).rejects.toMatchObject({status: 403});
+    await expect(portal.authorise({readAll: true})).rejects.toMatchObject({status: 403});
     expect((await control.deletePrincipal('ts-live-portal')).ok).toBe(true);
 
     // Logout ends the session it is sent with, and ending by principal ends the rest.

@@ -116,9 +116,6 @@ class Database:
         #: The tables inserted since the last commit, which the next one sends and forgets.
         self.pending: list[Insert] = []
         self.blocks = D.Declaration()
-        #: Every access label this database's rows carry, plus each view's default label: the
-        #: terms `viewer()` holds when given none. The server has no route that lists them.
-        self.terms: list[str] = []
         self.built = (self.path / "bundle" / "CURRENT").exists()
         self._child: subprocess.Popen | None = None
         self.listening: _instance.Listening | None = None
@@ -1218,7 +1215,6 @@ class Database:
         state = {
             "inserts": [_stored(insert) for insert in self.inserts],
             "pending": [_stored(insert) for insert in self.pending],
-            "terms": list(self.terms),
             "blocks": _tagged(self.blocks.blocks),
         }
         path = self.path / ".tessera" / "declaration.json"
@@ -1323,7 +1319,6 @@ class Database:
             raise Refusal("commit: the build failed\n" + report.log, report)
         self.built = True
         self._record_label_columns(document.get("layer", []))
-        self._record_terms(document)
         self.serve()
         report.seconds = time.monotonic() - started
         if self.listening is not None:
@@ -1400,7 +1395,6 @@ class Database:
             raise Refusal(str(report), report)
         accepted = C.run(control, pages, report, strict)
         self._record_label_columns(page.body for page in accepted if page.kind == "layer")
-        self._record_terms(self._document())
         self.pending.clear()
         self._save_state()
         if pages and not accepted:
@@ -1434,22 +1428,24 @@ class Database:
     def token(self, terms: Sequence[str] | None = None) -> Token:
         """A token for reading this database, made with its operator credential.
 
-        - `terms`: the access terms the token holds. By default it holds every access label the
-          database's rows carry, and each view's default label.
+        - `terms`: the access terms the token holds. Without them the token is the operator's
+          own, which holds `read-all` and reads every item that is not deleted or suppressed.
 
         Pass the token to `connect` or `Map` to read as that reader.
 
             token = db.token(["cs.LG"])
         """
         self.serve()
-        chosen = list(terms) if terms is not None else list(self.terms)
-        return authorise(self.session_url, self.operator_credential, terms=chosen)
+        if terms is None:
+            return authorise(self.session_url, self.operator_credential, read_all=True)
+        return authorise(self.session_url, self.operator_credential, terms=list(terms))
 
     def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
         """A reader of this database holding only the access terms given.
 
         - `terms`: the access terms. The reader sees an item when it holds one of the item's
-          labels. By default it holds every label the database's rows carry, which sees everything.
+          labels. Without them the reader is the operator, which holds `read-all` and sees every
+          item that is not deleted or suppressed.
 
         Every count, map and record the reader is given covers only what those terms let it see.
         An empty list is refused, since such a reader sees nothing. A term no row carries is
@@ -1464,12 +1460,13 @@ class Database:
                 "viewer: a reader holding no terms sees nothing. Name at least one term, or "
                 "call viewer() with no terms to read everything"
             )
-        chosen = list(terms) if terms is not None else list(self.terms)
+        chosen = None if terms is None else list(terms)
         self.serve()
         reader = Viewer(self.viewer_url, lambda: self.token(chosen), terms=chosen)
         # A new token is made for each call, so a commit's new views are seen, while the category
         # keys already looked up are kept for every reader holding the same terms.
-        reader._keys = self._keys.setdefault((self.viewer_url, frozenset(chosen)), {})
+        held = None if chosen is None else frozenset(chosen)
+        reader._keys = self._keys.setdefault((self.viewer_url, held), {})
         return reader
 
     def map(
@@ -1634,31 +1631,6 @@ class Database:
             if field:
                 D.carry_labels(layer["name"], self.blocks.layer(layer["name"]), field)
         self._save_state()
-
-    def _record_terms(self, document: dict) -> None:
-        """Remember every access label inserted so far: the terms `viewer()` holds by default."""
-        for term in self._inserted_terms(document):
-            if term not in self.terms:
-                self.terms.append(term)
-        self._save_state()
-
-    def _inserted_terms(self, document: dict) -> list[str]:
-        """Every access label inserted into a view or onto an artifact, plus each view's default
-        label and each layer's named default."""
-        terms: list[str] = []
-        for block in document.get("view", []) + document.get("view_group", []):
-            terms.extend(_label_terms(dict(block.get("point_visibility") or {}).get("default")))
-        for block in document.get("layer", []):
-            default = _label_terms(dict(block.get("artifact_visibility") or {}).get("default"))
-            if default != ["inherited"]:
-                terms.extend(default)
-        for insert in self.inserts + self.pending:
-            column = insert.columns.get("access") if insert.role in ("rows", "artifacts") else None
-            if column is None:
-                continue
-            for value in insert.table()[column].to_pylist():
-                terms.extend(_label_terms(value))
-        return terms
 
     # ------------------------------------------------------------------ verbs that are not inserts
 
@@ -2206,7 +2178,6 @@ def _restored(stored: dict) -> Insert:
 def _load(database: Database, state: dict) -> None:
     database.inserts = [_restored(one) for one in state.get("inserts", [])]
     database.pending = [_restored(one) for one in state.get("pending", [])]
-    database.terms = list(state.get("terms", []))
     for kind, blocks in state.get("blocks", {}).items():
         database.blocks.blocks[kind] = [_untagged(block) for block in blocks]
 
@@ -2316,16 +2287,3 @@ def _member_addresses(insert: Insert, levelled: bool) -> set[tuple]:
     if pa.types.is_signed_integer(key.type):
         named = pc.and_(named, pc.not_equal(key, NOISE_KEY))
     return _distinct(*(pc.filter(array, named) for array in (level, key, view)))
-
-
-# Rust's `str::trim` set, the Unicode White_Space property; `str.strip()` also strips U+001C-001F.
-_WHITE_SPACE = (
-    "\t\n\x0b\x0c\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
-    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
-)
-
-
-def _label_terms(value) -> list[str]:
-    """One access cell's labels as the server stores them: each trimmed, an empty one dropped."""
-    trimmed = (str(one).strip(_WHITE_SPACE) for one in C._labels(value) if one is not None)
-    return [label for label in trimmed if label]

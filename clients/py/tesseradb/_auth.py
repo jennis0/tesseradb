@@ -173,21 +173,25 @@ def authorise(
     principal: Optional[str] = None,
     access_token: Optional[str] = None,
     terms: Optional[Sequence[str]] = None,
+    read_all: bool = False,
     timeout: float = 10.0,
 ) -> Token:
-    """Make a token on the session plane, for another principal or for a set of terms.
+    """Make a token on the session plane, for another principal, for a set of terms, or for the
+    operator.
 
     - `session_url`: the address of the database's session plane, where tokens are made.
     - `credential`: an API key whose principal holds `authorise-as`, or the operator credential.
       Either can make a token that reads as anyone. Give other people a token, never the
       credential.
     - Exactly one target: `principal`, a local principal's name; `access_token`, the OIDC access
-      token of the identity to act as; or `terms`, the access terms the token holds, which only
-      the operator credential may name.
+      token of the identity to act as; `terms`, the access terms the token holds; or
+      `read_all=True`, the operator's own token. Only the operator credential may send the last
+      two.
     - `timeout`: how long to wait for the server, in seconds.
 
-    A token for a principal carries its terms and its `read` and `write`, and the principal must
-    hold `read`. A token for `terms` holds those terms and `read`. The token's `renew()` makes a
+    A token for a principal carries its terms and its `read` and `write`, never its `read-all`,
+    and the principal must hold `read`. A token for `terms` holds those terms and `read`. The
+    operator's token holds `read-all`: it reads every item that is not deleted or suppressed. The token's `renew()` makes a
     fresh one with the same credential, which stays in this process. A `Database` does this for
     you: `db.token(terms)` and `db.viewer(terms)`.
 
@@ -210,10 +214,13 @@ def authorise(
         "principal": principal,
         "access_token": access_token,
         "terms": None if terms is None else list(terms),
+        "read_all": True if read_all else None,
     }
     body = {k: v for k, v in named.items() if v is not None}
     if len(body) != 1:
-        raise ValueError("authorise takes exactly one of principal=, access_token= and terms=")
+        raise ValueError(
+            "authorise takes exactly one of principal=, access_token=, terms= and read_all=True"
+        )
     answer = _post(
         session_url.rstrip("/") + "/session/authorise",
         credential,
@@ -231,6 +238,7 @@ def authorise(
             principal=principal,
             access_token=access_token,
             terms=terms,
+            read_all=read_all,
             timeout=timeout,
         ),
         principal=principal,

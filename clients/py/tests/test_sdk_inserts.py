@@ -425,5 +425,4 @@ def test_a_padded_label_serves_trimmed_and_a_control_character_is_kept_at_each_c
     report = db.commit()
     assert report.ok, report
     assert counts() == {"red": 2, "\x1fred": 2, "sealed": 2}
-    assert {"red", "\x1fred", "sealed"} <= set(db.terms)
-    assert not {" red ", "", "  "} & set(db.terms)
+    assert db.viewer().view("map").count() == 6

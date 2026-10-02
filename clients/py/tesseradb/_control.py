@@ -96,7 +96,8 @@ class Control:
 
     - `base`: the control plane's address, such as `http://127.0.0.1:41234`.
     - `credential`: the operator credential, an API key or an OIDC access token. Writes need
-      `write` and `bypass`; status, flush, compaction and the catalogue's verbs need `admin`.
+      `write`; flush and compaction need `write` and `write-all`; status and the catalogue's
+      verbs need `admin`.
     - `timeout`: how long to wait for one answer, in seconds. The default is 300.
     """
 
@@ -353,7 +354,7 @@ class Control:
     def list_principals(self) -> Answer:
         """`GET /control/principals`: every local principal, under `principals`.
 
-        Each record holds its `name`, `kind`, `disabled`, `bypass`, `has_password`, and the
+        Each record holds its `name`, `kind`, `disabled`, `has_password`, and the
         `terms`, `permissions` and `groups` granted to it directly. No password or key is answered.
         """
         return self._send("GET", "/control/principals")
@@ -369,17 +370,14 @@ class Control:
         """
         return self._json_send("POST", "/control/principals", {"name": name, "kind": kind})
 
-    def change_principal(
-        self, name: str, disabled: bool | None = None, bypass: bool | None = None
-    ) -> Answer:
-        """`PATCH /control/principals/{name}`: disable or enable a principal, or set `bypass`.
+    def change_principal(self, name: str, disabled: bool) -> Answer:
+        """`PATCH /control/principals/{name}`: disable or enable a principal.
 
-        Each argument given is sent. A disabled principal's sessions end and none of its
-        credentials is accepted. `bypass` lets a principal holding `write` write against the
-        whole corpus.
+        A disabled principal's sessions end and none of its credentials is accepted.
         """
-        body = {k: v for k, v in (("disabled", disabled), ("bypass", bypass)) if v is not None}
-        return self._json_send("PATCH", f"/control/principals/{_segment(name)}", body)
+        return self._json_send(
+            "PATCH", f"/control/principals/{_segment(name)}", {"disabled": disabled}
+        )
 
     def delete_principal(self, name: str) -> Answer:
         """`DELETE /control/principals/{name}`: the principal, its password, keys, grants and
@@ -469,8 +467,8 @@ class Control:
         Name exactly one of `principal` and `group`, and exactly one of `term`, `terms` and
         `permission`; the server refuses anything else with `422`. A term says what the grantee
         may see, and `terms` grants many as one change, refused whole if one is. A permission,
-        `"read"`, `"write"`, `"authorise-as"` or `"admin"`, says what it may do. A grant already
-        held changes nothing.
+        `"read"`, `"write"`, `"authorise-as"`, `"admin"`, `"read-all"` or `"write-all"`, says
+        what it may do. A grant already held changes nothing.
         """
         return self._json_send("POST", "/control/grants", _grant(principal, group, term, terms, permission))
 

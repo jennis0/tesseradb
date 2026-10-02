@@ -32,7 +32,7 @@ ONE_TERM = "cs.LG"
 
 @pytest.fixture
 def db(served, corpus):
-    """The notebook corpus, committed and served, as its own all-terms principal."""
+    """The notebook corpus, committed and served, read with the operator's own token."""
     return served(lambda one: declare_notebook(one, corpus))
 
 
@@ -101,10 +101,12 @@ def test_viewer_refuses_an_empty_term_set(db):
         db.viewer([])
 
 
-def test_the_union_is_every_access_label_the_sdk_inserted(db):
-    """`viewer()` with no terms mints for the distinct labels of every access column inserted."""
-    assert ONE_TERM in db.terms
-    assert len(db.terms) > 1
+def test_a_reader_given_no_terms_is_the_operator_and_reads_every_item(db):
+    """`viewer()` with no terms reads with the operator's own token, which holds `read-all`: the
+    SDK keeps no list of labels to stand in for it."""
+    token = db.token()
+    assert token.terms is None and token.principal is None
+    assert db.viewer().view("s0").count() > db.viewer([ONE_TERM]).view("s0").count()
 
 
 # ---------------------------------------------------------------------------- the query verbs
@@ -128,9 +130,8 @@ def test_item_is_the_record_for_a_point_a_sample_served(db):
     one = table.column("tessera_id")[0].as_py()
     record = db.item(one)
     assert record["fields"]["arxiv_id"]
-    # Decision 0114: the item's own labels intersected with this session's satisfied set, never
-    # the full set, so a viewer learns no compartment they do not hold.
-    assert set(record["labels"]) <= set(db.terms)
+    # The operator's session satisfies every label, so the card names each label the item holds.
+    assert record["labels"]
     assert [view["id"] for view in record["views"]] == ["s0"]
 
 
@@ -153,7 +154,7 @@ def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
     found = db.lookup("s0", "id", [carried])
     assert found.column("tessera_id").to_pylist() == [one]
 
-    token = authorise(db.session_url, db.operator_credential, terms=db.terms)
+    token = authorise(db.session_url, db.operator_credential, read_all=True)
     assert connect(db.viewer_url, token).item(one)["fields"]["id"] == carried
 
 
@@ -213,9 +214,9 @@ def test_reading_an_uncommitted_database_names_the_commit_that_would_build_it(tm
 
 def test_a_token_never_prints_itself(db):
     """A repr reaches a saved notebook, a traceback and a log; the token must not be in it."""
-    minted = db.token()
+    minted = db.token([ONE_TERM])
     assert minted.token not in repr(minted)
-    assert f"{len(db.terms)} term(s)" in repr(minted)
+    assert "1 term(s)" in repr(minted)
 
 
 def test_a_token_past_its_expiry_is_renewed_and_the_next_read_answers(db):
