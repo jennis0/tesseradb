@@ -36,42 +36,39 @@ identity key too. Access control applies to what the server sends, not to the fi
 
 | Address | Routes | Who should reach it |
 |---|---|---|
-| Viewer | `/v1/*`, `/healthz`, `/readyz` | Browsers, each with its own token, through a TLS proxy |
-| Session | `/session/authorise`, `/session/revoke`, `/healthz`, `/readyz` | Your application's backend, which signs people in and asks Tessera for their tokens |
+| Viewer | `/v1/*`, `/healthz`, `/readyz` | Browsers, each with its own token, through a TLS proxy. People who log in with a password or an API key do it here, at `/v1/login`. |
+| Session | `/session/authorise`, `/session/revoke`, `/healthz`, `/readyz` | Your application's backend, which signs people in and asks Tessera for their tokens with an API key whose principal holds `authorise-as` |
 | Control | `/control/*` | You, and whatever loads data into the corpus |
 
-Anyone holding the session credential can mint a token with any labels they like. The operator
-credential is the only thing between the control address and a caller who wants to delete your
-data or add to it. Keep both addresses off the internet. The viewer address serves only what each
-token allows, and it is the one browsers need.
+An API key whose principal holds `authorise-as` can mint a token for any principal in the
+catalogue, and so read whatever any principal may. The operator credential holds every permission:
+it can mint a token for any set of access labels, read every item, change the catalogue, and
+delete your data or add to it. Keep the session and control addresses off the internet. The viewer
+address serves only what each token allows, and it is the one browsers need. It serves plain
+HTTP and accepts a password over it, so put it behind TLS, as [Put Tessera behind TLS](tls.md)
+describes.
 
-Both installs keep the credentials in files called `session.secret` and `operator.secret`. Under
-systemd they are in `/srv/tessera/secrets`, and under Docker in `~/tessera-docker/secrets`, which
-Compose mounts into the container as `/run/secrets`. The server reads each file once, when it starts, and trims the whitespace around it. To change a
-credential, replace the file and restart the server.
+Both installs keep the operator credential in a file called `operator.secret`. Under systemd it is
+in `/srv/tessera/secrets`, and under Docker in `~/tessera-docker/secrets`, which Compose mounts into
+the container as `/run/secrets`. The server reads the file once, when it starts, and trims the
+whitespace around it. To change the credential, replace the file and restart the server. The users,
+groups, API keys and grants are kept in the catalogue, the directory `[catalogue] dir` names, and
+change without a restart.
 
-Instead of a file, `session_credential_env` and `operator_credential_env` can name an environment
-variable. The server does not trim a variable, and anything else running as the same user can read
-a process's environment from `/proc`. A file is the better choice. Whichever you use, the server
-wants both credentials even if nothing ever calls the control address:
+Instead of a file, `operator_credential_env` can name an environment variable, which the server
+trims in the same way. Anything else running as the same user can read a process's environment
+from `/proc`, so a file is the better choice. Whichever you use, the server wants the credential
+even if nothing ever calls the control address, and refuses one that is empty:
 
 ```text
 tessera serve: refused to start: there is no operator credential; set `operator_credential_file` or `operator_credential_env` under [serve] and put the secret in that file or variable
 ```
 
-!!! warning
-    Not built yet: a plugin that checks a claim against your identity provider.
-    `builtin:passthrough` is the only plugin, and it grants whatever labels the caller of
-    `/session/authorise` asks for. The session credential is therefore all that stands between a
-    caller and every item in the corpus. Keep the session address away from browsers and the
-    network, and have your backend decide each person's labels from its own sign-in.
-    [Deployment](../system/clients.md#deployment) in the clients chapter shows both ways this goes
-    wrong.
-
 A browser's token lasts `token_max_lifetime` seconds, set under `[disclosure]`, and keeps the
-labels it was issued with. If you take a label away from someone, they go on seeing its items until
-their token expires, unless your backend revokes it with `/session/revoke`. A shorter lifetime
-narrows that gap, at the cost of more calls to the session address.
+labels its principal held when it was issued. A change in the catalogue that could change them,
+such as a label granted or taken away, a group membership or a disabled principal, ends every token
+of the principals it affects. Their next request is answered `403 expired-token`, and the client
+asks for a new token.
 
 ## Memory
 

@@ -295,8 +295,10 @@ token_max_lifetime = 3600
 viewer                   = "127.0.0.1:9141"
 session                  = "127.0.0.1:9142"
 control                  = "127.0.0.1:9143"
-session_credential_file  = "session.secret"
 operator_credential_file = "operator.secret"
+
+[catalogue]
+dir = "catalogue"
 ```
 
 `[bundle]` names three places on disc. `path` is the directory the build writes and the server
@@ -312,8 +314,11 @@ so that a change survives a crash.
 `token_max_lifetime` is how long a browser's permission to read the map lasts, in seconds. An hour
 is plenty here.
 
-`[serve]` gives the server's three addresses and the names of two files holding secrets. We'll
-create the files, and explain the addresses, when we start the server.
+`[serve]` gives the server's three addresses and the name of a file holding the operator's secret.
+We'll create the file, and explain the addresses, when we start the server.
+
+`[catalogue]` names the directory where Tessera keeps its users, the passwords and keys they sign
+in with, and what each may see and do. The server creates it the first time it starts.
 
 ## Check the declaration
 
@@ -458,13 +463,12 @@ nothing in our file can name a place twice.
 
 ## Serve it
 
-The server needs the two secret files `tessera.toml` names. Fill each with a random value that only
-you can read.
+The server needs the secret file `tessera.toml` names. Fill it with a random value that only you
+can read.
 
 ```bash
-openssl rand -hex 16 > session.secret
 openssl rand -hex 16 > operator.secret
-chmod 600 session.secret operator.secret
+chmod 600 operator.secret
 ```
 
 The server listens on three addresses, each with its own job.
@@ -472,9 +476,10 @@ The server listens on three addresses, each with its own job.
 - The viewer address, port 9141, serves the data. Each caller gets only the places it's allowed to
   see.
 - The session address, port 9142, gives a caller permission to read the map. It only answers
-  callers holding the session secret.
-- The control address, port 9143, takes changes to the data, such as new places and deletions.
-  It only answers callers holding the operator secret. We won't use it here.
+  callers holding a key that may act for other users, or the operator secret.
+- The control address, port 9143, takes changes to the data, such as new places and deletions,
+  and changes to the users. It only answers callers holding a key or a secret that allows the
+  change. We'll use it once, to create the users the map's page needs.
 
 Keeping them apart means you can open each address only to the callers that need it.
 
@@ -518,24 +523,61 @@ dist/tessera-components.js             1,857.60 kB │ gzip: 444.08 kB
 ```
 
 `examples/plain-html` holds a web page with the map on it, and a small Node server that signs you
-in. The server holds the session secret so that the browser never sees it; the tutorial on access
-control explains why that matters.
+in. Tessera needs to know who you are signed in as. It keeps its users, which it calls principals,
+in the catalogue, and the page's server asks the session address for a token on your behalf.
 
-The server signs you in as one of the people listed in `users.json`. The list that comes with the
-example belongs to a different dataset, so replace it with a single person, Everyone.
+So we need two principals. `everyone` is the person reading the map. It holds the `read`
+permission, which lets it read, and no labels of its own, since every place is labelled `public`
+and every principal holds that. `page` is the page's server. It holds `authorise-as`, which lets it
+ask for a token for another principal. Changes to the catalogue go to the control address, with the
+operator secret.
 
 ```bash
-cd examples/plain-html
-echo '{"everyone": {"label": "Everyone", "terms": []}}' > users.json
+cd ~/ireland
+export TESSERA_CREDENTIAL=$(cat operator.secret)
+tessera principal create everyone --kind person --control http://127.0.0.1:9143
+tessera grant --principal everyone --permission read --control http://127.0.0.1:9143
+tessera principal create page --kind service --control http://127.0.0.1:9143
+tessera grant --principal page --permission authorise-as --control http://127.0.0.1:9143
 ```
 
-Tell the page's server where Tessera is listening and where to find the session secret, then start
-it.
+```
+{"sessions_ended":0}
+{"sessions_ended":0}
+{"sessions_ended":0}
+{"sessions_ended":0}
+```
+
+Each change answers how many sessions it ended. Nobody is signed in yet, so the answer is 0.
+
+The page's server proves it is `page` with an API key. Tessera shows a key once, when it makes it,
+so save it straight to a file only you can read.
+
+```bash
+umask 077
+tessera key create page --control http://127.0.0.1:9143 > page.key
+cat page.key
+```
+
+```
+{"key":"tsk_92ce602a0958_c37c39511c94d1f5dbe414cdd9dde1232c602409e2db22d01401afc0b299d46a","prefix":"92ce602a0958"}
+```
+
+The page's server signs you in as one of the people listed in `users.json`, each with the
+principal it reads as. The list that comes with the example belongs to a different dataset, so
+replace it with a single person, Everyone.
+
+```bash
+cd ~/tesseradb/clients/ts/examples/plain-html
+echo '{"everyone": {"label": "Everyone", "principal": "everyone"}}' > users.json
+```
+
+Tell the page's server where Tessera is listening and give it the key, then start it.
 
 ```bash
 export TESSERA_VIEWER_URL=http://127.0.0.1:9141
 export TESSERA_SESSION_URL=http://127.0.0.1:9142
-export TESSERA_SESSION_CRED=$(cat ~/ireland/session.secret)
+export TESSERA_API_KEY=$(python3 -c 'import json; print(json.load(open("/dev/stdin"))["key"])' < ~/ireland/page.key)
 node server.mjs
 ```
 
@@ -588,10 +630,11 @@ When you've finished, press Ctrl-C in each terminal to stop the page's server an
 ## What you built
 
 `~/ireland` now holds a working deployment. The data is in `points.parquet` and the declaration in
-`corpus.toml`. `tessera.toml` holds the deployment's settings, and `session.secret` and
-`operator.secret` hold its two secrets. The `bundle` directory is what the build made from all of
-that. To bring the map back, start `tessera serve` in `~/ireland`, then run the three `export` lines
-and `node server.mjs` in the example's directory.
+`corpus.toml`. `tessera.toml` holds the deployment's settings, `operator.secret` the operator's
+secret, and `page.key` the page's key. The `catalogue` directory holds the two principals, and the
+`bundle` directory is what the build made from the data. To bring the map back, start
+`tessera serve` in `~/ireland`, then run the three `export` lines and `node server.mjs` in the
+example's directory. The principals and the key are still in the catalogue.
 
 ## What you learned
 
@@ -602,8 +645,8 @@ and `node server.mjs` in the example's directory.
 - Every place carries an access label, and a viewer sees only the places whose label they hold.
   Ours all carry `public`, which everyone holds.
 - The server listens on three addresses. Browsers read the map from the viewer address, your own
-  server gets them permission from the session address, and changes to the data go to the
-  control address.
+  server gets them permission from the session address, and changes to the data and to the
+  catalogue of principals go to the control address.
 - Everything a viewer is sent, every count and every point, is computed from the places their
   labels allow.
 

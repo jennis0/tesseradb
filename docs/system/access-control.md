@@ -86,25 +86,36 @@ permissions granted to each, and the OIDC providers whose access tokens the serv
 ([users and access](../users-and-access.md) is the design). The whole catalogue is held in memory,
 and no request reads SQLite.
 
-A session is minted in one of two ways.
+A session is minted in one of three ways.
 
 - **At login.** `POST /v1/login` on the viewer plane takes a password, an API key or an OIDC
   access token. A password is checked with argon2id, and failed attempts are limited per name
   presented. An API key is found by its public prefix and its secret compared by SHA-256 in
   constant time. An access token's signature is checked against a key its provider publishes at
   its JWKS URL, then its issuer, audience, `exp` and `nbf`; only asymmetric algorithms are
-  accepted. Every reason a credential is refused answers the same `401`.
+  accepted, and a token whose `typ` header names something other than a JWT or an access token
+  (`at+jwt`) is refused. Every reason a credential is refused answers the same `401`. Password
+  checks have an admission limit of their own, about one per core, and past it are answered `429`
+  whether or not the name exists. The session carries the principal's `read`, `write`, `read-all`
+  and `write-all`.
 - **Through `authorise-as`.** `POST /session/authorise` on the session plane takes an API key
   whose principal holds `authorise-as`, and names the principal to act as: a local principal by
   name, or an OIDC identity whose access token the integrator's backend passes on. The session
-  carries the target's terms and its `read` and `write`, and never its `admin`, `authorise-as` or
-  `bypass`. The session plane is a listener separate from the viewer plane, because its key acts
-  as any viewer and belongs to the integrator's backend, never to a browser.
+  carries the target's terms and its `read` and `write`, and never its `admin`, `authorise-as`,
+  `read-all` or `write-all`. The session plane is a listener separate from the viewer plane,
+  because its key acts as any viewer and belongs to the integrator's backend, never to a browser.
+- **With the operator credential.** On the session plane the operator credential may also name a
+  set of terms, `{"terms": [...]}`, for a session holding exactly those terms and `read` and
+  belonging to no principal, or ask for `{"read_all": true}`, a session of the superuser itself
+  holding `read` and `read-all`. An API key may use neither form.
 
 A local principal's terms are those granted to it and to each group it belongs to. An OIDC
 identity's terms are those its provider's claim rules produce from the token's claims, together
 with the terms of each local group a role mapping names. The principal must hold `read`. The
 service hands the engine the resolved terms, and the engine builds the authorised set from them.
+A session holding `read-all` is handed every term the dictionary carries instead, and its
+authorised set is built by the same union, so it is every item; the overlay is subtracted from it
+at each request as from any other, and it satisfies every view's, layer's and artifact's label.
 
 A token is a bearer string: unguessable, random, valid until its session ends. It carries no
 claims of its own and nothing that would let a holder work out its terms without asking the

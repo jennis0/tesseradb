@@ -107,7 +107,7 @@ should be hidden.
 ### Admission
 
 A request against `/control/ingest` is checked before the server commits any work to it. The
-credential and its `write` and `bypass`, the body size, the row count and the columns are checked first, and a
+credential and its `write`, the body size, the row count and the columns are checked first, and a
 request that fails any of them takes no effect. Every column may be left out of a row: a value
 left out keeps what the item stores, and a null clears it. A row carries both coordinates or
 neither. Beyond those, three checks apply:

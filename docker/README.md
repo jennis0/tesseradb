@@ -30,6 +30,8 @@ The working directory is `/etc/tessera`, so `tessera build` and `tessera serve` 
 
 Publishing a port to the host's loopback keeps it off the network. Other containers on the same Docker network still reach every port, including control, which still needs a credential.
 
+The three listeners serve plain HTTP, and the starting config binds them on `0.0.0.0`. A password sent to `POST /v1/login` on the viewer port, an API key and every session token cross the network as they are sent. The server accepts a password over plain HTTP, so a deployment reached from outside the host terminates TLS in front of the viewer port, and in front of the session and control ports where they leave the host: a reverse proxy, a load balancer or a TLS sidecar, as [the TLS guide](../docs/guides/tls.md) describes.
+
 ## Run it with Compose
 
 [compose.yaml](compose.yaml) runs the image read-only with every capability dropped, and publishes the control plane on the host's loopback only.

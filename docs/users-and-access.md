@@ -6,8 +6,8 @@ may see. The catalogue, the three listeners' credentials, sessions and their end
 catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients are built, and
 [system/access-control.md](system/access-control.md) describes them. **Not built yet:** access
 expressions and their index, removing the plugin, writes masked by the writer's terms, writes with
-a session token on the viewer listener, and the audit log. A write from a principal without `bypass` is refused until masked writes are
-built.
+a session token on the viewer listener, and the audit log. Until masked writes are built, a
+principal with `write` writes against the whole corpus whether or not it holds `write-all`.
 
 ## Decisions
 
@@ -15,14 +15,14 @@ built.
 |---|---|
 | How a viewer authenticates | OIDC access tokens, local passwords, and API keys. An OIDC provider is optional. |
 | Where identity data lives | A catalogue in SQLite, beside the bundle and independent of it. |
-| What a principal may do | Four permissions over the whole database: `read`, `write`, `authorise-as`, `admin`. They are separate from terms. |
+| What a principal may do | Six permissions over the whole database: `read`, `write`, `authorise-as`, `admin`, `read-all` and `write-all`. They are separate from terms. |
 | What a principal may see | Terms, granted to local principals and groups, or derived from OIDC claims. |
 | Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
 | How labels are indexed | Each distinct label gets a label id. A label that is a disjunction of terms is indexed under each of its terms. Any other label is indexed under its label id, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
-| Writes to items the writer cannot see | Masked by the writer's own terms. A principal flagged `bypass` acts on the whole corpus. |
+| Writes to items the writer cannot see | Masked by the writer's own terms. A principal holding `write-all` acts on the whole corpus. Not built yet: the mask. Every writer acts on the whole corpus. |
 | A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
@@ -41,12 +41,32 @@ A principal proves who it is with one of three credentials.
 
 | Credential | Held by | How Tessera checks it | What is stored |
 |---|---|---|---|
-| Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. Accepted over TLS only. | The argon2id hash. |
+| Password | Local person | argon2id against the stored hash. A password shorter than the configured minimum is refused when it is set. Failed attempts are limited per name presented. The server accepts it over plain HTTP, so a deployment that takes passwords terminates TLS in front of the viewer listener. | The argon2id hash. |
 | API key | Local person or service | A random secret with a public id prefix. The prefix finds the record and the secret is compared by SHA-256 in constant time. A key can carry an expiry and a narrower set of permissions than its principal. | The prefix, the hash, the expiry and the permissions. The secret is shown once, at creation. |
-| OIDC access token | OIDC identity | The signature against the provider's published keys (JWKS), then issuer, audience, expiry and not-before. | The provider's configuration only. Validating a token needs no stored secret. |
+| OIDC access token | OIDC identity | The signature against the provider's published keys (JWKS), then issuer, audience, expiry and not-before, and the `typ` header where it is present. | The provider's configuration only. Validating a token needs no stored secret. |
 
 An API key's secret carries enough entropy that a stolen hash cannot be reversed by guessing, so a
 fast hash is enough. A password carries far less, so it takes argon2id.
+
+Password checks have their own admission limit: as many at once as the service has compute
+threads, which is one per core unless configured otherwise, and as many again waiting. A check
+past that is answered `429` with `Retry-After`, before the name is looked up, so an unknown name
+meets the same limit, the same work and the same answer as a known one. The service's blocking
+thread pool is sized to hold these checks beside every admitted viewer and ingest request, so a
+flood of logins cannot take the threads those requests need.
+
+An access token is refused when its JOSE header carries a `typ` other than `JWT`, `at+jwt` or
+`application/at+jwt`, compared without regard to case. RFC 9068 types an access token `at+jwt`.
+Other typed JWTs, such as a logout token (`logout+jwt`), are refused. An OpenID Connect ID token
+usually carries `typ: JWT` or no `typ`, so the header cannot tell it apart from an access token.
+What refuses it is the audience: an ID token's `aud` is the client's id, so a provider whose
+`audience` names the API, and not a client, refuses it. A deployment that sets `audience` to a
+client id accepts that client's ID tokens as access tokens.
+
+Two providers may not have the same issuer and audience. A token from either would verify against
+both, and which claim rules and role mappings applied would depend on the order the providers
+were tried in. One rule in the catalogue refuses such a provider, whether it is declared through
+the API or in `tessera.toml`.
 
 A provider's JWKS URL uses `https`, or `http` to a loopback address (`localhost`, `127.0.0.1` or
 `::1`). Any other `http` URL is refused when the provider is declared, because anyone on the network
@@ -67,7 +87,7 @@ It holds:
 - local principals, with their password hashes and API keys;
 - local groups and their members;
 - the terms granted to each principal and each group;
-- the permissions granted to each principal and each group, and the `bypass` flag;
+- the permissions granted to each principal and each group;
 - each OIDC provider declared through the API: issuer, audience, JWKS location, and the rules that
   turn claims into terms, and the role mappings from exact claim values to local groups. A
   provider can also be declared in `tessera.toml` ([Surfaces](#surfaces)).
@@ -93,23 +113,45 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. All of it is masked by the principal's own terms ([Writes](#writes)). |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. All of it is masked by the principal's own terms ([Writes](#writes)). Not built yet: the mask, so a write acts on the whole corpus. |
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
-| `admin` | Every change to the catalogue. |
+| `admin` | Every change to the catalogue, and the service's status. |
+| `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
+| `write-all` | With `write`, writes against the whole corpus, unmasked, and flushing and compacting. |
 
-The four are independent. `admin` implies neither `read` nor `write`, so an account that manages
-users can be one that sees nothing. The superuser ([Bootstrap](#bootstrap)) holds all four.
+The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
+users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
+nothing alone. All six are granted to a principal or a group in the same way, and an OIDC identity
+receives them through a role mapping as it receives any other. The superuser
+([Bootstrap](#bootstrap)) holds all six.
+
+`admin` can grant any permission to any principal, itself included, so a principal holding
+`admin` can make itself hold `read-all` and `write-all`. `admin` is therefore equivalent to every
+permission, and is granted as such.
+
+A session holding `read-all` is authorised through the same path as every other session: its
+authorised set is built as the union of the postings of every term the dictionary carries, so
+the visible set is that union minus the overlay. A deletion or a suppression applies to it as to
+any session. It satisfies every view's, layer's and artifact's label, including a label no item
+carries. A term that first appears after the session was authorised is not in its set, and the
+service marks the session stale, as it marks any session whose credential names a term the
+dictionary has gained since.
+
+Flushing and compacting act on every item, so they need `write` and `write-all`. They do not need
+`admin`, so an ingest pipeline, which ends a commit with a flush, holds `write` and `write-all`
+and nothing more. The service's status needs `admin`.
 
 `authorise-as` is the permission an integrator's backend holds. It replaces the session credential.
 A session it mints for a principal carries that principal's terms, and that principal's `read` and
 `write`. A viewer who may annotate can therefore annotate through the integrator's application,
 and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
 also give the caller the target's privileges. The session never carries the target's `admin`,
-`authorise-as` or `bypass`, so a compromised backend can act as any viewer and cannot change who
-exists, what they are granted, or write outside a viewer's terms.
+`authorise-as`, `read-all` or `write-all`, so a compromised backend can act as any viewer and
+cannot change who exists, what they are granted, read past a viewer's terms, or write outside
+them.
 
-`bypass` is a flag on a principal. A principal with `write` and `bypass` writes against the whole
-corpus. It is intended for ingest pipelines that authenticate as themselves.
+A session a principal authorises for itself, at login, carries its `read`, `write`, `read-all`
+and `write-all`. No session carries `admin` or `authorise-as`.
 
 ## From a credential to terms
 
@@ -130,7 +172,8 @@ holds.
 - An administrator declares **role mappings** for a provider: a claim path and an exact value
   mapped to a local group, such as `groups[*]: tessera-admins -> admins`. An identity whose
   `groups` claim holds `tessera-admins` receives the group's permissions and the terms granted to
-  it. It never receives `bypass`. The mapping reads the claim itself and ignores the terms the
+  it, `read-all` and `write-all` among them where the group holds them. The mapping reads the
+  claim itself and ignores the terms the
   claim rules produce. The identity still holds those terms: with the standard rule it also holds
   the term `tessera-admins`. A mapping matches a whole value exactly, and only in the claim it
   names. A `department` claim that users can edit, set to `tessera-admins`, does not match.
@@ -326,7 +369,10 @@ system.
 
 ## Writes
 
-A write is masked by the writer's own terms unless the writer has `bypass`.
+A write is masked by the writer's own terms unless the writer holds `write-all`. **Not built
+yet:** the mask. A principal with `write` writes against the whole corpus whether or not it holds
+`write-all`, and every rule in this section is the design for masked writes. A write is therefore
+trusted with every item, as the operator is.
 
 - Deleting, suppressing or unsuppressing an item whose label the writer does not satisfy returns
   the answer for an item that does not exist, and does the same work.
@@ -349,10 +395,22 @@ root node upwards, so the writer's authorised set is never built.
 ## Bootstrap
 
 The operator credential, read from the file or environment variable named in `tessera.toml`,
-authenticates a built-in superuser that has every permission and `bypass`. The superuser is not in
-the catalogue. The API cannot disable it or change its credential. Changing the file and restarting
-rotates it. An empty catalogue therefore still has an administrator, who creates the first local
-principals and grants.
+authenticates a built-in superuser that has every permission, `read-all` and `write-all`
+included. The superuser is not in the catalogue. The API cannot disable it or change its
+credential. Changing the file and restarting rotates it. An empty catalogue therefore still has an
+administrator, who creates the first local principals and grants. The service refuses to start
+when the credential is empty or holds only white space, since an empty bearer would then
+authenticate as the superuser.
+
+On the session listener the operator credential has two forms of its own, which an API key holding
+`authorise-as` may not use.
+
+- `{"terms": [...]}` mints a session holding exactly those terms and `read`, for no principal of
+  the catalogue. Nothing is stored, so no catalogue change ends it. A local operator uses it to
+  read as a set of terms without creating principals.
+- `{"read_all": true}` mints a session of the superuser itself. It carries `read` and `read-all`,
+  so its authorised set is every item. The Python client's `db.viewer()` with no terms reads with
+  it.
 
 ## Surfaces
 
@@ -362,7 +420,7 @@ the CLI each reach all of them:
 - create, disable and delete a local principal, and set its password;
 - create and revoke an API key;
 - create and delete a group, and add and remove members;
-- grant and revoke terms and permissions, and set `bypass`;
+- grant and revoke terms and permissions;
 - declare, change and remove an OIDC provider and its claim rules;
 - list a principal's sessions, and end them.
 
@@ -378,8 +436,8 @@ The three listeners stay, and each accepts the credentials of the callers it ser
 | Listener | Accepts | Serves |
 |---|---|---|
 | Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests, and writes made with a session token that carries `write`. |
-| Session | A principal with `authorise-as`, by API key. | `POST /session/authorise`, naming the principal to authorise, and `POST /session/revoke`. |
-| Control | An API key, an OIDC access token, or the operator credential. | Writes, and the catalogue's verbs. |
+| Session | A principal with `authorise-as`, by API key, or the operator credential. | `POST /session/authorise`, naming the principal to authorise, and with the operator credential a set of terms or the superuser itself, and `POST /session/revoke`. |
+| Control | An API key, an OIDC access token, or the operator credential. | Writes, flush and compaction, status, and the catalogue's verbs. |
 
 An OIDC access token on the control listener is checked as it is at login, and its permissions come
 from its role mappings, so administration can be granted through single sign-on.
@@ -405,7 +463,12 @@ change records who made it and what it changed.
   NIST SP 800-63B requires for a password that is the only factor. No composition rule is applied.
 - Ten failed password attempts for one name within fifteen minutes refuse further attempts for that
   name until the fifteen minutes have passed. A refused attempt answers as a wrong password does.
-  Both numbers are configurable.
+  Both numbers are configurable. The limit counts attempts per name, from any address, so anyone
+  who knows a principal's name can lock it out of password login by sending ten wrong passwords
+  every fifteen minutes. The principal's API keys and its sessions are unaffected. Per-address
+  limiting is not built.
+- Password checks run at most one per compute thread at once, with as many waiting; past that a
+  login by password is answered `429`.
 
 ## Where the code lives
 
