@@ -323,13 +323,16 @@ describe('a streamed viewport response', () => {
 
   it('sends the render columns a request names as the list it was given, and `full` as the word', async () => {
     const sent: unknown[] = [];
+    const answered: unknown[] = [];
     for (const pointRows of [['score', 'archive'], [], 'full'] as const) {
       vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
         sent.push((JSON.parse(init!.body as string) as {point_rows?: unknown}).point_rows);
         return chunked(bodyBytes(), 64, {headers: HEADERS});
       });
-      await client().viewport('tok', {view: 's0', zoom: 4, k: 100, pointRows});
+      answered.push((await client().viewport('tok', {view: 's0', zoom: 4, k: 100, pointRows})).columnsAsked);
     }
     expect(sent).toEqual([['score', 'archive'], [], 'full']);
+    // The response says which columns were asked for, so a column it lacks can be told apart.
+    expect(answered).toEqual([['score', 'archive'], [], null]);
   });
 });

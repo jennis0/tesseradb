@@ -1083,6 +1083,8 @@ export type ViewportPart = {
   identityKey: string;
   /** As {@link ViewportResponse.contentKey}. */
   contentKey: string;
+  /** As {@link ViewportResponse.columnsAsked}. */
+  columnsAsked?: readonly string[] | null;
 };
 
 /**
@@ -1137,6 +1139,11 @@ export type ViewportResponse = {
    * to fetch it again.
    */
   contentKey: string;
+  /**
+   * The render columns the request named in {@link ViewportRequest.pointRows}, or `null` where it
+   * named none: a column outside the list is absent because it was not asked for.
+   */
+  columnsAsked?: readonly string[] | null;
   /**
    * The generation this response was answered from (`x-tessera-pin`, a JSON string). Send it back
    * as {@link ViewportRequest.stamp}; its only effect is {@link ViewportResponse.stale}. Until the

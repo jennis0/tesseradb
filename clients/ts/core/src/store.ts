@@ -852,11 +852,6 @@ export function createStore(options: StoreOptions): Store {
   const colourAsked = new Map<BandKey, number>();
   /** The render columns each caller of {@link setPointColumns} asked for, by its id. */
   const pointColumnAsks = new Map<string, readonly string[]>();
-  /**
-   * The view and columns each band lacking a render column was last fetched again under, so a
-   * server that leaves a column out is not asked for it without end.
-   */
-  const columnAsked = new Map<BandKey, string>();
   /** What the last {@link checkPointColumns} looked at, so a frame that changed none of it costs nothing. */
   let pointColumnsChecked: {replica: Replica; version: number; columns: string} | null = null;
 
@@ -1103,12 +1098,6 @@ export function createStore(options: StoreOptions): Store {
           }
         );
         if (!admitted(response.identityKey, tok)) throw identityChanged();
-        // Points asked for before a column was wanted lack it, and may land on bands already fetched
-        // again for it, so each band may be fetched again once more.
-        if (columns !== undefined && columns.join('\0') !== pointColumns(id).join('\0')) {
-          columnAsked.clear();
-          pointColumnsChecked = null;
-        }
         return response;
       },
       q,
@@ -1565,8 +1554,11 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * Fetch again every band the current view holds, in view or not, that lacks a column
-   * {@link pointColumns} names, so panning does not reveal a band without it. A band stays drawn
-   * until its replacement arrives. A band with no points has nothing to carry.
+   * {@link pointColumns} names and its request did not, so panning does not reveal a band without
+   * it. A band asked for every column, or for this one, is not fetched again for lacking it: the
+   * server served what there is. A band stays drawn until its replacement arrives, and is withdrawn
+   * again if the piece it came in marks it covered after. A band with no points has nothing to
+   * carry.
    */
   function checkPointColumns(): void {
     const machinery = views.current;
@@ -1578,13 +1570,11 @@ export function createStore(options: StoreOptions): Store {
     const last = pointColumnsChecked;
     if (last && last.replica === checked.replica && last.version === checked.version && last.columns === checked.columns) return;
     pointColumnsChecked = checked;
+    const unasked = (b: Band, c: string) => !(c in b.scalars) && b.columnsAsked != null && !b.columnsAsked.includes(c);
     const lacking = replica
       .heldBands()
-      .filter((b) => b.ids.length > 0 && columnAsked.get(bandKey(b.depth, b.prefix)) !== checked.columns && columns.some((c) => !(c in b.scalars)));
-    if (lacking.length === 0) return;
-    for (const b of lacking) columnAsked.set(bandKey(b.depth, b.prefix), checked.columns);
-    replica.retract(lacking);
-    machinery.presenter.reschedule();
+      .filter((b) => b.ids.length > 0 && columns.some((c) => unasked(b, c)));
+    if (replica.retract(lacking) > 0) machinery.presenter.reschedule();
   }
 
   function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
@@ -1645,7 +1635,6 @@ export function createStore(options: StoreOptions): Store {
     // The content key, the bands asked for again and the shapes were the outgoing view's.
     contentKeyAtFrame = '';
     colourAsked.clear();
-    columnAsked.clear();
     shapes.forget('all');
 
     if (!kept) {
@@ -2081,7 +2070,6 @@ export function createStore(options: StoreOptions): Store {
     clearSelection();
     contentKeyAtFrame = '';
     colourAsked.clear();
-    columnAsked.clear();
     awaitingSwitchFrame = false;
     replaceProjection('view', noFrame(views.id));
     replaceProjection('marks', {...projections.marks, bands: [], standIn: [], count: NO_COUNT});

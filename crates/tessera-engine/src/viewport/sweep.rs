@@ -608,6 +608,39 @@ pub(crate) fn scoped_render_families<'a>(
     manifest: &'a tessera_store::manifest::Manifest,
     view: &str,
 ) -> Vec<&'a tessera_store::manifest::ScopedScalar> {
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.scoped_scalars.iter())
+        .filter(|f| f.render && scoped_column_under(manifest, f, view))
+        .collect()
+}
+
+/// Every view whose row tail carries a column of `family`, in roster order: the one list
+/// [`scoped_render_families`] and `/v1/meta` both read. Unfiltered by the gate.
+pub(crate) fn scoped_family_views(
+    manifest: &tessera_store::manifest::Manifest,
+    family: &tessera_store::manifest::ScopedScalar,
+) -> Vec<String> {
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| {
+            g.views
+                .iter()
+                .map(move |v| format!("{}{}{}", g.name, tessera_store::GROUP_SEPARATOR, v.key))
+        })
+        .filter(|view| scoped_column_under(manifest, family, view))
+        .collect()
+}
+
+/// Whether `view`'s row tail carries a column of `family`: `view` is a view of the family's group,
+/// or of a group declaring members of it, and the family has a column for that key.
+fn scoped_column_under(
+    manifest: &tessera_store::manifest::Manifest,
+    family: &tessera_store::manifest::ScopedScalar,
+    view: &str,
+) -> bool {
     // Matched against the roster rather than parsed out of the id, since the roster decides which
     // group and key a view id names.
     let Some(roster) = manifest.groups.iter().find_map(|g| {
@@ -619,7 +652,7 @@ pub(crate) fn scoped_render_families<'a>(
             .any(|v| v.key == key)
             .then_some((g.name.as_str(), key))
     }) else {
-        return Vec::new();
+        return false;
     };
     let members_of = |name: &str| {
         manifest
@@ -629,22 +662,14 @@ pub(crate) fn scoped_render_families<'a>(
             .members_of
             .as_deref()
     };
-    manifest
-        .groups
-        .iter()
-        .flat_map(|g| g.scoped_scalars.iter())
-        .filter(|f| f.render)
-        .filter(|f| {
-            // A view of the group with no column — created since the build — renders nothing.
-            owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
-                f.views.contains(&format!(
-                    "{}{}{key}",
-                    f.group,
-                    tessera_store::GROUP_SEPARATOR
-                ))
-            })
-        })
-        .collect()
+    // A view of the group with no column — created since the build — carries none.
+    owning_key_of(roster, members_of, &family.group).is_some_and(|key| {
+        family.views.contains(&format!(
+            "{}{}{key}",
+            family.group,
+            tessera_store::GROUP_SEPARATOR
+        ))
+    })
 }
 
 /// Resolve `declared` against one segment's columns, once.
@@ -828,22 +853,29 @@ fn is_sparse(ts: &TileSweepOut<'_>) -> bool {
     spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
 }
 
+/// The address of `slice[i]`, which need not be read to be named.
+fn element<T>(slice: &[T], i: usize) -> usize {
+    slice.as_ptr() as usize + std::mem::size_of::<T>() * i
+}
+
 /// `MADV_WILLNEED` over every page in `pages`, one call per run of adjacent pages. The pages are
 /// read in the background, so the gather's faults that follow find them in the page cache, and
 /// the kernel's read-ahead around a fault, sized for a sequential reader, is not triggered.
 fn will_need(pages: &mut [usize]) {
-    const PAGE: usize = 4096;
-    for page in pages.iter_mut() {
-        *page &= !(PAGE - 1);
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: `sysconf` reads a constant of the running system.
+    let page = *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize);
+    for at in pages.iter_mut() {
+        *at &= !(page - 1);
     }
     pages.sort_unstable();
     let mut i = 0;
     while i < pages.len() {
         let start = pages[i];
-        let mut end = start + PAGE;
+        let mut end = start + page;
         i += 1;
         while i < pages.len() && pages[i] <= end {
-            end = end.max(pages[i] + PAGE);
+            end = end.max(pages[i] + page);
             i += 1;
         }
         // SAFETY: advice only; `MADV_WILLNEED` changes no mapping and no byte. Every page named
@@ -949,23 +981,27 @@ impl<'a> Gather<'a> {
                 let (segment, local) = segment_holding(self.view, row)
                     .expect("a selected row lies in the view's row space");
                 let rows = &self.segments[segment];
-                let at = |base: *const u8, width: usize| base as usize + width * local as usize;
-                self.pages.push(at(rows.tessera_id.as_ptr().cast(), 8));
-                self.pages.push(at(rows.morton.as_ptr().cast(), 4));
-                self.pages.push(at(rows.residual.as_ptr().cast(), 4));
+                let local = local as usize;
+                self.pages.push(element(rows.tessera_id, local));
+                self.pages.push(element(rows.morton, local));
+                self.pages.push(element(rows.residual, local));
                 for column in &self.columns {
                     macro_rules! page {
                         ($(($v:ident, $t:ty)),* $(,)?) => {
                             match &column.values {
-                                $(ColumnSlices::$v(slices) => slices[segment]
-                                    .map(|v| at(v.as_ptr().cast(), std::mem::size_of::<$t>())),)*
+                                $(ColumnSlices::$v(slices) => {
+                                    slices[segment].map(|v: &[$t]| element(v, local))
+                                })*
                                 ColumnSlices::Bool(arrays) => arrays[segment].map(|a| {
                                     let bits = a.values();
-                                    bits.values().as_ptr() as usize
-                                        + (bits.offset() + local as usize) / 8
+                                    element(bits.values(), (bits.offset() + local) / 8)
                                 }),
-                                ColumnSlices::Utf8(arrays) => arrays[segment]
-                                    .map(|a| at(a.value_offsets().as_ptr().cast(), 4)),
+                                // The offsets only: the value bytes' place is read from them, so
+                                // asking for it would fault the offsets now. Those pages fault
+                                // as the gather reads them.
+                                ColumnSlices::Utf8(arrays) => {
+                                    arrays[segment].map(|a| element(a.value_offsets(), local))
+                                }
                             }
                         };
                     }

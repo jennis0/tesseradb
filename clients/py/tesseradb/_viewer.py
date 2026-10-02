@@ -592,7 +592,12 @@ class Selection:
             ("computed", None if computed is None else list(computed)),
             ("artifact_budget", artifact_budget),
             ("artifact_rows", artifact_rows),
-            ("point_rows", point_rows if point_rows is None or isinstance(point_rows, str) else list(point_rows)),
+            (
+                "point_rows",
+                point_rows
+                if point_rows is None or isinstance(point_rows, str)
+                else list(point_rows),
+            ),
             ("underlay_offset", underlay_offset),
             ("pin", pin),
         ):

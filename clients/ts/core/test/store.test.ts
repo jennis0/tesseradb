@@ -2286,14 +2286,26 @@ describe('a point request names the render columns the store reads', () => {
     };
     const named = Array.isArray(req.pointRows) ? req.pointRows : Object.keys(all);
     const scalars = Object.fromEntries(Object.entries(all).filter(([name]) => named.includes(name)));
-    return {...r, result: {...r.result, scalars}};
+    return {...r, result: {...r.result, scalars}, columnsAsked: Array.isArray(req.pointRows) ? [...req.pointRows] : null};
   }
 
   async function open() {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {client, viewport} = fakeClient(answer, COLUMNS);
-    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    /** Called once, the next time a whole answer has been stored and before its ground is marked held. */
+    let onStored: (() => void) | null = null;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false,
+      replica: {
+        revalidateAfterMs: Infinity,
+        onPhase: (kind) => {
+          if (kind !== 'store' || !onStored) return;
+          const run = onStored;
+          onStored = null;
+          run();
+        }
+      }
+    });
     await clock.advance(1);
     const settle = async () => {
       await clock.advance(600);
@@ -2303,7 +2315,8 @@ describe('a point request names the render columns the store reads', () => {
     };
     /** The point requests sent, oldest first. */
     const asked = () => viewport.mock.calls.map((c) => c[1] as FakeRequest).filter((r) => r.k !== 0);
-    return {store, settle, asked};
+    const whenStored = (run: () => void) => (onStored = run);
+    return {store, settle, asked, whenStored};
   }
 
   it('names no column while nothing colours, sizes or asks, then the colour, size and asked columns the view renders', async () => {
@@ -2355,5 +2368,20 @@ describe('a point request names the render columns the store reads', () => {
     store.setColourBy('archive');
     await settle();
     expect(asked().length).toBe(settled);
+  });
+
+  it('fetches again a band stored under the old colour column and marked held after the colour changed', async () => {
+    const {store, settle, asked, whenStored} = await open();
+    store.setColourBy('archive');
+    whenStored(() => store.setColourBy('score'));
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    expect(asked()[0]!.pointRows).toEqual(['archive']);
+    await settle();
+    await settle();
+    expect(asked().some((r) => Array.isArray(r.pointRows) && r.pointRows.includes('score'))).toBe(true);
+    const bands = store.get('marks').bands;
+    expect(bands.length).toBeGreaterThan(0);
+    for (const band of bands) expect('score' in band.scalars).toBe(true);
   });
 });

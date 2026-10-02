@@ -266,8 +266,8 @@ export class Replica {
   }
 
   /** See {@link BandCache.retract}; the caller schedules the refetch. */
-  retract(bands: readonly Band[]): void {
-    this.cache.retract(bands);
+  retract(bands: readonly Band[]): number {
+    return this.cache.retract(bands);
   }
 
   /** The store's change counter; see {@link BandCache.version}. */
@@ -509,7 +509,7 @@ export class Replica {
    * sees the arrived bands as exact and the rest as stand-ins, with no hole.
    */
   private async absorb(
-    arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string},
+    arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string; columnsAsked?: readonly string[] | null},
     depth: number,
     k: number,
     /** The touch time every band of one piece shares: the piece's start. */
@@ -523,6 +523,7 @@ export class Replica {
       contentKey,
       capUsed: k,
       now: at,
+      columnsAsked: arrival.columnsAsked,
       table: this.opts.table,
       onRemap: (ms) => this.opts.onPhase?.('remap', ms, arrival.result.ids.length)
     });

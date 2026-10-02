@@ -90,7 +90,7 @@ pub(crate) use row_filter::{
 };
 pub(crate) use served::ServedView;
 pub(crate) use sweep::{
-    scoped_render_families, segment_holding, segment_row_of, RowPresence,
+    scoped_family_views, scoped_render_families, segment_holding, segment_row_of, RowPresence,
 };
 
 pub(crate) use geometry::OpenView;

@@ -604,6 +604,66 @@ async fn named_point_columns_serve_only_those_columns_and_an_unknown_one_is_refu
     assert_eq!(refused.status(), 422);
 }
 
+/// **Every column `/v1/meta` lists as rendered under a view is one `point_rows` accepts for it**,
+/// owning, sharing and plain views alike, and the points carry exactly those columns.
+#[tokio::test]
+async fn every_render_column_meta_lists_for_a_view_is_accepted_by_point_rows() {
+    let served = Served::build(build_with_families).await;
+    let meta: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&served.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let views: Vec<String> = meta["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(views.len() > 2, "{views:?}");
+    let mut scoped_somewhere = false;
+    for view in &views {
+        let mut rendered: Vec<String> = meta["declared_scalars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["render"] == true)
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect();
+        for family in meta["scoped_scalars"].as_array().unwrap() {
+            let under = family["views"].as_array().unwrap().iter().any(|v| v == view);
+            if family["render"] == true && under {
+                rendered.push(family["name"].as_str().unwrap().to_string());
+                scoped_somewhere = true;
+            }
+        }
+        let resp = served
+            .server
+            .client
+            .post(served.server.viewer_url("/v1/viewport"))
+            .bearer_auth(&served.token)
+            .json(&json!({
+                "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+                "point_rows": rendered,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{view}: {rendered:?}");
+        let names = points_columns(&resp.bytes().await.unwrap()).0;
+        if !names.is_empty() {
+            assert_eq!(names[2..], rendered[..], "{view}");
+        }
+    }
+    assert!(scoped_somewhere, "the fixture renders a scoped family under some view");
+}
+
 /// The tiles frame's rows and the points' `(tessera_id, code)` pairs.
 fn decode_tiles_and_codes(body: &[u8]) -> (Vec<u8>, Vec<(u64, u64)>) {
     let mut tiles = Vec::new();
