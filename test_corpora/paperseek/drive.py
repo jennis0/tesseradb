@@ -25,7 +25,6 @@ artifact step below additionally drills into a few ids through `POST /v1/artifac
 """
 import argparse
 import json
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -33,7 +32,7 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from test_corpora.common.serve_battery import Sessions  # noqa: E402
+from test_corpora.common.serve_battery import Sessions
 from pyarrow import ipc
 import io
 
