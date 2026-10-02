@@ -912,8 +912,10 @@ export function createStore(options: StoreOptions): Store {
     async (spec, signal) => {
       const asked = await viewed();
       const area = countedArea()!;
+      const box = area.selected ? null : lastView!.input.bbox;
       const filters = withArea(aggregateFilters(spec), area);
       const result = await aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
+      if (box) boxOf.set(result, box);
       if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
       return {result, view: asked.view};
     },
@@ -923,6 +925,10 @@ export function createStore(options: StoreOptions): Store {
   );
   /** The pending ask after the camera moved. */
   let inViewTimer: unknown = null;
+  /** The camera's box each count in view was taken over; a selected region's count has none. */
+  const boxOf = new WeakMap<object, [number, number, number, number]>();
+  /** The box the counts in view on show were taken over, which the shown count is taken over too. */
+  let countedBox: [number, number, number, number] | null = null;
   /** Whether `inView` holds its two specs, and the highlighted one. */
   let inViewRegistered = false;
   let inViewHighlighted = false;
@@ -1596,7 +1602,8 @@ export function createStore(options: StoreOptions): Store {
     const v = toDriverView(input);
     current.presenter.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
     current.channel.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
-    askInView(true);
+    // A selected region is counted as it is wherever the camera goes.
+    if (!region.selected) askInView(true);
   }
 
   /**
@@ -1746,10 +1753,18 @@ export function createStore(options: StoreOptions): Store {
     const counts = entries.get('counts');
     const lit = entries.get('highlighted');
     const total = counts?.result?.tables[0];
+    if (counts?.status === 'refused') {
+      // The last counts stand, marked refused; with none, the frame's own figures.
+      const v = projections.view;
+      const last = v.inView ?? {visible: v.visible, matched: v.matched, highlighted: v.highlighted, shown: v.served.shown};
+      replaceProjection('view', {...v, inView: {...last, status: 'refused'}});
+      return;
+    }
     if (!counts || !total || counts.view !== views.id) {
       if (projections.view.inView !== null && (!counts || counts.result === null)) replaceProjection('view', {...projections.view, inView: null});
       return;
     }
+    countedBox = counts.result ? (boxOf.get(counts.result) ?? null) : null;
     const exact = (counts.result?.region?.exact ?? true) && !(region.selected?.outside ?? false);
     const masked = (value: number) => ({value, exact});
     const visible = masked(total.referenceTotal ?? total.total);
@@ -1757,7 +1772,7 @@ export function createStore(options: StoreOptions): Store {
     const litTotal = lit?.result?.tables[0]?.total;
     const highlighted = litTotal === undefined ? matched : masked(litTotal);
     const loading = counts.status === 'loading' || counts.status === 'retrying' || lit?.status === 'loading' || lit?.status === 'retrying';
-    const status = counts.status === 'refused' || lit?.status === 'refused' ? 'refused' : loading ? 'loading' : 'shown';
+    const status = lit?.status === 'refused' ? 'refused' : loading ? 'loading' : 'shown';
     replaceProjection('view', {...projections.view, inView: {status, visible, matched, highlighted, shown: shownInArea(projections.marks.bands)}});
     if (status === 'shown' && region.selected) region.counted({visible, matched, verdict: counts.result?.region ?? null});
   }
@@ -1767,8 +1782,9 @@ export function createStore(options: StoreOptions): Store {
     const q = frameOrNull();
     if (!q) return 0;
     if (region.selected) return projections.region?.held.count ?? 0;
-    if (!lastView) return 0;
-    const [bx0, by0, bx1, by1] = lastView.input.bbox;
+    const counted = countedBox ?? lastView?.input.bbox;
+    if (!counted) return 0;
+    const [bx0, by0, bx1, by1] = counted;
     const [wx0, wy0] = dataToWorldXY(bx0, by0, q);
     const [wx1, wy1] = dataToWorldXY(bx1, by1, q);
     const box: [number, number, number, number] = [Math.min(wx0, wx1), Math.min(wy0, wy1), Math.max(wx0, wx1), Math.max(wy0, wy1)];
