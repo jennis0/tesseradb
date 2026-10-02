@@ -4,8 +4,8 @@ import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, nearestStop} from '@tesseradb/deck';
-import {artifactName, emptyDraft} from '@tesseradb/client';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
+import {WORLD_SIZE, artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
@@ -1382,7 +1382,8 @@ export class TesseraExplorer extends TesseraElement {
       this.placing = null;
       this.placeCallouts();
       // The resolution stops the server can count change with the camera.
-      const stops = this.layersOpen && this.density !== 'none' ? (this.map?.densityStops().map((s) => (s.enabled ? '1' : '0')).join('') ?? '') : '';
+      // The stops and the readout's cell size change with the zoom.
+      const stops = this.layersOpen && this.density !== 'none' ? `${Math.round((this.map?.zoom ?? 0) * 8)}:${this.map?.densityStops().map((s) => `${s.depth}${s.enabled ? '+' : '-'}`).join('') ?? ''}` : '';
       if (stops !== this.stopsSeen) {
         this.stopsSeen = stops;
         this.requestUpdate();
@@ -1545,33 +1546,43 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   /**
-   * The Resolution slider: one stop per cell size, coarse to fine. The stops past the finest the
-   * map can ask for at its camera are struck through on the track. Moving the slider onto one
-   * keeps the size asked for, which the map draws once the camera lets it, and shows the slider on
-   * the finest it can draw now. The readout gives the cell size drawn.
+   * The Resolution slider, coarse to fine: one stop per depth the cell sizes ask for at the map's
+   * zoom, so sizes that would draw the same cells are one stop. The stops past the finest the map
+   * can ask for at its camera are struck through on the track. Moving the slider onto one keeps the
+   * size asked for, which the map draws once the camera lets it, and shows the slider on the finest
+   * it can draw now. The readout gives the size of the cells drawn at the stop shown.
    */
   private resolutionControl(change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
-    const last = DENSITY_CELL_SIZES.length - 1;
-    // Before the map has a camera and `meta`, every stop is offered.
-    const enabled = this.map?.densityStops().map((s) => s.enabled) ?? [];
-    const finest = enabled.length === 0 ? last : Math.max(0, enabled.lastIndexOf(true));
-    const at = Math.min(DENSITY_CELL_SIZES.indexOf(nearestStop(this.densityResolution)), finest);
-    const px = DENSITY_CELL_SIZES[at]!;
+    const zoom = this.map?.zoom ?? 0;
+    // Before the map has a camera and `meta`, every size is a stop of its own.
+    const stops = this.map?.densityStops() ?? [];
+    const levels: {px: number; depth: number; enabled: boolean}[] = [];
+    for (const stop of stops.length > 0 ? stops : DENSITY_CELL_SIZES.map((px) => ({px, depth: cellDepth(zoom, px), enabled: true}))) {
+      const prev = levels[levels.length - 1];
+      if (prev && prev.depth === stop.depth) prev.enabled ||= stop.enabled;
+      else levels.push({...stop});
+    }
+    const last = levels.length - 1;
+    const finest = Math.max(0, levels.map((l) => l.enabled).lastIndexOf(true));
+    const asked = cellDepth(zoom, nearestStop(this.densityResolution));
+    const index = levels.findIndex((l) => l.depth === asked);
+    const at = Math.min(index >= 0 ? index : asked < levels[0]!.depth ? 0 : last, finest);
+    const drawn = Math.round((WORLD_SIZE * 2 ** zoom) / 2 ** levels[at]!.depth);
     // The track runs between the thumb's centres at either end; the struck part starts half a stop past the finest.
     const past = finest < last ? html`<span class="past" style=${`left:calc(8px + (100% - 16px) * ${(finest + 0.5) / last})`}></span>` : nothing;
     const onInput = (e: Event) => {
       const input = e.target as HTMLInputElement;
       const i = Number(input.value);
       input.value = String(Math.min(i, finest));
-      change({densityResolution: DENSITY_CELL_SIZES[i]!});
+      change({densityResolution: levels[i]!.px});
     };
     return html`<label for="density-resolution">Resolution</label>
       <div class="resolution">
         <input id="density-resolution" part="density-resolution" type="range" min="0" max=${last} step="1" .value=${String(at)}
-          aria-valuetext=${`Cells about ${px} px across`} @input=${onInput} />${past}
+          aria-valuetext=${`Cells about ${drawn} px across`} @input=${onInput} />${past}
       </div>
       <span></span>
-      <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${px} px</span><span>Fine</span></div>`;
+      <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${drawn} px</span><span>Fine</span></div>`;
   }
 
   /** The Scale choice under Resolution: Linear or Log, the scale density's colours follow. */

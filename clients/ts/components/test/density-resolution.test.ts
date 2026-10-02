@@ -75,18 +75,25 @@ describe('density resolution', () => {
     const seen: {densityResolution: number}[] = [];
     host.addEventListener('tessera-displaychange', (e) => seen.push((e as CustomEvent).detail));
     const slider = () => shadow.querySelector<HTMLInputElement>('[part="density-resolution"]')!;
-    // The default, 12 px, is past the limit, so the slider shows the finest it can count.
-    expect(slider().value).toBe('1');
+    const readout = () => [...shadow.querySelectorAll('.readout')].map((r) => r.textContent).find((t) => t?.startsWith('cells'));
+    // At this zoom the seven sizes ask for four depths, so the slider has four stops.
+    expect(new Set(map.densityStops().map((s) => s.depth)).size).toBe(4);
+    expect(slider().max).toBe('3');
+    // The default, 12 px, asks for a depth past the limit, so the slider shows the finest it can
+    // count, and the readout gives the size of that depth's cells on screen.
+    expect(slider().value).toBe('0');
+    const depth = map.densityStops()[0]!.depth;
+    expect(readout()).toBe(`cells ≈ ${Math.round((512 * 2 ** map.zoom) / 2 ** depth)} px`);
     slider().value = '0';
     slider().dispatchEvent(new Event('input'));
     await settle(host);
     expect(el.densityResolution).toBe(32);
     expect(map.densityResolution).toBe(32);
     // A stop past the limit is kept as asked, and the slider shows the finest the map can draw.
-    slider().value = '6';
+    slider().value = '3';
     slider().dispatchEvent(new Event('input'));
     await settle(host);
-    expect(slider().value).toBe('1');
+    expect(slider().value).toBe('0');
     expect(map.densityResolution).toBe(4);
     expect(seen.map((d) => d.densityResolution)).toEqual([32, 4]);
 
