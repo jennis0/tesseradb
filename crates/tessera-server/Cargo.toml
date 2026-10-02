@@ -45,7 +45,7 @@ arrow = { workspace = true }
 rustc-hash = "1"
 # OIDC access tokens: the signature against the provider's JWKS, then issuer, audience and
 # lifetime. Its ring backend is already in the tree through rustls.
-jsonwebtoken = { version = "9.3", default-features = false }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 # Fetching a provider's JWKS.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 

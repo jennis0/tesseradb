@@ -618,6 +618,10 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     .unwrap();
     let mut not_yet = claims(&["tessera-readers"], exp);
     not_yet["nbf"] = json!(now_secs() + 120);
+    let mut not_yet_as_text = claims(&["tessera-readers"], exp);
+    not_yet_as_text["nbf"] = json!((now_secs() + 120).to_string());
+    let mut expiry_as_text = claims(&["tessera-readers"], exp);
+    expiry_as_text["exp"] = json!(exp.to_string());
     let mut wrong_issuer = claims(&["tessera-readers"], exp);
     wrong_issuer["iss"] = json!("https://login.example.net");
     idp.add_key("unpublished");
@@ -627,6 +631,8 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
         ("expired", idp.token("k1", claims(&["tessera-readers"], now_secs() - 1))),
         ("HS256", hs256),
         ("not before", idp.token("k1", not_yet)),
+        ("not before, as a string", idp.token("k1", not_yet_as_text)),
+        ("expiry as a string", idp.token("k1", expiry_as_text)),
         ("wrong issuer", idp.token("k1", wrong_issuer)),
         ("unknown key", idp.token("unpublished", claims(&["tessera-readers"], exp))),
         ("alg none", unsigned(&claims(&["tessera-readers"], exp))),
