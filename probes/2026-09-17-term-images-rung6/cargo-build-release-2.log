@@ -1,0 +1,6 @@
+   Compiling tessera-store v0.1.0 (/home/joe/code/tessera/.claude/worktrees/ti-measure/crates/tessera-store)
+   Compiling tessera-build v0.1.0 (/home/joe/code/tessera/.claude/worktrees/ti-measure/crates/tessera-build)
+   Compiling tessera-engine v0.1.0 (/home/joe/code/tessera/.claude/worktrees/ti-measure/crates/tessera-engine)
+   Compiling tessera-server v0.1.0 (/home/joe/code/tessera/.claude/worktrees/ti-measure/crates/tessera-server)
+   Compiling tessera-cli v0.1.0 (/home/joe/code/tessera/.claude/worktrees/ti-measure/crates/tessera-cli)
+    Finished `release` profile [optimized] target(s) in 28.94s

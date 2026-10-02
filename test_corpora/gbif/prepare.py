@@ -2,11 +2,13 @@
 
 One pass over the 8,369 staged parts to a corpus `tessera build` consumes: **one `geo` view** on
 Web Mercator, a **three-level tiered taxonomy** over family → genus → species, four attributes —
-one per type — plus GBIF's own key `gbifid` declared unique, and `countrycode` as the compartment.
+one per type — plus GBIF's own key `gbifid` declared unique, and an access list whose country
+term is the compartment.
 
     python3 -m test_corpora.gbif.prepare --parts 64      # a prefix, for a run that finishes
     python3 -m test_corpora.gbif.prepare --parts 64 --spread   # …evenly spaced instead
     python3 -m test_corpora.gbif.prepare                 # all 8,369
+    python3 -m test_corpora.gbif.prepare --from-points $TESSERA_LADDER/gbif   # §"From points"
 
 **It is a demonstrator and a speed benchmark** (owner ruling, 2026-09-01). What the rung is for is
 the row count: 3.65×10⁹ occurrences is 85.1% of one `u32` entity space, and artifact ids allocate
@@ -23,9 +25,13 @@ Six decisions this stage makes:
   quantisation clamps it to the boundary, so the polar records land on a line. They are real
   observations and dropping them would be a rendering decision taken in the pipeline; the count is
   reported instead.
-- **`countrycode` is the compartment and every row carries a term.** A record whose country is
-  null or empty carries `UNRECORDED`, so the access column is never empty and a principal holding
-  no term sees nothing.
+- **The access column is a list of up to three terms, and every row carries at least one.** A
+  row's terms are its country, `y:` and its year, and `s:` and its species key. A null year or a
+  null species key contributes no term; a record whose country is null or empty carries
+  `UNRECORDED`, so the list is never empty and a principal holding no term sees nothing. The
+  country term is the compartment. The year and species terms give the measurement drivers
+  principals shaped like a user's term set — a few hundred years, a thousand or a hundred thousand
+  species — over a dictionary of about 1.4×10⁶ terms (owner ruling, 2026-09-17).
 - **The taxonomy starts at family.** `merge_member_runs` holds the largest single artifact's
   members resident while it sorts them, and kingdom Animalia is 2,809,414,577 of them — 22.5 GB on
   a 47 GB box (`probes/2026-09-09-gbif-census/`). `kingdom` rides as a rendered category instead.
@@ -36,6 +42,15 @@ Six decisions this stage makes:
   ~6×10⁸ dictionary operations over the whole corpus for the three taxonomy levels alone;
   `value_counts` per batch and one `group_by` per `FOLD_EVERY` batches does the same arithmetic in
   C++.
+
+## From points
+
+`--from-points <rung>` rewrites an already prepared rung's `points.parquet`, and its
+`holdout.parquet` and `duplicates.parquet` where it has them, with the access column derived from
+the `countrycode`, `year` and `specieskey` they already carry, and writes the rest of the rung
+beside them. The source share is 258 GB over SMB and a prepared rung holds every column the access
+terms are built from, so a second pass over the share buys nothing. Every other column keeps the
+value the first pass gave it, `gbifid` among them, so the two rungs name the same occurrences.
 """
 
 from __future__ import annotations
@@ -47,6 +62,7 @@ import json
 import math
 import os
 import resource
+import shutil
 import sys
 from collections import deque
 from pathlib import Path
@@ -67,6 +83,12 @@ RUNG = sources.RUNG
 #: the default never fires. It exists so the access column is never empty: **a principal holding no
 #: term must see nothing.** Rung 5's `unpublished` and rung 4's `unlicensed` have the same shape.
 UNRECORDED = "UNRECORDED"
+
+#: What prefixes a year term and a species term in the access column. A country code that begins
+#: with either would be the same term as a year or a species, merging two compartments, so the run
+#: refuses one as it refuses a country spelled `UNRECORDED`.
+YEAR_PREFIX = "y:"
+SPECIES_PREFIX = "s:"
 
 #: The key a level takes where the source recorded no name for it but recorded one below it.
 #: GeoNames' rule and GeoNames' reason: `parent_edges` is `windows(2)` and does not read past a
@@ -92,9 +114,9 @@ READ_AHEAD = 16
 #: plus the pending batches, so a larger number is fewer, wider folds.
 FOLD_EVERY = 32
 
-#: What `points.parquet` carries: the publisher's coordinates in degrees, the access column and
-#: the five attributes, `gbifid` among them, which every file of the corpus names its item by.
-#: Fixed rather than inferred, because it is written a batch at a time and a batch whose
+#: What `points.parquet` carries: the publisher's coordinates in degrees, the five attributes,
+#: `gbifid` among them, which every file of the corpus names its item by, and the access list built
+#: from `countrycode`, `year` and `specieskey`. Fixed rather than inferred, because it is written a batch at a time and a batch whose
 #: `kingdom` column happened to be all-null would otherwise change it.
 POINTS_SCHEMA = pa.schema(
     [
@@ -106,8 +128,20 @@ POINTS_SCHEMA = pa.schema(
         pa.field("year", pa.uint16()),
         pa.field("scientificname", pa.string()),
         pa.field("gbifid", pa.uint64()),
+        pa.field("access", pa.list_(pa.string())),
     ]
 )
+
+#: The columns of `points.parquet` a dictionary page is worth encoding. `access.list.element` is
+#: the leaf of the list column, where parquet holds its strings: a row group's three million terms
+#: are a few tens of thousands of distinct ones.
+POINTS_DICTIONARY = [
+    "countrycode",
+    "kingdom",
+    "specieskey",
+    "scientificname",
+    "access.list.element",
+]
 
 #: The publisher's own identifier, carried only under `--occurrenceid`.
 OCCURRENCE_ID = pa.field("occurrenceid", pa.string())
@@ -194,9 +228,23 @@ def placed(
     )
 
 
+def prefixed(country) -> pa.Array:
+    """Where a country code begins with a year or species prefix, and would be that term."""
+    return pc.fill_null(
+        pc.or_(pc.starts_with(country, YEAR_PREFIX), pc.starts_with(country, SPECIES_PREFIX)),
+        False,
+    )
+
+
+def collides(country) -> pa.Array:
+    """Where a source's country code would merge with another term: spelled `UNRECORDED`, or
+    [`prefixed`]."""
+    return pc.or_(pc.fill_null(pc.equal(country, UNRECORDED), False), prefixed(country))
+
+
 def country_terms(column) -> tuple[pa.Array, int, int]:
-    """The access column, with how many rows carried no country and how many spelled
-    `UNRECORDED` themselves.
+    """The country term of each row, with how many rows carried no country and how many
+    [`collides`] refuses.
 
     Filled here rather than left to the view's `default` so that a principal holding no term sees
     nothing. Trimmed for the reason the build trims a label: ` GB` and `GB` are one term rather
@@ -205,9 +253,53 @@ def country_terms(column) -> tuple[pa.Array, int, int]:
     country = pc.fill_null(
         pc.utf8_trim_whitespace(column.combine_chunks().cast(pa.string())), ""
     )
-    collisions = true_count(pc.equal(country, UNRECORDED))
+    collisions = true_count(collides(country))
     blank = pc.equal(country, "")
     return pc.if_else(blank, UNRECORDED, country), true_count(blank), collisions
+
+
+def access_lists(country, year, species_key) -> pa.ListArray:
+    """The access column: each row's `[country, "y:"+year, "s:"+species_key]`, in that order, a
+    null year or species key contributing nothing. `country` is never null, so no list is empty.
+
+    Assembled by index rather than row by row: a batch is a million rows and three million terms.
+    """
+    rows = len(country)
+    # An empty separator, so the join is the prefix followed by the value, and null where the value
+    # is null.
+    years = pc.binary_join_element_wise(YEAR_PREFIX, pc.cast(year, pa.string()), "")
+    species = pc.binary_join_element_wise(SPECIES_PREFIX, pc.cast(species_key, pa.string()), "")
+    has_year = pc.is_valid(years).to_numpy(zero_copy_only=False)
+    has_species = pc.is_valid(species).to_numpy(zero_copy_only=False)
+
+    offsets = np.zeros(rows + 1, dtype=np.int32)
+    np.cumsum(1 + has_year.astype(np.int32) + has_species, out=offsets[1:])
+    at = offsets[:-1]
+
+    # One `take` over country ++ the present years ++ the present species; `index` says where each
+    # term lands.
+    present_years = int(has_year.sum())
+    index = np.empty(int(offsets[-1]), dtype=np.int64)
+    index[at] = np.arange(rows)
+    index[at[has_year] + 1] = rows + np.arange(present_years)
+    index[at[has_species] + 1 + has_year[has_species]] = (
+        rows + present_years + np.arange(int(has_species.sum()))
+    )
+    terms = pa.concat_arrays(
+        [country.cast(pa.string()), years.drop_null(), species.drop_null()]
+    ).take(pa.array(index))
+    return pa.ListArray.from_arrays(pa.array(offsets, pa.int32()), terms)
+
+
+def with_access(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    """`table` with its access column built from its own `countrycode`, `year` and `specieskey`."""
+    access = access_lists(
+        table.column("countrycode").combine_chunks(),
+        table.column("year").combine_chunks(),
+        table.column("specieskey").combine_chunks(),
+    )
+    columns = {name: table.column(name) for name in schema.names if name != "access"}
+    return pa.table(columns | {"access": access}, schema=schema)
 
 
 class Census:
@@ -250,6 +342,11 @@ class Census:
             return []
         table = table.take(pc.sort_indices(table, sort_keys=[("n", "descending")]))
         return list(zip(table.column("key").to_pylist(), table.column("n").to_pylist()))
+
+    @property
+    def totals(self) -> pa.Table | None:
+        """`key`, `n`, folded: one row per distinct value, left in Arrow."""
+        return self._fold()
 
     @property
     def distinct(self) -> int:
@@ -299,6 +396,7 @@ def point_rows(batch: pa.Table, schema: pa.Schema) -> tuple[pa.Table, dict]:
         columns[OCCURRENCE_ID.name] = (
             batch.column(OCCURRENCE_ID.name).combine_chunks().cast(pa.string())
         )
+    columns["access"] = access_lists(country, year, columns["specieskey"])
     counts = {
         "beyond_mercator": true_count(pc.greater(pc.abs(lat), MAX_LATITUDE)),
         "year_out_of_range": year_out_of_range,
@@ -357,6 +455,33 @@ class HeldRows:
                     w.write_table(point_rows(table, schema)[0])
             written[name] = sum(t.num_rows for t in tables)
         return written
+
+
+def access_report(census: Census) -> dict:
+    """The access column's distinct terms and (row, term) pairs, whole and by class."""
+    table = census.totals
+    by_class: dict[str, dict] = {}
+    if table is not None:
+        keys = table.column("key").combine_chunks()
+        counts = table.column("n").combine_chunks()
+        year = pc.fill_null(pc.starts_with(keys, YEAR_PREFIX), False)
+        species = pc.fill_null(pc.starts_with(keys, SPECIES_PREFIX), False)
+        classes = {"country": pc.invert(pc.or_(year, species)), "year": year, "species": species}
+        for name, mask in classes.items():
+            n = counts.filter(mask)
+            by_class[name] = {"terms": len(n), "pairs": int(pc.sum(n).as_py() or 0)}
+    pairs = sum(c["pairs"] for c in by_class.values())
+    return {"terms": census.distinct, "pairs": pairs, "by_class": by_class}
+
+
+def print_access(report: dict, rows: int) -> None:
+    print(
+        f"access: {report['terms']:,} distinct terms, {report['pairs']:,} pairs "
+        f"({report['pairs'] / max(rows, 1):.3f} a row); "
+        + ", ".join(f"{name} {c['terms']:,} terms / {c['pairs']:,} pairs"
+                    for name, c in report["by_class"].items()),
+        flush=True,
+    )
 
 
 def taxonomy_keys(table: pa.Table) -> tuple[pa.Array, list[pa.Array]]:
@@ -597,6 +722,123 @@ def select_parts(every: list[Path], take: int, spread: bool) -> list[Path]:
     return [every[i] for i in at]
 
 
+#: What `--from-points` links rather than copies where the two rungs share a filesystem. A prepared
+#: rung's files are written once and never edited, and the member file is 22.9 GB at the whole
+#: corpus.
+LINKED = ("members-taxonomy.parquet", "vocab-kingdom.parquet")
+
+#: What `--from-points` copies as it stands.
+COPIED = ("country-ranks.json", "country-terms.txt")
+
+#: What `--from-points` rewrites with the access column, where the source rung has it.
+REWRITTEN = ("points.parquet", "holdout.parquet", "duplicates.parquet")
+
+
+def free_gb(path: Path) -> float:
+    stats = os.statvfs(path)
+    return stats.f_bavail * stats.f_frsize / 1e9
+
+
+def place(src: Path, out: Path, name: str, link: bool) -> str:
+    """One of the source rung's files beside the rewritten ones, linked or copied."""
+    source, target = src / name, out / name
+    target.unlink(missing_ok=True)
+    if link:
+        try:
+            os.link(source, target)
+            return f"  {name:34} {source.stat().st_size / 1e6:10.2f} MB linked"
+        except OSError:
+            pass
+    shutil.copy2(source, target)
+    return f"  {name:34} {target.stat().st_size / 1e6:10.2f} MB copied"
+
+
+def rewrite_from_points(src: Path, out: Path) -> None:
+    """A prepared rung rewritten with the access column, without reading the share again.
+
+    One row group in, one row group out, so nothing holds more than a million rows. Every column
+    but `access` is written back as the first pass wrote it. The census printed is the access
+    column's, and it is the pre-flight figure for the build: the dictionary is its distinct count
+    and `postings_write` is charged by its pairs.
+    """
+    if not (src / "points.parquet").exists():
+        raise SystemExit(f"no points.parquet in {src}; --from-points takes a prepared rung")
+    if src.resolve() == out.resolve():
+        raise SystemExit(f"--from-points {src} would rewrite its own files; give --out")
+    for name in ("manifest.json", *LINKED, *COPIED):
+        if not (src / name).exists():
+            raise SystemExit(f"no {name} in {src}; --from-points takes a prepared rung")
+    out.mkdir(parents=True, exist_ok=True)
+    steps = Steps()
+    census = Census()
+    written = {}
+
+    for name in REWRITTEN:
+        if not (src / name).exists():
+            continue
+        reader = pq.ParquetFile(src / name)
+        have = reader.schema_arrow
+        missing = {"countrycode", "year", "specieskey", "gbifid"} - set(have.names)
+        if missing:
+            raise SystemExit(f"{src / name} carries no {sorted(missing)}; it is not a prepared gbif "
+                             f"rung of this layout")
+        schema = pa.schema([f for f in have if f.name != "access"]).append(
+            POINTS_SCHEMA.field("access"))
+        print(f"{name}: {reader.metadata.num_rows:,} rows in {reader.num_row_groups:,} row groups, "
+              f"{free_gb(out):.1f} GB free", flush=True)
+        n = 0
+        with steps.step(f"rewrite {name}"), pq.ParquetWriter(
+            out / name, schema, compression="zstd", use_dictionary=POINTS_DICTIONARY
+        ) as writer:
+            for group in range(reader.num_row_groups):
+                table = reader.read_row_group(group)
+                if refused := true_count(prefixed(table.column("countrycode"))):
+                    raise SystemExit(
+                        f"{src / name}: {refused:,} rows carry a country code beginning "
+                        f"{YEAR_PREFIX!r} or {SPECIES_PREFIX!r}, which would be a year or species "
+                        f"term; prepare the rung again from the share with other prefixes"
+                    )
+                table = with_access(table, schema)
+                if name == "points.parquet":
+                    census.add(pc.list_flatten(table.column("access")))
+                writer.write_table(table, row_group_size=ROW_GROUP)
+                n += table.num_rows
+        written[name] = n
+    rows = written["points.parquet"]
+    access = access_report(census)
+    print_access(access, rows)
+
+    with steps.step("the rest of the rung"):
+        for name in COPIED:
+            print(place(src, out, name, link=False), flush=True)
+        for name in LINKED:
+            print(place(src, out, name, link=True), flush=True)
+        write_declaration(
+            out, size=pq.read_metadata(out / "vocab-kingdom.parquet").num_rows, rows=rows
+        )
+        if OCCURRENCE_ID.name in pq.read_schema(out / "points.parquet").names:
+            with (out / "corpus.toml").open("a") as declaration:
+                declaration.write(OCCURRENCE_ID_TOML)
+        write_deployment(out)
+
+    manifest = json.loads((src / "manifest.json").read_text())
+    manifest["access"] = access
+    manifest["from_points"] = {"source": str(src), "rows": written, "linked": list(LINKED)}
+    manifest["bytes"] = {p.name: p.stat().st_size for p in out.iterdir() if p.is_file()}
+    manifest["seconds"] = dict(steps)
+    manifest["total_seconds"] = steps.total()
+    manifest["peak_rss_gb"] = round(peak_gb(), 2)
+    manifest.pop("extrapolated_whole_corpus", None)
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+
+    print(f"\nwrote to {out}:")
+    for f in sorted(out.iterdir()):
+        if f.is_file():
+            print(f"  {f.name:34} {f.stat().st_size / 1e6:10.2f} MB")
+    print(f"\n{steps.total() / 60:.1f} min, {free_gb(out):.1f} GB free")
+    print(f"\nnext:\n  cd {out} && tessera check --payloads && tessera build --stage-timings")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--parts", type=int, default=0,
@@ -630,7 +872,16 @@ def main() -> None:
     ap.add_argument("--duplicates-every", type=int, default=349_000,
                     help="copy every this-many-th placed row; 349,000 spreads 10^4 across the "
                          "whole corpus")
+    ap.add_argument("--from-points", type=Path, default=None, metavar="RUNG",
+                    help="rewrite an already prepared rung's points with the access column "
+                         "instead of reading the share; the default output is the rung's "
+                         "directory with -terms after it")
     args = ap.parse_args()
+
+    if args.from_points is not None:
+        src = args.from_points
+        src = src.parent if src.is_file() else src
+        return rewrite_from_points(src, args.out or ladder(f"{src.name}-terms"))
 
     every = sources.parts()
     if args.fraction is not None:
@@ -662,6 +913,7 @@ def main() -> None:
     species_key_census = Census()
     level_census = [Census() for _ in sources.RANKS]
     year_census = Census()
+    access_census = Census()
 
     rows_read = 0
     rows_placed = 0
@@ -676,8 +928,7 @@ def main() -> None:
     lat_bounds = [float("inf"), float("-inf")]
 
     points = pq.ParquetWriter(
-        out / "points.parquet", schema, compression="zstd",
-        use_dictionary=["countrycode", "kingdom", "specieskey", "scientificname"],
+        out / "points.parquet", schema, compression="zstd", use_dictionary=POINTS_DICTIONARY,
     )
     members = None if kept_manifest is not None else pq.ParquetWriter(
         out / "members-taxonomy.parquet", MEMBER_SCHEMA, compression="zstd")
@@ -704,6 +955,7 @@ def main() -> None:
         country_census.add(rows.column("countrycode"))
         species_key_census.add(rows.column("specieskey"))
         year_census.add(rows.column("year"))
+        access_census.add(pc.list_flatten(rows.column("access")))
 
         if members is not None:
             # The taxonomy markers must not collide with a name the source wrote. Checked over
@@ -778,17 +1030,18 @@ def main() -> None:
     # **The markers must not collide with a name the source wrote.** A rank value spelled
     # `NOT_RECORDED` would merge with the placeholder for a level nobody recorded, and one carrying
     # the separator would split a key at the wrong level; a country code spelled `UNRECORDED` would
-    # merge real records into the term that stands for *no country*, which is an access decision.
-    # Each would move records between artifacts or between compartments with no error, so each is
-    # a refusal rather than a report.
+    # merge real records into the term that stands for *no country*, and one beginning with a year
+    # or species prefix would merge two compartments. Each would move records between artifacts or
+    # between compartments with no error, so each is a refusal rather than a report.
     collided = {rank: sorted(got)[:5] for rank, got in rank_collisions.items() if got}
     if country_collisions:
-        collided["countrycode"] = [f"{country_collisions:,} rows spell {UNRECORDED!r}"]
+        collided["countrycode"] = [f"{country_collisions:,} rows"]
     if collided:
         raise SystemExit(
             f"source value(s) collide with this script's markers ({NOT_RECORDED!r} for a level "
             f"the source did not record, {SEPARATOR!r} between levels, {UNRECORDED!r} for a "
-            f"record with no country): {collided}. Choose other markers; a placeholder that merges "
+            f"record with no country, {YEAR_PREFIX!r} and {SPECIES_PREFIX!r} before a year and a "
+            f"species access term): {collided}. Choose other markers; a placeholder that merges "
             f"with a real value would move records between artifacts and between compartments."
         )
 
@@ -816,6 +1069,8 @@ def main() -> None:
     with steps.step("the demo's terms"):
         country_ranks = country_census.ranked()
         write_demo_terms(out, country_ranks)
+        access = access_report(access_census)
+    print_access(access, rows_placed)
 
     write_declaration(out, size=vocab_size, rows=rows_placed)
     if args.occurrenceid:
@@ -861,6 +1116,7 @@ def main() -> None:
             "unrecorded": counted["unrecorded_country"],
             "top": [{"term": t, "pairs": n} for t, n in country_ranks[:5]],
         },
+        "access": access,
         "kingdom": {"keys": vocab_size, "null_rows": kingdom_census.nulls},
         "specieskey": {
             "distinct": species_key_census.distinct,

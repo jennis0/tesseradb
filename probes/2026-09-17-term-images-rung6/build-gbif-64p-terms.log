@@ -1,0 +1,56 @@
+view 'geo': web_mercator, quantising against x [0, 1], y [0, 1]
+        asked for lon [-180, 180], lat [-85.0511287798066, 85.0511287798066] — snapped outward to the square at z0 (0, 0), lon [-180, 180], lat [-85.05112877980659, 85.0511287798066]
+        the data spans x [0, 0.9999977777777777], y [0, 1] — 65536 x 65536 of the 65536 x 65536 cells
+        25846007 point(s) placed, none clamped onto the frame's edge
+        11 of 25846007 point(s) (0.0%) CLIPPED at web_mercator's ±85.0511287798066° domain — stored on the frame's edge, not where they were written. Built anyway at any proportion: the domain is the projection's own boundary and no frame moves it, so a real tail beyond it is the wrong projection for this corpus rather than the wrong frame
+schema: 4 column(s), 1.00 B/row against the 12 B fixed row (+8%)
+        0.93 GiB per 10^9 items — unalterable without rewriting the corpus
+        every column materialises in EVERY view — including ones whose items carry no value for it (§3.9). Per-view columns need contracts §2.6's per-view enumeration
+tessera build: commit 032b8296d85d5ba0c5ee833399744c43d9ee495a
+stage       source_ids      1.34s  rows=25846007     peak=    82 MiB
+stage       dictionary     18.30s  rows=186179       peak=  1081 MiB
+columns: 0 of 2 string column(s) spill their characters as record-blob extents, the entity-order stages modelling 3187 MiB of scratch against 177711 MiB free
+disk: ~4914 MiB at peak, in the join phase (spill 725 MiB) (band 1367 MiB) (join 4914 MiB) (index 3855 MiB) (blob 3280 MiB) (assembly 4233 MiB)
+stage    geometry_read      9.83s  rows=25846007     peak=  2774 MiB
+stage       pairs_pack      0.00s  rows=75023354     peak=  2774 MiB
+stage   signature_sort      1.89s  rows=25846007     peak=  2774 MiB
+stage       assignment      7.24s  rows=25846007     peak=  2774 MiB
+stage       assignment      1.79s  rows=25846007     peak=  2774 MiB
+stage   postings_write      1.54s  rows=75023354     peak=  2774 MiB
+stage     external_ids      0.00s  rows=0            peak=  2774 MiB
+attribute 'kingdom': 25,846,007 of 25,846,007 entities have a value
+attribute 'specieskey': 23,955,426 of 25,846,007 entities have a value
+attribute 'year': 25,221,921 of 25,846,007 entities have a value
+attribute 'scientificname': 25,846,007 of 25,846,007 entities have a value
+        0 source row(s) named entities this build did not load, over the rows this build read (a --limit build prunes row groups before decoding them)
+stage   attribute_tail     11.04s  rows=25846007     peak=  2774 MiB
+layer 'taxonomy/tree': 251907 artifact(s) created by keys in /home/joe/code/tessera/data/ladder/gbif-64p-terms/members-taxonomy.parquet that no artifacts source declares
+layer 'taxonomy/tree': 276003 of 25846007 rows in /home/joe/code/tessera/data/ladder/gbif-64p-terms/members-taxonomy.parquet are in no artifact (a null key, or -1)
+layers: publishing in batches of at most 268435456 member entr(ies), 24 B an entry against a 4th of the 24576 MiB budget
+stage           layers     14.61s  rows=1            peak=  2774 MiB
+stage       text_index      0.00s  rows=0            peak=  2774 MiB
+stage  filter_postings      5.60s  rows=25846007     peak=  2774 MiB
+stage      record_blob      2.85s  rows=25846007     peak=  2774 MiB
+stage   column_release      0.16s  rows=25846007     peak=  2774 MiB
+stage       tiler_sort      2.47s  rows=25846007     peak=  2774 MiB
+  view 'geo': 25846007 rows, largest Morton bucket 201922 rows over 129 buckets
+stage    segment_write      5.15s  rows=25846007     peak=  2774 MiB
+artifact layouts, chosen from the bundle's own row space (8420 ms):
+  taxonomy/tree level 0 [geo]: 8550 artifact(s) with rows, 0.501 everywhere, 29.7 blocks/artifact, disjoint — served column
+  taxonomy/tree level 1 [geo]: 56893 artifact(s) with rows, 0.312 everywhere, 12.5 blocks/artifact, disjoint — served column
+  taxonomy/tree level 2 [geo]: 186464 artifact(s) with rows, 0.164 everywhere, 5.7 blocks/artifact, disjoint — served rows
+  wrote 1 tile index(es), 2 row-major column(s), 0 shape row form(s), 0 decomposition file(s)
+  taxonomy/tree: 251907 artifact(s) across 3 levels — what a response naming it carries at `levels: "all"`. Omitting `levels` serves the levels whose declared zoom range covers the request's depth:
+    level 0 [geo]: 8550 artifact(s), zoom 0–5
+    level 1 [geo]: 56893 artifact(s), zoom 4–10
+    level 2 [geo]: 186464 artifact(s), zoom 9–16
+stage    artifact_pass      8.45s  rows=3            peak=  2774 MiB
+stage      term_images      6.63s  rows=5516         peak=  2774 MiB
+  wrote 3 containment partition(s)
+stage    artifact_pass      0.17s  rows=3            peak=  2774 MiB
+attribute 'specieskey': 185,418 distinct key(s) over 23,955,426 row(s) with a value, of 25,846,007 row(s); the index is 99.76 MB
+stage        manifests      0.22s  rows=1662295444   peak=  2774 MiB
+view 'geo': 25846007 point(s) landed in 3508005 distinct cell(s) — 13.6% of them have a position of their own
+view 'geo': term images: 5,516 kept of 186,179 terms, 76.61 MB payload, 7.45 MB table, largest 2.66 MB, 6.6 s
+built /home/joe/code/tessera/data/ladder/gbif-64p-terms/bundle (v00000): 25846007 items, 186179 terms, 75023354 pairs, 1662295444 bytes on disk, 251907 artifact(s) minted, 276003 unclustered member row(s)
+  view geo: 25846007 row(s)
