@@ -239,6 +239,15 @@ async fn each_request_is_one_line_with_its_session_and_no_secret() {
     for secret in [token.as_str(), SESSION_CREDENTIAL, OPERATOR_CREDENTIAL] {
         assert!(!text.contains(secret), "the log must not hold {secret:?}");
     }
+    // It holds `auth_data`, so only its owner may read it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let run = logged[0]["run"].as_str().expect("each line names its run");
+    assert!(logged.iter().all(|l| l["run"] == run));
 
     // A restarted server appends after the lines already there.
     let server = start(&deployment).await;
@@ -250,6 +259,10 @@ async fn each_request_is_one_line_with_its_session_and_no_secret() {
     assert_eq!(after.len(), logged.len() + 1);
     assert_eq!(after[..logged.len()], logged[..]);
     assert_eq!(after[logged.len()]["path"], "/session/authorise");
+    assert_ne!(
+        after[logged.len()]["run"], run,
+        "a restarted server's lines are told apart from the first's, whose token_ids it reuses"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,7 +286,7 @@ async fn a_deployment_naming_no_log_writes_none() {
     drop(client);
     server.stop().await;
 
-    // The server's own files are the cache and the log it was told of; nothing else is new.
+    // The server's own files are the cache and the write-ahead log; nothing else is new.
     let new: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -284,4 +297,45 @@ async fn a_deployment_naming_no_log_writes_none() {
         })
         .collect();
     assert!(new.is_empty(), "no file but the cache and log: {new:?}");
+}
+
+/// A body larger than the log keeps is logged by its size alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_too_large_to_keep_is_logged_by_its_size() {
+    let tmp = TempDir::new().unwrap();
+    let deployment = write_deployment(
+        tmp.path(),
+        "127.0.0.1:0",
+        "request_log = \"requests.jsonl\"",
+    );
+    let log = tmp.path().join("requests.jsonl");
+    let server = start(&deployment).await;
+    let client = reqwest::Client::new();
+    let auth = server.authorise(&client).await;
+    // Over a mebibyte of filter values: still JSON, and still under axum's body limit.
+    let names: Vec<String> = (0..120_000).map(|i| format!("v{i:05}")).collect();
+    let body = json!({
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 5,
+        "filters": { "nothing": { "in": names } },
+    })
+    .to_string();
+    assert!(body.len() > 1 << 20);
+    client
+        .post(format!("{}/v1/viewport", server.viewer))
+        .bearer_auth(auth["token"].as_str().unwrap())
+        .header("content-type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    drop(client);
+    server.stop().await;
+
+    let logged = lines(&log);
+    let viewport = logged.iter().find(|l| l["path"] == "/v1/viewport").unwrap();
+    assert_eq!(viewport["body_bytes"], body.len() as u64);
+    assert!(viewport.get("body").is_none());
 }

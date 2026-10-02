@@ -37,7 +37,8 @@ futures-core = "0.3"
 http-body = "1"
 bytes = "1"
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value`: the request log embeds a request body as it was sent.
+serde_json = { workspace = true, features = ["raw_value"] }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 sha2 = { workspace = true }

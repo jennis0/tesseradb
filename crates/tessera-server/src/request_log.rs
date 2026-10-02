@@ -3,20 +3,26 @@
 //!
 //! A request's line is sent when its response body ends or is dropped, since the viewport and
 //! bulk routes stream and a client that pans away cancels mid-body. A request whose handler is
-//! dropped before it answers is logged as cancelled with no status. Lines go through a bounded
-//! channel; when it is full the line is dropped and counted, so a slow disk never holds a request.
+//! dropped before it answers is logged as cancelled with no status. Lines go through a channel
+//! bounded in lines and in bytes, so a slow disk never holds a request: past the byte budget a
+//! line is kept without its body, and past the line bound it is dropped and counted on the next
+//! line written. The writer flushes whenever it has drained the channel, and at least once a
+//! second under constant load, so a process that exits without unwinding loses little.
 //!
-//! Never written: the bearer token, the session credential, any other header, and every response
-//! body. `/session/authorise`'s request body is written, since replaying a session needs its
-//! `auth_data`, and the `token_id` it issued is noted by the handler rather than read from the
-//! response.
+//! Each line carries the run, a random id taken when the log is opened, since `token_id`s start
+//! again in each process.
+//!
+//! Request bodies are written, including `/session/authorise`'s, whose `auth_data` is what
+//! replaying a session needs; the file is created readable by its owner only. Never written: the
+//! bearer token, the session credential, any other header, and every response body. The
+//! `token_id` an authorisation issued is noted by the handler rather than read from the response.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,60 +34,116 @@ use axum::response::Response;
 use bytes::Bytes;
 use http_body::{Body as _, Frame, SizeHint};
 use parking_lot::Mutex;
+use serde::Serialize;
+use serde_json::value::RawValue;
 
 use crate::state::AppState;
 
-/// How often the writer flushes when lines are waiting.
+/// How often the writer flushes while the channel never empties.
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 
 /// Lines that may wait for the writer before new ones are dropped.
 const QUEUE_LINES: usize = 1 << 16;
+
+/// Bytes that may wait for the writer before new lines are queued without their bodies.
+const QUEUE_BYTES: usize = 64 << 20;
+
+/// What a queued line costs beyond its path and body.
+const LINE_OVERHEAD_BYTES: usize = 256;
 
 /// Request-body bytes kept for the line. A larger body is logged by its size alone.
 const BODY_CAPTURE_BYTES: usize = 1 << 20;
 
 /// The open log: the sending half of the channel and the writer thread that drains it.
 pub struct RequestLog {
-    tx: Option<SyncSender<Line>>,
+    tx: Option<SyncSender<Queued>>,
     writer: Option<std::thread::JoinHandle<()>>,
+    /// Bytes queued for the writer, which subtracts each line's cost once it is written.
+    queued_bytes: Arc<AtomicUsize>,
+    /// Lines dropped since the last line queued, written on the next one.
     dropped: AtomicU64,
+    dropped_total: AtomicU64,
 }
 
 impl RequestLog {
-    /// Opens `path` for appending, creating it if absent, and starts the writer.
+    /// Opens `path` for appending, creating it readable by its owner only if absent, and starts
+    /// the writer.
     pub fn open(path: &Path) -> std::io::Result<RequestLog> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        let (tx, rx) = sync_channel::<Line>(QUEUE_LINES);
-        let shown = path.display().to_string();
-        let writer = std::thread::Builder::new()
-            .name("request-log".into())
-            .spawn(move || write_lines(rx, file, &shown))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(path)?;
+        let (tx, rx) = sync_channel::<Queued>(QUEUE_LINES);
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let shown = path.display().to_string();
+            let queued_bytes = Arc::clone(&queued_bytes);
+            let run = run_id();
+            std::thread::Builder::new()
+                .name("request-log".into())
+                .spawn(move || write_lines(rx, file, &shown, &run, &queued_bytes))?
+        };
         Ok(RequestLog {
             tx: Some(tx),
             writer: Some(writer),
+            queued_bytes,
             dropped: AtomicU64::new(0),
+            dropped_total: AtomicU64::new(0),
         })
     }
 
     fn send(&self, line: Line) {
         let Some(tx) = &self.tx else { return };
-        match tx.try_send(line) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                if dropped.is_power_of_two() {
-                    tracing::warn!(
-                        dropped,
-                        "the request log is behind; lines are being dropped rather than holding \
-                         requests"
-                    );
-                }
+        let captured = std::mem::take(&mut *line.body.lock());
+        let body_bytes = captured.size;
+        let mut body = (captured.size > 0 && captured.size as usize == captured.bytes.len())
+            .then_some(captured.bytes);
+        let base = line.path.len() + LINE_OVERHEAD_BYTES;
+        let queued = self.queued_bytes.load(Ordering::Relaxed);
+        if queued + base + body.as_ref().map_or(0, Vec::len) > QUEUE_BYTES {
+            body = None;
+        }
+        let cost = base + body.as_ref().map_or(0, Vec::len);
+        self.queued_bytes.fetch_add(cost, Ordering::Relaxed);
+        let dropped_before = self.dropped.swap(0, Ordering::Relaxed);
+        let queued = Queued {
+            line,
+            body,
+            body_bytes,
+            dropped_before,
+            cost,
+        };
+        if let Err(TrySendError::Full(queued) | TrySendError::Disconnected(queued)) =
+            tx.try_send(queued)
+        {
+            self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
+            self.dropped
+                .fetch_add(queued.dropped_before + 1, Ordering::Relaxed);
+            let total = self.dropped_total.fetch_add(1, Ordering::Relaxed) + 1;
+            if total.is_power_of_two() {
+                tracing::warn!(
+                    dropped = total,
+                    "the request log is behind; lines are being dropped rather than holding \
+                     requests"
+                );
             }
         }
     }
+}
+
+/// A random id for this process's lines. `RandomState` is seeded from the operating system's
+/// random source, so two processes started in the same instant still differ.
+fn run_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    hasher.write_u32(std::process::id());
+    format!("{:016x}", hasher.finish())
 }
 
 impl Drop for RequestLog {
@@ -95,40 +157,47 @@ impl Drop for RequestLog {
     }
 }
 
-fn write_lines(rx: std::sync::mpsc::Receiver<Line>, file: File, path: &str) {
+/// Writes each queued line and flushes whenever the channel is empty, or a second after the last
+/// flush if it never is. Returns once every sender is gone and the last line is flushed.
+fn write_lines(
+    rx: Receiver<Queued>,
+    file: File,
+    path: &str,
+    run: &str,
+    queued_bytes: &AtomicUsize,
+) {
     let mut out = BufWriter::new(file);
-    let mut unflushed = false;
-    let mut flushed_at = Instant::now();
     let mut failed = false;
-    loop {
-        let closed = match rx.recv_timeout(FLUSH_EVERY) {
-            Ok(line) => {
-                let mut text = line.into_json().to_string();
-                text.push('\n');
-                if let Err(e) = out.write_all(text.as_bytes()) {
-                    if !failed {
-                        tracing::warn!(path, error = %e, "the request log could not be written");
-                        failed = true;
+    let mut report = |e: std::io::Error| {
+        if !failed {
+            tracing::warn!(path, error = %e, "the request log could not be written");
+            failed = true;
+        }
+    };
+    let write = |out: &mut BufWriter<File>, queued: Queued| -> std::io::Result<()> {
+        queued_bytes.fetch_sub(queued.cost, Ordering::Relaxed);
+        let mut text = serde_json::to_string(&queued.written(run))?;
+        text.push('\n');
+        out.write_all(text.as_bytes())
+    };
+    // Blocks only with nothing unflushed: every drain ends in a flush.
+    while let Ok(queued) = rx.recv() {
+        write(&mut out, queued).unwrap_or_else(&mut report);
+        let mut flushed_at = Instant::now();
+        loop {
+            match rx.try_recv() {
+                Ok(queued) => {
+                    write(&mut out, queued).unwrap_or_else(&mut report);
+                    if flushed_at.elapsed() >= FLUSH_EVERY {
+                        out.flush().unwrap_or_else(&mut report);
+                        flushed_at = Instant::now();
                     }
                 }
-                unflushed = true;
-                false
-            }
-            Err(RecvTimeoutError::Timeout) => false,
-            Err(RecvTimeoutError::Disconnected) => true,
-        };
-        if unflushed && (closed || flushed_at.elapsed() >= FLUSH_EVERY) {
-            if let Err(e) = out.flush() {
-                if !failed {
-                    tracing::warn!(path, error = %e, "the request log could not be flushed");
-                    failed = true;
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                    out.flush().unwrap_or_else(&mut report);
+                    break;
                 }
             }
-            unflushed = false;
-            flushed_at = Instant::now();
-        }
-        if closed {
-            return;
         }
     }
 }
@@ -140,8 +209,9 @@ enum Outcome {
     Completed,
     /// The client went away: the handler or the body was dropped before the body ended.
     Cancelled,
-    /// The server ended the body with an error: a stream cut off by its deadline, a stall or an
-    /// engine error.
+    /// The server ended the body with an error: a stream cut off by its deadline or by an engine
+    /// error. A stream cut off because its client stopped reading is seen as `Cancelled`, since
+    /// the body is not polled again before the connection goes.
     Aborted,
 }
 
@@ -218,29 +288,73 @@ struct Line {
     outcome: Outcome,
 }
 
-impl Line {
-    fn into_json(self) -> serde_json::Value {
-        let captured = std::mem::take(&mut *self.body.lock());
-        let mut line = serde_json::json!({
-            "start_us": self.start_us,
-            "plane": self.plane,
-            "method": self.method,
-            "path": self.path,
-            "body_bytes": captured.size,
-            "token_id": Notes::read(&self.notes.token_id),
-            "admission_us": Notes::read(&self.notes.admission_us),
-            "status": self.status,
-            "bytes": self.bytes,
-            "headers_us": self.headers_us,
-            "end_us": self.end_us,
-            "outcome": self.outcome.as_str(),
-        });
-        if captured.size > 0 && captured.size as usize == captured.bytes.len() {
-            if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&captured.bytes) {
-                line["body"] = body;
-            }
+/// A line on its way to the writer, with the request body taken out of the request.
+struct Queued {
+    line: Line,
+    /// The whole body, unless it was too large to keep or the queue's byte budget was spent.
+    body: Option<Vec<u8>>,
+    body_bytes: u64,
+    dropped_before: u64,
+    /// What this line counts against [`QUEUE_BYTES`].
+    cost: usize,
+}
+
+/// One line as written.
+#[derive(Serialize)]
+struct Written<'a> {
+    run: &'a str,
+    start_us: u64,
+    plane: &'static str,
+    method: &'a str,
+    path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<Box<RawValue>>,
+    body_bytes: u64,
+    token_id: Option<u64>,
+    admission_us: Option<u64>,
+    status: Option<u16>,
+    bytes: u64,
+    headers_us: Option<u64>,
+    end_us: u64,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "is_zero")]
+    dropped_before: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The body as JSON to embed, if it is JSON: as sent, unless it spans lines.
+fn json_body(bytes: &[u8]) -> Option<Box<RawValue>> {
+    let raw: Box<RawValue> = serde_json::from_slice(bytes).ok()?;
+    if raw.get().contains(['\n', '\r']) {
+        let value: serde_json::Value = serde_json::from_str(raw.get()).ok()?;
+        return RawValue::from_string(value.to_string()).ok();
+    }
+    Some(raw)
+}
+
+impl Queued {
+    fn written<'a>(&'a self, run: &'a str) -> Written<'a> {
+        let line = &self.line;
+        Written {
+            run,
+            start_us: line.start_us,
+            plane: line.plane,
+            method: &line.method,
+            path: &line.path,
+            body: self.body.as_deref().and_then(json_body),
+            body_bytes: self.body_bytes,
+            token_id: Notes::read(&line.notes.token_id),
+            admission_us: Notes::read(&line.notes.admission_us),
+            status: line.status,
+            bytes: line.bytes,
+            headers_us: line.headers_us,
+            end_us: line.end_us,
+            outcome: line.outcome.as_str(),
+            dropped_before: self.dropped_before,
         }
-        line
     }
 }
 

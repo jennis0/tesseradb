@@ -244,10 +244,12 @@ struct RawServe {
     /// A file to append one JSON line to for each viewer-plane and session-plane request other
     /// than `/healthz` and `/readyz`: when it started, its route and body, the session's
     /// `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it
-    /// waited for admission, and whether the client went away before the body ended. Tokens and
-    /// credentials are never written. The file is written by its own thread and flushed about once
-    /// a second, and a restarted server appends to it. `tessera-bench replay` sends a log back at a
-    /// server. Unset, nothing is logged.
+    /// waited for admission, and whether the client went away before the body ended. Request
+    /// bodies are written, including `/session/authorise`'s `auth_data`, so that a session can be
+    /// replayed, and the file is created readable by its owner only. Tokens and the credentials in
+    /// headers are never written. The file is written by its own thread and flushed whenever it
+    /// has caught up, and a restarted server appends to it, marking its lines with a new `run`.
+    /// `tessera-bench replay` sends a log back at a server. Unset, nothing is logged.
     ///
     /// Default: not set.
     request_log: Option<PathBuf>,

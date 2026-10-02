@@ -258,6 +258,7 @@ impl ComputeGate {
         let slot = match Arc::clone(&self.slots).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                crate::request_log::note_admission_us(0);
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
                 return Err(crate::error::ApiError::Backpressure {
                     retry_after_s: crate::error::RETRY_AFTER_SECS,
