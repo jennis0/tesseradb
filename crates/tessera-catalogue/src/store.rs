@@ -25,7 +25,7 @@ use crate::permission::PermissionSet;
 use crate::provider::{ClaimRule, Provider, RoleMapping};
 use crate::Error;
 
-pub(crate) const SCHEMA_VERSION: i64 = 5;
+pub(crate) const SCHEMA_VERSION: i64 = 6;
 pub(crate) const FILE_NAME: &str = "catalogue.sqlite";
 const LOCK_NAME: &str = "catalogue.lock";
 
@@ -35,7 +35,6 @@ CREATE TABLE principal (
     name TEXT NOT NULL UNIQUE,
     kind TEXT NOT NULL CHECK (kind IN ('person', 'service')),
     disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
-    bypass INTEGER NOT NULL DEFAULT 0 CHECK (bypass IN (0, 1)),
     permissions INTEGER NOT NULL DEFAULT 0,
     password_hash TEXT
 );
@@ -248,7 +247,7 @@ pub(crate) fn load(conn: &Connection, allow_insecure_jwks: bool) -> Result<State
 
 fn load_principals(conn: &Connection, st: &mut State, ids: &mut Ids) -> Result<(), Error> {
     let mut q = conn.prepare(
-        "SELECT id, name, kind, disabled, bypass, permissions, password_hash FROM principal",
+        "SELECT id, name, kind, disabled, permissions, password_hash FROM principal",
     )?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
@@ -274,9 +273,8 @@ fn principal_row(r: &rusqlite::Row<'_>) -> Result<(String, PrincipalRec), Error>
         id,
         kind,
         disabled: r.get(3)?,
-        bypass: r.get(4)?,
-        permissions: perms(r.get(5)?)?,
-        password: r.get(6)?,
+        permissions: perms(r.get(4)?)?,
+        password: r.get(5)?,
         terms: Default::default(),
         groups: Default::default(),
     };
@@ -407,9 +405,11 @@ fn load_providers(
     }
     load_claim_rules(conn, st)?;
     load_role_mappings(conn, st)?;
-    st.providers
-        .values()
-        .try_for_each(|(p, _)| check_provider(p, allow_insecure_jwks))
+    st.providers.values().try_for_each(|(p, _)| {
+        check_provider(p, allow_insecure_jwks)?;
+        st.check_issuer_audience(p)
+            .map_err(|e| Error::Corrupt(format!("provider row `{}` breaks a rule: {e}", p.name)))
+    })
 }
 
 fn load_claim_rules(conn: &Connection, st: &mut State) -> Result<(), Error> {
@@ -691,8 +691,11 @@ mod tests {
         cat.create_principal("gone", PrincipalKind::Person).unwrap();
         cat.set_password("ada", "correct horse battery").unwrap();
         cat.disable_principal("gone").unwrap();
-        cat.set_bypass("ingest", true).unwrap();
         cat.grant_permission(Grantee::Principal("ingest"), Permission::Write)
+            .unwrap();
+        cat.grant_permission(Grantee::Principal("ingest"), Permission::WriteAll)
+            .unwrap();
+        cat.grant_permission(Grantee::Principal("ingest"), Permission::ReadAll)
             .unwrap();
         cat.grant_term(Grantee::Principal("ada"), "secret").unwrap();
         cat.create_group("eu").unwrap();

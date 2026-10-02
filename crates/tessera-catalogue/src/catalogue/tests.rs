@@ -72,7 +72,6 @@ fn a_principal_resolves_to_its_own_grants_and_those_of_its_groups() {
     let r = cat.resolve("ada", None).unwrap();
     assert_eq!(r.terms, set(&["secret", "region:eu"]));
     assert_eq!(r.permissions, perms(&[Permission::Read]));
-    assert!(!r.bypass);
 
     cat.remove_member("eu", "ada").unwrap();
     cat.add_member("ops", "ada").unwrap();
@@ -100,10 +99,10 @@ fn each_permission_is_granted_alone_and_admin_implies_nothing() {
         cat.revoke_permission(Grantee::Principal("root"), p)
             .unwrap();
     }
-    cat.set_bypass("root", true).unwrap();
-    let r = cat.resolve("root", None).unwrap();
-    assert!(r.bypass);
-    assert_eq!(r.permissions, PermissionSet::EMPTY);
+    assert_eq!(
+        cat.resolve("root", None).unwrap().permissions,
+        PermissionSet::EMPTY
+    );
 }
 
 #[test]
@@ -164,12 +163,11 @@ fn an_oidc_identity_holds_the_terms_its_claim_rules_produce_and_nothing_else() {
     let r = cat.resolve_claims("corp", &claims).unwrap();
     assert_eq!(r.terms, set(&["analysts", "eu", "tenant:7f3a"]));
     assert_eq!(r.permissions, PermissionSet::EMPTY);
-    assert!(!r.bypass);
     assert_eq!(cat.resolve_claims("nobody", &claims), None);
 }
 
 #[test]
-fn a_role_mapping_passes_on_its_groups_terms_and_permissions_and_never_bypass() {
+fn a_role_mapping_passes_on_its_groups_terms_and_permissions() {
     let fx = Fixture::new();
     let cat = fx.open();
     cat.create_provider(&corp_with_admins()).unwrap();
@@ -186,7 +184,14 @@ fn a_role_mapping_passes_on_its_groups_terms_and_permissions_and_never_bypass() 
     let r = cat.resolve_claims("corp", &admin).unwrap();
     assert_eq!(r.terms, set(&["analysts", "tessera-admins", "ops"]));
     assert_eq!(r.permissions, perms(&[Permission::Admin]));
-    assert!(!r.bypass);
+
+    cat.grant_permission(Grantee::Group("admins"), Permission::ReadAll)
+        .unwrap();
+    let r = cat.resolve_claims("corp", &admin).unwrap();
+    assert_eq!(
+        r.permissions,
+        perms(&[Permission::Admin, Permission::ReadAll])
+    );
 }
 
 #[test]
@@ -285,6 +290,7 @@ fn a_configured_provider_is_listed_and_cannot_be_changed_here() {
     let cat = Catalogue::open(&fx.path(), options.clone()).unwrap();
     let mut other = corp(vec![]);
     other.name = "partner".into();
+    other.audience = "partner".into();
     cat.create_provider(&other).unwrap();
 
     let listed: Vec<(String, bool)> = cat
@@ -341,6 +347,57 @@ fn a_configured_provider_is_listed_and_cannot_be_changed_here() {
         Catalogue::open(&fx.path(), options),
         Err(Error::Invalid(_))
     ));
+}
+
+#[test]
+fn a_provider_sharing_another_providers_issuer_and_audience_is_refused_on_both_paths() {
+    let fx = Fixture::new();
+    let cat = fx.open();
+    cat.create_provider(&corp(vec![])).unwrap();
+    let twin = Provider {
+        name: "twin".into(),
+        ..corp(vec![groups_rule()])
+    };
+    assert!(matches!(
+        cat.create_provider(&twin),
+        Err(Error::SameIssuer { .. })
+    ));
+    let other_audience = Provider {
+        audience: "reports".into(),
+        ..twin.clone()
+    };
+    cat.create_provider(&other_audience).unwrap();
+    assert!(matches!(
+        cat.update_provider(&twin),
+        Err(Error::SameIssuer { .. })
+    ));
+    let names = |cat: &Catalogue| -> Vec<(String, String)> {
+        cat.providers()
+            .into_iter()
+            .map(|p| (p.provider.name, p.provider.audience))
+            .collect()
+    };
+    assert_eq!(
+        names(&cat),
+        vec![
+            ("corp".to_owned(), "tessera".to_owned()),
+            ("twin".to_owned(), "reports".to_owned())
+        ]
+    );
+    drop(cat);
+
+    let mut options = fx.options();
+    options.config_providers = vec![Provider {
+        name: "configured".into(),
+        ..corp(vec![])
+    }];
+    assert!(matches!(
+        Catalogue::open(&fx.path(), options.clone()),
+        Err(Error::SameIssuer { .. })
+    ));
+    options.config_providers[0].audience = "configured".into();
+    let cat = Catalogue::open(&fx.path(), options).unwrap();
+    assert_eq!(cat.providers().len(), 3);
 }
 
 #[test]
@@ -501,10 +558,17 @@ fn grants_and_principal_flags_report_whom_they_affect() {
         principals(&["ada", "bob"])
     );
     assert_eq!(
-        who(cat.set_bypass("cy", true).unwrap()),
+        who(cat
+            .grant_permission(Grantee::Principal("cy"), Permission::WriteAll)
+            .unwrap()),
         principals(&["cy"])
     );
-    assert_eq!(who(cat.set_bypass("cy", true).unwrap()), none);
+    assert_eq!(
+        who(cat
+            .grant_permission(Grantee::Principal("cy"), Permission::WriteAll)
+            .unwrap()),
+        none
+    );
     assert_eq!(
         who(cat.disable_principal("cy").unwrap()),
         principals(&["cy"])
@@ -544,12 +608,14 @@ fn a_change_to_a_mapped_group_reports_its_members_and_every_provider_mapping_to_
     cat.create_provider(&corp_with_admins()).unwrap();
     let partner = Provider {
         name: "partner".into(),
+        audience: "partner".into(),
         role_mappings: vec![mapping("ops", "admins")],
         ..corp(vec![])
     };
     cat.create_provider(&partner).unwrap();
     cat.create_provider(&Provider {
         name: "other".into(),
+        audience: "other".into(),
         role_mappings: vec![mapping("tessera-admins", "eu")],
         ..corp(vec![])
     })
@@ -689,7 +755,7 @@ fn a_change_that_fails_to_commit_changes_nothing() {
     let attempts = [
         cat.create_principal("bob", PrincipalKind::Person),
         cat.disable_principal("ada"),
-        cat.set_bypass("ada", true),
+        cat.grant_permission(ada, Permission::WriteAll),
         cat.set_password("ada", "another long passphrase"),
         cat.clear_password("ada"),
         cat.create_group("ops"),
@@ -701,6 +767,7 @@ fn a_change_that_fails_to_commit_changes_nothing() {
         cat.create_api_key("ada", None, None).map(|(_, a)| a),
         cat.create_provider(&Provider {
             name: "partner".into(),
+            audience: "partner".into(),
             ..corp(vec![])
         }),
         cat.update_provider(&corp_with_admins()),

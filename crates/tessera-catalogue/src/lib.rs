@@ -119,6 +119,11 @@ pub enum Error {
     DeclaredTwice {
         provider: String,
     },
+    /// A provider has the issuer and audience of another provider.
+    SameIssuer {
+        provider: String,
+        other: String,
+    },
     /// A provider's JWKS URL is `http://` to a host other than a loopback address, and the
     /// catalogue was opened without `Options::allow_insecure_jwks`.
     InsecureJwks {
@@ -178,6 +183,12 @@ impl fmt::Display for Error {
                 f,
                 "provider `{provider}` is declared more than once; remove it from the \
                  configuration file or from the catalogue"
+            ),
+            Error::SameIssuer { provider, other } => write!(
+                f,
+                "provider `{provider}` has the issuer and audience of provider `{other}`, so a \
+                 token from it would be accepted by both; give it its own audience, or change \
+                 `{other}` instead"
             ),
             Error::InsecureJwks { provider, url } => write!(
                 f,
