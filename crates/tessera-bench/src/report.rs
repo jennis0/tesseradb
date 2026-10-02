@@ -105,6 +105,7 @@ pub struct Timing {
     /// noise and page-cache warmth without needing a separate warm-up phase.
     pub min_ns: u64,
     pub median_ns: u64,
+    pub p95_ns: u64,
     pub p99_ns: u64,
     pub max_ns: u64,
     /// The retained sample set, so the spread can be inspected without a re-run.
@@ -139,8 +140,8 @@ impl Timing {
             let idx = ((n as f64 * p) as usize).min(n - 1);
             samples[idx]
         };
-        let (min_ns, median_ns, p99_ns, max_ns) =
-            (samples[0], pick(0.5), pick(0.99), samples[n - 1]);
+        let (min_ns, median_ns, p95_ns, p99_ns, max_ns) =
+            (samples[0], pick(0.5), pick(0.95), pick(0.99), samples[n - 1]);
 
         let retained = if n > MAX_RETAINED_SAMPLES {
             let step = n.div_ceil(MAX_RETAINED_SAMPLES);
@@ -158,6 +159,7 @@ impl Timing {
             n_repeats: n as u32,
             min_ns,
             median_ns,
+            p95_ns,
             p99_ns,
             max_ns,
             all_ns: retained,

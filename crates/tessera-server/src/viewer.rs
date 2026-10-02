@@ -32,6 +32,7 @@ use crate::stream::{CancelGuard, Producer};
 pub fn router(state: Arc<AppState>) -> Router {
     // With neither CORS list set there is no CORS layer at all.
     let cors = crate::cors::viewer_layer(&state);
+    let state_for_log = state.request_log.is_some().then(|| Arc::clone(&state));
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
@@ -55,8 +56,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             crate::memory::trim_after_response,
         ))
         .with_state(state);
-    match cors {
+    let router = match cors {
         Some(layer) => router.layer(layer),
+        None => router,
+    };
+    // Outermost, so a preflight the CORS layer answers is logged too.
+    match state_for_log {
+        Some(state) => router.layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::request_log::viewer,
+        )),
         None => router,
     }
 }

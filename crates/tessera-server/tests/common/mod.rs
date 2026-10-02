@@ -1021,6 +1021,7 @@ async fn mount_server_with_flush(
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
+        request_log: None,
         faults,
     });
 
@@ -2212,4 +2213,42 @@ pub fn unique_holders(
             _ => None,
         })
         .collect())
+}
+
+/// A deployment over a fixture bundle built into `tmp`, with the control plane at `control`, the
+/// viewer and session planes on port 0, and `serve_extra` added to `[serve]`.
+pub fn write_deployment(tmp: &Path, control: &str, serve_extra: &str) -> std::path::PathBuf {
+    let bundle_root = build_fixture(tmp, N_ITEMS);
+    let session_credential = tmp.join("session.cred");
+    let operator_credential = tmp.join("operator.cred");
+    std::fs::write(&session_credential, SESSION_CREDENTIAL).unwrap();
+    std::fs::write(&operator_credential, OPERATOR_CREDENTIAL).unwrap();
+
+    let text = format!(
+        r#"
+        [bundle]
+        path = "{bundle}"
+        cache = "{cache}"
+        wal = "{wal}"
+        [plugin]
+        module = "builtin:passthrough"
+        [disclosure]
+        token_max_lifetime = 3600
+        [serve]
+        viewer = "127.0.0.1:0"
+        session = "127.0.0.1:0"
+        control = "{control}"
+        session_credential_file = "{session_cred}"
+        operator_credential_file = "{operator_cred}"
+        {serve_extra}
+        "#,
+        bundle = bundle_root.display(),
+        cache = tmp.join("cache").display(),
+        wal = tmp.join("wal.log").display(),
+        session_cred = session_credential.display(),
+        operator_cred = operator_credential.display(),
+    );
+    let path = tmp.join("tessera.toml");
+    std::fs::write(&path, text).unwrap();
+    path
 }

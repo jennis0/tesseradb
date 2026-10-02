@@ -330,6 +330,44 @@ enum Command {
         cold_workers: usize,
     },
 
+    /// Send a log written by `[serve] request_log` back at a server, as one viewer or as many,
+    /// and report each route's latency beside the latency the log recorded. Each copy authorises
+    /// its own sessions by re-sending the recorded `auth_data`. Needs no fixtures.
+    Replay {
+        /// The request log.
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long)]
+        viewer_url: String,
+        #[arg(long)]
+        session_url: String,
+        /// The environment variable holding the session credential.
+        #[arg(long)]
+        credential_env: String,
+        /// Copies of the recorded sessions to run at once, each with its own sessions.
+        #[arg(long, default_value_t = 1)]
+        viewers: usize,
+        /// Seconds between the starts of successive copies.
+        #[arg(long, default_value_t = 0.0)]
+        stagger: f64,
+        /// `recorded` keeps the log's gaps between requests; `asap` sends each session's next
+        /// request when its last one ends.
+        #[arg(long, value_enum, default_value_t = arms::replay::Pace::Recorded)]
+        pace: arms::replay::Pace,
+        /// Divides the recorded gaps and cancellation times, at recorded pace.
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        /// Seconds a request may take, to the end of its body.
+        #[arg(long, default_value_t = 30.0)]
+        timeout: f64,
+        /// Replay only requests at least this many seconds after the log's first line.
+        #[arg(long)]
+        since: Option<f64>,
+        /// Replay only requests less than this many seconds after the log's first line.
+        #[arg(long)]
+        until: Option<f64>,
+    },
+
     /// Morton tile enumeration and masked counting, swept over zoom.
     ///
     /// Covers zoom 0..=3 as well, which every existing script omits: counting is nearly free at
@@ -357,6 +395,51 @@ fn main() -> std::process::ExitCode {
     }
 
     let cli = Cli::parse();
+
+    // The one subcommand that reads no fixture.
+    if let Command::Replay {
+        log,
+        viewer_url,
+        session_url,
+        credential_env,
+        viewers,
+        stagger,
+        pace,
+        speed,
+        timeout,
+        since,
+        until,
+    } = cli.command
+    {
+        let ctx = arms::Context {
+            run_dir: cli.run_dir,
+            repeat: cli.repeat,
+            fixtures: Vec::new(),
+        };
+        let result = std::env::var(&credential_env)
+            .map_err(|_| {
+                format!("{credential_env} is not set; export the session credential in it").into()
+            })
+            .and_then(|credential| {
+                arms::replay::run(
+                    &ctx,
+                    arms::replay::Options {
+                        log,
+                        viewer_url: viewer_url.trim_end_matches('/').to_string(),
+                        session_url: session_url.trim_end_matches('/').to_string(),
+                        credential,
+                        viewers,
+                        stagger: std::time::Duration::from_secs_f64(stagger),
+                        pace,
+                        speed,
+                        timeout: std::time::Duration::from_secs_f64(timeout),
+                        since_s: since,
+                        until_s: until,
+                    },
+                )
+            });
+        return exit(result);
+    }
 
     let fixtures = match fixture::discover(&cli.fixtures) {
         Ok(f) => f,
@@ -528,8 +611,12 @@ fn main() -> std::process::ExitCode {
             coverage,
             seed,
         } => arms::tiles::run(&ctx, &zoom, &coverage, seed),
+        Command::Replay { .. } => unreachable!("answered before fixtures are read"),
     };
+    exit(result)
+}
 
+fn exit(result: arms::Result<()>) -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

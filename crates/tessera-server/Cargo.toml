@@ -33,9 +33,12 @@ tokio = { version = "1", features = ["full"] }
 # `StreamBody`); axum's `Body::from_stream` consumes it. Already in the tree via axum — this
 # only makes the trait nameable.
 futures-core = "0.3"
+# The request log wraps request and response bodies; already in the tree via axum.
+http-body = "1"
 bytes = "1"
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value`: the request log embeds a request body as it was sent.
+serde_json = { workspace = true, features = ["raw_value"] }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 sha2 = { workspace = true }

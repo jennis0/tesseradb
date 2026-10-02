@@ -98,3 +98,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # needs the same libzstd `tessera-filter` reads the blocks with. Comparing a candidate against a
 # differently-invoked compressor would price the compressor rather than the framing.
 zstd = { workspace = true }
+
+[dev-dependencies]
+# `replay`'s test serves a server's routers itself, as `tessera-server`'s own tests do.
+axum = "0.8"

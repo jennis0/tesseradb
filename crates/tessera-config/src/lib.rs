@@ -241,6 +241,18 @@ struct RawServe {
     ///
     /// Default: `false`.
     stage_timing: Option<bool>,
+    /// A file to append one JSON line to for each viewer-plane and session-plane request other
+    /// than `/healthz` and `/readyz`: when it started, its route and body, the session's
+    /// `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it
+    /// waited for admission, and whether the client went away before the body ended. Request
+    /// bodies are written, including `/session/authorise`'s `auth_data`, so that a session can be
+    /// replayed, and the file is created readable by its owner only. Tokens and the credentials in
+    /// headers are never written. The file is written by its own thread and flushed whenever it
+    /// has caught up, and a restarted server appends to it, marking its lines with a new `run`.
+    /// `tessera-bench replay` sends a log back at a server. Unset, nothing is logged.
+    ///
+    /// Default: not set.
+    request_log: Option<PathBuf>,
     /// The most vertices a `region` filter's polygon may have. A filter with more is refused
     /// with 422.
     ///
@@ -573,6 +585,8 @@ pub struct Config {
     /// Add `stage_ns` to a viewport response's trailer; does nothing in a binary built without
     /// `bench-timing`.
     pub stage_timing: bool,
+    /// `None` logs nothing.
+    pub request_log: Option<PathBuf>,
     pub dev_cors_origins: Vec<String>,
     pub cors_origins: Vec<String>,
     pub visible_wait_max_secs: u64,
@@ -696,6 +710,7 @@ pub fn load(path: &Path) -> Result<Config> {
         Some(&mut config.schema_path),
         config.session_credential.file.as_mut(),
         config.operator_credential.file.as_mut(),
+        config.request_log.as_mut(),
     ]
     .into_iter()
     .flatten()
@@ -958,6 +973,7 @@ fn parse(text: &str) -> Result<Config> {
             .region_cache_bytes
             .unwrap_or(DEFAULT_REGION_CACHE_BYTES),
         stage_timing: serve.stage_timing.unwrap_or(false),
+        request_log: serve.request_log,
         dev_cors_origins,
         cors_origins,
         visible_wait_max_secs: serve
@@ -1338,12 +1354,21 @@ mod tests {
     fn paths_resolve_against_the_deployment_files_own_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let at = tmp.path().join(DEPLOYMENT_FILE);
-        std::fs::write(&at, valid_toml("")).unwrap();
+        std::fs::write(&at, valid_toml("request_log = \"logs/requests.jsonl\"")).unwrap();
         let config = load(&at).expect("the file loads");
         assert_eq!(config.bundle_path, tmp.path().join("b"));
         assert_eq!(config.cache_dir, tmp.path().join("c"));
         assert_eq!(config.wal_path, tmp.path().join("w"));
         assert_eq!(config.schema_path, tmp.path().join(DEFAULT_SCHEMA_FILE));
+        assert_eq!(
+            config.request_log,
+            Some(tmp.path().join("logs/requests.jsonl"))
+        );
+    }
+
+    #[test]
+    fn no_request_log_is_kept_unless_one_is_named() {
+        assert_eq!(parse(&valid_toml("")).unwrap().request_log, None);
     }
 
     #[test]
