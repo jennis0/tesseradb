@@ -220,7 +220,14 @@ export function joinedAggregate(
         {once: true}
       );
     }
-    send(batch.token, {...batch.req, groupings: live.flatMap((p) => p.groupings)}, controller.signal).then(
+    // A send that throws rather than rejecting is that caller's refusal all the same.
+    let sent: Promise<AggregateResult>;
+    try {
+      sent = send(batch.token, {...batch.req, groupings: live.flatMap((p) => p.groupings)}, controller.signal);
+    } catch (error) {
+      sent = Promise.reject(error);
+    }
+    sent.then(
       (result) => {
         let from = 0;
         for (const part of live) {
