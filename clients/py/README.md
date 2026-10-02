@@ -379,7 +379,8 @@ in which each map tile carries at most `k` points and the zoom sets how many til
 holds fewer rows than the selection has items; `count()` is the number, and `items()` below
 reads every row. The result reads as a pyarrow table of
 `tessera_id`, `code` (the point's position on the view's grid) and the columns declared with
-`render=True`. A category column holds each value's key, as a dictionary column, and null for a
+`render=True`, or only the rendered columns `point_rows` names, as in
+`point_rows=["venue"]`. A category column holds each value's key, as a dictionary column, and null for a
 value the reader may not see; the keys are looked up once per reader and kept. Its schema metadata carries `tessera.counts` (`visible`, `matched`, `highlighted`
 and `served`, over the tiles the request touched), `tessera.request` and `tessera.trailer`.
 Beside the points it has `artifacts`, the annotations served with them, and `sub_cells`, finer
