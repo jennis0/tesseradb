@@ -160,11 +160,13 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
 /// read at 29 takes the next record's leading bytes for them. **29** is the version before a row
 /// lost its external id: a 29 row read at 30 takes the external id's tag for its entity. **30** is
 /// the version before a receipt's `tessera_id` was optional: a 30 receipt read at 31 takes the
-/// identifier's first byte for the option's tag.
+/// identifier's first byte for the option's tag. **31** is the version before a row's descriptors
+/// were the keys an access expression is indexed under: a 31 row's labels read at 32 would index
+/// an item under a key nobody's label meant.
 #[test]
 fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    for (index, version) in [15u16, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
         .into_iter()
         .enumerate()
     {
@@ -181,7 +183,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("wal-000001.log"), header_at_version(31, 1, 0)).unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(32, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
@@ -285,7 +287,7 @@ fn a_row_of_every_scalar_kind_is_written_as_these_bytes() {
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(
         hex,
-        "5457414c1f000100000000000000000000000000000086000000010162000000000000000000000000000000\
+        "5457414c20000100000000000000000000000000000086000000010162000000000000000000000000000000\
          0000000000000000000000000000000000010301760000000000000000e03f000000000000d03f0e000101ab\
          02cdd702038486880804ffffffffffffffffff0105fe06d70407dfc50808ffffffffffffffffff01090000c0\
          3f0a00000000000002c00b8080f281838985060c016b0d0101010000a8d5d049"

@@ -117,7 +117,7 @@ struct PlannedArtifact {
     /// shape content is read in the same space, and is read in a second pass once every row of the
     /// layer is in hand.
     space: Option<String>,
-    /// The artifact's own access labels, as the plugin's descriptors, on
+    /// The artifact's own access labels, each as its canonical text, on
     /// [`IncomingArtifact::access`]'s terms.
     access: Option<Vec<Vec<u8>>>,
 }
@@ -1173,10 +1173,11 @@ fn plan_inline(
     Ok(())
 }
 
-/// An artifact's labels as the plugin's descriptors. The build labels with the passthrough plugin,
-/// as it does a points file's access column.
+/// An artifact's labels as they are stored, by the rule a running service applies to a published
+/// artifact ([`tessera_types::label::artifact_access`]).
 fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
-    tessera_plugin::artifact_access(&tessera_plugin::Passthrough::new(), labels)
+    tessera_types::label::artifact_access(labels)
+        .map(|labels| labels.into_iter().map(String::into_bytes).collect())
         .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))
 }
 

@@ -13,7 +13,9 @@ accepted only as the whole label, and every principal satisfies it. `inherited` 
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
-The engine's limit on the size of a label holding a conjunction is not modelled.
+The engine's limit on the size of a label holding a conjunction is not modelled, and neither is
+the item card's answer for a label written with a conjunction that normalisation reduces to a
+disjunction of terms, such as `(a|b)&(a|b|c)`.
 """
 
 from __future__ import annotations
@@ -80,6 +82,67 @@ def satisfies(tree, held: Callable[[str], bool]) -> bool:
     if isinstance(tree, And):
         return all(satisfies(operand, held) for operand in tree.operands)
     return any(satisfies(operand, held) for operand in tree.operands)
+
+
+def admits(labels, held: Callable[[str], bool]) -> bool:
+    """Whether a principal holding the terms `held` satisfies any one of the labels `labels`, as an
+    item, a view or an artifact carrying a list of labels admits it."""
+    return any(satisfies(parse(label), held) for label in labels)
+
+
+def witness(tree, held: Callable[[str], bool]) -> list[str] | None:
+    """Held terms whose conjunction satisfies `tree`, sorted and distinct, or `None` where `held`
+    does not satisfy it. Of a disjunction, the satisfied operand with fewest terms, then the first
+    in code point order, is taken."""
+    if isinstance(tree, Public):
+        return []
+    if isinstance(tree, Term):
+        return [tree.name] if held(tree.name) else None
+    found = [witness(operand, held) for operand in tree.operands]
+    if isinstance(tree, And):
+        if any(w is None for w in found):
+            return None
+        return sorted(set().union(*found))
+    satisfied = [w for w in found if w is not None]
+    return min(satisfied, key=lambda w: (len(w), w)) if satisfied else None
+
+
+def write_term(name: str) -> str:
+    """A term as label text: bare where every character may stand bare, and quoted otherwise."""
+    if all(c in BARE for c in name):
+        return name
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def card_labels(labels, held: Callable[[str], bool]) -> list[str]:
+    """What an item card serves for an item carrying `labels`, to a principal holding `held`: each
+    term of a label that is a term or a disjunction of terms, where held, and `public` where a label
+    is `public`; and of each label holding a conjunction that `held` satisfies, its witness, with
+    its terms joined by `&`. Each entry is label text, and the list is sorted and distinct."""
+    out = set()
+    for text in labels:
+        tree = parse(text)
+        if isinstance(tree, Public):
+            out.add(PUBLIC)
+        elif isinstance(tree, Term) or (
+            isinstance(tree, Or) and all(isinstance(o, Term) for o in tree.operands)
+        ):
+            out.update(write_term(t) for t in terms(tree) if held(t))
+        elif (w := witness(tree, held)) is not None:
+            out.add("&".join(write_term(t) for t in w))
+    return sorted(out)
+
+
+def held_term(term: str) -> str | None:
+    """A term a credential presents, as it is held: trimmed, and `None` where nothing is left,
+    where it holds a control character, or where it is `public` in any case. Every principal holds
+    `public` without presenting it."""
+    name = term.strip(WHITESPACE)
+    if not name or any(unicodedata.category(c) == "Cc" for c in name):
+        return None
+    if name.isascii() and name.lower() == PUBLIC:
+        return None
+    return name
 
 
 def terms(tree) -> set[str]:

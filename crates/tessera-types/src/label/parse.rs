@@ -167,10 +167,10 @@ fn check_term(term: &str) -> Result<(), &'static str> {
     if term.chars().any(char::is_control) {
         return Err(CONTROL);
     }
-    if term.eq_ignore_ascii_case(tessera_types::label::PUBLIC) {
+    if term.eq_ignore_ascii_case(super::PUBLIC) {
         return Err(PUBLIC_TERM);
     }
-    if term.eq_ignore_ascii_case(tessera_types::label::INHERITED) {
+    if term.eq_ignore_ascii_case(super::INHERITED) {
         return Err(INHERITED_TERM);
     }
     Ok(())

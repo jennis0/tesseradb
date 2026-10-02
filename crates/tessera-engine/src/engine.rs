@@ -10,7 +10,6 @@ use rand::RngCore;
 use rustc_hash::FxHashMap;
 use tessera_authz::{DeltaTier, Dict, FragmentCache, PostingsReader};
 use tessera_lifecycle::Overlay;
-use tessera_plugin::Plugin;
 use tessera_store::manifest::{CurrentPointer, Declarations};
 use tessera_store::read::open_bundle;
 use tessera_store::vocabulary::Vocabularies;
@@ -73,7 +72,7 @@ fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
-/// pointer, plus the state that is genuinely process-lifetime — the plugin, the compute pool, the
+/// pointer, plus the state that is genuinely process-lifetime — the compute pool, the
 /// `tessera_id` key, the row-projection cache and the bundle root. The dictionary, postings
 /// reader and fragment cache live in [`Generation`] instead, since each changes on its own
 /// publication.
@@ -82,7 +81,6 @@ pub struct Engine {
     /// swap through this exact pointer and read paths load it, so a copy elsewhere would hide a
     /// swap from whichever side held it.
     pub(crate) generation: Arc<GenerationHandle>,
-    pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
     /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)`. Not
@@ -362,47 +360,6 @@ fn merge_side_declarations(bundle: &mut Bundle) -> SideDeclarations {
         attributes,
         scoped_attributes,
     }
-}
-
-/// The plugin that serves a bundle must be the plugin that labelled it: every posting is that
-/// implementation's output, and serving under a different one mislabels every item invisibly, with
-/// no downstream failure. An empty or absent manifest hash also refuses. Only the data hash is
-/// checked; the auth module's hash is not recorded in the manifest.
-fn check_serving_plugin(
-    manifest: &tessera_store::manifest::Manifest,
-    plugin: &dyn Plugin,
-) -> Result<()> {
-    let served_hash = plugin.data_plugin_hash();
-    if manifest.data_plugin_hash != served_hash {
-        let recorded = if manifest.data_plugin_hash.is_empty() {
-            "<empty>"
-        } else {
-            &manifest.data_plugin_hash
-        };
-        return Err(EngineError::Malformed(format!(
-            "MANIFEST data_plugin_hash is '{recorded}' but this process serves with plugin \
-             '{served_hash}': the bundle's postings were labelled by a different rule, so \
-             serving them here would mislabel every one of them. Rebuild the bundle with \
-             this plugin, or serve it with the plugin that built it."
-        )));
-    }
-
-    // The containment partition answers `G ⊆ M_auth` from term signatures, sound only when
-    // authorisation is signature-shaped, true of the builtin plugin, unverifiable for any
-    // other. Under a foreign plugin containment falls back to asking `M_auth` directly per
-    // request instead: correct and fail-closed, but otherwise invisible, so logged.
-    if !crate::containment::signature_shaped(&served_hash) {
-        tracing::warn!(
-            data_plugin_hash = %served_hash,
-            "this bundle is served by a plugin other than the builtin, so the containment \
-             partition is not built: the expression it interns is over term signatures, which \
-             is sound only where an entity's visibility is decided by its own term set, and a \
-             foreign plugin's rule cannot be shown to be. Containment is answered per artifact \
-             per request against the composed mask instead — the same answer, at the cost the \
-             partition exists to remove"
-        );
-    }
-    Ok(())
 }
 
 /// One partition's base postings under a prefix. Mmap-backed: a generation holds this reader for
@@ -953,13 +910,11 @@ impl Engine {
         bundle_root: &Path,
         cache_dir: &Path,
         wal_path: &Path,
-        plugin: impl Plugin + 'static,
         config: EngineConfig,
     ) -> Result<Engine> {
         config.check()?;
         let mut bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
         let side = merge_side_declarations(&mut bundle);
-        check_serving_plugin(&bundle.manifest, &plugin)?;
 
         let readers = PrefixReaders::open(bundle_root, &bundle)?;
         let ReconstructedWrites {
@@ -969,14 +924,10 @@ impl Engine {
             vocabularies,
         } = reconstruct_writes(wal_path, &bundle, &readers, side)?;
 
-        let plugin: Arc<dyn Plugin> = Arc::new(plugin);
-        let auth_plugin_hash = hex_decode_32(&plugin.auth_plugin_hash()).ok_or_else(|| {
-            EngineError::Malformed("plugin auth_plugin_hash is not 64 hex characters".to_string())
-        })?;
         let fragment_cache = Arc::new(FragmentCache::new(
             cache_dir,
             readers.bundle_identity,
-            auth_plugin_hash,
+            authorisation_rule_hash(),
         ));
         // Built now, not lazily on first request: a pool that cannot be built is a fact about this
         // engine's open-time health, not one to discover on whichever request happens to be first.
@@ -1033,7 +984,6 @@ impl Engine {
 
         let engine = Engine {
             generation: Arc::clone(&generation),
-            plugin,
             // Unbounded until `set_cache_bounds` is called.
             row_projection_cache: Arc::clone(&row_projection_cache),
             region_cache: Arc::clone(&region_cache),
@@ -1125,18 +1075,6 @@ impl Engine {
         self.generation.load_full()
     }
 
-    /// The plugin this engine was opened with — the `/control/ingest` handler calls
-    /// `terms_of_labels` through this to turn an item's `access` labels into descriptors.
-    pub fn plugin(&self) -> &Arc<dyn Plugin> {
-        &self.plugin
-    }
-
-    /// The plugin's declared sizing bounds — the ingest handler consults these to decide
-    /// `over_bound`. Bounds warn, they never exclude an item.
-    pub fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
-        self.plugin.declared_bounds()
-    }
-
     /// Start this engine's write executor: move the WAL onto a dedicated thread and open the two
     /// queues every write is submitted through. Call at most once. A separate call rather than a
     /// config field, so an engine that never ingests starts no thread at all. `&mut self` makes
@@ -1184,7 +1122,6 @@ impl Engine {
             bundle_root: self.bundle_root.clone(),
             identity_key: self.identity_key,
             pool: Arc::clone(&self.pool),
-            max_distinct_terms: self.plugin.declared_bounds().max_distinct_terms,
         }
     }
 
@@ -1313,6 +1250,15 @@ fn read_current(root: &Path) -> Result<CurrentPointer> {
     let bytes = std::fs::read(root.join("CURRENT")).map_err(EngineError::Io)?;
     serde_json::from_slice(&bytes)
         .map_err(|e| EngineError::Malformed(format!("CURRENT is not valid JSON: {e}")))
+}
+
+/// The second half of the fragment cache's key beside the bundle identity: the rule that turns a
+/// credential's terms into the set of index keys a fragment unions. A change to that rule changes
+/// this text, so a cache directory kept across the change misses rather than serving a fragment
+/// built under the old rule.
+pub(crate) fn authorisation_rule_hash() -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(b"tessera access expressions:1").into()
 }
 
 fn hex_decode_32(s: &str) -> Option<[u8; 32]> {

@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
@@ -200,7 +199,6 @@ fn main() {
             &bundle_root,
             &tmp.path().join("cache"),
             &tmp.path().join("wal.log"),
-            Passthrough::new(),
             EngineConfig {
                 // `tessera-server`'s own defaults (`config.rs`'s `DEFAULT_*` constants) — this
                 // must measure the deployment the server actually runs, not an arbitrary config

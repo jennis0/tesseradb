@@ -184,8 +184,8 @@ pub(crate) struct IngestSubmission {
     /// The live unique entries' sequence number the handler resolved the batch at; the
     /// executor re-checks the created rows' values against the entries added since.
     pub(crate) unique_seq: u64,
-    /// The request rows creating an item whose label resolves to more terms than the plugin
-    /// declares an item carries.
+    /// The request rows creating an item indexed under more than
+    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys.
     pub(crate) over_bound: Vec<u32>,
 }
 

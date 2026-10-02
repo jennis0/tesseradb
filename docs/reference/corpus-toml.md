@@ -38,7 +38,7 @@ One coordinate system: a position for each item it holds, the frame those positi
 | `fields` | table of strings | not set | Where the points file keeps each field, as `field = "column"`. The fields are either `x` and `y` or `morton` and `residual`, or on a projected view `lon` and `lat`, and each attribute declared `unique`, whose column is its `field` or its name where this map does not move it. A field not named here is read from the column of its own name. A field the view does not have, both kinds of position, `residual` without `morton`, and `fields` where the view has no source are refused. |
 | `extent` | string or table | required | The frame positions are stored across, as a 32-bit position on each axis. A point outside it is stored on its edge, and a build refuses a frame that more than half the points fall outside. The spellings are under `[view.extent]`. |
 | `point_visibility` | table | required | Where each point's access label comes from: keys under `[view.point_visibility]`. |
-| `visibility` | string or array of strings | `"public"` | The access label a viewer must hold to reach the view, or a list of labels of which they must hold one. `public` alone admits every viewer. An empty list, an empty label, `inherited`, `public` beside another label, and a label the plugin maps to no term are refused. |
+| `visibility` | string or array of strings | `"public"` | The access label a viewer must satisfy to reach the view, or a list of labels of which they must satisfy one. Each label is an access expression, such as `finance&(eu|uk)`. `public` alone admits every viewer. An empty list, an empty label, `inherited`, `public` beside another label, and a label that is not an access expression are refused. |
 
 ## `[view.extent]`
 
@@ -73,13 +73,13 @@ extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }  # a box
 
 ## `[view.point_visibility]`
 
-Where each point's access label comes from. A viewer sees a point when they hold one of its labels. Write `field` or `source`, not both, and at least one of the three keys.
+Where each point's access label comes from. A label is an access expression, such as `secret&(team_a|team_b)`, and a viewer sees a point when their terms satisfy one of its labels. Write `field` or `source`, not both, and at least one of the three keys.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `field` | string | not set | A column of the view's points file holding each point's access label, as a string or a list of strings. A null or an empty list is no label. An empty name is refused. |
 | `source` | string | not set | A name in `[sources]`: a file of an integer `term_id` beside the column of at least one attribute declared `unique`, which names the point, one row per point and access term. If one view of a build reads labels this way, every view must, from the same file. |
-| `default` | string | not set | The label a point with none of its own takes: `public` for every viewer, or an access label the plugin maps to a term. `inherited` is refused. Without it, a point with no label is refused, at a build and at `/control/ingest` alike. |
+| `default` | string | not set | The label a point with none of its own takes: `public` for every viewer, or an access expression. `inherited` is refused. Without it, a point with no label is refused, at a build and at `/control/ingest` alike. |
 
 ## `[[view_group]]`
 

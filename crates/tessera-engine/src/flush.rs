@@ -445,7 +445,8 @@ pub(crate) struct FlushContext {
     pub(crate) dict: Arc<Dict>,
     /// The descriptor bytes behind every extension term id this plan's items carry; empty in the steady state.
     pub(crate) novel_descriptors: FxHashMap<TermId, Vec<u8>>,
-    /// The plugin's declared `max_distinct_terms`, enforced at promotion (see [`promote`]).
+    /// [`tessera_authz::MAX_DISTINCT_TERMS`] unless a test lowers it, enforced at promotion (see
+    /// [`promote`]), the one path by which a caller grows the dictionary.
     pub(crate) max_distinct_terms: u64,
     pub(crate) prefix: String,
     /// The view's spatial levels as held when planned; the new segment's rows are resolved against these on the pool.
@@ -931,8 +932,8 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, Maintenanc
                         if next >= ctx.max_distinct_terms {
                             return Err(MaintenanceFailed(format!(
                                 "promoting this flush's novel descriptors would carry the \
-                                 dictionary to {next}, at or past the plugin's declared \
-                                 max_distinct_terms of {}; refusing rather than assigning an \
+                                 dictionary to {next}, at or past the most it is sized \
+                                 for, {}; refusing rather than assigning an \
                                  ordinal that could alias an extension id",
                                 ctx.max_distinct_terms
                             )));

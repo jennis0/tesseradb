@@ -37,7 +37,6 @@ use tessera_build::input::deinterleave;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{Wal, WalRecord};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{Bounds, Projection, WEB_MERCATOR_MAX_LATITUDE_DEG};
 
 use common::*;
@@ -514,7 +513,6 @@ async fn replay_reproduces_the_stored_positions_without_re_running_the_transform
         &replay_root,
         &tmp.path().join("cache-copy"),
         &replay_dir.join("wal.log"),
-        Passthrough::new(),
         config(),
     )
     .expect("the engine opens against the copied bundle and replays the copied log");

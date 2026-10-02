@@ -74,7 +74,6 @@ fn open_engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             // **The row trigger off.** This cell drives publication itself — it pins `B`
@@ -1028,7 +1027,6 @@ fn a_configured_tier_width_reaches_selection_and_changes_when_a_merge_fires() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,
@@ -1086,7 +1084,6 @@ fn a_configured_segment_floor_reaches_selection_and_changes_which_segments_merge
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

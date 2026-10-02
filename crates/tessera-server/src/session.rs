@@ -60,13 +60,13 @@ async fn authorise(
         .map_err(|e| ApiError::Contract(format!("auth_data is not valid base64: {e}")))?;
 
     // On a fragment-cache miss this builds the frozen fragment and writes it to disk.
-    // The caller holds the session credential, so the plugin's reason for refusing `auth_data`
+    // The caller holds the session credential, so the reason for refusing `auth_data`
     // is theirs to read.
     let session = state
         .gated(move |state| {
             state.engine.authorise(&auth_data).map_err(|e| match e {
-                tessera_engine::EngineError::Plugin(why) => ApiError::Contract(format!(
-                    "the deployment's plugin refused auth_data: {why}"
+                tessera_engine::EngineError::Credential(why) => ApiError::Contract(format!(
+                    "auth_data is refused: {why}"
                 )),
                 other => map_engine_error(other),
             })

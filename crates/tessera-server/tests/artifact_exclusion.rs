@@ -167,7 +167,6 @@ async fn a_list_over_the_bound_is_refused_naming_the_limit() {
         &bundle,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         default_engine_config(),
     )
     .unwrap();

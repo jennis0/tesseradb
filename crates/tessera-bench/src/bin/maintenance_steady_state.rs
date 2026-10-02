@@ -183,7 +183,6 @@ fn open(tmp: &Path, root: &Path, merge_held: bool) -> Result<Engine, Box<dyn std
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,

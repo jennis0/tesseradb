@@ -1179,48 +1179,14 @@ fn check_refuses_an_absent_or_non_text_label_column() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A label the plugin maps to nothing
+// A label that is not an access expression
 // ---------------------------------------------------------------------------------------------
 
-/// `builtin:passthrough` in every respect but one: the label `nothing` maps to no descriptor.
-struct Forgetful;
-
-impl tessera_plugin::Plugin for Forgetful {
-    fn terms_of_labels(
-        &self,
-        labels: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        let kept: Vec<_> = labels.iter().filter(|l| l.as_slice() != b"nothing").cloned().collect();
-        tessera_plugin::Passthrough::new().terms_of_labels(&kept)
-    }
-    fn terms_of_auth(
-        &self,
-        auth_data: &[u8],
-    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
-        tessera_plugin::Passthrough::new().terms_of_auth(auth_data)
-    }
-    fn present_terms(
-        &self,
-        descriptors: &[tessera_plugin::Descriptor],
-    ) -> Result<Vec<String>, tessera_plugin::PluginError> {
-        tessera_plugin::Passthrough::new().present_terms(descriptors)
-    }
-    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
-        tessera_plugin::Passthrough::new().declared_bounds()
-    }
-    fn data_plugin_hash(&self) -> String {
-        tessera_plugin::Passthrough::new().data_plugin_hash()
-    }
-    fn auth_plugin_hash(&self) -> String {
-        tessera_plugin::Passthrough::new().auth_plugin_hash()
-    }
-}
-
-/// **A label the plugin maps to no term is refused**, at publication and at a fill, rather than
-/// stored as no label: on an `inherited` layer that would serve the artifact to everyone the layer
-/// admits.
+/// **A label that is not an access expression is refused**, at publication and at a fill, rather
+/// than stored as no label: on an `inherited` layer that would serve the artifact to everyone the
+/// layer admits.
 #[tokio::test]
-async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_none() {
+async fn a_label_that_is_not_an_expression_is_refused_rather_than_stored_as_none() {
     let tmp = TempDir::new().unwrap();
     build_fixture(tmp.path(), N_ITEMS);
     let config = default_engine_config();
@@ -1229,7 +1195,6 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         &tmp.path().join("bundle"),
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Forgetful,
         config,
     )
     .unwrap();
@@ -1241,7 +1206,7 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         .put(artifacts_url(&server, LAYER))
         .bearer_auth(OPERATOR_CREDENTIAL)
         .json(&json!({ "artifacts": [
-            { "key": "hidden", "members": members(0..40), "access": ["nothing"] }
+            { "key": "hidden", "members": members(0..40), "access": ["a|b&c"] }
         ] }))
         .send()
         .await
@@ -1254,7 +1219,7 @@ async fn a_label_the_plugin_maps_to_nothing_is_refused_rather_than_stored_as_non
         json!([{ "key": "bare", "members": members(0..40), "access": null }]),
     )
     .await;
-    let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["nothing"] }])).await;
+    let (status, _) = patch(&server, LAYER, json!([{ "key": "bare", "access": ["team a"] }])).await;
     assert_eq!(status, 422);
     tick(&server).await;
     assert_eq!(

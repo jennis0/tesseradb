@@ -34,7 +34,6 @@ use tessera_engine::projection::RowProjection;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
@@ -178,7 +177,6 @@ fn bench_viewport(c: &mut Criterion) {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         // The production defaults, deliberately: this bench exists to measure what the server
         // actually does, so θ is live here rather than saturated the way the correctness tests
         // configure it. Note that recorded baselines from before §7.2's density rule landed are

@@ -32,7 +32,6 @@ use tessera_build::config::{AttributeSource, Config};
 use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{Bounds, Projection};
 use tessera_types::IdentityKey;
 
@@ -147,7 +146,6 @@ fn bundle(dir: &Path, absent_every: Option<u64>) -> Engine {
         &out,
         &dir.join("cache"),
         &dir.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 500,

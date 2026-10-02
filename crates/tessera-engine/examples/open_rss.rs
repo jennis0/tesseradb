@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 
 fn main() {
     let bundle_root = env::args()
@@ -23,7 +22,6 @@ fn main() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 200,

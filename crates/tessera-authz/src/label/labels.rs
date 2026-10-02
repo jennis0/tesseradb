@@ -6,6 +6,7 @@ use tessera_types::{LabelId, TermId};
 use super::dag::{Dag, Scratch};
 use super::{Expr, Label, Shape};
 
+#[derive(Clone)]
 enum Entry {
     Public,
     /// The label's term ids, sorted.
@@ -15,6 +16,7 @@ enum Entry {
 }
 
 /// Every distinct label, each with its label id. Label ids are issued in order from zero.
+#[derive(Clone)]
 pub struct Labels {
     entries: Vec<Entry>,
     any_of: FxHashMap<Box<[TermId]>, LabelId>,
@@ -134,25 +136,6 @@ impl Labels {
             Entry::Compound(root) => self.dag.eval(*root, held),
         }
     }
-
-    /// Held terms whose conjunction satisfies label `id`, sorted and distinct, or `None` when
-    /// `held` does not satisfy it. `public` needs no term. An item card shows these in place of
-    /// the label, which can name terms the viewer does not hold.
-    pub fn witness(&self, id: LabelId, held: &impl Fn(TermId) -> bool) -> Option<Vec<TermId>> {
-        let mut out = Vec::new();
-        let found = match &self.entries[id.raw() as usize] {
-            Entry::Public => true,
-            Entry::AnyOf(terms) => terms
-                .iter()
-                .find(|&&t| held(t))
-                .map(|&t| out.push(t))
-                .is_some(),
-            Entry::Compound(root) => self.dag.witness(*root, held, &mut out),
-        };
-        out.sort_unstable();
-        out.dedup();
-        found.then_some(out)
-    }
 }
 
 #[cfg(test)]
@@ -189,17 +172,6 @@ mod tests {
                 .filter_map(|t| self.dict.get(*t).copied())
                 .collect();
             move |t| held.contains(&t)
-        }
-
-        fn names(&self, ids: &[TermId]) -> Vec<&str> {
-            let mut names: Vec<&str> = self
-                .dict
-                .iter()
-                .filter(|(_, id)| ids.contains(id))
-                .map(|(t, _)| t.as_str())
-                .collect();
-            names.sort_unstable();
-            names
         }
     }
 
@@ -246,22 +218,6 @@ mod tests {
         assert_eq!(out, vec![compound]);
         assert!(!f.labels.satisfied(other, &f.holds(&["team_a"])));
         assert!(f.labels.satisfied(other, &f.holds(&["team_a", "eu"])));
-    }
-
-    #[test]
-    fn a_witness_is_one_satisfied_conjunction() {
-        let mut f = Fixture::new();
-        let id = f.add("(s&(a|b))|(t&c)");
-        let witness = f.labels.witness(id, &f.holds(&["s", "b", "c"])).unwrap();
-        assert_eq!(f.names(&witness), ["b", "s"]);
-        assert_eq!(f.labels.witness(id, &f.holds(&["s", "c"])), None);
-        let any = f.add("x|y");
-        assert_eq!(
-            f.names(&f.labels.witness(any, &f.holds(&["y"])).unwrap()),
-            ["y"]
-        );
-        let public = f.add("public");
-        assert_eq!(f.labels.witness(public, &f.holds(&[])), Some(vec![]));
     }
 
     #[test]

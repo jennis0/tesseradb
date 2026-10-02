@@ -654,7 +654,7 @@ async fn authorise_and_revoke_match_the_description() {
         .await
         .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
-    // auth_data the plugin refuses is the caller's to correct, and the plugin's reason reaches
+    // auth_data that is not a credential is the caller's to correct, and the reason reaches
     // them: a 422 whose detail is not the fail-closed text every internal failure gets.
     let resp = f
         .server

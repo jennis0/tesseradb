@@ -53,11 +53,12 @@ We know of no system that does all of these at once.
 
 ## How it works
 
-An operator declares an access label on each item. The label resolves to one or more terms, the
-unit of access the term index is built from. A viewer authenticates by presenting a credential
-once, to a plane separate from the one serving requests, and receives a token that names the terms
-the credential satisfies. An item is visible to a viewer whose token holds at least one of the
-item's terms, and that visible set is computed once per session.
+An operator declares an access label on each item: an expression over terms, such as
+`secret&(team_a|team_b)`. A viewer authenticates by presenting a credential once, to a plane
+separate from the one serving requests, and receives a token that names the terms the credential
+holds. An item is visible to a viewer whose terms satisfy its label, and that visible set is
+computed once per session, from a term index and a shared graph of the labels that need more than
+one term.
 
 Geometry is stored so that a screen tile at any zoom level is one contiguous range of rows, using
 Morton order, a row order in which every map tile falls in a single run. A viewer's visible set is
@@ -167,7 +168,6 @@ any framework, with a deck.gl layer and React bindings alongside them.
 | Live ingest and denies | Built. A deletion or suppression hides the item from the next request; its rows are removed from disk later, at compaction, which runs on a schedule |
 | Clients: web components, a deck.gl layer, React bindings, a Python notebook widget | Built. Not yet published to a package index |
 | Conformance suite (the check that the guarantees hold) | Built and run on every change against an independent oracle. Its own record states where its coverage stands |
-| Plugin host for custom authorisation logic | Not built. A passthrough plugin ships in its place |
 | Partitions and replicas | Not built |
 
 ## Where to go next

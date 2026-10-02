@@ -211,7 +211,6 @@ fn engine_over_fixture(tmp: &Path, root: &Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the engine opens against a freshly built bundle");

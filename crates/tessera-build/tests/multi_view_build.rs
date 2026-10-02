@@ -746,8 +746,8 @@ fn a_roster_tables_gate_column_may_be_a_large_list_of_large_strings() {
         Field::new("label", DataType::Utf8, false),
         Field::new("starts", DataType::Int64, false),
     ]));
-    // Q2: two labels; Q3: one label with a comma in it; Q4: null, so the group's gate.
-    let labels = LargeStringArray::from(vec!["finance", "legal", "finance,legal"]);
+    // Q2: two labels; Q3: one label holding a conjunction; Q4: null, so the group's gate.
+    let labels = LargeStringArray::from(vec!["finance", "legal", "legal&finance"]);
     let gates = LargeListArray::try_new(
         gate_field,
         OffsetBuffer::new(vec![0i64, 2, 3, 3].into()),
@@ -801,12 +801,12 @@ fields = { key = "quarter" }
     assert_eq!(
         gate_of(0),
         Some(vec!["finance".to_string(), "legal".to_string()]),
-        "a two-element list is two terms"
+        "a two-element list is two labels"
     );
     assert_eq!(
         gate_of(1),
-        Some(vec!["finance,legal".to_string()]),
-        "a comma inside an element is part of the label"
+        Some(vec!["finance&legal".to_string()]),
+        "an element is one expression, stored as its canonical text"
     );
     assert_eq!(gate_of(2), None, "a null row takes the group's gate");
 }

@@ -59,7 +59,7 @@ fn grant() -> Grant {
 }
 
 /// The credential naming exactly [`CENSUS_GRANT`]'s terms — the same postings, reached through the
-/// `builtin:passthrough` convention the build's dictionary derives from the pairs relation.
+/// decimal terms the build's dictionary derives from the pairs relation.
 fn census_credential() -> Vec<u8> {
     let terms: Vec<String> = grant()
         .terms()

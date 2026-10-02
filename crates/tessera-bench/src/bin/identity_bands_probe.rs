@@ -59,7 +59,6 @@ use tessera_engine::occupancy::occupied_tiles_ladder;
 use tessera_engine::select::{served_count, SelectParams, Threshold};
 use tessera_engine::viewport::{segments_with_row_bases, ViewportRequest};
 use tessera_engine::{compose::EffectiveMask, Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{tiles_for_bbox, Bounds, Tile};
 use tessera_store::read::{open_bundle, SegmentData};
 use tessera_store::tile_ranges_all;
@@ -1347,7 +1346,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.bundle,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: MAX_K,

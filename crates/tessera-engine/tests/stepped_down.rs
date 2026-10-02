@@ -84,7 +84,6 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
         &root,
         &tmp.path().join("cache"),
         &wal_path,
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 1,
             // The shipped row trigger, four commit windows (`DEFAULT_FLUSH_MAX_ITEMS`):

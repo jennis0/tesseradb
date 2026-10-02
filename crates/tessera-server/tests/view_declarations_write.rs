@@ -403,8 +403,8 @@ async fn a_plain_view_created_at_runtime_takes_rows_at_its_first_flush() {
     );
 }
 
-/// **A gate is one label or a list** (decision 0132), on both routes, and a label the plugin
-/// cannot read is refused rather than stored as a gate nobody could satisfy.
+/// **A gate is one label or a list** (decision 0132), on both routes, and a label that is not an
+/// access expression is refused rather than stored as a gate nobody could satisfy.
 #[tokio::test]
 async fn a_gate_is_one_label_or_a_list_on_both_routes() {
     let served = Served::build(|dir| build_fixture(dir, N)).await;
@@ -502,19 +502,17 @@ async fn a_gate_is_one_label_or_a_list_on_both_routes() {
     );
 }
 
-/// **`point_visibility.default` goes through the plugin**, on the gate's rule: it is given to
-/// every point that carries no label of its own (decision 0133), so a label the plugin cannot
-/// read would put those points in no principal's mask, and the refusal belongs at the
+/// **`point_visibility.default` is read as an access expression**, on the gate's rule: it is
+/// given to every point that carries no label of its own (decision 0133), so a label that is not
+/// one would put those points in no principal's mask, and the refusal belongs at the
 /// declaration rather than at every batch. `inherited` and the empty string are the build's own
 /// two refusals, transcribed.
 #[tokio::test]
-async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
+async fn a_point_default_is_read_as_an_expression_on_both_routes() {
     let served = Served::build(|dir| build_fixture(dir, N)).await;
 
-    // The plugin arm is exercised by no case here: this fixture's plugin reads every non-empty
-    // label as a term, so a label it *cannot* read has no spelling. What the two cases below
-    // cover is the pair the build refuses too, and the plugin call itself is the one
-    // `check_visibility` makes, on the same descriptors.
+    // What the cases below cover is the pair the build refuses too, by the rule
+    // `declared_visibility` applies to a gate.
     for default in ["", "inherited"] {
         let mut view = embedding();
         view["point_visibility"] = json!({ "default": default });
@@ -527,7 +525,7 @@ async fn a_point_default_is_measured_against_the_plugin_on_both_routes() {
         assert_eq!(status, 422, "{default:?} on a group: {body}");
     }
 
-    // A label the plugin reads, and `public`, are both accepted.
+    // A label, and `public`, are both accepted.
     let mut labelled = embedding();
     labelled["point_visibility"] = json!({ "default": "0" });
     assert_eq!(declare_view(&served, "labelled", labelled).await.0, 201);

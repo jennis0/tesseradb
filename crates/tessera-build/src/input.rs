@@ -480,11 +480,11 @@ pub fn scan_pairs<F: FnMut(u64, u64) -> ControlFlow<()>>(
 /// difference.
 #[derive(Debug, Clone)]
 pub enum TermDescriptors {
-    /// The exploded relation's own integer `term_id`s, spelled as decimals — what the probe
-    /// corpus has always carried and what `builtin:passthrough` has always been handed.
+    /// The exploded relation's own integer `term_id`s, spelled as decimals: each a bare term, so
+    /// each is its own index key.
     Ids,
-    /// A field-sourced view's distinct terms, **sorted**, a source term being a position in this
-    /// list.
+    /// A field-sourced view's distinct index keys, **sorted**, a source term being a position in
+    /// this list.
     ///
     /// **Sorted, and that is load-bearing.** Term ids are assigned by first appearance, ties
     /// broken by source term — so ordering source terms by their position here has to be ordering

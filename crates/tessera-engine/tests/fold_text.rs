@@ -152,7 +152,6 @@ fn engine_over(tmp: &Path, root: &Path) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the engine opens against the text fixture");

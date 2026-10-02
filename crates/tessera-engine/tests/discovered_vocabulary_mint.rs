@@ -177,7 +177,6 @@ fn engine_over(tmp: &Path, root: &Path, config: EngineConfig) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config,
     )
     .expect("the engine opens against a bundle carrying a discovered vocabulary");

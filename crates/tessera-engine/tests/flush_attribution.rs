@@ -77,7 +77,6 @@ fn the_flush_stages_partition_both_walls_and_accumulate_across_flushes() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             // Only the request below publishes, so every lap read here is one flush's.
             flush_max_age_secs: 3600,

@@ -219,15 +219,15 @@ export class TesseraClient {
 
   /**
    * `POST /session/authorise`: mints a viewer session. The request's `auth_data` is base64 of the
-   * JSON `{"terms": [...]}`, the form the built-in `builtin:passthrough` auth plugin reads.
+   * JSON `{"terms": [...]}`.
    *
-   * @param terms - The access labels to grant, under `builtin:passthrough`. Another auth plugin
-   *   reads them by its own rules.
+   * @param terms - The terms the session holds. A term is trimmed, and one that is empty, holds a
+   *   control character or is `public` is not held.
    * @returns The session: `token` for the viewer methods, `tokenId` for `revoke`, and `expiresAt`
    *   in seconds since the Unix epoch.
    * @throws `Error` when the options carry no `sessionCredential`.
    * @throws {@link TesseraError} when the server refuses: `401` for a wrong session credential,
-   *   `422` where the auth plugin refuses `auth_data`, `429` under load.
+   *   `422` where `auth_data` is not that JSON, `429` under load.
    */
   async authorise(terms: string[], signal?: AbortSignal): Promise<Session> {
     if (!this.opts.sessionCredential) {
@@ -812,7 +812,9 @@ export class TesseraClient {
   /**
    * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
    * a category given as its vocabulary key and a column the item has no value for left out.
-   * `labels` lists the item's access labels this session satisfies and no others. `views` and
+   * `labels` is why this session sees the item: each held term of a label that is a term or a
+   * disjunction of terms, and one satisfied clause of each label holding a conjunction, as label
+   * text, and nothing else. A held term that appears only inside a conjunction is not listed. `views` and
    * `scoped` cover only the views this principal may reach.
    *
    * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.

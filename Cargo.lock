@@ -2933,7 +2933,6 @@ dependencies = [
  "tessera-filter",
  "tessera-filter-write",
  "tessera-lifecycle",
- "tessera-plugin",
  "tessera-roaring",
  "tessera-server",
  "tessera-spatial",
@@ -2969,7 +2968,6 @@ dependencies = [
  "tessera-filter",
  "tessera-filter-write",
  "tessera-lifecycle",
- "tessera-plugin",
  "tessera-spatial",
  "tessera-store",
  "tessera-types",
@@ -3085,7 +3083,6 @@ dependencies = [
  "tessera-filter",
  "tessera-filter-write",
  "tessera-lifecycle",
- "tessera-plugin",
  "tessera-roaring",
  "tessera-spatial",
  "tessera-store",
@@ -3141,16 +3138,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-plugin"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
- "tessera-types",
-]
-
-[[package]]
 name = "tessera-python"
 version = "0.1.0"
 dependencies = [
@@ -3191,7 +3178,6 @@ dependencies = [
  "tessera-config",
  "tessera-engine",
  "tessera-lifecycle",
- "tessera-plugin",
  "tessera-server",
  "tessera-spatial",
  "tessera-types",
@@ -3228,7 +3214,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "tessera-analyse",
- "tessera-plugin",
  "tessera-roaring",
  "tessera-spatial",
  "tessera-types",

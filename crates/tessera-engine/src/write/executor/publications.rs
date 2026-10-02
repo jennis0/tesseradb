@@ -1255,7 +1255,11 @@ impl Executor {
                 text_schema: text_schema.clone(),
                 dict: Arc::clone(&generation.dict),
                 novel_descriptors,
-                max_distinct_terms: self.deps.max_distinct_terms,
+                max_distinct_terms: self
+                    .deps
+                    .switches
+                    .max_distinct_terms
+                    .load(Ordering::Relaxed),
                 prefix: generation.prefix.clone(),
                 shapes: self.deps.shapes.levels_of_view(&view),
                 unique_schema: manifest

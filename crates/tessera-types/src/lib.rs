@@ -215,7 +215,10 @@ pub struct GenerationStamp {
 // bundle is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 29;
+// 30: an access label is an expression. A dictionary holds terms and, for each label holding a
+// conjunction, a key of its own; the manifest carries no plugin hash or declared bounds. A 29
+// bundle is refused.
+pub const BUNDLE_FORMAT: u32 = 30;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

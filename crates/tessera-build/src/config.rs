@@ -303,10 +303,10 @@ struct ViewBlock {
     /// Required.
     #[serde(default)]
     point_visibility: Option<PointVisibilityBlock>,
-    /// The access label a viewer must hold to reach the view, or a list of labels of which they
-    /// must hold one. `public` alone admits every viewer. An empty list, an empty label,
-    /// `inherited`, `public` beside another label, and a label the plugin maps to no term are
-    /// refused.
+    /// The access label a viewer must satisfy to reach the view, or a list of labels of which
+    /// they must satisfy one. Each label is an access expression, such as `finance&(eu|uk)`.
+    /// `public` alone admits every viewer. An empty list, an empty label, `inherited`, `public`
+    /// beside another label, and a label that is not an access expression are refused.
     ///
     /// Type: string or array of strings.
     ///
@@ -426,8 +426,9 @@ struct RosterTableBlock {
     fields: Option<BTreeMap<String, String>>,
 }
 
-/// Where each point's access label comes from. A viewer sees a point when they hold one of its
-/// labels. Write `field` or `source`, not both, and at least one of the three keys.
+/// Where each point's access label comes from. A label is an access expression, such as
+/// `secret&(team_a|team_b)`, and a viewer sees a point when their terms satisfy one of its labels.
+/// Write `field` or `source`, not both, and at least one of the three keys.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PointVisibilityBlock {
@@ -445,7 +446,7 @@ struct PointVisibilityBlock {
     #[serde(default)]
     source: Option<String>,
     /// The label a point with none of its own takes: `public` for every viewer, or an access
-    /// label the plugin maps to a term. `inherited` is refused. Without it, a point with no label
+    /// expression. `inherited` is refused. Without it, a point with no label
     /// is refused, at a build and at `/control/ingest` alike.
     ///
     /// Default: not set.
@@ -1358,9 +1359,9 @@ pub struct View {
     /// The two `auto` spellings still need the data: [`frame_view`] turns them into [`Bounds`],
     /// and turns a [`Extent::LonLat`] box into the aligned square containing it.
     pub extent: Extent,
-    /// The view's own gate: the labels a principal must hold one of, each element one term
+    /// The view's own gate: the labels a principal must satisfy one of, each an access expression
     /// (`views.md` §6, decision 0132); `None` is `public`. Compiled by [`compile_view_gate`],
-    /// which has asked the plugin to read every element.
+    /// which stores each as its canonical text.
     pub visibility: Option<Vec<String>>,
     /// Where each point's own access label is, and what a point carrying none gets.
     pub point_visibility: PointVisibility,
@@ -2390,8 +2391,7 @@ const EXTENT_SPELLINGS: &str = "\n  \
 pub struct AccessInput {
     pub source: AccessSource,
     /// What a point carrying no terms of its own is given, or `None` to refuse such a point.
-    /// Never `inherited` (§1); any other string is a term, commas and all — the plugin is handed
-    /// a list, so nothing splits it.
+    /// Never `inherited` (§1); stored as the canonical text of an access expression.
     pub default: Option<String>,
 }
 
@@ -3738,8 +3738,8 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 }
 
 /// A `[[view]]`'s, a `[[view_group]]`'s or a roster record's own `visibility` (`views.md` §6):
-/// a list of labels, each one term, stored trimmed. A declaration spells one
-/// label as a string and several as a list; both arrive here as the list.
+/// a list of labels, each an access expression, stored as its canonical text. A declaration
+/// spells one label as a string and several as a list; both arrive here as the list.
 ///
 /// **`public` compiles to `None`**, which is what every downstream reader takes as *no gate*: it
 /// is the label every principal holds inside the trust boundary (decision 0088), so storing the
@@ -3747,20 +3747,13 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 /// term to look up. It is recognised only as the whole of the list: beside another label it
 /// would be a gate everybody passes, spelled as if it were narrower, so that is refused.
 ///
-/// **Any other list is compiled after the plugin has been asked to read it** — the same question
-/// an item's `access` list is put through at ingest ([`Plugin::terms_of_labels`]), because a view
-/// gate is satisfied by exactly the item-visibility predicate (`views.md` §6) and a label the
-/// plugin cannot read is one no principal could ever satisfy. Refusing it here is the difference
-/// between a typo an author fixes at the build and a view that is silently reachable by nobody.
-/// An empty list, and an empty element, are refused for the same reason: an empty term set
-/// intersects nothing and gates the view against every principal including the one who wrote
-/// it, and an empty element is no label.
-///
-/// The plugin asked is `builtin:passthrough`, which is the only one a build runs
-/// (`tessera_build::build`); a deployment serving the bundle under a different plugin is a
-/// mismatch the gate fails closed on rather than one this check could anticipate.
+/// **Any other list is read label by label as access expressions** and stored as their canonical
+/// text, by the rule a running service applies to a view it creates
+/// ([`tessera_types::label::declared_visibility`]). A label that does not parse is refused here,
+/// where an author fixes it, rather than stored as a gate nobody satisfies. An empty list, and an
+/// empty element, are refused for the same reason.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    tessera_plugin::check_visibility(&tessera_plugin::Passthrough::new(), declared)
+    tessera_types::label::declared_visibility(declared)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
@@ -4099,7 +4092,7 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    let default = tessera_plugin::check_point_default(&tessera_plugin::Passthrough::new(), default)
+    let default = tessera_types::label::point_default(default)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),
