@@ -65,8 +65,8 @@ depends on the shape of each of its labels.
 | A term, or a disjunction of terms, such as `user:ann\|user:bob` | each of its terms | it holds one of them |
 | Any label holding a conjunction | one key of its own: a byte no term can hold, then the label's canonical text | its terms satisfy the label |
 
-The union of the postings of the keys a session satisfies is therefore exactly the set of items
-whose labels it satisfies. Per-document sharing, where nearly every item has a label of its own,
+The items listed under the keys a session satisfies are therefore exactly the items whose labels
+it satisfies. Per-document sharing, where nearly every item has a label of its own,
 produces disjunctions of terms, which never enter the expression graph below.
 
 Every label holding a conjunction is compiled into one shared directed acyclic graph. A leaf is a
@@ -78,16 +78,16 @@ conjunction is refused when it holds more than 1,024 nodes. A disjunction of ter
 
 At authorise, the service looks each of the credential's terms up in the dictionary, marks the
 graph's leaves for those terms true and propagates upwards: an OR node becomes true with its first
-true child, and an AND node when every child has. The authorised set is the union of the postings
-of the credential's terms, of `public`, and of the key of every label whose root became true: one
+true child, and an AND node when every child has. The authorised set is every item listed under
+the credential's terms, under `public`, or under the key of a label whose root became true: one
 bitmap over item identity, the whole of what that credential grants, independent of any later
 request. The pass visits only the nodes reachable from the credential's terms. A label's own key
 starts with a control character, which a credential's terms cannot hold, so no credential names
 one directly.
 
 A probe of the two layouts measured authorise on 9.3 million per-document labels at 100 to 800 ms
-through the graph and 1.4 to 95 ms through term postings, and on 500,000 compartmented labels at 20
-to 95 ms through the graph, which term postings cannot express
+through the graph and 1.4 to 95 ms through each term's item list, and on 500,000 compartmented
+labels at 20 to 95 ms through the graph, which term lists cannot express
 (`probes/2026-09-30-label-dag-authorise/results.md`). Indexing each label by its shape
 takes the faster figure for each. Authorise runs once per session, so these figures are paid at
 session start and never by a map request.
