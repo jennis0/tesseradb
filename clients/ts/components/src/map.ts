@@ -11,9 +11,9 @@ import {
   type SelectionShape
 } from '@tesseradb/client';
 import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
-import {DEFAULT_DENSITY_CELL_PX, DensityCounter, TesseraLayer, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
-import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DensityCounter, TesseraLayer, densityCountAt, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
+import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, drawnCells, encodingOf, encodingSignature, hoverAt, maxCount, type ContourShape} from '@tesseradb/deck/internal';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
 import {TesseraElement, emit, idString, shapeDetail, timestampText, type PickOutcome} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -150,8 +150,9 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * @csspart region-tag - The drawn region's tag on its top-left corner: how many items match inside
  *   it, or outside it for its complement, and a button that clears the selection.
  * @csspart tooltip - The hover tooltip.
- * @csspart density-key - The key to density's colours, from "Fewer" to "More items", in the
- *   bottom-left corner while density is drawn in a ramp or without the points.
+ * @csspart density-key - The key to density's colours, items per cell from 0 to the largest count
+ *   drawn with the count at the scale's midpoint, in the bottom-left corner while density is drawn
+ *   in a ramp or without the points.
  * @cssprop --tessera-map-height - The map's height.
  * @cssprop --tessera-map-bg - The canvas's background, behind the points and any basemap.
  * @cssprop --tessera-map-inset-left - Extra space between the top-left corner's content and the
@@ -339,9 +340,13 @@ export class TesseraMap extends TesseraElement {
         border-radius: 2px;
       }
       [part='density-key'] .ends {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 8px;
+        font-variant-numeric: tabular-nums;
+      }
+      [part='density-key'] .ends > :last-child {
+        text-align: right;
       }
     `
   ];
@@ -419,12 +424,18 @@ export class TesseraMap extends TesseraElement {
   /**
    * The colours density is drawn in: `warm-grey`, `viridis`, `cividis`, `magma` or `greys`. Unset,
    * the smooth wash under the points is warm grey and every other density is Viridis. While density
-   * is drawn in a ramp, or without the points, a key reading "Fewer" to "More items" sits in the
-   * bottom-left corner.
+   * is drawn in a ramp, or without the points, a key to the colours sits in the bottom-left corner.
    */
   @property({attribute: 'density-colours'}) accessor densityColours: DensityColours | '' = '';
   /** How strongly density is drawn, from 0.1 to 1. */
   @property({type: Number, attribute: 'density-strength'}) accessor densityStrength = 1;
+  /**
+   * How a cell's count is placed between no items and the largest count drawn, which picks its
+   * colour: `linear`, in proportion to the count, or `log`, in proportion to `log(1 + count)`,
+   * which spreads counts that span several orders of magnitude. The hexagons and contours take the
+   * largest count among the cells they merge to.
+   */
+  @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
   /**
    * The palette a category column's values are coloured from: `tableau10`, `okabe-ito`, `set2` or
    * `dark2`. Unset, the choice made in `<tessera-legend>` stands, Tableau 10 until one is made.
@@ -602,7 +613,7 @@ export class TesseraMap extends TesseraElement {
       this.pushColouring(s, changed);
     }
     if (changed.has('density') || changed.has('densityResolution')) this.pushDensity();
-    const repaint = ['mode', 'drag', 'dragPolygon', 'basemap', 'ground', 'radius', 'clusterLevel', 'hoveredArtifact', 'noPoints', 'pointOpacity', 'density', 'densityColours', 'densityStrength'] as const;
+    const repaint = ['mode', 'drag', 'dragPolygon', 'basemap', 'ground', 'radius', 'clusterLevel', 'hoveredArtifact', 'noPoints', 'pointOpacity', 'density', 'densityColours', 'densityStrength', 'densityScale'] as const;
     if (repaint.some((k) => changed.has(k))) this.paint();
   }
 
@@ -692,6 +703,8 @@ export class TesseraMap extends TesseraElement {
       ? new DensityCounter(store, () => {
           this.probe.densityRequests = this.densityCounter?.requests ?? 0;
           this.paint();
+          // The key's figures follow the counts.
+          this.requestUpdate();
         })
       : null;
     this.pushDensity();
@@ -961,6 +974,7 @@ export class TesseraMap extends TesseraElement {
           densityCounter: this.densityCounter,
           densityColours: this.densityColours || null,
           densityStrength: this.densityStrength,
+          densityScale: this.densityScale,
           colouring: colouringOf(s),
           sizing: sizingOf(s),
           scheme: this.scheme(),
@@ -1388,18 +1402,24 @@ export class TesseraMap extends TesseraElement {
   }
 
   /**
-   * What density's colours mean, from "Fewer" to "More items", while density is drawn in a ramp or
-   * without the points. The warm-grey wash under the points is context and has no key. There are no
-   * figures on it: the colours follow the rank of each count among those on screen.
+   * What density's colours mean, while density is drawn in a ramp or without the points: items per
+   * cell at either end of the ramp, 0 and the largest count drawn, and the count at its middle on
+   * the scale in force. The warm-grey wash under the points is context and has no key.
    */
   private densityKey(): TemplateResult | typeof nothing {
     if (this.density !== 'smooth' && this.density !== 'hex' && this.density !== 'grid') return nothing;
     const colours = drawnDensityColours(this.density, this.densityColours, !this.noPoints);
     if (!this.noPoints && colours === 'warm-grey') return nothing;
     const stops = densityStops(colours, this.scheme()).map(([r, g, b]) => `rgb(${r}, ${g}, ${b})`);
-    return html`<div part="density-key" role="img" aria-label=${`Density in ${DENSITY_COLOUR_TITLES[colours]}, from fewer items to more`}>
+    const counts = this.densityCounter?.counts();
+    const max = counts ? maxCount(drawnCells(counts, this.density).cells) : 0;
+    const scale = this.densityScale === 'linear' ? 'linear' : 'log';
+    const figures = max > 0 ? [0, densityCountAt(0.5, max, scale), max].map(countText) : null;
+    const label = `Density in ${DENSITY_COLOUR_TITLES[colours]}, ${figures ? `from 0 to ${figures[2]} items per cell on a ${scale} scale` : 'from fewer items to more'}`;
+    return html`<div part="density-key" role="img" aria-label=${label}>
+      <span class="caption">${figures ? 'Items per cell' : 'Density'}</span>
       <span class="ramp" style=${`background:linear-gradient(to right, ${stops.join(', ')})`}></span>
-      <span class="ends"><span>Fewer</span><span>More items</span></span>
+      <span class="ends">${figures ? figures.map((f) => html`<span>${f}</span>`) : html`<span>Fewer</span><span></span><span>More items</span>`}</span>
     </div>`;
   }
 
@@ -1455,6 +1475,11 @@ export class TesseraMap extends TesseraElement {
           </div>`
         : nothing}`;
   }
+}
+
+/** A count as the density key shows it: whole above 10, to one decimal place below. */
+function countText(n: number): string {
+  return n.toLocaleString('en-GB', {maximumFractionDigits: n < 10 ? 1 : 0});
 }
 
 /** The density colours drawn: those chosen, else warm grey for a wash under the points, else Viridis. */

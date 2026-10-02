@@ -258,6 +258,12 @@ coarser, up to three times. Any other refusal draws nothing until the camera nex
 counter asks again. A `TesseraLayer` given a store and neither counts nor a counter keeps a counter
 of its own over its viewport.
 
+Every density mode colours a cell by where its count sits between no items and the largest count
+among the cells drawn: in proportion to the count under the linear scale, or to `log(1 + count)`
+under the log scale, which is the default. The hexagons and contours merge fine cells to coarser
+ones before drawing, and take the largest of the merged counts. The map's key shows 0, the count at
+the middle of the scale and the largest count.
+
 There is no command-line command for this route. It is reached over HTTP and through the
 TypeScript and Python clients.
 
