@@ -11,7 +11,7 @@ import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
 import {HeldAggregate} from './aggregate.js';
 import {TesseraElement, columnCaption, emit} from './base.js';
-import {placeCallout, type Rect} from './callout.js';
+import {placeCallout, type Rect, type Side} from './callout.js';
 import {sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
@@ -84,6 +84,10 @@ type Pinned = {key: string; world: [number, number]; view: string} & (
 );
 /** A card's size before it has been measured. */
 const CALLOUT_SIZE = {width: 300, height: 220};
+/** How long after the camera stops a callout may move to another side. */
+const CALLOUT_REST_MS = 200;
+/** The shortest a callout is made to fit beside its point; what does not fit scrolls inside it. */
+const CALLOUT_MIN_HEIGHT = 180;
 
 /** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
 const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
@@ -582,18 +586,16 @@ export class TesseraExplorer extends TesseraElement {
         --_tessera-panel-padding: 12px 14px 10px;
         --_tessera-panel-inline: 14px;
         --_tessera-panel-rule: transparent;
-        --_tessera-key-width: 76px;
+        --_tessera-key-width: 104px;
         --_tessera-field-gap: 4px 10px;
         font-size: 12px;
+        overflow-y: auto;
+        user-select: none;
       }
       /* A callout whose point is off the map keeps its box, so its size stays known. */
       [part~='callout'][hidden] {
         display: block;
         visibility: hidden;
-      }
-      [part~='callout'] tessera-artifact-card {
-        max-height: 360px;
-        overflow-y: auto;
       }
       [part='pin'] {
         flex: none;
@@ -629,7 +631,7 @@ export class TesseraExplorer extends TesseraElement {
       .compact [part='detail'] {
         --_tessera-panel-padding: 12px 12px 10px;
         --_tessera-title-size: 14px;
-        --_tessera-key-width: 76px;
+        --_tessera-key-width: 104px;
         --_tessera-field-gap: 4px 10px;
       }
       .right {
@@ -850,6 +852,10 @@ export class TesseraExplorer extends TesseraElement {
   private observed = new Set<Element>();
   /** A frame asked for to place the callouts after the camera moved. */
   private placing: number | null = null;
+  /** Each callout's last placement, by its key, with the point it was placed for. */
+  private placements = new Map<string, {side: Side; offset: number; world: [number, number]}>();
+  /** Set while the camera moves, and cleared {@link CALLOUT_REST_MS} after it stops. */
+  private moving: ReturnType<typeof setTimeout> | null = null;
   /** The zoom the level drawn was last worked out at, and the level that gave when none is chosen. */
   private zoomSeen: number | null = null;
   private autoSeen: number | null = null;
@@ -927,6 +933,8 @@ export class TesseraExplorer extends TesseraElement {
     this.observed.clear();
     if (this.placing !== null) cancelAnimationFrame(this.placing);
     this.placing = null;
+    if (this.moving !== null) clearTimeout(this.moving);
+    this.moving = null;
     this.hintCount.set(null, null);
     this.closeLayers();
     super.disconnectedCallback();
@@ -1269,23 +1277,32 @@ export class TesseraExplorer extends TesseraElement {
    * map and of the callouts placed before it, and join it to its point. A callout whose point is off
    * the map is hidden with its leader. Reads no layout: the sizes are those {@link measure} took.
    */
-  private placeCallouts(): void {
+  private placeCallouts(firm = this.moving !== null): void {
     const m = this.map;
     if (!m) return;
     const size = this.mapSize ?? {width: m.clientWidth, height: m.clientHeight};
     const placed: Rect[] = [];
+    const keys = new Set<string>();
     for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
       const key = el.dataset.callout!;
       const card = this.cards.find((c) => c.key === key);
       const leader = this.renderRoot.querySelector<SVGGElement>(`[part="leaders"] g[data-callout="${key}"]`);
       if (!card) continue;
+      keys.add(key);
       const point = m.screenOf(card.world);
       const box = this.calloutSizes.get(key) ?? CALLOUT_SIZE;
-      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed]) : null;
+      // A card keeps its side and its place along it while the camera moves and as it grows, and
+      // at rest wherever that is still clear; a card for another point is placed afresh.
+      const last = this.placements.get(key);
+      const kept = last && last.world[0] === card.world[0] && last.world[1] === card.world[1] ? {side: last.side, offset: last.offset, firm} : null;
+      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed], undefined, kept, CALLOUT_MIN_HEIGHT) : null;
       el.hidden = at === null;
       leader?.setAttribute('visibility', at === null ? 'hidden' : 'visible');
       if (!at) continue;
-      placed.push({left: at.left, top: at.top, width: box.width, height: box.height});
+      // A card shortened to fit scrolls inside, so its last row stays within reach.
+      el.style.maxHeight = `${Math.round(at.height)}px`;
+      this.placements.set(key, {side: at.side, offset: at.offset, world: card.world});
+      placed.push({left: at.left, top: at.top, width: box.width, height: at.height});
       el.style.transform = `translate(${Math.round(at.left)}px, ${Math.round(at.top)}px)`;
       el.dataset.side = at.side;
       const line = leader?.querySelector('line');
@@ -1297,6 +1314,7 @@ export class TesseraExplorer extends TesseraElement {
       dot?.setAttribute('cx', String(point[0]));
       dot?.setAttribute('cy', String(point[1]));
     }
+    for (const key of [...this.placements.keys()]) if (!keys.has(key)) this.placements.delete(key);
   }
 
   /**
@@ -1308,14 +1326,16 @@ export class TesseraExplorer extends TesseraElement {
     if (!m) return;
     this.mapSize = {width: m.clientWidth, height: m.clientHeight};
     const origin = m.getBoundingClientRect();
+    // The height the card's content wants, whatever height it is shown at.
     for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
-      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: el.offsetHeight});
+      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: Math.max(el.offsetHeight, el.scrollHeight)});
     }
     this.keepClear = this.keptClear().flatMap((el) => {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0 ? [{left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height}] : [];
     });
-    this.placeCallouts();
+    // A card that grew, as under Show all, keeps its side and grows down.
+    this.placeCallouts(true);
   }
 
   /** The cards over the map that callouts keep clear of. */
@@ -1352,6 +1372,11 @@ export class TesseraExplorer extends TesseraElement {
   private stopsSeen = '';
 
   private onCamera(): void {
+    if (this.moving !== null) clearTimeout(this.moving);
+    this.moving = setTimeout(() => {
+      this.moving = null;
+      this.placeCallouts();
+    }, CALLOUT_REST_MS);
     if (this.placing !== null || typeof requestAnimationFrame === 'undefined') return;
     this.placing = requestAnimationFrame(() => {
       this.placing = null;
@@ -1880,11 +1905,7 @@ export class TesseraExplorer extends TesseraElement {
       this.pinned = this.pinned.filter((p) => p.key !== key);
       if (key !== live) return;
     } else if (live) this.pinned = this.pinned.filter((p) => p.key !== live);
-    const m = this.map;
-    if (m) {
-      m.lastPick = null;
-      m.pickedAt = null;
-    }
+    this.map?.clearPick();
     s.clearSelection();
     this.requestUpdate();
   }

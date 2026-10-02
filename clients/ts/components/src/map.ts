@@ -110,9 +110,11 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * The map owns the camera and tells the store where it is looking on every move. Density is asked
  * for once the camera has rested for 200 ms, as counts by cell over the view and a margin round
  * it, and the last counts are drawn at their own positions until the next land. Keys, with the
- * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
- * clears the selection. On connecting, the map sets `role="application"` on itself, replacing
- * any role the host set, and sets `tabindex="0"` and an `aria-label` unless the host set them.
+ * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn, else
+ * clears the selected region, else drops the picked point or artifact and its ring. A press hides
+ * the hover tooltip until the pointer is released. On connecting, the map sets `role="application"`
+ * on itself, replacing any role the host set, and sets `tabindex="0"` and an `aria-label` unless
+ * the host set them.
  *
  * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
  * is disconnected and not reconnected releases its GPU resources a quarter of a second later.
@@ -920,6 +922,8 @@ export class TesseraMap extends TesseraElement {
         const v = viewState as {target: number[]; zoom: number};
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
         this.deck?.setProps({viewState: this.viewState});
+        // The tooltip names what was under the pointer before the move.
+        if (this.hover) this.hover = null;
         this.pushView();
         // The region's tag follows the camera.
         if (this.regionWorld || this.regionPolygon) this.requestUpdate();
@@ -1047,6 +1051,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /** What the pointer is over: the tooltip from the mark beneath, and the hovered artifact from {@link artifactAt}. */
+  /** Whether a pointer is pressed on the map, during which no tooltip shows. */
+  private pressed = false;
+
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
@@ -1059,7 +1066,7 @@ export class TesseraMap extends TesseraElement {
     this.hoveredArtifact = world ? this.artifactAt(world, own) : null;
     // The viewport carries no shapes; fetch the hovered one. `needShape` asks once per artifact.
     if (this.hoveredArtifact !== null) this.resolvedStore?.needShape(this.hoveredArtifact);
-    if (picked.kind !== 'mark') {
+    if (picked.kind !== 'mark' || this.pressed) {
       if (this.hover) this.hover = null;
       return;
     }
@@ -1102,6 +1109,16 @@ export class TesseraMap extends TesseraElement {
         this.hover = {...this.hover, title: hoverText(value, arrowType)};
       });
     }, HOVER_DESCRIBE_MS);
+  }
+
+  /** Forget the last pick: the card it opened and the ring drawn round the picked point. */
+  clearPick(): void {
+    this.lastPick = null;
+    this.pickedAt = null;
+    this.pickedId = null;
+    if (this.selectedWorldXY === null) return;
+    this.selectedWorldXY = null;
+    this.paint();
   }
 
   private onClick(info: PickingInfo): void {
@@ -1170,6 +1187,12 @@ export class TesseraMap extends TesseraElement {
    * next pointer movement would pan. Stopping `pointerdown` first means no session opens.
    */
   private onPointerDown = (e: PointerEvent): void => {
+    // A press starts a drag or a click, and the tooltip would stay where it was through either; it
+    // comes back on the next hover after the press ends.
+    if (this.hover) this.hover = null;
+    this.pressed = true;
+    addEventListener('pointerup', () => (this.pressed = false), {once: true});
+    addEventListener('pointercancel', () => (this.pressed = false), {once: true});
     if (e.button !== 0) return;
     const lasso = this.mode === 'lasso';
     if (!lasso && this.mode !== 'box' && !(this.mode === 'pan' && e.shiftKey)) return;
@@ -1372,6 +1395,9 @@ export class TesseraMap extends TesseraElement {
           this.dragPolygon = null;
         } else if (this.resolvedStore?.get('region')) {
           this.select(null);
+        } else if (this.pickedAt || this.selectedWorldXY) {
+          this.clearPick();
+          this.resolvedStore?.clearSelection();
         }
         break;
       default:

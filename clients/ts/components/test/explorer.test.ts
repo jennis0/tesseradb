@@ -337,10 +337,14 @@ describe('<tessera-explorer> the item card beside its point', () => {
     map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));
     expect(ctx.shadow.activeElement).toBe(card);
     card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
+    // The ring the map draws round the picked point.
+    (map as unknown as {selectedWorldXY: [number, number] | null}).selectedWorldXY = [256, 256];
     card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
     await settle(ctx.host);
     expect(ctx.store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
     expect(ctx.shadow.activeElement).toBe(map);
+    expect(map.pickedAt).toBeNull();
+    expect((map as unknown as {selectedWorldXY: [number, number] | null}).selectedWorldXY).toBeNull();
   });
 
   it('drops every card when it is given another store', async () => {

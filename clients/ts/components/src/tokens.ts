@@ -193,6 +193,7 @@ export const chrome = css`
   [part='value'],
   .v {
     color: var(--_tessera-ink);
+    user-select: text;
   }
   [part='refusal'] {
     color: var(--_tessera-refuse);

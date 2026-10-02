@@ -158,3 +158,19 @@ describe('a hover under a highlight', () => {
     }
   });
 });
+
+describe('the tooltip through a press', () => {
+  it('goes at a press, stays away while the pointer is held, and comes back on the next hover after it', async () => {
+    const {el} = await map([]);
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+    const canvas = (el as unknown as HTMLElement).shadowRoot!.querySelector('[part="canvas"]')!;
+    canvas.dispatchEvent(new PointerEvent('pointerdown', {button: 0, bubbles: true, composed: true}));
+    expect(el.hover).toBeNull();
+    el.onHover(markAt(5n));
+    expect(el.hover).toBeNull();
+    window.dispatchEvent(new PointerEvent('pointerup'));
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+  });
+});
