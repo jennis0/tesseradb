@@ -730,14 +730,16 @@ impl Bands {
         }
         let (e_ids, e_rows, e_codes, e_residuals) =
             (self.ids(), self.rows(), self.codes(), self.residuals());
-        for j in self.bands() {
-            let mut e = self.band(j).start;
-            let end = self.band(j).end;
-            for (row, &id) in ids.iter().enumerate() {
-                if band_of(id) < j {
-                    continue;
-                }
-                if e >= end {
+        // One pass over the rows, with a cursor in each band: a row with `z` leading zeros is the
+        // next entry of every band up to `z`.
+        let bands = self.bands();
+        let mut cursor: Vec<usize> = bands.clone().map(|j| self.band(j).start).collect();
+        for (row, &id) in ids.iter().enumerate() {
+            let zeros = band_of(id);
+            for j in bands.start..bands.end.min(zeros + 1) {
+                let at = &mut cursor[(j - bands.start) as usize];
+                let e = *at;
+                if e >= self.band(j).end {
                     return Err(format!("band {j} ends before row {row}"));
                 }
                 if e_rows[e] as usize != row
@@ -751,12 +753,14 @@ impl Bands {
                         e_rows[e]
                     ));
                 }
-                e += 1;
+                *at += 1;
             }
-            if e != end {
+        }
+        for (j, &e) in bands.clone().zip(&cursor) {
+            if e != self.band(j).end {
                 return Err(format!(
                     "band {j} holds {} entries past the last row",
-                    end - e
+                    self.band(j).end - e
                 ));
             }
         }
