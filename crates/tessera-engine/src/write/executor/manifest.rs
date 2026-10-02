@@ -1,12 +1,13 @@
 use super::*;
 
 /// Every level's version, and the derived files of `held` still adoptable at it. A file whose
-/// level has moved is dropped, so a manifest never names one nothing could adopt, except the label
-/// and row columns of a layer in `enumerated` and the band-order copies of its labels: an
-/// enumerated membership only grows between folds, so each file holds a subset of the level's
-/// labels, and an open completes a column the level has moved past
-/// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). A spatial layer's are read only at
-/// its level's version, so they are dropped like any other file.
+/// level has moved is dropped, so a manifest never names one nothing could adopt, except the row
+/// column of a layer in `enumerated`: an enumerated membership only grows between folds, and an
+/// open completes a column the level has moved past
+/// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). Nothing completes a level's label
+/// column or its band-order copy, so those are dropped with every other file, and a level holds
+/// a copy only while the copy is current. A spatial layer's column is read only at its level's
+/// version, so it is dropped like any other file.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
@@ -34,8 +35,6 @@ pub(super) fn artifact_coordinates(
             let now = expected(&entry.layer, entry.level);
             match entry.form {
                 tessera_store::manifest::DerivedForm::RowColumn { .. }
-                | tessera_store::manifest::DerivedForm::LevelLabels
-                | tessera_store::manifest::DerivedForm::BandLabels { .. }
                     if enumerated.contains(&entry.layer) =>
                 {
                     entry.level_version <= now

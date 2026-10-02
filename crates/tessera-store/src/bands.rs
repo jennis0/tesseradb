@@ -497,7 +497,9 @@ impl BandCopy<'_> {
 /// A segment's `bands.bin`, mapped and framed.
 ///
 /// [`Bands::open`] checks what the header and the length can answer, so every slice below is in
-/// bounds. Whether the entries are the segment's rows is [`Bands::check_against`]'s question, which
+/// bounds. It does not check that an entry's row is in the segment, or is the row its identity
+/// came from: a reader that indexes a column by an entry's row trusts the digest the bundle open
+/// checked and the writer that produced it, and `tessera verify --deep` checks them. Whether the entries are the segment's rows is [`Bands::check_against`]'s question, which
 /// reads every entry and is `tessera verify --deep`'s to ask.
 #[derive(Debug)]
 pub struct Bands {
@@ -573,8 +575,20 @@ impl Bands {
                 "a band holds more entries than a wider one",
             ));
         }
+        // The widest band holds at most every row, so with the bands nested the file holds at most
+        // 59 entries a row and every size below fits a `usize`. Whether the rows are the segment's
+        // is `check_against`'s question.
+        if starts.len() > 1 && starts[1] - starts[0] > u64::from(row_count) {
+            return Err(malformed(
+                &path,
+                format!(
+                    "band {first_band} holds {} entries for {row_count} rows",
+                    starts[1] - starts[0]
+                ),
+            ));
+        }
         let entries = usize::try_from(entries).map_err(|_| malformed(&path, "too many entries"))?;
-        let mut copies = Vec::with_capacity(copy_count);
+        let mut copies = Vec::with_capacity(copy_count.min(4096));
         let mut lens = Vec::with_capacity(copy_count);
         let mut at = HEADER_BYTES + (band_count + 1) * 8;
         for _ in 0..copy_count {
@@ -673,6 +687,13 @@ impl Bands {
     /// The names of the copied columns, in the order `columns.arrow` holds them.
     pub fn copy_names(&self) -> impl Iterator<Item = &str> {
         self.copies.iter().map(|(name, _)| name.as_str())
+    }
+
+    /// Where one copied column's values lie in `bands.bin`, as a byte range of the file.
+    pub fn copy_range(&self, name: &str) -> Option<std::ops::Range<usize>> {
+        let k = self.copies.iter().position(|(held, _)| held == name)?;
+        let at = self.layout.copies[k];
+        Some(at..at + self.entries() * self.copies[k].1.width())
     }
 
     /// One copied column, or `None` where the segment has no column of that name.
@@ -1096,6 +1117,28 @@ mod tests {
         assert!(Bands::open(dir.path(), 200).is_err());
     }
 
+    /// A header claiming more entries in the widest band than the segment has rows, or a count past
+    /// what a file could hold, is refused rather than read.
+    #[test]
+    fn a_header_claiming_more_entries_than_rows_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        segment(dir.path(), 200);
+        let path = dir.path().join(BANDS_FILE);
+        let good = std::fs::read(&path).unwrap();
+        for (starts_1, entries) in [(201u64, 201u64), (u64::MAX, u64::MAX)] {
+            let mut bytes = good.clone();
+            bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            bytes[16..24].copy_from_slice(&entries.to_le_bytes());
+            bytes[HEADER_BYTES..HEADER_BYTES + 8].copy_from_slice(&0u64.to_le_bytes());
+            bytes[HEADER_BYTES + 8..HEADER_BYTES + 16].copy_from_slice(&starts_1.to_le_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(matches!(
+                Bands::open(dir.path(), 200),
+                Err(StoreError::MalformedBundle { .. })
+            ));
+        }
+    }
+
     #[test]
     fn a_changed_entry_fails_the_check() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1111,6 +1154,25 @@ mod tests {
         let morton = crate::read::MortonSlice::load(&dir.path().join("morton.u32")).unwrap();
         let bands = Bands::open(dir.path(), 200).unwrap();
         assert!(bands.check_against(morton.u32(), &columns).is_err());
+    }
+
+    /// A copy that cannot be taken, here because the column labels another segment's rows, is an
+    /// error and leaves nothing in the scratch directory: the level is then filed without a copy.
+    #[test]
+    fn a_copy_that_cannot_be_staged_leaves_nothing_behind() {
+        let dir = tempfile::TempDir::new().unwrap();
+        segment(dir.path(), 300);
+        let bands = Bands::open(dir.path(), 300).unwrap();
+        let column = dir.path().join("column.tslb");
+        std::fs::write(
+            &column,
+            crate::membership::pack_label_column(3, &vec![1u32; 299]),
+        )
+        .unwrap();
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        assert!(crate::derived::stage_band_labels(&column, &bands, &scratch).is_err());
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
     }
 
     #[test]

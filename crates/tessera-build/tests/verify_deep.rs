@@ -17,17 +17,18 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, UInt32Array, UInt64Array};
+use arrow::array::{Array, Float64Array, Int32Array, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use sha2::{Digest, Sha256};
 
+use tessera_build::error::BuildError;
 use tessera_build::{build, verify, verify_deep, verify_with_window_rows, BuildArgs, VerifyOpts};
 use tessera_spatial::Bounds;
 use tessera_store::flush::{write_flush_segment, FlushInput, FlushRow};
 use tessera_store::manifest::{CurrentPointer, EntitySet, FileDigest, SegmentsManifest};
-use tessera_store::write_segments_manifest;
+use tessera_store::{write_segments_manifest, StoreError};
 use tessera_types::{EntityId, IdentityKey, TermId, SMALL_TERM_THRESHOLD_DEFAULT};
 
 const TEST_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
@@ -44,21 +45,25 @@ fn extent() -> Bounds {
     }
 }
 
+/// `score` is in every points file and is declared only where a case asks for a render column.
 fn write_points(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
+        Field::new("score", DataType::Int32, false),
     ]));
     let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let scores: Vec<i32> = ids.iter().map(|e| *e as i32 * 7 - 100).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(UInt64Array::from(ids)),
             Arc::new(Float64Array::from(xs)),
             Arc::new(Float64Array::from(ys)),
+            Arc::new(Int32Array::from(scores)),
         ],
     )
     .unwrap();
@@ -93,14 +98,29 @@ fn write_pairs(path: &Path, n: u64) {
     w.close().unwrap();
 }
 
-/// Build `n` items into `root/bundle`, oracle pairs on.
-fn built_bundle(root: &Path, n: u64) {
+/// Build `n` items into `root/bundle`, oracle pairs on, with `score` rendered where `render`.
+fn built_bundle(root: &Path, n: u64, render: bool) {
     let points = root.join("points.parquet");
     let pairs = root.join("pairs.parquet");
     let out = root.join("bundle");
     write_points(&points, n);
     write_pairs(&pairs, n);
-    let (schema, attribute_sources) = common::id_attributes(&points);
+    let (mut schema, mut attribute_sources) = common::id_attributes(&points);
+    if render {
+        schema.attributes.push(tessera_build::config::Attribute {
+            field: None,
+            name: "score".to_string(),
+            title: None,
+            ty: tessera_spatial::tiler::ScalarType::I32,
+            analyser: None,
+            vocabulary: None,
+            value_set: None,
+            index: false,
+            render: true,
+            unique: false,
+        });
+        attribute_sources = tessera_build::config::AttributeSource::over(&points, &schema);
+    }
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
             visibility: None,
@@ -137,7 +157,7 @@ fn built_bundle(root: &Path, n: u64) {
 /// delta tier carrying their postings, a deleted build entity's tombstone, and a
 /// complete-current-state `SEGMENTS-1.json`.
 fn flushed_bundle(root: &Path) {
-    built_bundle(root, N_ITEMS);
+    built_bundle(root, N_ITEMS, false);
     let out = root.join("bundle");
 
     let prefix_dir = out.join("v00000");
@@ -908,6 +928,16 @@ fn a_cut_index_missing_a_cell_boundary_is_refused() {
     expect_refusal(&root, "where the Morton code changes at row");
 }
 
+/// That deep verification refused the bundle on `rel`, a prefix-relative file.
+fn expect_refused_on(root: &Path, rel: &str) {
+    match verify_deep(root, &VerifyOpts::default()) {
+        Err(BuildError::Store(StoreError::FileVerificationFailed { path, .. })) => {
+            assert_eq!(path, root.join("v00000").join(rel))
+        }
+        other => panic!("expected a refusal naming {rel}, got {other:?}"),
+    }
+}
+
 /// A cell code that is not its cell's Morton code is refused.
 #[test]
 fn a_cell_code_that_is_not_its_cells_is_refused() {
@@ -921,33 +951,53 @@ fn a_cell_code_that_is_not_its_cells_is_refused() {
     fs::write(&path, &bytes).unwrap();
     refresh_digest(&root, rel);
 
-    expect_refusal(
-        &root,
-        "cell-codes.u32 does not hold each cell's Morton code",
-    );
+    expect_refused_on(&root, rel);
+}
+
+/// A bundle large enough for a band to hold a row, band 6 holding about one row in 64, with
+/// `score` rendered, and its base segment's `bands.bin`.
+fn banded_bundle(temp: &tempfile::TempDir) -> (PathBuf, &'static str, tessera_store::bands::Bands) {
+    const ROWS: u64 = 1_000;
+    built_bundle(temp.path(), ROWS, true);
+    let root = bundle_root(temp);
+    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
+    let bands = tessera_store::bands::Bands::open(
+        root.join("v00000").join(rel).parent().unwrap(),
+        ROWS as u32,
+    )
+    .unwrap();
+    assert!(bands.entries() > 0, "the base segment has a row in a band");
+    (root, rel, bands)
 }
 
 /// A band entry whose identity is not its row's is refused. The identities are the first section
-/// of `bands.bin`, on the first page boundary past its tables. The bundle is large enough for a
-/// band to hold a row: band 6 holds about one row in 64.
+/// of `bands.bin`, on the first page boundary past its tables.
 #[test]
 fn a_band_entry_that_is_not_its_row_is_refused() {
-    const ROWS: u64 = 1_000;
     let temp = tempfile::TempDir::new().unwrap();
-    built_bundle(temp.path(), ROWS);
-    let root = bundle_root(&temp);
-    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
-    let path = root.join("v00000").join(rel);
-    let bands = tessera_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
-    assert!(
-        bands.entries() > 0,
-        "the fixture's base segment has a row in a band"
-    );
+    let (root, rel, bands) = banded_bundle(&temp);
     drop(bands);
+    let path = root.join("v00000").join(rel);
     let mut bytes = fs::read(&path).unwrap();
     bytes[4096] ^= 1;
     fs::write(&path, &bytes).unwrap();
     refresh_digest(&root, rel);
 
-    expect_refusal(&root, "bands.bin: band 6, entry 0");
+    expect_refused_on(&root, rel);
+}
+
+/// A render copy that does not hold its row's value is refused.
+#[test]
+fn a_render_copy_that_is_not_its_rows_value_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let (root, rel, bands) = banded_bundle(&temp);
+    let at = bands.copy_range("score").expect("score is copied").start;
+    drop(bands);
+    let path = root.join("v00000").join(rel);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[at] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refused_on(&root, rel);
 }

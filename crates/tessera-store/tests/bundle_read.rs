@@ -902,6 +902,30 @@ fn open_bundle_rejects_a_segments_manifest_that_omits_columns_arrow_from_files()
     }
 }
 
+/// A segment whose `bands.bin` is gone does not open: the segment's load names the band file, and
+/// the bundle has no manifest left to serve.
+#[test]
+fn a_segment_without_its_bands_does_not_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 40);
+    let seg_dir = dir
+        .path()
+        .join("v00000/partitions/default/views/main/segments/seg0");
+    fs::remove_file(seg_dir.join(tessera_store::bands::BANDS_FILE)).unwrap();
+    let refused = tessera_store::read::SegmentData::load(
+        &seg_dir,
+        "seg0",
+        40,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .expect_err("a segment without its bands must not load");
+    assert_eq!(refused.file, "bands");
+    assert!(matches!(
+        open_bundle(dir.path()),
+        Err(StoreError::NoVerifyingSegmentsManifest { .. })
+    ));
+}
+
 #[test]
 fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
     let dir = tempfile::tempdir().expect("tempdir");

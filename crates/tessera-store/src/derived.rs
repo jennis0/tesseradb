@@ -568,17 +568,27 @@ pub fn project_row_column_pairs(
     }
 }
 
-/// What a level's column is composed as and filed under, given the layout it is served in.
+/// What a level's column is composed as and filed under, given the layout it is served in and
+/// whether its observed memberships partition the rows ([`LevelShape::partitions`]), or `None`
+/// where it has no column.
 ///
-/// A row-major level's column is the one it is served from. Every other level gets a label column
-/// too, wherever its memberships partition the rows, so that every such level has one label per row
-/// whatever form serves it: the band-order copies are taken from it ([`stage_band_labels`]), and the
-/// level's artifact-major form is unchanged. The build and the fold both ask here, so a level gets
-/// the same files from either.
-pub fn level_column(layout: ServingLayout) -> (ServingLayout, DerivedForm) {
+/// A row-major level's column is the one it is served from. A level served artifact-major gets a
+/// label column where its memberships partition the rows, so that every such level has one label
+/// per row whatever form serves it: the band-order copies are taken from it
+/// ([`stage_band_labels`]), and the level's artifact-major form is unchanged. One whose memberships
+/// overlap has none, and is refused here from the shape the layout pick has already observed rather
+/// than after its pairs are spilled and sorted. The build and the fold both ask here, so a level
+/// gets the same files from either.
+pub fn level_column(
+    layout: ServingLayout,
+    partitions: bool,
+) -> Option<(ServingLayout, DerivedForm)> {
     match layout {
-        ServingLayout::ArtifactMajor => (ServingLayout::RowMajorLabel, DerivedForm::LevelLabels),
-        layout => (layout, DerivedForm::RowColumn { layout }),
+        ServingLayout::ArtifactMajor if !partitions => None,
+        ServingLayout::ArtifactMajor => {
+            Some((ServingLayout::RowMajorLabel, DerivedForm::LevelLabels))
+        }
+        layout => Some((layout, DerivedForm::RowColumn { layout })),
     }
 }
 

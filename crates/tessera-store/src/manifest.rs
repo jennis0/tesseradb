@@ -1768,7 +1768,7 @@ pub enum DerivedForm {
     /// The level's label for each entry of one segment's `bands.bin`, in entry order
     /// ([`crate::bands::BandLabels`]). Copied from the level's label column, a
     /// [`Self::RowColumn`] in the label layout or a [`Self::LevelLabels`], when that column is
-    /// written, and at no other time.
+    /// written, and at no other time. Named only while its level is at `level_version`.
     BandLabels {
         seg_id: String,
     },

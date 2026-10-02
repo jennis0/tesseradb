@@ -433,7 +433,14 @@ pub fn run(
         if !composable {
             continue;
         }
-        let (composed_as, form) = derived::level_column(*layout);
+        let partitions = pass
+            .levels
+            .iter()
+            .find(|l| &l.layer == layer && l.level == *level)
+            .is_some_and(|l| l.shape.partitions);
+        let Some((composed_as, form)) = derived::level_column(*layout, partitions) else {
+            continue;
+        };
         let ordinals = store.level(layer, *level).count() as u32;
         let level_version = store.level_version(layer, *level);
         let staged = derived::project_row_column(
@@ -480,7 +487,8 @@ pub fn run(
                                 copy,
                             )),
                             Err(error) => eprintln!(
-                                "artifact pass: {layer} level {level}'s labels would not be                                  copied into the bands' order ({error}); the level has no copy"
+                                "artifact pass: {layer} level {level}'s labels would not be \
+                                 copied into the bands' order ({error}); the level has no copy"
                             ),
                         }
                     }

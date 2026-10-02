@@ -322,6 +322,9 @@ struct FoldApplies<'a> {
     carried_entities: u64,
 }
 
+/// The `(layer, level)`s whose observed memberships overlap, which have no label column.
+type Overlapping = std::collections::BTreeSet<(String, u32)>;
+
 /// What every derived writer of one fold shares: where the files go, the row spaces and segments
 /// the fold has just written, the levels its retirement is about to move, and the file counter.
 struct DerivedPass<'a> {
@@ -876,7 +879,7 @@ impl Executor {
         let mut derived = self.write_containment_partitions(&mut pass, data_plugin_hash);
         // Layouts must be chosen before the files and the registry snapshot, or the fold would
         // publish a level in its old layout under a record claiming the new one.
-        let layouts = self.choose_layouts(&pass.spaces, pending, &pass.segments);
+        let (layouts, overlapping) = self.choose_layouts(&pass.spaces, pending, &pass.segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
                 self.deps.artifact_projections.forget_level(layer, *level);
@@ -884,7 +887,7 @@ impl Executor {
         }
         self.pending_forms.clear();
         derived.extend(self.write_tile_indexes(&mut pass, &layouts));
-        derived.extend(self.write_row_columns(&mut pass, &layouts));
+        derived.extend(self.write_row_columns(&mut pass, &layouts, &overlapping));
         let shape_rows = self.write_shape_rows(&mut pass, &derived);
         derived.extend(shape_rows);
         derived.extend(self.write_shape_held(&mut pass));
@@ -1855,15 +1858,20 @@ impl Executor {
     ///
     /// The record is per `(layer, level)` but the observation is per view; the shape is taken in
     /// the first view the fold wrote, deterministically, and the other views' columns are written
-    /// in that layout even where it is not the one they would have chosen alone.
+    /// in that layout even where it is not the one they would have chosen alone. Beside the layouts,
+    /// the levels whose observed memberships overlap.
     pub(super) fn choose_layouts(
         &self,
         spaces: &[(String, tessera_store::RowSpace)],
         pending: &PendingRetirement,
         fold_segments: &[(String, tessera_store::read::SegmentData)],
-    ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
+    ) -> (
+        Vec<(String, u32, tessera_types::layer::ServingLayout)>,
+        Overlapping,
+    ) {
+        let mut overlapping = std::collections::BTreeSet::new();
         let Some((first_view, space)) = spaces.first() else {
-            return Vec::new();
+            return (Vec::new(), overlapping);
         };
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             levels_of(store)
@@ -1953,6 +1961,9 @@ impl Executor {
                 .entry(layer.clone())
                 .or_default()
                 .push((level, shape.artifacts));
+            if !shape.partitions {
+                overlapping.insert((layer.clone(), level));
+            }
             out.push((layer, level, chosen));
         }
         // What a whole-layer response costs: the sum of the per-level counts above, reported and
@@ -1969,7 +1980,7 @@ impl Executor {
                  them carries, one row per served artifact"
             );
         }
-        out
+        (out, overlapping)
     }
 
     /// Write this prefix's columns, one file per `(view, layer, level)`: a row-major level's column,
@@ -1981,6 +1992,7 @@ impl Executor {
         &self,
         pass: &mut DerivedPass<'_>,
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        overlapping: &Overlapping,
     ) -> Vec<tessera_store::manifest::DerivedExtent> {
         let prefix_dir = pass.prefix_dir;
         let partition = pass.partition;
@@ -2022,7 +2034,12 @@ impl Executor {
         )> = self.live.with_artifacts(|store| {
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
-                let (composed_as, form) = tessera_store::derived::level_column(*layout);
+                let partitions = !overlapping.contains(&(layer.clone(), *level));
+                let Some((composed_as, form)) =
+                    tessera_store::derived::level_column(*layout, partitions)
+                else {
+                    continue;
+                };
                 let version = pending.version_after(store, layer, *level);
                 let ordinals = level_length(pending.records(store, layer, *level));
                 let spatial = self.live.registered_layer(layer).is_some_and(|registered| {

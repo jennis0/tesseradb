@@ -423,8 +423,8 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
     assert_partition(&engine, &labels_of(&root, &engine, SERVED), &served);
     assert_partition(&engine, &labels_of(&root, &engine, WALKED), &walked);
 
-    // A growth and a flush: the files written at the fold stay named, and still agree, until the
-    // next fold writes the level again.
+    // A growth moves the level, so its label column and copy are no longer current and the next
+    // manifest names neither; the served level is untouched and keeps its copy.
     let joining = entity(ROWS - 1);
     engine
         .grow_memberships(
@@ -440,21 +440,30 @@ fn every_partitioning_level_has_a_label_column_and_a_band_copy_that_follow_the_f
         .ingest_rows(vec![fresh], "labels-1".to_string(), [2u8; 32])
         .unwrap();
     publish_buffered(&engine);
-    let stale = labels_of(&root, &engine, WALKED);
-    let generation = engine.generation();
-    let space = &generation.bundle.partitions.values().next().unwrap().views["s0"].row_space;
-    let joined_row = space.row_of(joining).unwrap().raw() as usize;
-    assert_eq!(
-        stale.label(joined_row),
-        ROW_COLUMN_HOLE,
-        "a growth is not written into the column or its copy before the fold"
+    let unlabelled = |engine: &Engine| {
+        extents_of(engine, WALKED).iter().all(|e| {
+            !matches!(
+                e.form,
+                DerivedForm::LevelLabels | DerivedForm::BandLabels { .. }
+            )
+        })
+    };
+    assert!(
+        unlabelled(&engine),
+        "a moved level names no label column or copy"
     );
-    drop(generation);
+    labels_of(&root, &engine, SERVED);
     drop(engine);
 
-    // After a restart and a fold, both carry the growth.
+    // A restart serves the same manifest, which still verifies.
     let engine = open_engine_publishing(&root, &cache, &wal);
-    labels_of(&root, &engine, WALKED);
+    assert!(unlabelled(&engine));
+    drop(engine);
+    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("a bundle whose moved level has no copy verifies deep");
+
+    // The fold writes the level again, with the growth in both.
+    let engine = open_engine_publishing(&root, &cache, &wal);
     fold(&engine);
     assert_partition(&engine, &labels_of(&root, &engine, WALKED), &walked);
     assert_partition(&engine, &labels_of(&root, &engine, SERVED), &served);
@@ -504,4 +513,85 @@ fn a_build_writes_the_label_columns_and_their_copies() {
     let report = tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
         .expect("the built bundle verifies deep");
     assert!(report.band_label_copies >= 1);
+}
+
+/// `tessera verify --deep` refuses a band label copy that does not hold its column's labels, and
+/// a current label column that has no copy, naming the file in each case.
+#[test]
+fn deep_verification_refuses_a_damaged_copy_and_a_missing_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_scored(&root);
+    let map = source_to_new_map(&root, "v00000");
+    let engine = open_engine_publishing(&root, &tmp.path().join("cache"), &tmp.path().join("wal"));
+    engine.register_layer(flat(WALKED, None)).unwrap();
+    let batch = (0..5)
+        .map(|a| {
+            IncomingArtifact::from_entities(
+                Some(format!("a{a}")),
+                (0..ROWS)
+                    .filter(|s| s % 5 == a)
+                    .map(|s| EntityId::new(map[&s])),
+            )
+        })
+        .collect();
+    engine.publish_artifacts(WALKED.into(), 0, batch).unwrap();
+    fold(&engine);
+    let prefix = root.join(&engine.generation().prefix);
+    let extents = extents_of(&engine, WALKED);
+    drop(engine);
+    let path_of = |form: fn(&DerivedForm) -> bool| {
+        prefix.join(&extents.iter().find(|e| form(&e.form)).unwrap().path)
+    };
+    let copy = path_of(|f| matches!(f, DerivedForm::BandLabels { .. }));
+    let column = path_of(|f| *f == DerivedForm::LevelLabels);
+    let refused_on = |expected: &Path| match tessera_build::verify_deep(
+        &root,
+        &tessera_build::VerifyOpts::default(),
+    ) {
+        Err(tessera_build::BuildError::Store(
+            tessera_store::StoreError::FileVerificationFailed { path, .. },
+        )) => assert_eq!(path, expected),
+        other => panic!(
+            "expected a refusal naming {}, got {other:?}",
+            expected.display()
+        ),
+    };
+    tessera_build::verify_deep(&root, &tessera_build::VerifyOpts::default())
+        .expect("the folded bundle verifies deep");
+
+    // A label changed in the copy.
+    let good = std::fs::read(&copy).unwrap();
+    let mut damaged = good.clone();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    std::fs::write(&copy, &damaged).unwrap();
+    refused_on(&copy);
+    std::fs::write(&copy, &good).unwrap();
+
+    // The copy no longer named by the manifest the bundle serves.
+    let partition = prefix.join("partitions/default");
+    let newest = std::fs::read_dir(&partition)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("SEGMENTS-") && n.ends_with(".json"))
+        })
+        .max_by_key(|p| {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            name["SEGMENTS-".len()..name.len() - ".json".len()]
+                .parse::<u64>()
+                .unwrap()
+        })
+        .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&newest).unwrap()).unwrap();
+    manifest["derived_extents"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|e| !e["path"].as_str().unwrap().contains("/band-labels/"));
+    std::fs::write(&newest, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    refused_on(&column);
 }
