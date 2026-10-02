@@ -159,6 +159,18 @@ describe('a hover under a highlight', () => {
   });
 });
 
+describe('the map in the tab order', () => {
+  it('is one stop, after its tools and before the other corners, and focus() lands on it', async () => {
+    const {el} = await map([]);
+    const root = (el as unknown as HTMLElement).shadowRoot!;
+    const stops = [...root.querySelectorAll<HTMLElement>('button, [tabindex]')].filter((e) => e.tabIndex >= 0).map((e) => e.getAttribute('part') ?? e.getAttribute('aria-label'));
+    expect(stops).toEqual(['Pan', 'Box select', 'Lasso select', 'Fit to extent', 'canvas']);
+    expect((el as unknown as HTMLElement).tabIndex).toBe(-1);
+    (el as unknown as HTMLElement).focus();
+    expect(root.activeElement?.getAttribute('part')).toBe('canvas');
+  });
+});
+
 describe('the tooltip through a press', () => {
   it('goes at a press, stays away while the pointer is held, and comes back on the next hover after it', async () => {
     const {el} = await map([]);

@@ -334,9 +334,9 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(ctx.host);
     const [card] = callouts(ctx.shadow);
     expect(card!.getAttribute('aria-label')).toBe('A5');
-    // The card follows the map in the tab order, before the left card.
+    // The left card comes first in the tab order, then the map, then the card beside the point.
     const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
-    expect(order).toEqual(['tessera-map', 'callout', 'panel']);
+    expect(order).toEqual(['panel', 'tessera-map', 'callout']);
     // Tab from the map goes to the card.
     map.focus();
     map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));

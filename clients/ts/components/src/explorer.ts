@@ -1127,6 +1127,7 @@ export class TesseraExplorer extends TesseraElement {
       @tessera-close=${(e: Event) => this.closeDetail(e)}>
       ${floating || narrow ? nothing : docked}
       <div class="stage">
+        ${floating && !narrow ? panel : nothing}
         <tessera-map
           exportparts=${FORWARD.map}
           colour-by=${this.colourBy || nothing}
@@ -1165,7 +1166,6 @@ export class TesseraExplorer extends TesseraElement {
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
         </tessera-map>
         ${narrow ? nothing : this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
-        ${floating && !narrow ? panel : nothing}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
@@ -1413,7 +1413,8 @@ export class TesseraExplorer extends TesseraElement {
    * the card is the next stop after the map; from there Tab goes on in the page's order.
    */
   private onMapKey = (e: KeyboardEvent): void => {
-    if (e.key !== 'Tab' || e.shiftKey || e.composedPath()[0] !== this.map) return;
+    const from = e.composedPath()[0];
+    if (e.key !== 'Tab' || e.shiftKey || !this.map || (from !== this.map && from !== this.map.focusTarget)) return;
     const shown = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]')).filter((c) => !c.hidden);
     const card = shown.find((c) => c.dataset.callout === 'live') ?? shown[0];
     if (!card) return;

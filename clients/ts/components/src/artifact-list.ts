@@ -178,6 +178,8 @@ export class TesseraArtifactList extends TesseraElement {
   @property({type: Number}) accessor level: number | null = null;
   /** Rows shown beyond `rows` after "N more" was pressed, for the layers it was pressed under. */
   @state() private accessor extra = 0;
+  /** The row in the tab order, the one the arrow keys reached last; the first row where unset. */
+  @state() private accessor rowFocus: bigint | null = null;
   private extraFor = '';
   private readonly counts = new HeldAggregate('in-view');
   /** The artifacts the list shows, as last rendered, which its aggregate counts. */
@@ -256,10 +258,20 @@ export class TesseraArtifactList extends TesseraElement {
     const shown = listed.slice(0, this.rows + this.extra);
     const n = listed.length;
     const filterable = this.resolvedStore !== null && this.artifacts === null;
+    // One row is in the tab order; the arrow keys, Home and End move among the rows.
+    const tabbed = shown.some((x) => x.tesseraId === this.rowFocus) ? this.rowFocus : (shown[0]?.tesseraId ?? null);
+    const moveFrom = (e: KeyboardEvent, i: number) => {
+      const next = {ArrowDown: Math.min(shown.length - 1, i + 1), ArrowUp: Math.max(0, i - 1), Home: 0, End: shown.length - 1}[e.key];
+      if (next === undefined) return false;
+      e.preventDefault();
+      this.rowFocus = shown[next]!.tesseraId;
+      void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>(`[part~="item"][data-id="${idString(shown[next]!.tesseraId)}"]`)?.focus());
+      return true;
+    };
     return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
       <span part="state" data-state="shown"></span>
       <ul part="items" class=${colourLayer ? 'list swatched' : 'list'}>
-        ${shown.map((artifact) => {
+        ${shown.map((artifact, i) => {
           const name = artifactName(artifact, a.attached);
           const up = artifact.parentIds.map((p) => byId.get(p)).find((p) => p !== undefined);
           const parent = up ? (artifactName(up, a.attached) ?? UNNAMED) : null;
@@ -279,18 +291,20 @@ export class TesseraArtifactList extends TesseraElement {
           return html`<li
             part="item"
             role="button"
-            tabindex="0"
+            tabindex=${artifact.tesseraId === tabbed ? '0' : '-1'}
             data-id=${idString(artifact.tesseraId)}
             data-clause=${clauses.length > 0 ? [...clauses].sort().join(' ') : nothing}
             ?data-empty=${count === 0}
             title=${`Fit the map to ${title}`}
             @click=${() => this.fit(artifact)}
             @keydown=${(e: KeyboardEvent) => {
+              if (e.target !== e.currentTarget || moveFrom(e, i)) return;
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 this.fit(artifact);
               }
             }}
+            @focus=${() => (this.rowFocus = artifact.tesseraId)}
           >
             ${colourLayer ? html`<span part="swatch" style=${`--c:${rgb(colour)}`}></span>` : nothing}
             <span class="names"><span part="name" ?data-unnamed=${name === null}>${title}</span>${parent === null ? nothing : html`<span part="parent">${parent}</span>`}</span>

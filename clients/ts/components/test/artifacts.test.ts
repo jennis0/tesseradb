@@ -134,6 +134,28 @@ describe('<tessera-artifact-list>', () => {
     expect(store.calls.find((c) => c.name === 'openArtifact')).toBeUndefined();
   });
 
+  it('is one tab stop: the arrow keys, Home and End move among the rows', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    const served = [artifact(1n, 100n), artifact(2n, 60n), artifact(3n, 40n)];
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    const rows = () => deepAll(host, '[part="item"]') as HTMLElement[];
+    const tabbable = () => rows().map((r) => r.tabIndex);
+    expect(tabbable()).toEqual([0, -1, -1]);
+    const press = async (key: string) => {
+      const active = rows().find((r) => r.tabIndex === 0)!;
+      active.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true, composed: true, cancelable: true}));
+      await settle(host);
+    };
+    await press('ArrowDown');
+    expect(tabbable()).toEqual([-1, 0, -1]);
+    await press('End');
+    expect(tabbable()).toEqual([-1, -1, 0]);
+    await press('Home');
+    expect(tabbable()).toEqual([0, -1, -1]);
+  });
+
   it('lists the level the map draws: each branch cut at it, or on a levelled layer that level alone', async () => {
     const host = await mount('<tessera-artifact-list level="0"></tessera-artifact-list>');
     const el = host.querySelector('tessera-artifact-list') as unknown as {store: unknown; level: number | null};
