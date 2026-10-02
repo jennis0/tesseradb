@@ -1077,8 +1077,8 @@ export class TesseraExplorer extends TesseraElement {
           this.sheet = this.sheet === sheet ? null : sheet;
         }}>${icon(ic, 18)}${label}</button>`;
     // The filters sheet's primary action names the number it will produce.
-    const matched = s?.get('view').matched;
-    const matchedText = matched && matched.exact && s?.get('status').status === 'shown' ? `Show ${matched.value.toLocaleString('en-GB')} matching` : 'Show';
+    const counted = s?.get('view').inView;
+    const matchedText = counted && counted.status === 'shown' && counted.matched.exact ? `Show ${counted.matched.value.toLocaleString('en-GB')} matching` : 'Show';
     const sheetFooter = html`<div class="sheet-footer">
       <button class="btn" type="button" @click=${() => {
         const meta = s?.get('meta');
