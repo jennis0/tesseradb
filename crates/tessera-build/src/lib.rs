@@ -617,6 +617,9 @@ pub(crate) struct AccessPlan {
     pub labels: Vec<String>,
     /// Per position in [`Self::labels`], the source terms the label is indexed under.
     pub keys_of_label: Vec<Vec<u64>>,
+    /// Per position in [`Self::labels`], whether one of its keys is a conjunction's. A row carrying
+    /// such a label among others is indexed by reading its labels together ([`Self::row_keys`]).
+    pub names_conjunction: Vec<bool>,
     /// The label a point of view `v` carrying none is given, as a position in [`Self::labels`],
     /// indexed by [`BuildArgs::views`]. Meaningless for the relation route, which fills nothing.
     ///
@@ -743,6 +746,7 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
             descriptors: input::TermDescriptors::Ids,
             labels: Vec::new(),
             keys_of_label: Vec::new(),
+            names_conjunction: Vec::new(),
             default_term: vec![None; args.views.len()],
         });
     }
@@ -801,6 +805,14 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
         .collect();
     keys.sort_unstable();
     keys.dedup();
+    let names_conjunction = label_keys
+        .iter()
+        .map(|label| {
+            label
+                .iter()
+                .any(|key| tessera_authz::label::label_of_key(key).is_some())
+        })
+        .collect();
     let keys_of_label = label_keys
         .iter()
         .map(|label| {
@@ -817,8 +829,38 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
         descriptors: input::TermDescriptors::Vocabulary(keys),
         labels: vocabulary,
         keys_of_label,
+        names_conjunction,
         default_term,
     })
+}
+
+impl AccessPlan {
+    /// The source terms a row carrying the labels at `labels` (positions in [`Self::labels`]) is
+    /// indexed under, into `out`, sorted and distinct: [`tessera_authz::index_keys`] over the row's
+    /// labels. Where no label names a conjunction, or there is one label, that is the union of each
+    /// label's own keys, and no label is read again.
+    fn row_keys(&self, labels: &[u64], out: &mut Vec<u64>) -> Result<()> {
+        out.clear();
+        let together =
+            labels.len() > 1 && labels.iter().any(|&l| self.names_conjunction[l as usize]);
+        if together {
+            let texts = labels.iter().map(|&l| self.labels[l as usize].as_str());
+            let keys = tessera_authz::index_keys(texts).map_err(BuildError::Invalid)?;
+            out.extend(keys.iter().map(|key| {
+                let key = std::str::from_utf8(key).expect("a key is a label's own text");
+                self.descriptors
+                    .position_of(key)
+                    .expect("every key of a row is a key of one of its labels")
+            }));
+        } else {
+            for &label in labels {
+                out.extend_from_slice(&self.keys_of_label[label as usize]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        Ok(())
+    }
 }
 
 /// Walk every view's access relation, whichever of the three shapes declared it, as
@@ -847,9 +889,10 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
         return Ok(input::AccessFill::default());
     }
     let mut fill = input::AccessFill::default();
+    let mut keys = Vec::new();
+    let mut refused = None;
     for (index, view) in args.views.iter().enumerate() {
-        // One visit per key a label is indexed under. A key two of a row's labels share is
-        // visited twice, which both builds deduplicate per item.
+        // One visit per key a row's labels are indexed under.
         let one = input::scan_access_field(
             view_source(args, index, numbering),
             match &view.access.source {
@@ -858,13 +901,20 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
             },
             &plan.labels,
             plan.default_term[index],
-            |id, label| {
-                for &key in &plan.keys_of_label[label as usize] {
+            |id, labels| {
+                if let Err(e) = plan.row_keys(labels, &mut keys) {
+                    refused = Some(e);
+                    return std::ops::ControlFlow::Break(());
+                }
+                for &key in &keys {
                     visit(index, id, key)?;
                 }
                 std::ops::ControlFlow::Continue(())
             },
         )?;
+        if let Some(e) = refused.take() {
+            return Err(e);
+        }
         fill.carried += one.carried;
         fill.filled += one.filled;
     }

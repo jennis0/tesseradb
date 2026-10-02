@@ -13,9 +13,11 @@ accepted only as the whole label, and every principal satisfies it. `inherited` 
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
-The engine's limit on the size of a label holding a conjunction is not modelled, and neither is
-the item card's answer for a label written with a conjunction that normalisation reduces to a
-disjunction of terms, such as `(a|b)&(a|b|c)`.
+The engine's limit on the size of a label holding a conjunction is not modelled. Two of the item
+card's answers are not modelled either: one for a label written with a conjunction that
+normalisation reduces to a disjunction of terms, such as `(a|b)&(a|b|c)`, and one for an item
+where one operand of its disjunction implies another without holding the other's conjuncts, such
+as `a&b` beside `a&(b|c)`.
 """
 
 from __future__ import annotations
@@ -115,22 +117,57 @@ def write_term(name: str) -> str:
 
 
 def card_labels(labels, held: Callable[[str], bool]) -> list[str]:
-    """What an item card serves for an item carrying `labels`, to a principal holding `held`: each
-    term of a label that is a term or a disjunction of terms, where held, and `public` where a label
-    is `public`; and of each label holding a conjunction that `held` satisfies, its witness, with
-    its terms joined by `&`. Each entry is label text, and the list is sorted and distinct."""
+    """What an item card serves for an item carrying `labels`, to a principal holding `held`.
+
+    The labels other than `public` are read as one disjunction, and its operands are each a term or
+    a conjunction (`operands`). An operand that implies another, and is not implied by it, adds
+    nothing to what the item admits and is dropped. Of the rest, each held term is served, and of
+    each conjunction that `held` satisfies, its witness with its terms joined by `&`. `public` is
+    served where a label is `public`. Each entry is label text, and the list is sorted and
+    distinct."""
     out = set()
+    disjuncts = []
     for text in labels:
         tree = parse(text)
         if isinstance(tree, Public):
             out.add(PUBLIC)
-        elif isinstance(tree, Term) or (
-            isinstance(tree, Or) and all(isinstance(o, Term) for o in tree.operands)
+        else:
+            disjuncts.extend(operands(tree))
+    for i, x in enumerate(disjuncts):
+        if any(
+            implies(x, y) and not implies(y, x) for j, y in enumerate(disjuncts) if j != i
         ):
-            out.update(write_term(t) for t in terms(tree) if held(t))
-        elif (w := witness(tree, held)) is not None:
+            continue
+        if (w := witness(x, held)) is not None:
             out.add("&".join(write_term(t) for t in w))
     return sorted(out)
+
+
+def operands(tree) -> list:
+    """The operands of `tree` read as a disjunction: a disjunction's operands, with any
+    disjunction among them read the same way, or `tree` itself."""
+    if isinstance(tree, Or):
+        return [o for operand in tree.operands for o in operands(operand)]
+    return [tree]
+
+
+def implies(x, y) -> bool:
+    """Whether every principal satisfying `x` satisfies `y`. The expressions have no negation, so
+    it is enough that each least set of terms satisfying `x` satisfies `y`."""
+    return all(satisfies(y, clause.__contains__) for clause in _clauses(x))
+
+
+def _clauses(tree) -> list[frozenset]:
+    """Sets of terms, each of which satisfies `tree`, such that every set satisfying `tree` holds
+    one of them."""
+    if isinstance(tree, Term):
+        return [frozenset([tree.name])]
+    if isinstance(tree, Or):
+        return [c for operand in tree.operands for c in _clauses(operand)]
+    out = [frozenset()]
+    for operand in tree.operands:
+        out = [a | b for a in out for b in _clauses(operand)]
+    return out
 
 
 def held_term(term: str) -> str | None:

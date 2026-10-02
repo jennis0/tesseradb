@@ -12,6 +12,7 @@ from oracle.access import (
     Term,
     admits,
     card_labels,
+    implies,
     held_term,
     parse,
     satisfies,
@@ -134,6 +135,24 @@ def test_a_card_serves_each_held_term_and_one_clause_of_each_satisfied_conjuncti
         '"team b"',
         's&"team b"',
     ]
+
+
+def test_a_card_serves_a_clause_of_each_operand_of_the_labels_read_as_one_disjunction():
+    everyone = holding("a", "b", "c", "d", "e", "s", "t")
+    assert card_labels(["a|(b&c)"], everyone) == ["a", "b&c"]
+    assert card_labels(["a", "b&c"], everyone) == ["a", "b&c"]
+    assert card_labels(["(a&b&c)|(d&e)"], everyone) == ["a&b&c", "d&e"]
+    assert card_labels(["(t&c)|(s&(b|a))"], everyone) == ["a&s", "c&t"]
+    assert card_labels(["a", "a&b"], everyone) == ["a"]
+    assert card_labels(["a|(a&b)"], everyone) == ["a"]
+    assert card_labels(["(a|b)|(c&d)"], holding("b", "c")) == ["b"]
+
+
+def test_implication_between_operands():
+    assert implies(parse("a&b"), parse("a"))
+    assert implies(parse("a&b"), parse("a&(b|c)"))
+    assert not implies(parse("a&(b|c)"), parse("a&b"))
+    assert implies(parse("(a|b)&c"), parse("c"))
 
 
 def test_a_space_inside_quotes_makes_another_term():

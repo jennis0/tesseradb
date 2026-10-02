@@ -15,10 +15,10 @@ use crate::session::SatisfiedKeys;
 pub struct ItemOut {
     /// Present fields only, in declaration order — an absent field is absent, not null.
     pub fields: Vec<ItemField>,
-    /// Why the asking session sees this item: each held term of its labels that are a term or a
-    /// disjunction of terms, and one satisfied clause of each of its labels holding a conjunction,
-    /// each written as label text, sorted. A held term that appears only inside a conjunction is
-    /// not named on its own. Every term is one the credential holds, so no clause the session does
+    /// Why the asking session sees this item. Its labels are read as one disjunction, whose
+    /// operands are terms and conjunctions ([`tessera_authz::index_keys`]). Each held term among
+    /// them is named, and one satisfied clause of each satisfied conjunction, each written as label
+    /// text, sorted. A held term that appears only inside a conjunction is not named on its own. Every term is one the credential holds, so no clause the session does
     /// not satisfy and no term it does not hold is named. Never the item's whole label.
     pub labels: Vec<String>,
     /// The views this item holds a row in that this session may reach, sorted by id, each with
@@ -94,12 +94,12 @@ impl Engine {
     /// The drill-down's `labels` array: why this session sees the entity, as the clauses of its
     /// labels that the session satisfies, each written as label text and sorted. Each index key
     /// of the entity's that the session satisfies offers one clause: a term offers itself, and a
-    /// label holding a conjunction its [`Label::witness`]. Every term
+    /// conjunction its [`Label::witness`]. Every term
     /// written is one the credential holds, so the clauses the session does not satisfy and the
     /// terms it does not hold are never named. Reached only after the visibility verdict, like
     /// every other read in [`Engine::item`]: the transpose is never probed for an entity the
     /// principal cannot see. An entity the transpose does not hold answers `[]`. `parsed` holds
-    /// the label behind each key read so far, so a page of rows parses each label once.
+    /// the conjunction behind each key read so far, so a page of rows parses each one once.
     pub(crate) fn labels_for(
         &self,
         generation: &Generation,

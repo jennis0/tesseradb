@@ -1065,7 +1065,9 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 // **32**: an access label is an expression, and a row's descriptors are the keys it is indexed
 // under: a term, `public`, or a label holding a conjunction under its own key. A log at 31 is
 // refused.
-const WAL_VERSION: u16 = 32;
+// **33**: a row's descriptors are the operands of its labels read as one disjunction: a term,
+// `public`, or a conjunction under its own key. A log at 32 is refused.
+const WAL_VERSION: u16 = 33;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

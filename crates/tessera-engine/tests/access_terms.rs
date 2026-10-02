@@ -617,6 +617,79 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
     check(&reopened);
 }
 
+/// Five points whose labels are disjunctions written as a list and as one label.
+fn disjunctions_of(e: u64) -> Option<Vec<&'static str>> {
+    match e {
+        0 => Some(vec!["ir:analyst", "eu&ir:analyst"]),
+        1 => Some(vec!["ir:analyst|(eu&ir:audit)"]),
+        2 => Some(vec!["eu&ir:audit", "ir:analyst"]),
+        3 => Some(vec!["public"]),
+        _ => Some(vec!["eu&(ir:analyst|ir:audit)"]),
+    }
+}
+
+/// **A list of labels and one label writing the same disjunction are indexed alike**, by the build
+/// and by ingest: each operand of the disjunction on its own, a conjunction another operand absorbs
+/// not at all. The `labels` column names each held term and one clause of each satisfied
+/// conjunction among the operands.
+#[test]
+fn a_list_of_labels_is_indexed_as_one_label_writing_the_same_disjunction() {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), disjunctions_of);
+    let bundle = dir.path().join("bundle");
+    build(&args(&dir.path().join("points.parquet"), &bundle, None)).expect("it builds");
+    let engine =
+        open_engine_publishing(&bundle, &dir.path().join("cache"), &dir.path().join("wal.log"));
+    let rows_of = |e: u64| disjunctions_of(e).unwrap();
+    let ingested: Vec<(&[&str], (f64, f64))> = (0..N)
+        .map(|e| (rows_of(e).leak() as &[&str], (100.0 + e as f64, 100.0)))
+        .collect();
+    create(&engine, "disjunctions", &ingested);
+    engine.request_flush();
+    wait_until("the flush to publish", std::time::Duration::from_secs(30), || {
+        engine.write_executor_stats().flushes >= 1
+    });
+
+    let all = engine.authorise(&credential(&["eu", "ir:analyst", "ir:audit"])).unwrap();
+    let mut served: Vec<Vec<String>> = rows(&engine, &all).into_iter().map(|(_, l)| l).collect();
+    served.sort();
+    let expected = [
+        vec!["eu&ir:analyst"],
+        vec!["eu&ir:audit", "ir:analyst"],
+        vec!["eu&ir:audit", "ir:analyst"],
+        vec!["ir:analyst"],
+        vec!["public"],
+    ];
+    let mut twice: Vec<Vec<String>> = expected
+        .iter()
+        .chain(&expected)
+        .map(|l| l.iter().map(|s| s.to_string()).collect())
+        .collect();
+    twice.sort();
+    assert_eq!(served, twice, "built and ingested alike, `eu&ir:analyst` absorbed");
+
+    // Without `ir:analyst`, an item is seen only through a conjunction among its operands.
+    let eu_audit = engine.authorise(&credential(&["eu", "ir:audit"])).unwrap();
+    let mut served: Vec<Vec<String>> =
+        rows(&engine, &eu_audit).into_iter().map(|(_, l)| l).collect();
+    served.sort();
+    let mut expected: Vec<Vec<String>> = [
+        vec!["eu&ir:audit"],
+        vec!["eu&ir:audit"],
+        vec!["eu&ir:audit"],
+        vec!["eu&ir:audit"],
+        vec!["eu&ir:audit"],
+        vec!["eu&ir:audit"],
+        vec!["public"],
+        vec!["public"],
+    ]
+    .iter()
+    .map(|l| l.iter().map(|s| s.to_string()).collect())
+    .collect();
+    expected.sort();
+    assert_eq!(served, expected);
+}
+
 /// A bundle of [`expressions_of`]'s points, served by an engine that publishes flushes.
 fn expressions_engine() -> (tempfile::TempDir, Engine) {
     let dir = tempfile::tempdir().unwrap();

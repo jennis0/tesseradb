@@ -381,14 +381,14 @@ mod tests {
             .extended_with(&keys[1..]);
         for dict in [&loaded, &extended] {
             let key = dict.lookup(&keys[0]).unwrap();
-            assert!(dict.labels().is_label_key(key));
+            assert!(dict.labels().is_conjunction_key(key));
             let mut out = Vec::new();
             dict.labels().authorise(["a", "b"], &mut out);
             assert_eq!(out, vec![key]);
             out.clear();
             dict.labels().authorise(["a", "c"], &mut out);
             assert!(out.is_empty());
-            assert!(!dict.labels().is_label_key(dict.lookup(b"c").unwrap()));
+            assert!(!dict.labels().is_conjunction_key(dict.lookup(b"c").unwrap()));
         }
     }
 

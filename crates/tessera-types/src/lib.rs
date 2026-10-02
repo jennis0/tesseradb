@@ -215,7 +215,10 @@ pub struct GenerationStamp {
 // 30: an access label is an expression. A dictionary holds terms and, for each label holding a
 // conjunction, a key of its own; the manifest carries no plugin hash or declared bounds. A 29
 // bundle is refused.
-pub const BUNDLE_FORMAT: u32 = 30;
+// 31: an item's labels are read as one disjunction, and each of its operands is a key: a term under
+// itself, a conjunction under its own key. A 30 dictionary keys a whole label holding a conjunction,
+// which a reader at 31 would evaluate as one, so a 30 bundle is refused.
+pub const BUNDLE_FORMAT: u32 = 31;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
