@@ -3,6 +3,7 @@ import {Driver} from '../src/driver.js';
 import {Replica} from '../src/replica.js';
 import {TesseraError} from '../src/client.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
+import {mortonOfTile} from '../src/coords.js';
 import {fakeClock, response, result, tile} from './support.js';
 
 /**
@@ -44,6 +45,8 @@ function harness(opts: {
   hang?: (call: number, k?: number) => boolean;
   prefetch?: boolean;
   respond?: () => ViewportResponse;
+  /** Serve as under a filter: every match up to `k`, with no thinning. */
+  filtered?: boolean;
 } = {}) {
   const clock = fakeClock();
   const calls: {zoom: number; k?: number; background?: boolean}[] = [];
@@ -63,7 +66,7 @@ function harness(opts: {
   replica.reset();
   const driver = new Driver(
     replica,
-    {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+    {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10, filtered: () => opts.filtered ?? false},
     clock,
     {
       onFrame: () => {},
@@ -257,7 +260,7 @@ describe('driver', () => {
   it('a budget change replans at its depth on the very next schedule: no motion, no settle', async () => {
     // `setBudget` reaches the next plan and suspends the depth hold, which would otherwise keep a
     // one-step depth change at the presented depth.
-    const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
+    const h = harness({prefetch: false, filtered: true, respond: () => servedResponse(10_000_000n, 8)});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(600); // fetch, calibration, settle: presented at the budget's depth
     // Same view again: covered, and the settle's banked suspension is consumed and re-armed.
@@ -296,7 +299,8 @@ describe('driver', () => {
       async (req) => {
         calls.push({zoom: req.zoom, k: req.k});
         if (req.k !== 0) return servedResponse(10_000n, 8);
-        // Every tile saturated, so a request costs `k` per tile and the budget bounds the choice.
+        // Every tile saturated, so a filtered request costs `k` per tile and the budget bounds the
+        // choice.
         const n = Math.min(4 ** req.zoom, 4096);
         const result = emptyResponse().result;
         return {
@@ -313,7 +317,7 @@ describe('driver', () => {
     replica.reset();
     const driver = new Driver(
       replica,
-      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10, filtered: () => true},
       clock,
       {onFrame: () => {}, onTrace: (kind, fields) => traces.push({kind, fields})},
       {budget: 50_000},
@@ -373,4 +377,65 @@ describe('driver', () => {
     expect(statuses).not.toContain('refused');
   });
 
+  it('an unfiltered corpus far below the cap is drawn whole as the view zooms in, where the cap alone stopped short', async () => {
+    // 65,536 members, one per depth-8 cell over the whole map, and a server that thins as the real
+    // one does: a tile of n serves θ·n with θ = 10 · occupied(d) / 65,536, at least 2 and at most k.
+    // Every depth below 7 serves 10 marks a tile; from depth 7, where θ passes 1, every member.
+    const clock = fakeClock();
+    const asked: {zoom: number; k?: number}[] = [];
+    const total = 4 ** 8;
+    const replica = new Replica(
+      async (req) => {
+        asked.push({zoom: req.zoom, k: req.k});
+        const z = req.zoom;
+        const side = 2 ** z;
+        const [x0, y0, x1, y1] = req.bbox!;
+        const at = (v: number) => Math.min(side - 1, Math.floor(v * side));
+        const n = total / 4 ** z;
+        const theta = Math.min(1, (10 * 4 ** z) / total);
+        const tiles = [];
+        for (let x = at(x0); x <= at(x1); x++) {
+          for (let y = at(y0); y <= at(y1); y++) {
+            const served = req.k === 0 ? 0 : Math.min(n, 500, Math.max(Math.min(2, n), Math.floor(theta * n)));
+            tiles.push({x, y, served});
+          }
+        }
+        const points = tiles.flatMap((t) => Array.from({length: t.served}, () => [(t.x + 0.5) / side, (t.y + 0.5) / side] as const));
+        return response(
+          result({
+            tiles: tiles.map((t) => tile(mortonOfTile(t.x, t.y, z), BigInt(n), {served: BigInt(t.served)})),
+            ids: BigUint64Array.from(points.map((_, i) => BigInt(asked.length * 1_000_000 + i + 1))),
+            codes: BigUint64Array.from(points.map(() => 0n)),
+            positions: Float64Array.from(points.flat()),
+            world: Float32Array.from(points.flatMap(([x, y]) => [x * 512, y * 512]))
+          }),
+          {contentKey: 'p1'}
+        );
+      },
+      Q,
+      {view: 's', now: () => clock.now(), revalidateAfterMs: Infinity}
+    );
+    replica.reset();
+    const driver = new Driver(
+      replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 65_536, thetaTargetMarks: 10, kMin: 2, filtered: () => false},
+      clock,
+      {onFrame: () => {}},
+      {budget: 500_000},
+      false
+    );
+    const marksDepths = () => asked.filter((c) => c.k !== 0).map((c) => c.zoom);
+
+    driver.schedule({target: [256, 256, 0], zoom: 0}, 512, 512);
+    await clock.advance(3_000);
+    expect(marksDepths().at(-1)).toBe(7);
+    expect(driver.presentedFrame?.depth).toBe(7);
+
+    // Zoomed in on a quarter of the map: still every member, so still depth 7. Read as min(k, n),
+    // the 256 members of a depth-4 tile looked served whole and the request stopped at depth 4.
+    driver.schedule({target: [128, 128, 0], zoom: 1}, 512, 512);
+    await clock.advance(3_000);
+    expect(marksDepths().every((d) => d === 7)).toBe(true);
+    expect(driver.presentedFrame?.depth).toBe(7);
+  });
 });

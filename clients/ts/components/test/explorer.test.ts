@@ -169,11 +169,16 @@ describe('<tessera-explorer> narrow layout', () => {
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
   });
 
-  it('clears the controls and the member_of clauses from the filters sheet', async () => {
+  it('clears the controls and the member_of clauses from the filters sheet, and offers Clear only while one applies', async () => {
     const {host, shadow, store} = await explorer();
     tabs(shadow)[0]!.click();
     await settle(host);
-    (shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement).click();
+    const clear = () => shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement;
+    expect(clear().disabled).toBe(true);
+    store.set('filters', {...store.get('filters'), members: [{layer: 'clusters', artifact: 1n, outside: false, verb: 'filter'}]});
+    await settle(host);
+    expect(clear().disabled).toBe(false);
+    clear().click();
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(store.calls.filter((c) => c.name === 'setMembers').map((c) => c.args[0])).toEqual([[]]);
   });
@@ -329,18 +334,22 @@ describe('<tessera-explorer> the item card beside its point', () => {
     await settle(ctx.host);
     const [card] = callouts(ctx.shadow);
     expect(card!.getAttribute('aria-label')).toBe('A5');
-    // The card follows the map in the tab order, before the left card.
+    // The left card comes first in the tab order, then the map, then the card beside the point.
     const order = [...ctx.shadow.querySelectorAll('tessera-map, [part~="callout"], [part="panel"]')].map((e) => e.getAttribute('part') ?? e.tagName.toLowerCase());
-    expect(order).toEqual(['tessera-map', 'callout', 'panel']);
+    expect(order).toEqual(['panel', 'tessera-map', 'callout']);
     // Tab from the map goes to the card.
     map.focus();
     map.dispatchEvent(new KeyboardEvent('keydown', {key: 'Tab', bubbles: true, composed: true, cancelable: true}));
     expect(ctx.shadow.activeElement).toBe(card);
     card!.querySelector('tessera-item-card')!.shadowRoot!.querySelector<HTMLButtonElement>('[part="close"]')!.focus();
+    // The ring the map draws round the picked point.
+    (map as unknown as {selectedWorldXY: [number, number] | null}).selectedWorldXY = [256, 256];
     card!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, composed: true}));
     await settle(ctx.host);
     expect(ctx.store.calls.filter((c) => c.name === 'clearSelection')).toHaveLength(1);
     expect(ctx.shadow.activeElement).toBe(map);
+    expect(map.pickedAt).toBeNull();
+    expect((map as unknown as {selectedWorldXY: [number, number] | null}).selectedWorldXY).toBeNull();
   });
 
   it('drops every card when it is given another store', async () => {

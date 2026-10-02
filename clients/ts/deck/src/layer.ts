@@ -1010,7 +1010,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const size = sizeEncodingOf(r.meta, r.legend, sizing.scale);
     const sized = size.kind !== 'none';
     const slabStarted = performance.now();
-    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer, size);
+    // Marks resident from earlier frames are drawn too; the store's budget caps them with the frame's.
+    slab.sync(r.marks.bands, r.depth, encoding, column.colourBy, membershipLayer, size, this.props.store?.budget ?? Number.POSITIVE_INFINITY);
     timings.slabMs = performance.now() - slabStarted;
 
     if (!checkedMarks.has(r.marks)) {

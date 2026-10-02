@@ -110,12 +110,17 @@ let mapsMade = 0;
  * A settled box or lasso becomes the store's selection, a filter every count narrows to; a tag on
  * its top-left corner gives the count matched inside it and a button that clears it.
  *
- * The map owns the camera and tells the store where it is looking on every move. Density is asked
+ * The map owns the camera and tells the store where it is looking on every move. It starts on the
+ * whole extent, fitted as the Fit button fits it, unless the camera was moved before `meta`. Density is asked
  * for once the camera has rested for 200 ms, as counts by cell over the view and a margin round
  * it, and the last counts are drawn at their own positions until the next land. Keys, with the
- * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
- * clears the selection. On connecting, the map sets `role="application"` on itself, replacing
- * any role the host set, and sets `tabindex="0"` and an `aria-label` unless the host set them.
+ * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn, else
+ * clears the selected region, else drops the picked point or artifact and its ring. A press hides
+ * the hover tooltip until the pointer is released. The canvas is one tab stop, after the toolbar
+ * and before the content of the other corners: it carries `role="application"`, the `tabindex`
+ * the host set on the map, else 0, and the host's `aria-label` where the host set one, else one
+ * naming the keys. A `tabindex` the host sets moves to the canvas, leaving -1 on the map, so the
+ * map is never a second stop. `focus()` focuses the canvas.
  *
  * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
  * is disconnected and not reconnected releases its GPU resources a quarter of a second later.
@@ -175,12 +180,13 @@ export class TesseraMap extends TesseraElement {
         outline: none;
         overflow: hidden;
       }
-      :host(:focus-visible) {
-        box-shadow: inset 0 0 0 2px var(--_tessera-accent);
-      }
       [part='canvas'] {
         position: absolute;
         inset: 0;
+      }
+      [part='canvas']:focus-visible {
+        outline: 1.5px solid color-mix(in srgb, var(--_tessera-accent) 40%, transparent);
+        outline-offset: -1.5px;
       }
       :host([mode='box']) [part='canvas'],
       :host([mode='lasso']) [part='canvas'] {
@@ -570,6 +576,31 @@ export class TesseraMap extends TesseraElement {
   private frameLoop: number | null = null;
   private lastFrameAt = 0;
 
+  static override get observedAttributes(): string[] {
+    return [...super.observedAttributes, 'tabindex', 'aria-label'];
+  }
+
+  /** The tab index the canvas takes: the one the host set on the map, else 0. */
+  private canvasTab = '0';
+  /** Set while the map writes its own `tabindex`, so the write is not read as the host's. */
+  private movingTab = false;
+
+  /**
+   * A `tabindex` the host sets on the map moves to the canvas, and the map keeps -1 so it is not a
+   * second stop; an `aria-label` names the canvas.
+   */
+  override attributeChangedCallback(name: string, old: string | null, value: string | null): void {
+    super.attributeChangedCallback(name, old, value);
+    if (name === 'tabindex' && !this.movingTab && value !== null) {
+      this.canvasTab = value;
+      this.movingTab = true;
+      this.setAttribute('tabindex', '-1');
+      this.movingTab = false;
+      this.requestUpdate();
+    }
+    if (name === 'aria-label') this.requestUpdate();
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.askPointColumns(this.resolvedStore);
@@ -577,17 +608,12 @@ export class TesseraMap extends TesseraElement {
       clearTimeout(this.finalizeTimer);
       this.finalizeTimer = null;
     }
-    if (!this.hasAttribute('tabindex')) this.tabIndex = 0;
-    this.setAttribute('role', 'application');
-    if (!this.hasAttribute('aria-label')) this.setAttribute('aria-label', 'map: arrow keys pan, + and - zoom');
-    this.addEventListener('keydown', this.onKey);
     if (this.measure) this.startFrameLoop();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.askPointColumns(null);
-    this.removeEventListener('keydown', this.onKey);
     if (this.describeTimer !== null) {
       clearTimeout(this.describeTimer);
       this.describeTimer = null;
@@ -746,6 +772,8 @@ export class TesseraMap extends TesseraElement {
       : null;
     this.slab.clear();
     this.metaSeen = false;
+    // A new store's view starts on its whole extent, as the first did.
+    this.cameraSet = false;
     this.selectedWorldXY = null;
     this.pickedAt = null;
     this.regionWorld = null;
@@ -771,7 +799,9 @@ export class TesseraMap extends TesseraElement {
     if (!s) return;
     if (!this.metaSeen && s.get('meta')) {
       this.metaSeen = true;
-      this.pushView();
+      // A camera no one has moved starts on the whole extent, where the map has a size to fit.
+      if (!this.cameraSet && this.clientWidth > 0 && this.clientHeight > 0) this.fit();
+      else this.pushView();
     }
     const view = s.get('view');
     // Every switch drops the hover: the marks under the cursor are different rows in the new view.
@@ -939,14 +969,21 @@ export class TesseraMap extends TesseraElement {
       parent,
       views: VIEW,
       viewState: this.viewState,
-      controller: true,
+      // The map takes the keys itself, on its canvas, so deck's keyboard is off.
+      controller: {keyboard: false},
       pickingRadius: 8,
       layers: [],
       onDeviceInitialized: (device) => this.slab.attach(device),
+      // The canvas's container is the map's one tab stop and takes its keys; deck's input handling
+      // makes its own canvas focusable once it is set up, so that is undone here.
+      onLoad: () => parent.querySelector('canvas')?.setAttribute('tabindex', '-1'),
       onViewStateChange: ({viewState}) => {
         const v = viewState as {target: number[]; zoom: number};
+        this.cameraSet = true;
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
         this.deck?.setProps({viewState: this.viewState});
+        // The tooltip names what was under the pointer before the move.
+        if (this.hover) this.hover = null;
         this.pushView();
         // The region's tag follows the camera.
         if (this.regionWorld || this.regionPolygon) this.requestUpdate();
@@ -1074,6 +1111,9 @@ export class TesseraMap extends TesseraElement {
   }
 
   /** What the pointer is over: the tooltip from the mark beneath, and the hovered artifact from {@link artifactAt}. */
+  /** Whether a pointer is pressed on the map, during which no tooltip shows. */
+  private pressed = false;
+
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
@@ -1086,7 +1126,7 @@ export class TesseraMap extends TesseraElement {
     this.hoveredArtifact = world ? this.artifactAt(world, own) : null;
     // The viewport carries no shapes; fetch the hovered one. `needShape` asks once per artifact.
     if (this.hoveredArtifact !== null) this.resolvedStore?.needShape(this.hoveredArtifact);
-    if (picked.kind !== 'mark') {
+    if (picked.kind !== 'mark' || this.pressed) {
       if (this.hover) this.hover = null;
       return;
     }
@@ -1129,6 +1169,28 @@ export class TesseraMap extends TesseraElement {
         this.hover = {...this.hover, title: hoverText(value, arrowType)};
       });
     }, HOVER_DESCRIBE_MS);
+  }
+
+  /** The element that takes the map's focus: the canvas, a tab stop of its own. @internal */
+  get focusTarget(): HTMLElement | null {
+    return this.renderRoot.querySelector<HTMLElement>('[part="canvas"]');
+  }
+
+  /** Focus the canvas, which takes the map's keys. */
+  override focus(options?: FocusOptions): void {
+    const target = this.focusTarget;
+    if (target) target.focus(options);
+    else super.focus(options);
+  }
+
+  /** Forget the last pick: the card it opened and the ring drawn round the picked point. */
+  clearPick(): void {
+    this.lastPick = null;
+    this.pickedAt = null;
+    this.pickedId = null;
+    if (this.selectedWorldXY === null) return;
+    this.selectedWorldXY = null;
+    this.paint();
   }
 
   private onClick(info: PickingInfo): void {
@@ -1197,6 +1259,12 @@ export class TesseraMap extends TesseraElement {
    * next pointer movement would pan. Stopping `pointerdown` first means no session opens.
    */
   private onPointerDown = (e: PointerEvent): void => {
+    // A press starts a drag or a click, and the tooltip would stay where it was through either; it
+    // comes back on the next hover after the press ends.
+    if (this.hover) this.hover = null;
+    this.pressed = true;
+    addEventListener('pointerup', () => (this.pressed = false), {once: true});
+    addEventListener('pointercancel', () => (this.pressed = false), {once: true});
     if (e.button !== 0) return;
     const lasso = this.mode === 'lasso';
     if (!lasso && this.mode !== 'box' && !(this.mode === 'pan' && e.shiftKey)) return;
@@ -1266,7 +1334,11 @@ export class TesseraMap extends TesseraElement {
     emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
+  /** Whether the camera has been moved, by the user or the host, since the map was made. */
+  private cameraSet = false;
+
   private setViewState(next: Partial<ViewState>): void {
+    this.cameraSet = true;
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
     this.pushView();
@@ -1322,10 +1394,13 @@ export class TesseraMap extends TesseraElement {
     return this.viewState.zoom;
   }
 
-  /** Fit the whole extent into the map. */
+  /**
+   * Fit the whole extent into the map's narrower axis, at 92% of it, so the points at the extent's
+   * edges and their labels stay on screen.
+   */
   fit(): void {
     const {width, height} = this.size;
-    this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2(Math.min(width, height) / WORLD_SIZE)});
+    this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2((0.92 * Math.min(width, height)) / WORLD_SIZE)});
   }
 
   /**
@@ -1368,7 +1443,8 @@ export class TesseraMap extends TesseraElement {
   }
 
   private onKey = (e: KeyboardEvent): void => {
-    if (e.target !== this) return;
+    // From the canvas's container, or deck's canvas inside it, which a click focuses.
+    if (e.target !== e.currentTarget && !(e.target instanceof HTMLCanvasElement)) return;
     const step = 64 / 2 ** this.viewState.zoom;
     const [x, y] = this.viewState.target;
     switch (e.key) {
@@ -1399,6 +1475,9 @@ export class TesseraMap extends TesseraElement {
           this.dragPolygon = null;
         } else if (this.resolvedStore?.get('region')) {
           this.select(null);
+        } else if (this.pickedAt || this.selectedWorldXY) {
+          this.clearPick();
+          this.resolvedStore?.clearSelection();
         }
         break;
       default:
@@ -1473,8 +1552,28 @@ export class TesseraMap extends TesseraElement {
           <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso', 16, 1.2)}</button>
           <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit', 16, 1.2)}</button>
         </div>`;
-    return html`<div
+    const slots = {
+      'top-left': html`<slot name="top-left"></slot>`,
+      'top-right': html`<slot name="top-right"></slot>`,
+      'bottom-left': html`<slot name="bottom-left"></slot>`,
+      'bottom-right': html`<slot name="bottom-right"></slot>`
+    };
+    const corner = (at: keyof typeof slots) => {
+      const top = at.startsWith('top');
+      const own = this.controlsCorner === at ? controls : nothing;
+      return html`<div class=${`corner ${at}`}>
+        ${top ? own : nothing}${at === 'bottom-left' ? this.densityKey() : nothing}${slots[at]}${top ? nothing : own}
+      </div>`;
+    };
+    const corners = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const;
+    // The corner holding the toolbar comes before the canvas in the page, and the others after it,
+    // so Tab reaches the tools, then the map, then what the host put in the other corners.
+    return html`${corner(this.controlsCorner)}<div
         part="canvas"
+        tabindex=${this.canvasTab}
+        role="application"
+        aria-label=${this.getAttribute('aria-label') ?? 'map: arrow keys pan, + and - zoom'}
+        @keydown=${this.onKey}
         @pointerleave=${() => {
           // deck reports picks only while the pointer is over the canvas, so clear the hover here.
           if (this.hover) this.hover = null;
@@ -1487,23 +1586,7 @@ export class TesseraMap extends TesseraElement {
       ></div>
       ${overlay}
       ${this.regionTag()}
-      <div class="corner top-left">
-        ${this.controlsCorner === 'top-left' ? controls : nothing}
-        <slot name="top-left"></slot>
-      </div>
-      <div class="corner top-right">
-        ${this.controlsCorner === 'top-right' ? controls : nothing}
-        <slot name="top-right"></slot>
-      </div>
-      <div class="corner bottom-left">
-        ${this.densityKey()}
-        <slot name="bottom-left"></slot>
-        ${this.controlsCorner === 'bottom-left' ? controls : nothing}
-      </div>
-      <div class="corner bottom-right">
-        <slot name="bottom-right"></slot>
-        ${this.controlsCorner === 'bottom-right' ? controls : nothing}
-      </div>
+      ${corners.filter((c) => c !== this.controlsCorner).map(corner)}
       ${this.hover
         ? html`<div part="tooltip" style=${`left:${this.hover.x}px;top:${this.hover.y}px`}>
             <slot name="tooltip"><div class="t">${this.hover.title}</div>${this.hover.lines.length > 0 ? html`<div class="s">${this.hover.lines.join(' · ')}</div>` : nothing}</slot>

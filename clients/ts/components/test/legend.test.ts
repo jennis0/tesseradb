@@ -121,8 +121,8 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     expect(sent(store)!.highlight['field']).toEqual({family: 'category', keys: ['cs.CV']});
     await answer(host, store);
 
-    // Of the two filtered, the one highlighted is lit and the other dim; the rest are out.
-    expect(['cs.LG', 'cs.CV', 'hep-th'].map((k) => entry(host, k).getAttribute('data-state'))).toEqual(['dim', 'lit', 'out']);
+    // Of the two filtered, the one highlighted is lit and the other keeps its colour; the rest are out.
+    expect(['cs.LG', 'cs.CV', 'hep-th'].map((k) => entry(host, k).getAttribute('data-state'))).toEqual(['filtered', 'lit', 'out']);
     const pressed = (key: string, verb: 'filter' | 'highlight') => entry(host, key).querySelector(`[part="${verb}"]`)!.getAttribute('aria-pressed');
     expect([pressed('cs.CV', 'filter'), pressed('cs.CV', 'highlight'), pressed('cs.LG', 'filter'), pressed('cs.LG', 'highlight')]).toEqual(['true', 'true', 'true', 'false']);
 
@@ -219,9 +219,11 @@ describe('<tessera-legend> rows as a filter and a highlight', () => {
     el.store = store;
     await settle(host);
     expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'tiers', level: 0, artifacts: [3n]}}, {by: {layer: 'tiers', level: 1, artifacts: [4n, 9n]}}]}]);
-    answerAggregate(store, 'legend', aggregateEntry([{rows: [{key: 3n, count: 40}]}, {rows: [{key: 9n, count: 12}, {key: 4n, count: 7}]}]));
+    answerAggregate(store, 'legend', aggregateEntry([{rows: [{key: 3n, count: 40}]}, {rows: [{key: 9n, count: 0}, {key: 4n, count: 7}]}]));
     await settle(host);
-    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['12', '40', '7', '']);
+    expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['0', '40', '7', '']);
+    // A cluster the filters leave no member of is greyed, as a value the filter leaves out is.
+    expect(deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-state'))).toEqual(['out', '', '', '']);
     store.set('legend', legend('cluster:tree'));
     store.set('artifacts', {...base, colourServed: [artifact('tree', 2n, 3)] as never});
     await settle(host);

@@ -73,11 +73,18 @@ let registered = 0;
  * One aggregate an element keeps registered with its store under an id of its own. {@link set}
  * registers a spec only when it differs from the one held, since each registration sends a
  * request; `null` drops it.
+ *
+ * The registration is made in a microtask after the call. A registration publishes the store's
+ * `aggregates` projection at once, and an element calls `set` from its `updated`, so registering
+ * there would ask every subscribed element for an update while one is finishing.
  */
 export class HeldAggregate {
   readonly id: string;
   private store: Store | null = null;
   private held = '';
+  /** The last call's arguments, applied in the microtask. */
+  private wanted: {store: Store | null; key: string; spec: AggregateSpec | null} = {store: null, key: '', spec: null};
+  private queued = false;
 
   constructor(prefix: string) {
     registered += 1;
@@ -87,6 +94,16 @@ export class HeldAggregate {
   /** Register `spec` with `store`, or drop the registration where `spec` is `null` or the store changed. */
   set(store: Store | null, spec: AggregateSpec | null): void {
     const key = spec === null ? '' : JSON.stringify(spec, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+    if (store === this.wanted.store && key === this.wanted.key) return;
+    this.wanted = {store, key, spec};
+    if (this.queued) return;
+    this.queued = true;
+    queueMicrotask(() => this.apply());
+  }
+
+  private apply(): void {
+    this.queued = false;
+    const {store, key, spec} = this.wanted;
     if (store === this.store && key === this.held) return;
     if (this.store && (this.store !== store || key === '')) this.store.setAggregate(this.id, null);
     this.store = store;

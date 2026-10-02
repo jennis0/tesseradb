@@ -279,6 +279,13 @@ function controlsSignature(): string {
   return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget].join('|');
 }
 
+// Under 1000 px the instruments open over the explorer from a button; see `style.css`.
+const instrumentsToggle = document.getElementById('instruments-toggle');
+instrumentsToggle?.addEventListener('click', () => {
+  const open = document.body.classList.toggle('instruments-open');
+  instrumentsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+});
+
 let controlsPainted = '';
 const controlsEl = document.createElement('div');
 const readoutsEl = document.createElement('div');

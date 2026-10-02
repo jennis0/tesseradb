@@ -180,3 +180,46 @@ describe('the columns a hover reads', () => {
     expect(askedOf(next)).toEqual(['year', 'name']);
   });
 });
+
+describe('the map in the tab order', () => {
+  it('is one stop, after its tools and before the other corners, and focus() lands on it', async () => {
+    const {el} = await map([]);
+    const root = (el as unknown as HTMLElement).shadowRoot!;
+    const stops = [...root.querySelectorAll<HTMLElement>('button, [tabindex]')].filter((e) => e.tabIndex >= 0).map((e) => e.getAttribute('part') ?? e.getAttribute('aria-label'));
+    expect(stops).toEqual(['Pan', 'Box select', 'Lasso select', 'Fit to extent', 'canvas']);
+    expect((el as unknown as HTMLElement).tabIndex).toBe(-1);
+    (el as unknown as HTMLElement).focus();
+    expect(root.activeElement?.getAttribute('part')).toBe('canvas');
+  });
+
+  it('moves a tabindex the host sets to the canvas, and names the canvas by the host’s aria-label', async () => {
+    const {el} = await map([]);
+    const host = el as unknown as HTMLElement;
+    host.setAttribute('tabindex', '-1');
+    host.setAttribute('aria-label', 'Papers');
+    await (el as unknown as {updateComplete: Promise<unknown>}).updateComplete;
+    const canvas = host.shadowRoot!.querySelector<HTMLElement>('[part="canvas"]')!;
+    expect(canvas.tabIndex).toBe(-1);
+    expect(canvas.getAttribute('aria-label')).toBe('Papers');
+    host.setAttribute('tabindex', '2');
+    await (el as unknown as {updateComplete: Promise<unknown>}).updateComplete;
+    expect(canvas.tabIndex).toBe(2);
+    expect(host.getAttribute('tabindex')).toBe('-1');
+  });
+});
+
+describe('the tooltip through a press', () => {
+  it('goes at a press, stays away while the pointer is held, and comes back on the next hover after it', async () => {
+    const {el} = await map([]);
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+    const canvas = (el as unknown as HTMLElement).shadowRoot!.querySelector('[part="canvas"]')!;
+    canvas.dispatchEvent(new PointerEvent('pointerdown', {button: 0, bubbles: true, composed: true}));
+    expect(el.hover).toBeNull();
+    el.onHover(markAt(5n));
+    expect(el.hover).toBeNull();
+    window.dispatchEvent(new PointerEvent('pointerup'));
+    el.onHover(markAt(5n));
+    expect(el.hover?.title).toBe('#5');
+  });
+});

@@ -42,9 +42,11 @@ import {chrome, tokens} from './tokens.js';
  * @csspart state - The state line, with `data-state`.
  * @csspart refusal - The words "Layer unavailable", with `data-code` set to the refusal's code.
  * @csspart items - The list.
- * @csspart item - One artifact, with `data-id`, and `data-clause` while a clause is on it:
- *   `filter`, `highlight`, or both separated by a space.
- * @csspart swatch - An artifact's colour on the map.
+ * @csspart item - One artifact, with `data-id`, `data-clause` while a clause is on it (`filter`,
+ *   `highlight`, or both separated by a space), and `data-empty`, greyed, while none of its members
+ *   pass the filters.
+ * @csspart swatch - An artifact's colour on the map, while the points are coloured by the layer
+ *   listed.
  * @csspart name - An artifact's name, with `data-unnamed` where it has none.
  * @csspart parent - The name of an artifact's parent, where one is served.
  * @csspart count - An artifact's exact count, once the server's answer lands.
@@ -82,10 +84,19 @@ export class TesseraArtifactList extends TesseraElement {
         border-radius: 6px;
         cursor: pointer;
       }
+      /* Without the colouring's swatches the name takes the swatch's column. */
+      [part='items']:not(.swatched) [part~='item'] {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
       [part~='item']:hover,
       [part~='item']:focus-visible,
       [part~='item'][data-clause~='filter'] {
         background: var(--_tessera-surface-2);
+      }
+      /* A cluster none of whose members pass the filters. */
+      [part~='item'][data-empty] [part='name'],
+      [part~='item'][data-empty] [part='count'] {
+        color: var(--_tessera-ink-3);
       }
       [part~='item'][data-clause~='highlight'] {
         background: var(--_tessera-highlight-soft);
@@ -167,6 +178,8 @@ export class TesseraArtifactList extends TesseraElement {
   @property({type: Number}) accessor level: number | null = null;
   /** Rows shown beyond `rows` after "N more" was pressed, for the layers it was pressed under. */
   @state() private accessor extra = 0;
+  /** The row in the tab order, the one the arrow keys reached last; the first row where unset. */
+  @state() private accessor rowFocus: bigint | null = null;
   private extraFor = '';
   private readonly counts = new HeldAggregate('in-view');
   /** The artifacts the list shows, as last rendered, which its aggregate counts. */
@@ -230,7 +243,7 @@ export class TesseraArtifactList extends TesseraElement {
     const colourLayer = clusterLayerOf(this.resolvedStore?.get('legend').colourBy ?? null);
     const source = colourLayer ? a.colourServed.filter((x) => x.layer === colourLayer) : a.served;
     if (a.layers.length === 0 && !colourLayer) return html`<div class="panel">${heading()}<span part="state" data-state="empty">No layer on</span></div>`;
-    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null)}</div>`;
+    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null, {first: true})}</div>`;
     if (a.status === 'refused') {
       return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Layer unavailable', a.refusal?.code)}</span></div>`;
     }
@@ -245,10 +258,20 @@ export class TesseraArtifactList extends TesseraElement {
     const shown = listed.slice(0, this.rows + this.extra);
     const n = listed.length;
     const filterable = this.resolvedStore !== null && this.artifacts === null;
+    // One row is in the tab order; the arrow keys, Home and End move among the rows.
+    const tabbed = shown.some((x) => x.tesseraId === this.rowFocus) ? this.rowFocus : (shown[0]?.tesseraId ?? null);
+    const moveFrom = (e: KeyboardEvent, i: number) => {
+      const next = {ArrowDown: Math.min(shown.length - 1, i + 1), ArrowUp: Math.max(0, i - 1), Home: 0, End: shown.length - 1}[e.key];
+      if (next === undefined) return false;
+      e.preventDefault();
+      this.rowFocus = shown[next]!.tesseraId;
+      void this.updateComplete.then(() => this.renderRoot.querySelector<HTMLElement>(`[part~="item"][data-id="${idString(shown[next]!.tesseraId)}"]`)?.focus());
+      return true;
+    };
     return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
       <span part="state" data-state="shown"></span>
-      <ul part="items" class="list">
-        ${shown.map((artifact) => {
+      <ul part="items" class=${colourLayer ? 'list swatched' : 'list'}>
+        ${shown.map((artifact, i) => {
           const name = artifactName(artifact, a.attached);
           const up = artifact.parentIds.map((p) => byId.get(p)).find((p) => p !== undefined);
           const parent = up ? (artifactName(up, a.attached) ?? UNNAMED) : null;
@@ -268,19 +291,22 @@ export class TesseraArtifactList extends TesseraElement {
           return html`<li
             part="item"
             role="button"
-            tabindex="0"
+            tabindex=${artifact.tesseraId === tabbed ? '0' : '-1'}
             data-id=${idString(artifact.tesseraId)}
             data-clause=${clauses.length > 0 ? [...clauses].sort().join(' ') : nothing}
+            ?data-empty=${count === 0}
             title=${`Fit the map to ${title}`}
             @click=${() => this.fit(artifact)}
             @keydown=${(e: KeyboardEvent) => {
+              if (e.target !== e.currentTarget || moveFrom(e, i)) return;
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 this.fit(artifact);
               }
             }}
+            @focus=${() => (this.rowFocus = artifact.tesseraId)}
           >
-            <span part="swatch" style=${`--c:${rgb(colour)}`}></span>
+            ${colourLayer ? html`<span part="swatch" style=${`--c:${rgb(colour)}`}></span>` : nothing}
             <span class="names"><span part="name" ?data-unnamed=${name === null}>${title}</span>${parent === null ? nothing : html`<span part="parent">${parent}</span>`}</span>
             <span part="count">${count === undefined ? '' : count.toLocaleString('en-GB')}</span>
             ${filterable ? html`<span class="verbs">${verb('highlight')}${verb('filter')}</span>` : nothing}
