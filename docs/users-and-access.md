@@ -22,7 +22,7 @@ grants wherever a view has a unique field.
 | What a principal may do | Six permissions over the whole database: `read`, `write`, `authorise-as`, `admin`, `read-all` and `write-all`. They are separate from terms. |
 | What a principal may see | Terms, granted to local principals and groups, or derived from OIDC claims. |
 | Access labels | Accumulo visibility expressions, without negation. The empty expression is refused, and `public` is reserved. |
-| How labels are indexed | Each distinct label gets a label id. A label that is a disjunction of terms is indexed under each of its terms. Any other label is indexed under its label id, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
+| How labels are indexed | An item's labels are read as one disjunction and normalised. Each term among its operands is indexed under itself. Each conjunction among them is indexed under a key of its own, compiled into a shared expression DAG and evaluated bottom-up from a credential's terms. |
 | The plugin | Removed. |
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
@@ -262,20 +262,21 @@ Each distinct label, after normalisation, gets a **label id**, and each item car
 The label id is the item's permission signature: the build sorts entity ids by it, so the items
 that share a label form one contiguous range. Item cards, masked writes and compaction read it.
 
-Which postings an item appears in depends on the label's shape.
+Which postings an item appears in depends on the operands of its labels, read as one disjunction
+and normalised.
 
-- A **disjunction of terms**, such as `user:ann|user:bob|group:x` or a single term, is indexed
-  under each of its terms, as terms are indexed in the current system. Holding any one of them admits the item, so
-  the union of the held terms' postings is exactly the set these labels admit. Per-document sharing
-  produces labels of this shape.
-- **Any other label**, one holding a conjunction, is indexed under its label id and evaluated
-  through the DAG below.
+- A **term** among the operands, such as each term of `user:ann|user:bob|group:x`, is indexed
+  under itself. Holding any one of them admits the item, so the union of the held terms' postings
+  is exactly the set these operands admit. Per-document sharing produces labels of this shape.
+- A **conjunction** among the operands, such as `b&c` in `a|(b&c)`, is indexed under a key of its
+  own and evaluated through the DAG below. A disjunction inside it is not expanded.
 
 A probe of the two layouts measured authorise on a corpus of 9.3 million per-document labels at
 100 to 800 ms through the DAG and 1.4 to 95 ms through term postings, and on 500,000 compartmented
 labels at 20 to 95 ms through the DAG, which term postings cannot express
-([probe](../probes/2026-09-30-label-dag-authorise/results.md)). Indexing each label by its shape
-takes the faster figure for each.
+([probe](../probes/2026-09-30-label-dag-authorise/results.md)). Indexing terms in postings and
+only conjunctions through the DAG takes the faster figure for each. The probe indexed whole labels,
+and the per-operand rule has not been measured separately.
 
 Normalisation flattens nested conjunctions and disjunctions, sorts and removes duplicate operands,
 and applies absorption, so that `a|(a&b)` becomes `a`. Two equivalent labels that normalise
@@ -286,19 +287,21 @@ Label ids are internal, as term ids are, and no response carries one. A compacti
 id whose items have all been removed.
 
 **As built:** an item carries a list of labels, as the access column and `access` always allowed,
-and admits a principal who satisfies any one of them. It is indexed under the union of its labels'
-keys: each term of a disjunction of terms, and one key of its own for each label holding a
-conjunction, whose dictionary ordinal is that label's id. The permission signature is the item's
+and admits a principal who satisfies any one of them. Its labels other than `public` are read as
+one disjunction and normalised, so a list of labels and one label writing the same disjunction are
+indexed alike, and a conjunction another operand absorbs is not indexed. Each term among the
+operands is a key, and each conjunction among them is one key of its own, whose dictionary ordinal
+is that conjunction's id; `public` is a key beside them. The permission signature is the item's
 sorted set of keys, so two items share a signature exactly when their labels give them the same
 keys. The DAG is derived from those keys in the dictionary, and nothing else stores it. **Not
 built yet:** retiring a key at compaction; the dictionary keeps every key it has issued.
 
 ### The expression DAG
 
-Every label that holds a conjunction is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
-an AND or an OR over its children. Structurally identical subexpressions are one node, so `secret`
-appears once however many labels mention it. Each node records its parents, and each label id
-points at its root node.
+Every conjunction indexed under a key of its own is compiled into one shared directed acyclic
+graph. A leaf is a term. An inner node is an AND or an OR over its children. Structurally identical
+subexpressions are one node, so `secret` appears once however many conjunctions mention it. Each
+node records its parents, and each conjunction's id points at its root node.
 
 ```mermaid
 flowchart BT
@@ -330,8 +333,7 @@ number; it is 1,024.
 At authorise, the service marks each of the credential's terms true and propagates upwards through
 the DAG. An OR node becomes true when its first child does. An AND node keeps a count and becomes
 true when every child has. The authorised set is the union of the postings of the credential's
-terms, which admit every item whose label is a disjunction of terms, and the postings of every
-label in the DAG whose root became true.
+terms, and the postings of every conjunction in the DAG whose root became true.
 
 The pass visits only the nodes reachable from the credential's terms. A label that mentions none of
 them cannot be true, because the expressions have no negation, so it is never visited. The cost is
@@ -352,12 +354,12 @@ figures are paid at session start and never by a map request.
   it resolved at authorise, so it sees less than its terms admit until it authorises again, never
   more. The engine can tell, from the keys promoted since, whether a session is behind, and
   nothing outside its tests asks.
-- An item card shows each held term of the item's labels that are a single term or a disjunction
-  of terms, and, for each of its labels holding a conjunction that the viewer satisfies, one clause
-  of it in held terms: at each disjunction the satisfied operand with fewest terms, then the first
-  in byte order (built). A held term that appears only inside a conjunction is not shown on its
-  own. The card never shows the whole of such a label, which could name terms the viewer does not
-  hold.
+- An item card reads the item's labels as one disjunction, as they are indexed. It shows each held
+  term among the operands, and, for each conjunction among them that the viewer satisfies, one
+  clause of it in held terms: at each disjunction the satisfied operand with fewest terms, then the
+  first in byte order (built). A held term that appears only inside a conjunction is not shown on
+  its own. The card never shows the whole of a conjunction, which could name terms the viewer does
+  not hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
 - The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
@@ -512,6 +514,7 @@ A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks 
 from a principal to its terms and permissions. It depends on nothing that can see a row id or an
 entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
 `tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
-parser and normalisation are in `tessera-types`, and the DAG and the index over labels are in
-`tessera-authz` (built). A leaf crate, `tessera-access`, holding the parser and the DAG together,
-is not built yet. `tessera-plugin` is deleted (built).
+parser, normalisation and the DAG are in `tessera-access`, which depends on no other crate of the
+workspace, and the catalogue reads a granted term by its rule for a held term (built). The index
+keys and the postings behind them are in `tessera-authz` (built). `tessera-plugin` is deleted
+(built).

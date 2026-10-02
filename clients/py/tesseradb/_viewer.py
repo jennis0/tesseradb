@@ -814,9 +814,9 @@ class Viewer:
         - `tessera_id`: the item's id, as a sample's `tessera_id` column or a map pick gives it.
 
         The record has `fields` (the item's values by column name, missing where it has none),
-        `labels` (why this reader sees the item: each held term of a label that is a term or a
-        disjunction of terms, and one satisfied clause of each label holding a conjunction, as
-        label text; a held term that appears only inside a conjunction is not listed), `views`
+        `labels` (why this reader sees the item: its labels read as one disjunction, each held term
+        among its operands and one satisfied clause of each conjunction among them, as label
+        text; a held term that appears only inside a conjunction is not listed), `views`
         (the views this reader can find it in). An item this reader may not see is refused exactly as one that
         does not exist.
 

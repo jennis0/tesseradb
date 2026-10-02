@@ -226,7 +226,7 @@ complete as a response and says that the read is not ([serving](serving.md#bulk-
 ## Reading in bulk
 
 `POST /v1/items` and `POST /v1/artifacts` answer under the properties above. Every page composes
-the visible set again, an item's labels are one clause of its label the viewer satisfies, as on
+the visible set again, an item's labels are the clauses of its labels the viewer satisfies, as on
 the item card, and an artifact is served on its layer's terms, as on the viewport. An item's unique values are fields like
 any other, returned only on request, in that item's own row.
 
@@ -239,8 +239,8 @@ between a value that is held and one that is not, which the timing row below cov
 
 **Stored order shows which items share a full set of index keys.** A read of items in stored
 order returns a viewer's items in the order of their entity ids. Within each build batch and each
-ingest window, entity ids are assigned in order of each item's full set of index keys: the terms of
-its labels that are disjunctions of terms, and one key for each label holding a conjunction
+ingest window, entity ids are assigned in order of each item's full set of index keys: its labels
+read as one disjunction, each term among its operands, and one key for each conjunction among them
 ([access control](access-control.md#how-labels-are-indexed)), including keys the viewer does not
 satisfy. Within one set, a build orders
 items by their map cell in the build's anchor view and then by source order, and an ingest orders
@@ -336,7 +336,7 @@ membership-requirement declaration are covered under what this does not claim, b
 
 | Property | How it is checked | What is not covered |
 |---|---|---|
-| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. The three-surface differential and the manual assessment ran over corpora whose items each carry single terms. A second differential covers access expressions on a built bundle: over items carrying conjunctions, several labels each and a quoted term, it compares which items a bulk read returns to each of thirteen principals, the `labels` beside each, and each item's card, with an oracle that parses and evaluates each item's own labels. It does not compare tiles or counts over such a corpus. Labels holding a conjunction written by ingest are checked by Rust tests of the engine over a flush and a restart |
+| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. The three-surface differential and the manual assessment ran over corpora whose items each carry single terms. A second differential covers access expressions on a built bundle: over items carrying conjunctions, disjunctions with a conjunction among their operands, several labels each, a conjunction another label absorbs and a quoted term, it compares which items a bulk read returns to each of fifteen principals, the `labels` beside each, and each item's card, with an oracle that parses and evaluates each item's own labels. It does not compare tiles or counts over such a corpus. Labels holding a conjunction written by ingest are checked by Rust tests of the engine over a flush and a restart |
 | A derived artifact served on the terms its layer declares | Compared against an independent implementation with two viewers differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it. An artifact's own label is compared against an independent implementation over a built bundle and a service the artifacts were published into, across a restart and a fold; and a viewer lacking a label is shown to get byte-identical answers, on every viewer route, from a deployment holding the artifact and one that never published it | The other membership requirements are covered by Rust tests rather than the differential suite |
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the visible set, that the comparison is required to disagree with | None |
 | A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works. The scan covers both bulk reads, each read whole across responses and the items read in both orders, and every cursor they issue, whose decoded bytes are swept at every offset | A cursor's bytes are swept for 8-byte values only |
