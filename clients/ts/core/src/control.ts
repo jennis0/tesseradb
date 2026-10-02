@@ -603,8 +603,8 @@ export type ControlOptions = {
   controlUrl: string;
   /**
    * The credential sent as the bearer token on every request: the operator credential, an API key
-   * or an OIDC access token. Writes need `write`; flush and compaction need `write` and
-   * `write-all`; status and the catalogue's verbs need `admin`.
+   * or an OIDC access token. Writes, flush and compaction need `write`; status and the catalogue's
+   * verbs need `admin`.
    */
   credential: string;
   /** Used for every request in place of the global `fetch`. */

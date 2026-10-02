@@ -1223,8 +1223,8 @@ async fn the_session_routes_match_the_description() {
 }
 
 /// Every control operation refuses an accepted credential without the permission it needs with
-/// `403 forbidden`, before the body is read: a write needs `write`, flush and compaction `write`
-/// and `write-all`, and status and the catalogue `admin`.
+/// `403 forbidden`, before the body is read: a write, flush and compaction need `write`, and
+/// status and the catalogue `admin`.
 #[tokio::test]
 async fn every_control_route_needs_its_permission() {
     use tessera_catalogue::{Grantee, Permission, PrincipalKind};
@@ -1243,13 +1243,11 @@ async fn every_control_route_needs_its_permission() {
     };
     let nothing = key_for("nothing", &[]);
     let writer = key_for("writer", &[Permission::Write]);
-    let flusher = key_for("flusher", &[Permission::Write, Permission::WriteAll]);
     let not_writer = key_for("not-writer", &everything_but(&[Permission::Write]));
     let not_admin = key_for("not-admin", &everything_but(&[Permission::Admin]));
-    let not_write_all = key_for("not-write-all", &everything_but(&[Permission::WriteAll]));
     let admin = key_for("admin", &[Permission::Admin]);
 
-    let (mut writes, mut operations) = (0, 0);
+    let mut writes = 0;
     for (path, item) in doc["paths"].as_object().unwrap() {
         if !path.starts_with("/control/") {
             continue;
@@ -1264,16 +1262,6 @@ async fn every_control_route_needs_its_permission() {
             let tag = op["tags"][0].as_str().unwrap_or("");
             // Each credential, and whether the route refuses it.
             let cases: Vec<(&str, &str, bool)> = match tag {
-                "control: flush" | "control: compact" => {
-                    operations += 1;
-                    vec![
-                        ("write", &writer, true),
-                        ("all but write", &not_writer, true),
-                        ("all but write-all", &not_write_all, true),
-                        ("admin", &admin, true),
-                        ("write and write-all", &flusher, false),
-                    ]
-                }
                 "control: identity" | "control: status" => vec![
                     ("write", &writer, true),
                     ("all but admin", &not_admin, true),
@@ -1305,8 +1293,10 @@ async fn every_control_route_needs_its_permission() {
             }
         }
     }
-    assert_eq!(writes, 13, "ingest, changes, the declarations, layers and artifacts");
-    assert_eq!(operations, 2, "flush and compact");
+    assert_eq!(
+        writes, 15,
+        "ingest, changes, the declarations, layers, artifacts, flush and compact"
+    );
 }
 
 #[tokio::test]

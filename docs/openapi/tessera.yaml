@@ -3373,7 +3373,7 @@ components:
     controlCredential:
       type: http
       scheme: bearer
-      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes need `write`; flush and compaction need `write` and `write-all`; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. Not built yet: masking a write by the writer's own terms. A principal with `write` writes against the whole corpus."
+      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes, flush and compaction need `write`; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. Not built yet: masking a write by the writer's own terms. A principal with `write` writes against the whole corpus: it can upsert an item it cannot see, by its unique value, and change its label, so granting `write` grants what `read-all` grants wherever a view has a unique field."
     sessionToken:
       type: http
       scheme: bearer

@@ -1,7 +1,7 @@
 //! The control (admin) plane: ingest, changes, declarations, status, flush and compact, and the
 //! catalogue's verbs ([`crate::identity`]). Every route requires a credential, checked once at the
-//! router by [`authenticate_control`]. Writes need `write`, flush and compaction `write` and
-//! `write-all`, and status and the catalogue's verbs `admin`. `/healthz` and `/readyz` are served
+//! router by [`authenticate_control`]. Writes, flush and compaction need `write`, and status and
+//! the catalogue's verbs `admin`. `/healthz` and `/readyz` are served
 //! on the viewer and session listeners, not here.
 //!
 //! A write is acknowledged only after its WAL append is fsynced: parse, allocate ids, append,
@@ -144,12 +144,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                     state.limits.publish_max_body_bytes,
                 )),
         )
-        .route_layer(axum::middleware::from_fn(require_write));
-    // An ingest pipeline flushes after its writes, so flushing needs no `admin`.
-    let operations = Router::new()
+        // An ingest pipeline flushes after its writes, and `?wait=visible` on a write flushes, so
+        // flushing and compaction need `write` as a write does.
         .route("/control/flush", post(flush))
         .route("/control/compact", post(compact))
-        .route_layer(axum::middleware::from_fn(require_write_all));
+        .route_layer(axum::middleware::from_fn(require_write));
     let admin_routes = Router::new().route("/control/status", get(status));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
     #[cfg(feature = "fault-injection")]
@@ -161,7 +160,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::identity::routes())
         .route_layer(axum::middleware::from_fn(require_admin));
     writes
-        .merge(operations)
         .merge(administration)
         // `Router::layer`, not `route_layer`, so every route, and every unrouted path, is behind
         // the credential.
@@ -218,24 +216,14 @@ async fn require_admin(
     Ok(next.run(request).await)
 }
 
-/// Writes need `write`. Not built yet: masking a write by the writer's own terms. A principal
-/// with `write` and without `write-all` writes against the whole corpus, as one with both does.
+/// Writes, flush and compaction need `write`. Not built yet: masking a write by the writer's own
+/// terms. A principal with `write` and without `write-all` writes against the whole corpus, as one
+/// with both does.
 async fn require_write(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     caller(&request).require(tessera_catalogue::Permission::Write)?;
-    Ok(next.run(request).await)
-}
-
-/// Flush and compaction act on every item, so they need `write` and `write-all`.
-async fn require_write_all(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, ApiError> {
-    let caller = caller(&request);
-    caller.require(tessera_catalogue::Permission::Write)?;
-    caller.require(tessera_catalogue::Permission::WriteAll)?;
     Ok(next.run(request).await)
 }
 

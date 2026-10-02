@@ -247,16 +247,16 @@ async fn a_session_ends_no_later_than_the_key_that_authorised_it() {
     assert_eq!(resp.status(), 401);
 }
 
-/// A principal with `write` writes against the whole corpus. Flushing needs `write-all` as well,
-/// and `admin` is not needed for either.
+/// A principal with `write` writes against the whole corpus and flushes, and needs neither
+/// `write-all` nor `admin` for either.
 #[tokio::test]
-async fn a_write_needs_write_and_a_flush_needs_write_all() {
+async fn a_write_and_a_flush_need_write() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let post = reqwest::Method::POST;
     control(&server, post.clone(), "/control/principals", json!({ "name": "pipeline", "kind": "service" })).await;
     control(&server, post.clone(), "/control/grants", json!({ "principal": "pipeline", "permission": "write" })).await;
-    let key = control(&server, post.clone(), "/control/principals/pipeline/keys", json!({})).await;
+    let key = control(&server, post, "/control/principals/pipeline/keys", json!({})).await;
     let key = key["key"].as_str().unwrap().to_owned();
     let suppress = server
         .client
@@ -267,16 +267,14 @@ async fn a_write_needs_write_and_a_flush_needs_write_all() {
         .await
         .unwrap();
     assert_eq!(suppress.status(), 200);
-    let flush = || {
-        server
-            .client
-            .post(server.control_url("/control/flush?wait=visible"))
-            .bearer_auth(&key)
-            .send()
-    };
-    assert_eq!(flush().await.unwrap().status(), 403);
-    control(&server, post, "/control/grants", json!({ "principal": "pipeline", "permission": "write-all" })).await;
-    assert_eq!(flush().await.unwrap().status(), 202);
+    let flush = server
+        .client
+        .post(server.control_url("/control/flush?wait=visible"))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flush.status(), 202);
 }
 
 /// A session of a principal holding `read-all` reads every item through the masked path, so a

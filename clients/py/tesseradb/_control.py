@@ -95,9 +95,8 @@ class Control:
     it came.
 
     - `base`: the control plane's address, such as `http://127.0.0.1:41234`.
-    - `credential`: the operator credential, an API key or an OIDC access token. Writes need
-      `write`; flush and compaction need `write` and `write-all`; status and the catalogue's
-      verbs need `admin`.
+    - `credential`: the operator credential, an API key or an OIDC access token. Writes, flush
+      and compaction need `write`; status and the catalogue's verbs need `admin`.
     - `timeout`: how long to wait for one answer, in seconds. The default is 300.
     """
 

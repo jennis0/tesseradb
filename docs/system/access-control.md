@@ -98,9 +98,9 @@ A session is minted in one of three ways.
   check is what refuses it: its `aud` is the client's id, not the API's. A token that more than
   one provider with its issuer accepts is refused. A provider's keys are fetched again after an
   hour; when that fetch fails, the keys held are used until they are 24 hours old, and then the
-  provider's tokens are refused until a fetch succeeds. Every reason a credential is refused answers the same `401`. Password
-  checks have an admission limit of their own, about one per core, and past it are answered `429`
-  whether or not the name exists. The session carries the principal's `read`, `write`, `read-all`
+  provider's tokens are refused until a fetch succeeds. Every reason a credential is refused
+  answers the same `401`. Password checks have an admission limit of their own, about one per
+  core, and past it are answered `429` whether or not the name exists. The session carries the principal's `read`, `write`, `read-all`
   and `write-all`.
 - **Through `authorise-as`.** `POST /session/authorise` on the session plane takes an API key
   whose principal holds `authorise-as`, and names the principal to act as: a local principal by

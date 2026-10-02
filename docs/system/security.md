@@ -41,11 +41,13 @@ full term index and the geometry. Nothing here defends against this party.
 An operator drives the control plane: ingest, deletion, suppression, compaction and the catalogue.
 Every route on the control plane, without exception, requires a credential: the operator
 credential, which authenticates a built-in superuser holding every permission, an API key, or an
-OIDC access token. Writes need `write`. Flush and compaction need `write` and `write-all`. Status
-and the catalogue need `admin`. **Not built yet:** writes masked by the writer's own terms
+OIDC access token. Writes, flush and compaction need `write`. Status and the catalogue need
+`admin`. **Not built yet:** writes masked by the writer's own terms
 ([users and access](../users-and-access.md#writes)). Until they are built, every principal with
 `write` writes against the whole corpus, with or without `write-all`, and is trusted with every
-item, as the operator is: a write can change or name an item the writer cannot see.
+item, as the operator is: a write can change or name an item the writer cannot see. A principal
+with `write` can upsert an item it cannot see, by its unique value, and change its label, so
+granting `write` grants what `read-all` grants wherever a view has a unique field.
 
 `admin` can grant any permission to any principal, itself included. A principal holding `admin`
 can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
@@ -77,7 +79,7 @@ flowchart LR
   subgraph trusted["inside the boundary"]
     session["login and session plane<br/>turn a credential into a token<br/>holding the principal's terms"]
     serve["tessera serve<br/>composes the visible set every request,<br/>answers only from inside it"]
-    control["control plane<br/>write: ingest, delete, suppress;<br/>write-all: flush, compact;<br/>admin: catalogue, status"]
+    control["control plane<br/>write: ingest, delete, suppress,<br/>flush, compact;<br/>admin: catalogue, status"]
     bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
   end
 

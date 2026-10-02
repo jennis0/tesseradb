@@ -7,7 +7,10 @@ catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients are b
 [system/access-control.md](system/access-control.md) describes them. **Not built yet:** access
 expressions and their index, removing the plugin, writes masked by the writer's terms, writes with
 a session token on the viewer listener, and the audit log. Until masked writes are built, a
-principal with `write` writes against the whole corpus whether or not it holds `write-all`.
+principal with `write` writes against the whole corpus whether or not it holds `write-all`. While
+writes are unmasked, a principal with `write` can upsert an item it cannot see, by its unique
+value, and change its label. Granting `write` therefore grants what `read-all` grants wherever a
+view has a unique field.
 
 ## Decisions
 
@@ -22,7 +25,7 @@ principal with `write` writes against the whole corpus whether or not it holds `
 | The plugin | Removed. |
 | OIDC users | Not stored. Claim rules turn claims into terms at each authorise. An administrator maps exact terms to local groups, which give their permissions and terms. |
 | A grant changes, or a password is set or cleared | Every session of every affected principal ends. |
-| Writes to items the writer cannot see | Masked by the writer's own terms. A principal holding `write-all` acts on the whole corpus. Not built yet: the mask. Every writer acts on the whole corpus. |
+| Writes to items the writer cannot see | Masked by the writer's own terms. A principal holding `write-all` acts on the whole corpus. Not built yet: the mask. Every writer acts on the whole corpus, and can upsert an item it cannot see by its unique value and change its label. |
 | A masked insert collides on a unique field with an item the writer cannot see | The collision is reported, as Postgres reports it. |
 | The first administrator | The operator credential file becomes a built-in superuser. |
 
@@ -123,11 +126,11 @@ terms, which say what a principal may see.
 | Permission | Allows |
 |---|---|
 | `read` | Authorising a session for itself, and every viewer request made with that session's token. |
-| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. All of it is masked by the principal's own terms ([Writes](#writes)). Not built yet: the mask, so a write acts on the whole corpus. |
+| `write` | Insert, delete, suppress, unsuppress and annotate. Declaring, changing and dropping views, layers and attributes. Flushing and compacting. All of it is masked by the principal's own terms ([Writes](#writes)). Not built yet: the mask, so a write acts on the whole corpus. While writes are unmasked, a principal with `write` can upsert an item it cannot see, by its unique value, and change its label. Granting `write` therefore grants what `read-all` grants wherever a view has a unique field. |
 | `authorise-as` | Authorising a session for another principal: a named local principal, or an OIDC identity whose token the caller passes on. |
 | `admin` | Every change to the catalogue, and the service's status. |
 | `read-all` | With `read`, a session whose authorised set is every item and which satisfies every label. |
-| `write-all` | With `write`, writes against the whole corpus, unmasked, and flushing and compacting. |
+| `write-all` | With `write`, writes against the whole corpus, unmasked. |
 
 The six are independent. `admin` implies neither `read` nor `write`, so an account that manages
 users can be one that sees nothing. `read-all` and `write-all` widen `read` and `write` and do
@@ -147,14 +150,16 @@ carries. A term that first appears after the session was authorised is not in it
 service marks the session stale, as it marks any session whose credential names a term the
 dictionary has gained since.
 
-Flushing and compacting act on every item, so they need `write` and `write-all`. They do not need
-`admin`, so an ingest pipeline, which ends a commit with a flush, holds `write` and `write-all`
-and nothing more. The service's status needs `admin`.
+Flushing and compacting need `write`, as a write does, because a write sent with `?wait=visible`
+flushes. They do not need `admin`, so an ingest pipeline, which ends a commit with a flush, holds
+`write` and nothing more. The service's status needs `admin`.
 
 `authorise-as` is the permission an integrator's backend holds. It replaces the session credential.
 A session it mints for a principal carries that principal's terms, and that principal's `read` and
-`write`. A viewer who may annotate can therefore annotate through the integrator's application,
-and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
+`write`. **Not built yet:** writes with a session token, and the audit log. No route takes a
+write with a session token, so a viewer cannot annotate through the integrator's application, and
+no write is recorded as any viewer's. When both are built, a viewer who may annotate can annotate
+through the integrator's application, and the write is recorded as that viewer's. Postgres's `SET ROLE` and Elasticsearch's `run_as`
 also give the caller the target's privileges. The session never carries the target's `admin`,
 `authorise-as`, `read-all` or `write-all`, so a compromised backend can act as any viewer and
 cannot change who exists, what they are granted, read past a viewer's terms, or write outside
@@ -382,7 +387,9 @@ system.
 A write is masked by the writer's own terms unless the writer holds `write-all`. **Not built
 yet:** the mask. A principal with `write` writes against the whole corpus whether or not it holds
 `write-all`, and every rule in this section is the design for masked writes. A write is therefore
-trusted with every item, as the operator is.
+trusted with every item, as the operator is. While writes are unmasked, a principal with `write`
+can upsert an item it cannot see, by its unique value, and change its label. Granting `write`
+therefore grants what `read-all` grants wherever a view has a unique field.
 
 - Deleting, suppressing or unsuppressing an item whose label the writer does not satisfy returns
   the answer for an item that does not exist, and does the same work.
@@ -445,7 +452,7 @@ The three listeners stay, and each accepts the credentials of the callers it ser
 
 | Listener | Accepts | Serves |
 |---|---|---|
-| Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests, and writes made with a session token that carries `write`. |
+| Viewer | A session token. A password, an API key or an OIDC access token at the login endpoint, which returns a session token. | Viewer requests. Not built yet: writes made with a session token that carries `write`. The viewer listener serves no writes. |
 | Session | A principal with `authorise-as`, by API key, or the operator credential. | `POST /session/authorise`, naming the principal to authorise, and with the operator credential a set of terms or the superuser itself, and `POST /session/revoke`. |
 | Control | An API key, an OIDC access token, or the operator credential. | Writes, flush and compaction, status, and the catalogue's verbs. |
 
@@ -457,7 +464,7 @@ belongs to an integrator's backend and is not exposed to a browser.
 
 ## Audit
 
-Each authorise, each refused authentication and each catalogue change is appended to an audit log
+**Not built yet:** the audit log. Nothing below is recorded. Each authorise, each refused authentication and each catalogue change is appended to an audit log
 kept outside the catalogue. An authorise record holds the time, the principal, the kind of
 credential and the API key's prefix where there is one, the listener, and the number of terms the
 session resolved to. It does not hold the terms, which can themselves be sensitive. A catalogue
