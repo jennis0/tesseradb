@@ -337,6 +337,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         ingest_admission: tessera_server::state::IngestAdmission::new(64),
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
+        request_log: None,
         faults: Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new()),
     });
 

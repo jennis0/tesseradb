@@ -277,6 +277,7 @@ impl ComputeGate {
             Ok(Ok(permit)) => permit,
             // The semaphore is never closed; a closed one is treated as a timeout.
             Ok(Err(_)) | Err(_) => {
+                crate::request_log::note_admission_us(start.elapsed().as_micros() as u64);
                 self.shed_total.fetch_add(1, Ordering::Relaxed);
                 return Err(crate::error::ApiError::Backpressure {
                     retry_after_s: crate::error::RETRY_AFTER_SECS,
@@ -286,6 +287,7 @@ impl ComputeGate {
         };
 
         let admission_us = start.elapsed().as_micros() as u64;
+        crate::request_log::note_admission_us(admission_us);
         Ok((
             GatePermits {
                 _slot: slot,
@@ -592,6 +594,8 @@ pub struct AppState {
     pub ingest_admission: IngestAdmission,
     pub session_credential: String,
     pub operator_credential: String,
+    /// `[serve] request_log`, open for appending. `None` mounts no logging at all.
+    pub request_log: Option<crate::request_log::RequestLog>,
     /// The write executor's fault switchboard, in the faults build only. The executor holds the
     /// same `Arc`, so `/control/faults/*` arms the thread that pauses.
     #[cfg(feature = "fault-injection")]
@@ -619,7 +623,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for ViewerSession {
         state: &Arc<AppState>,
     ) -> Result<Self, ApiError> {
         let token = bearer_token(&parts.headers).ok_or(ApiError::BadCredential)?;
-        state.authenticated_session(token).map(ViewerSession)
+        let session = state.authenticated_session(token)?;
+        crate::request_log::note_token_id(session.token_id());
+        Ok(ViewerSession(session))
     }
 }
 

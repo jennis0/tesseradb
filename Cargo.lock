@@ -3177,6 +3177,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "http-body",
  "jsonschema",
  "parking_lot",
  "parquet",

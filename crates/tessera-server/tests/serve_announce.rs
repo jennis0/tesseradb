@@ -12,12 +12,11 @@
 mod common;
 
 use std::io::Write;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
-use common::{build_fixture, wait_for, N_ITEMS, OPERATOR_CREDENTIAL, SESSION_CREDENTIAL};
+use common::{wait_for, write_deployment};
 
 /// The announce stream, readable from the test while the server holds it.
 #[derive(Clone)]
@@ -44,42 +43,6 @@ impl Write for SharedStream {
     }
 }
 
-/// A deployment over a fixture bundle, with the three planes as `control` names them.
-fn write_deployment(tmp: &Path, control: &str) -> std::path::PathBuf {
-    let bundle_root = build_fixture(tmp, N_ITEMS);
-    let session_credential = tmp.join("session.cred");
-    let operator_credential = tmp.join("operator.cred");
-    std::fs::write(&session_credential, SESSION_CREDENTIAL).unwrap();
-    std::fs::write(&operator_credential, OPERATOR_CREDENTIAL).unwrap();
-
-    let text = format!(
-        r#"
-        [bundle]
-        path = "{bundle}"
-        cache = "{cache}"
-        wal = "{wal}"
-        [plugin]
-        module = "builtin:passthrough"
-        [disclosure]
-        token_max_lifetime = 3600
-        [serve]
-        viewer = "127.0.0.1:0"
-        session = "127.0.0.1:0"
-        control = "{control}"
-        session_credential_file = "{session_cred}"
-        operator_credential_file = "{operator_cred}"
-        "#,
-        bundle = bundle_root.display(),
-        cache = tmp.join("cache").display(),
-        wal = tmp.join("wal.log").display(),
-        session_cred = session_credential.display(),
-        operator_cred = operator_credential.display(),
-    );
-    let path = tmp.join("tessera.toml");
-    std::fs::write(&path, text).unwrap();
-    path
-}
-
 /// The first complete line on the stream, waited for rather than raced against.
 async fn announce_line(stream: &SharedStream) -> String {
     wait_for(
@@ -101,7 +64,7 @@ async fn announce_line(stream: &SharedStream) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn port_zero_planes_announce_the_ports_the_kernel_chose() {
     let tmp = TempDir::new().unwrap();
-    let deployment = write_deployment(tmp.path(), "127.0.0.1:0");
+    let deployment = write_deployment(tmp.path(), "127.0.0.1:0", "");
     let prepared = tessera_server::prepare(&deployment).expect("the deployment must start");
 
     let stream = SharedStream::new();
@@ -178,7 +141,7 @@ async fn port_zero_planes_announce_the_ports_the_kernel_chose() {
 async fn a_unix_control_plane_is_announced_by_its_path() {
     let tmp = TempDir::new().unwrap();
     let socket = tmp.path().join("control.sock");
-    let deployment = write_deployment(tmp.path(), &format!("unix:{}", socket.display()));
+    let deployment = write_deployment(tmp.path(), &format!("unix:{}", socket.display()), "");
     let prepared = tessera_server::prepare(&deployment).expect("the deployment must start");
 
     let stream = SharedStream::new();

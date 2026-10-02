@@ -15,6 +15,7 @@ mod filter_dto;
 pub mod health;
 pub mod memory;
 mod records;
+pub mod request_log;
 pub mod session;
 pub mod state;
 mod stream;
@@ -127,6 +128,17 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     engine.set_commit_window_max_rows(config.commit_window_max_items);
     let engine = engine;
 
+    let request_log = match &config.request_log {
+        Some(path) => Some(request_log::RequestLog::open(path).map_err(|e| {
+            format!(
+                "the request log {} cannot be opened for appending: {e}; name a writable file \
+                 under `[serve] request_log`, or remove the key",
+                path.display()
+            )
+        })?),
+        None => None,
+    };
+
     // Built here so a runtime that cannot be built fails the start rather than the first
     // suppression. `/control/changes` never shares tokio's blocking pool.
     control::init_deny_runtime()?;
@@ -152,6 +164,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
         session_credential,
         operator_credential,
+        request_log,
         #[cfg(feature = "fault-injection")]
         faults,
     });

@@ -20,6 +20,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     // first. The production list never does: this plane's credential must never be held by a
     // browser, and `session_layer` reads only the development list.
     let dev_cors = crate::cors::session_layer(&state);
+    let state_for_log = state.request_log.is_some().then(|| Arc::clone(&state));
     let router = Router::new()
         .route("/session/authorise", post(authorise))
         .route("/session/revoke", post(revoke))
@@ -31,8 +32,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             crate::memory::trim_after_response,
         ))
         .with_state(state);
-    match dev_cors {
+    let router = match dev_cors {
         Some(layer) => router.layer(layer),
+        None => router,
+    };
+    // Outermost, so a preflight the CORS layer answers is logged too.
+    match state_for_log {
+        Some(state) => router.layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::request_log::session,
+        )),
         None => router,
     }
 }
@@ -73,6 +82,7 @@ async fn authorise(
         })
         .await?;
 
+    crate::request_log::note_token_id(session.token_id());
     let resp = AuthoriseResp {
         token: session.token().to_string(),
         token_id: session.token_id(),
@@ -104,6 +114,7 @@ async fn revoke(
     _: SessionCredential,
     ApiJson(req): ApiJson<RevokeReq>,
 ) -> Result<StatusCode, ApiError> {
+    crate::request_log::note_token_id(req.token_id);
     state.sessions.lock().revoke(req.token_id);
     // The registry removal above is what makes the session unusable; this prune is memory hygiene
     // after it. Pruning first would widen the window in which a request that authenticated before
