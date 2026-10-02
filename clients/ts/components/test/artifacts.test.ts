@@ -307,8 +307,12 @@ describe('<tessera-legend selectable>', () => {
     store.set('artifacts', {...artifactsProjection([], []), colourServed: [artifact(1n, 100n)]});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
-    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
+    // The choice closed the menu; it shows on the button, and as checked when the menu opens again.
+    expect(deep(host, '[part="option"]')).toBeNull();
     expect(deep(host, '[part="colour-by"]')?.textContent?.trim()).toBe('clusters');
+    (deep(host, '[part="colour-by"]') as HTMLButtonElement).click();
+    await settle(host);
+    expect(deep(host, '[part="option"][aria-checked="true"]')?.getAttribute('data-value')).toBe('cluster:clusters');
   });
 
   it('is a readout without selectable', async () => {

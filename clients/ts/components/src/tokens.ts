@@ -114,9 +114,11 @@ export const chrome = css`
     cursor: pointer;
     padding: 0;
   }
+  /* The focus ring: the accent at half strength, close to the control, so it marks the control
+     without outshining the data. */
   :focus-visible {
-    outline: 2px solid var(--_tessera-accent);
-    outline-offset: 2px;
+    outline: 2px solid color-mix(in srgb, var(--_tessera-accent) 50%, transparent);
+    outline-offset: 1px;
   }
   input[type='checkbox'],
   input[type='radio'] {
@@ -266,7 +268,7 @@ export const chrome = css`
     outline: none;
   }
   .input:focus-within {
-    outline: 2px solid var(--_tessera-accent);
+    outline: 2px solid color-mix(in srgb, var(--_tessera-accent) 50%, transparent);
     outline-offset: 1px;
   }
   /* A select drawn as text with a chevron, such as the view and colour choices. */

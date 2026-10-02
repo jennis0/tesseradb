@@ -175,7 +175,7 @@ export class TesseraMap extends TesseraElement {
         overflow: hidden;
       }
       :host(:focus-visible) {
-        box-shadow: inset 0 0 0 2px var(--_tessera-accent);
+        box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--_tessera-accent) 40%, transparent);
       }
       [part='canvas'] {
         position: absolute;

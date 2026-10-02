@@ -45,6 +45,9 @@ const graphemes = new Intl.Segmenter('en', {granularity: 'grapheme'});
 /** A name's length as a reader counts it: characters, not UTF-16 units. */
 const lengthOf = (text: string): number => [...graphemes.segment(text)].length;
 
+/** The width of the hue bar's knob, which its travel along the bar allows for. */
+const HUE_KNOB = 12;
+
 /** How far each lighter colour in the colour picker is taken towards white. */
 const LIGHTER = 0.45;
 
@@ -207,9 +210,11 @@ export class TesseraLegend extends TesseraElement {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* The Level choice: a short label, with the select over it taking the clicks and keys. */
+      /* The Level choice: a short label, with the select over it taking the clicks and keys. On a
+         line of its own it keeps to the right, under the Colour by name. */
       [part='level'] {
         flex: 0 0 auto;
+        margin-left: auto;
         font-size: 12px;
         font-weight: 400;
         letter-spacing: 0;
@@ -1191,7 +1196,11 @@ export class TesseraLegend extends TesseraElement {
       <div role="radiogroup" aria-labelledby="colour-by-label">
         ${options.map(
           (o, i) => html`<button part="option" type="button" role="radio" data-value=${o.value} data-kind=${o.cluster ? 'layer' : o.kind.toLowerCase() || 'none'} aria-checked=${o.checked ? 'true' : 'false'}
-            tabindex=${i === at ? '0' : '-1'} @click=${() => this.choose(o.value)}
+            tabindex=${i === at ? '0' : '-1'} @click=${() => {
+              // A choice made by pointer closes the menu; the arrow keys move through the choices and leave it open.
+              this.choose(o.value);
+              this.closePopovers(true);
+            }}
             @keydown=${(e: KeyboardEvent) => radioKeys(e, options.length, i, (j) => this.choose(options[j]!.value))}><span>${o.title}</span><span class="kind">${o.kind}</span></button>`
         )}
       </div>
@@ -1261,9 +1270,12 @@ export class TesseraLegend extends TesseraElement {
       const y = r.height > 0 ? Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) : 1 - val;
       return [h, x, 1 - y];
     };
+    // The hue knob's centre runs from half a knob in from one end of the bar to half a knob from the
+    // other, so the knob stays on the bar.
     const hueAt = (e: PointerEvent): Hsv => {
       const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      return [r.width > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left) / r.width) * 360)) : h, sat, val];
+      const run = r.width - HUE_KNOB;
+      return [run > 0 ? Math.min(359, Math.max(0, ((e.clientX - r.left - HUE_KNOB / 2) / run) * 360)) : h, sat, val];
     };
     const drag = (read: (e: PointerEvent) => Hsv) => ({
       down: (e: PointerEvent) => {
@@ -1322,7 +1334,7 @@ export class TesseraLegend extends TesseraElement {
         </div>
         <div part="hue" role="slider" tabindex="0" aria-label="Hue" aria-valuemin="0" aria-valuemax="359" aria-valuenow=${Math.round(h)}
           @pointerdown=${hue.down} @pointermove=${hue.move} @pointerup=${hue.up} @keydown=${hueKey}>
-          <span class="knob" style=${`left:${((h / 360) * 100).toFixed(1)}%`}></span>
+          <span class="knob" style=${`left:calc(${HUE_KNOB / 2}px + (100% - ${HUE_KNOB}px) * ${(h / 360).toFixed(4)})`}></span>
         </div>
         <label>Hex<input part="hex" type="text" spellcheck="false" .value=${custom.toUpperCase()}
           @change=${(e: Event) => {
@@ -1430,7 +1442,8 @@ export class TesseraLegend extends TesseraElement {
     const vh = typeof innerHeight === 'number' ? innerHeight : 768;
     const menu = pop.classList.contains('menu');
     let left = menu ? a.right - width : own.right + 12;
-    let top = menu ? a.bottom + 6 : a.top - 40;
+    // The picker's top edge is level with the swatch's row.
+    let top = menu ? a.bottom + 6 : a.top - 8;
     if (!menu && left + width > vw - 8) left = own.left - width - 12;
     left = Math.max(8, Math.min(left, vw - width - 8));
     top = Math.max(8, Math.min(top, vh - height - 8));
