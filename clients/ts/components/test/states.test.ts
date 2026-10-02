@@ -89,17 +89,28 @@ describe('<tessera-status> renders every state through part="state"', () => {
     }
   });
 
-  it('names the up-to-date state through the dot’s accessible name, and no other state that way', async () => {
+  it('names up to date and updating through the dot’s accessible name, so the strip keeps its width through a pan, and every other state in words beside a dot', async () => {
     const host = await mount('<tessera-status></tessera-status>');
     const el = host.querySelector('tessera-status') as TesseraStatus;
-    const store = fakeStore({status: status({}), view});
+    const store = fakeStore({status: status({sessionWarm: true}), view});
     el.store = store;
     await settle(host);
-    expect(deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label')).toBeTruthy();
-    store.set('status', status({status: 'retrying'}));
+    const named = () => deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label') ?? null;
+    expect(named()).toBe('Up to date');
+    store.set('status', status({status: 'loading', sessionWarm: true}));
     await settle(host);
-    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('retrying');
-    expect(deep(host, '[part="state"] [role="img"]')).toBeNull();
+    expect(named()).toBe('Updating');
+    expect(deep(host, '[part="state"]')?.textContent?.trim()).toBe('');
+    for (const [over, words] of [
+      [{status: 'retrying'}, 'Reconnecting'],
+      [{status: 'empty'}, 'Nothing in view']
+    ] as const) {
+      store.set('status', status(over));
+      await settle(host);
+      expect(named()).toBeNull();
+      expect(deep(host, '[part="state"] .dot')).not.toBeNull();
+      expect(deep(host, '[part="state"]')?.textContent?.trim()).toBe(words);
+    }
   });
 
   it('shows the matched count out of the visible count, then the shown count', async () => {

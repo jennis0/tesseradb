@@ -1318,10 +1318,13 @@ export class TesseraMap extends TesseraElement {
     return this.viewState.zoom;
   }
 
-  /** Fit the whole extent into the map. */
+  /**
+   * Fit the whole extent into the map's narrower axis, at 92% of it, so the points at the extent's
+   * edges and their labels stay on screen.
+   */
   fit(): void {
     const {width, height} = this.size;
-    this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2(Math.min(width, height) / WORLD_SIZE)});
+    this.setViewState({target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: Math.log2((0.92 * Math.min(width, height)) / WORLD_SIZE)});
   }
 
   /**

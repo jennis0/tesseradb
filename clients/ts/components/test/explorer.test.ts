@@ -169,11 +169,16 @@ describe('<tessera-explorer> narrow layout', () => {
     expect(shadow.activeElement).toBe(tabs(shadow)[0]);
   });
 
-  it('clears the controls and the member_of clauses from the filters sheet', async () => {
+  it('clears the controls and the member_of clauses from the filters sheet, and offers Clear only while one applies', async () => {
     const {host, shadow, store} = await explorer();
     tabs(shadow)[0]!.click();
     await settle(host);
-    (shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement).click();
+    const clear = () => shadow.querySelector('.sheet-footer .btn:not(.primary)') as HTMLButtonElement;
+    expect(clear().disabled).toBe(true);
+    store.set('filters', {...store.get('filters'), members: [{layer: 'clusters', artifact: 1n, outside: false, verb: 'filter'}]});
+    await settle(host);
+    expect(clear().disabled).toBe(false);
+    clear().click();
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(store.calls.filter((c) => c.name === 'setMembers').map((c) => c.args[0])).toEqual([[]]);
   });

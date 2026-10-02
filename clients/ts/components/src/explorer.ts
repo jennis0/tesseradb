@@ -5,7 +5,7 @@ import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
-import {WORLD_SIZE, artifactName, emptyDraft} from '@tesseradb/client';
+import {WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
@@ -667,16 +667,18 @@ export class TesseraExplorer extends TesseraElement {
         [part='tabs'] {
           display: flex;
           height: 56px;
+          padding: 0 8px env(safe-area-inset-bottom, 0px);
           border-top: 1px solid var(--_tessera-line);
           background: var(--_tessera-surface);
         }
         [part='tabs'] button {
-          flex: 1;
+          flex: 1 1 0;
+          min-width: 0;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          gap: 3px;
+          gap: 4px;
           color: var(--_tessera-ink-2);
           font-size: 11px;
           font-weight: 500;
@@ -718,6 +720,14 @@ export class TesseraExplorer extends TesseraElement {
         }
         .sheet-footer .btn.primary {
           flex: 2;
+        }
+        /* Every heading and row in a sheet starts 16 px in: the In view rows' fill reaches past
+           their content, so the list is drawn out by it. */
+        [part='sheet'] tessera-artifact-list::part(items) {
+          margin: 0 -6px;
+        }
+        [part='sheet'] tessera-artifact-list::part(more) {
+          margin-left: 0;
         }
         [part='sheet']::before {
           content: '';
@@ -1087,8 +1097,10 @@ export class TesseraExplorer extends TesseraElement {
     // The filters sheet's primary action names the number it will produce.
     const counted = s?.get('view').inView;
     const matchedText = counted && counted.status === 'shown' && counted.matched.exact ? `Show ${counted.matched.value.toLocaleString('en-GB')} matching` : 'Show';
+    // Clear has nothing to do where no filter, highlight or cluster clause applies.
+    const applied = s ? activeCount(s.get('filters').draft) > 0 || s.get('filters').members.length > 0 : false;
     const sheetFooter = html`<div class="sheet-footer">
-      <button class="btn" type="button" @click=${() => {
+      <button class="btn" type="button" ?disabled=${!applied} @click=${() => {
         const meta = s?.get('meta');
         if (!s || !meta) return;
         s.setFilters(emptyDraft(meta.filterOperands));
@@ -1100,7 +1112,7 @@ export class TesseraExplorer extends TesseraElement {
       this.sheet === 'filters'
         ? html`${filters}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`${head}${colour}<div class="panel">${layersPanel}</div>`
+          ? html`${colour}${layersPanel}`
           : this.sheet === 'artifacts'
             ? html`${selectionPanel}${list}`
             : this.sheet === 'detail'

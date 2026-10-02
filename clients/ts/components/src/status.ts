@@ -13,8 +13,10 @@ import './count.js';
  * over the selected region while one is selected, as the selection card counts it. While a
  * highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
  * match cell is left out unless a filter or selection narrows what matches. While the view is up to
- * date the first cell is a dot alone, titled "Up to date"; otherwise it names the state in two or
- * three words (Updating, Reconnecting, Data updated, View refused, Session expired) with the action
+ * date the first cell is a dot alone, titled "Up to date", and while it updates a grey dot alone,
+ * titled "Updating", so the strip keeps its width through a pan; otherwise it names the state in two
+ * or three words beside its dot (Connecting, Reconnecting, Nothing in view, Data updated, View
+ * refused, Session expired) with the action
  * the state offers: Refresh when the data changed, Retry when the view was refused, and Sign in on
  * expiry where `reauthorise` is set. The counts grey out while they are not current. The strip
  * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
@@ -187,10 +189,18 @@ export class TesseraStatus extends TesseraElement {
     const stale = status?.stale ?? false;
     const v = this.view;
     const refresh = () => this.resolvedStore?.refresh();
+    // Up to date and updating, the two states a pan moves between, are each a dot alone, so the
+    // strip keeps its width through a gesture; every other state names itself beside its dot.
+    const bare = (cls: string, words: string) =>
+      html`<div class="cell state bare"><span part="state" data-state=${state}><span class=${cls} role="img" aria-label=${words} title=${words}></span></span></div>`;
     const first =
       state === 'shown'
-        ? html`<div class="cell state bare"><span part="state" data-state="shown"><span class="dot" role="img" aria-label="Up to date" title="Up to date"></span></span></div>`
-        : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
+        ? bare('dot', 'Up to date')
+        : state === 'loading' && status?.sessionWarm
+          ? bare('dot quiet', 'Updating')
+          : state === 'empty'
+            ? html`<div class="cell state"><span part="state" data-state="empty"><span class="dot quiet"></span>Nothing in view</span></div>`
+            : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
     return html`<div part="strip" role="status" aria-live="polite" data-state=${state}>${first}${this.counts(state, v, stale)}</div>
       ${this.expanded && showsContent(state) && v ? this.card(v, stale) : nothing}`;
   }
