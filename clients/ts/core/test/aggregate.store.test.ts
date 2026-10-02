@@ -80,6 +80,21 @@ describe('the aggregates projection', () => {
     expect(store.requestFilters()).not.toBeNull();
   });
 
+  it('joins the highlight to the filters by all_of under highlighted, and sends the filters alone without a highlight', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('lit', {groupings: [{}], highlighted: true});
+    await flush();
+    expect(pending[0]!.req).toEqual({view: 's0', groupings: [{}]});
+    store.setFilters({filter: DRAFT.filter, highlight: {year: {family: 'numeric', gte: 2020, lte: null}}});
+    await flush();
+    const filters = store.requestFilters();
+    expect(filters).not.toBeNull();
+    expect(pending.at(-1)!.req.filters).toEqual({all_of: [filters, {year: {range: {gte: 2020}}}]});
+    store.setFilters({filter: {}, highlight: {year: {family: 'numeric', gte: 2020, lte: null}}});
+    await flush();
+    expect(pending.at(-1)!.req.filters).toEqual({year: {range: {gte: 2020}}});
+  });
+
   it('sends no filters where none is set, and publishes loading, then the answer with its view', async () => {
     const {store, pending} = await storeWith();
     store.setAggregate('a', {groupings: [{}]});

@@ -1615,14 +1615,18 @@ export function createStore(options: StoreOptions): Store {
 
   /**
    * {@link requestFilters} less the filter-position control `spec.without` names and the
-   * filter-position `member_of` clauses on the layer `spec.withoutMembersOf` names.
+   * filter-position `member_of` clauses on the layer `spec.withoutMembersOf` names, and with
+   * `spec.highlighted` the highlight joined to it.
    */
   function aggregateFilters(spec: AggregateSpec): FilterExpr | null {
     const {draft, members} = projections.filters;
     const kept = spec.without === undefined ? draft : withoutClause(draft, spec.without, 'filter');
     const layer = spec.withoutMembersOf;
     const clauses = layer === undefined ? members : members.filter((m) => m.verb !== 'filter' || m.layer !== layer);
-    return withSelected(withMembers(composeFilters(kept, 'filter'), clauses, 'filter'));
+    const filters = withSelected(withMembers(composeFilters(kept, 'filter'), clauses, 'filter'));
+    const highlight = spec.highlighted === true ? requestHighlight() : null;
+    if (highlight === null) return filters;
+    return filters === null ? highlight : {all_of: [filters, highlight]};
   }
 
   /** `expr` with the selected region's leaf joined. */
