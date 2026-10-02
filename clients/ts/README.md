@@ -81,7 +81,7 @@ The reference on the documentation site is generated from the doc comments. `com
 
 It prints the viewer's address, which carries the dataset document in `?datasets=`. Everything it writes goes under `tessera-demo/` at the repository root, which git ignores. The script's header lists its other options.
 
-Two settings make the demo work, and both are for development only. `serve.dev_cors_origins` in the generated `tessera.toml` lets the viewer's origin call both the viewer and the session listeners from the browser, and the server logs a warning when it is set. `VITE_TESSERA_SESSION_CREDENTIAL` puts the session credential into the viewer's page, so the viewer can mint a token for each principal in its picker. A page embedding Tessera gets its tokens from its own server, as the plain-HTML example shows.
+Two settings make the demo work, and both are for development only. `serve.dev_cors_origins` in the generated `tessera.toml` lets the viewer's origin call both the viewer and the session listeners from the browser, and the server logs a warning when it is set. The dataset document `run_demo.sh` writes carries an API key holding `authorise-as` for each dataset, which reaches the viewer's page so the viewer can mint a token for each principal in its picker. A page embedding Tessera gets its tokens from its own server, as the plain-HTML example shows.
 
 The viewer's Vite server listens on 5173, or on `VITE_PORT` where that is set, and fails to start where the port is taken instead of moving to another: the origin has to match the one in `dev_cors_origins`. `run_demo.sh` writes the viewer's port into the deployments it generates.
 
@@ -89,13 +89,13 @@ The viewer's Vite server listens on 5173, or on `VITE_PORT` where that is set, a
 
 ## The examples
 
-Each example is a workspace that `npm run typecheck` checks. They expect the demo's `2m4` scale, started with `./run_demo.sh --scale 2m4`: its viewer listener on `127.0.0.1:37585`, its session listener on `127.0.0.1:49303`, and the session credential `dev-session-credential`. The users in `examples/plain-html/users.json` hold access labels from that bundle's term dictionary. `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` point the examples at another deployment, whose users `users.json` then has to name.
+Each example is a workspace that `npm run typecheck` checks. They expect the demo's `2m4` scale, started with `./run_demo.sh --scale 2m4`: its viewer listener on `127.0.0.1:37585` and its session listener on `127.0.0.1:49303`. The plain-HTML app server takes an API key holding `authorise-as` in `TESSERA_API_KEY`; `run_demo.sh` writes one to `tessera-demo/presets/2m4.key`. The users in `examples/plain-html/users.json` read as the principals `run_demo.sh` creates for that bundle's presets. `TESSERA_VIEWER_URL` and `TESSERA_SESSION_URL` point the examples at another deployment, whose principals `users.json` then has to name.
 
 The plain-HTML example's app server mints the tokens for all four, so start it after the demo and before the others. It listens on port 5180. The other three are Vite dev servers that proxy `/token` and `/users` to it and `/v1/*` to the viewer listener.
 
 | Example | Port | What it shows |
 |---|---|---|
-| [`plain-html`](examples/plain-html/README.md) | 5180 | `<tessera-explorer>` from the single-file bundle, with no build step, and the app server that holds the session credential. |
+| [`plain-html`](examples/plain-html/README.md) | 5180 | `<tessera-explorer>` from the single-file bundle, with no build step, and the app server that holds the API key. |
 | [`react-explorer`](examples/react-explorer/README.md) | 5181 | The React wrappers and hooks, with one slot filled by a host component. |
 | [`canvas-store`](examples/canvas-store/README.md) | 5182 | The store under the host's own camera, drawn on a 2D canvas, with none of Tessera's rendering. |
 | [`deck-host`](examples/deck-host/README.md) | 5183 | `TesseraLayer` in a `Deck` the page builds, beside a layer of its own. |
@@ -153,4 +153,4 @@ Not tested here. Svelte sets a property when the element has one of that name, a
 | `scripts/write-cycle-demo.mjs` | Publishes a small cluster and a label, deletes a document the label was written from, and checks the label stays withdrawn. |
 | `scripts/reference.mjs` | Generates the TypeScript and components reference pages. |
 
-The operator scripts need `TESSERA_SESSION_CRED` and, where they write, `TESSERA_OPERATOR_CRED`. Each script's header gives its flags.
+The operator scripts need `TESSERA_OPERATOR_CRED`, with which they write and mint each session they read with for the terms asked for. Each script's header gives its flags.

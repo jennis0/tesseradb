@@ -459,12 +459,11 @@ type Listener = () => void;
  * a new store.
  *
  * Behind that rule the store checks each viewport answer's identity key, as far as answers allow.
- * The server derives the key from the exact credential bytes presented to `/session/authorise`, the
+ * The server derives the key from the terms the session's principal held when it was minted, the
  * identity of the viewer's visible-set fragment, and the view. An ingest or a suppression does not
  * change it. A compaction or a rebuilt bundle gives the fragment a new identity, and so a new key,
- * for every viewer. A renewal that presents different credential bytes, such as a freshly signed
- * token with a new issue time, also gives a new key, so the store treats it as another viewer even
- * for the same person.
+ * for every viewer. A renewal whose principal now holds different terms also gives a new key, so
+ * the store treats it as another viewer even for the same person.
  *
  * The store forgets what the server answered where an answer's key differs from the one held for
  * its view; where, after a renewal, an answer arrives on a view that holds no key before any answer

@@ -34,8 +34,8 @@ beforeAll(async () => {
     if (/\/v1\/(items|artifacts)$/.test(String(url))) requests += 1;
     return fetch(url, init);
   };
-  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.sessionCredential, fetch: counting});
-  session = await client.authorise(TERMS);
+  client = new TesseraClient({viewerUrl: served.viewerUrl, sessionUrl: served.sessionUrl, sessionCredential: served.operatorCredential, fetch: counting});
+  session = await client.authorise({terms: TERMS});
   meta = await client.meta(session.token);
 }, 120_000);
 
@@ -73,7 +73,7 @@ const artifacts = (request: ArtifactsRequest) => readAll(() => client.artifacts(
 /** The server's bulk reads in flight reach none within five seconds, well inside its ten-second stall shed. */
 async function lanesFree(): Promise<void> {
   const {controlUrl, operatorCredential} = served as Served;
-  const control = new Control({controlUrl, operatorCredential});
+  const control = new Control({controlUrl, credential: operatorCredential});
   const deadline = Date.now() + 5_000;
   while (((await control.status()).body.bulk as {in_flight: number}).in_flight > 0) {
     expect(Date.now(), 'bulk reads still hold their slots').toBeLessThan(deadline);
@@ -338,7 +338,7 @@ describe('bulk reads against a live server', () => {
     // carries its primary category among its terms, so a viewer holding every primary category
     // sees every paper.
     const primary = (await client.categories(session.token, 'primary_category', {limit: 1000})).map((v) => v.key);
-    const everything = (await client.authorise(primary)).token;
+    const everything = (await client.authorise({terms: primary})).token;
     const bodies: {k?: number; layers?: string[]}[] = [];
     const watching = new TesseraClient({
       viewerUrl: (served as Served).viewerUrl,

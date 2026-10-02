@@ -4,9 +4,16 @@
 // The size comes from the server: a zoom-0, full-extent viewport call returns `visible` for the
 // root tile, which is the principal's visible-set cardinality.
 //
-//   TESSERA_SESSION_CRED=… node clients/ts/scripts/measure-principals.mjs \
-//     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0..200 \
-//     [--ranks <pairs>.term-ranks.json] [--out PATH]
+//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/measure-principals.mjs \
+//     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 \
+//     --control http://127.0.0.1:45721 --terms 0..200 \
+//     [--ranks <pairs>.term-ranks.json] [--out PATH] [--key-out PATH]
+//
+// Each term set is measured with a session the operator credential mints for those terms. Each
+// preset written is held by a local principal of the deployment's catalogue, created on the control
+// plane and named by a digest of its terms, and the preset names it. `--key-out` writes a new API
+// key of the service principal `demo-viewer`, which holds `authorise-as` and which the viewer uses
+// to mint the presets' sessions.
 //
 // `--terms-file PATH` is `--terms` for a corpus whose keys carry commas: one term per line, blank
 // lines skipped.
@@ -17,7 +24,7 @@
 // (about 1%), medium (about 10%) and heavy (about 85%) of the corpus, since in a large dictionary
 // one term sees very little. Each is a run of ranked terms whose measured visible set reaches the
 // target, found by binary search on the run's length. `full` holds every ranked term and is the
-// denominator; if the session refuses that `auth_data`, it falls back to the top 4096 terms and
+// denominator; if authorising that many terms is refused, it falls back to the top 4096 terms and
 // its label says so.
 //
 // It decodes only the tiles frame, which comes first in the response.
@@ -25,6 +32,9 @@ import {readFile, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {tableFromIPC} from 'apache-arrow';
+// Loading a `.ts` module needs Node 22.18 or later, which strips its types.
+import {Control} from '../core/src/control.ts';
+import {authorise as mint, integratorKey, principalHolding} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -33,8 +43,9 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const cred = process.env.TESSERA_SESSION_CRED;
-if (!cred) throw new Error('set TESSERA_SESSION_CRED');
+const operatorCred = process.env.TESSERA_OPERATOR_CRED;
+if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 
 // `--terms` splits on commas, which a term may contain (a publisher called "Royal Botanic
 // Gardens, Kew"); `--terms-file` takes one term per line. `--terms` also takes the `lo..hi` form.
@@ -54,13 +65,7 @@ const candidates = args['terms-file']
     })();
 
 async function authorise(terms) {
-  const r = await fetch(`${session}/session/authorise`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${cred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
-  });
-  if (!r.ok) throw new Error(`authorise ${terms}: ${r.status} ${await r.text()}`);
-  return (await r.json()).token;
+  return (await mint(session, operatorCred, {terms})).token;
 }
 
 const probeToken = await authorise([candidates[0]]);
@@ -135,7 +140,7 @@ if (args.ranks) {
   try {
     corpus = await visibleFor(fullTerms);
   } catch (e) {
-    // The session refused a dictionary-sized `auth_data`: measure the head, and say so.
+    // The session refused a dictionary-sized term set: measure the head, and say so.
     fullTerms = ranked.slice(0, Math.min(ranked.length, 4096));
     fullLabel = `full — top ${fullTerms.length} of ${ranked.length} terms (session refused all: ${e.message})`;
     corpus = await visibleFor(fullTerms);
@@ -204,9 +209,12 @@ if (args.ranks) {
 
 // Presets are per bundle. `run_demo.sh` composes the per-bundle files into the dataset document
 // it names in the viewer URL it prints.
+const presets = [];
+for (const preset of chosen) presets.push({...preset, principal: await principalHolding(control, preset.terms)});
 const out =
   args.out ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'viewer', 'presets.json');
-await writeFile(out, `${JSON.stringify(chosen, null, 2)}\n`);
+await writeFile(out, `${JSON.stringify(presets, null, 2)}\n`);
+if (args['key-out']) await writeFile(args['key-out'], `${await integratorKey(control, 'demo-viewer')}\n`, {mode: 0o600});
 console.table(chosen.map((p) => ({label: p.label, terms: p.terms.length, visible: p.visible})));
 console.log(
   `measured ${measured.length} non-empty terms of ${candidates.length} candidates; wrote ${out}`

@@ -1,18 +1,74 @@
 import type {Table} from 'apache-arrow';
 
 /**
- * A viewer session, as {@link TesseraClient.authorise} returns it.
+ * A session minted on the session plane, as {@link TesseraClient.authorise} returns it.
  *
  * @category Requests and responses
  */
-export type Session = {
-  /** The bearer token every viewer route takes. It is a credential. */
-  token: string;
+export type Session = Login & {
   /** The session's handle for {@link TesseraClient.revoke}. It is not a credential. */
   tokenId: number;
-  /** When the token expires, in seconds since the Unix epoch: the time of the request plus the server's `token_max_lifetime_secs`. */
+};
+
+/**
+ * A session, as {@link TesseraClient.login} returns it.
+ *
+ * @category Requests and responses
+ */
+export type Login = {
+  /** The bearer token every viewer route takes. It is a credential. */
+  token: string;
+  /**
+   * When the session ends, in seconds since the Unix epoch: the earliest of the server's
+   * `token_max_lifetime` after the request, the expiry of the API key it was authorised with, and
+   * the `exp` of the access token it was authorised with. A catalogue change can end it sooner.
+   */
   expiresAt: number;
 };
+
+/**
+ * The one credential {@link TesseraClient.login} sends.
+ *
+ * @category Requests and responses
+ */
+export type LoginCredential =
+  | {
+      /** A local principal's name. */
+      principal: string;
+      /** Its password. */
+      password: string;
+    }
+  | {
+      /** An API key, `tsk_<prefix>_<secret>`. */
+      apiKey: string;
+    }
+  | {
+      /** An OIDC access token a declared provider issued. */
+      accessToken: string;
+    };
+
+/**
+ * Whom {@link TesseraClient.authorise} mints a session for.
+ *
+ * @category Requests and responses
+ */
+export type AuthoriseTarget =
+  | {
+      /** A local principal, by name. */
+      principal: string;
+    }
+  | {
+      /** The access token of an OIDC identity, as its provider issued it. */
+      accessToken: string;
+    }
+  | {
+      /**
+       * The terms the session holds, with `read` and no other permission, for no principal of the
+       * catalogue. Only the operator credential may name them. Each is trimmed and an empty one is
+       * dropped.
+       */
+      terms: string[];
+    };
 
 /**
  * The extent of a view's data coordinates. Each axis maps onto 32-bit grid units: `0` at the

@@ -7,13 +7,13 @@ npm run bundle -w @tesseradb/components    # writes components/dist/tessera-comp
 node server.mjs                            # http://localhost:5180
 ```
 
-The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585`, a session listener on `127.0.0.1:49303` and the session credential `dev-session-credential`. `users.json` lists the signed-in users the page offers and the access labels each holds, taken from that bundle's term dictionary. `TESSERA_VIEWER_URL`, `TESSERA_SESSION_URL` and `TESSERA_SESSION_CRED` point the server at another deployment, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.
+The server expects the demo's `2m4` scale (`./run_demo.sh --scale 2m4` at the repository root): a viewer listener on `127.0.0.1:37585` and a session listener on `127.0.0.1:49303`. `TESSERA_API_KEY` is an API key whose principal holds `authorise-as`; `run_demo.sh` writes one to `tessera-demo/presets/2m4.key` at the repository root. `users.json` lists the signed-in users the page offers and the Tessera principal each reads as. Those principals are the ones `run_demo.sh` creates when it measures the 2m4 presets, named `holding-` and a digest of their terms; `tessera principal list` shows them. `TESSERA_VIEWER_URL` and `TESSERA_SESSION_URL` point the server at another deployment, whose principals `users.json` then has to name, and `PORT` moves it off 5180. Until the bundle is built the server answers the page with a 503 naming the command above.
 
 ## Where the token comes from
 
-The page never holds the deployment's session credential. `server.mjs` does. When the page asks `POST /token` for its user, the server calls `POST /session/authorise` with that user's labels and returns the viewer token (`authorise()` in `server.mjs`). A real application takes the user from its own sign-in instead of a query parameter.
+The page never holds the API key. `server.mjs` does. When the page asks `POST /token` for its user, the server calls `POST /session/authorise` naming that user's principal and returns the viewer token (`authorise()` in `server.mjs`). A real application takes the user from its own sign-in instead of a query parameter.
 
-Under the `builtin:passthrough` auth plugin the server takes the labels it is sent as given. This app server therefore decides what each of its users may see, and the answer is only as trustworthy as the sign-in behind it.
+The key can mint a session for any principal holding `read`. This app server therefore decides which principal each of its users reads as, and the answer is only as trustworthy as the sign-in behind it. What each principal may see is decided by the terms the deployment's catalogue grants it.
 
 ## Reaching the viewer routes
 

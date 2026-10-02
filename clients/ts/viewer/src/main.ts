@@ -396,9 +396,9 @@ function openSession(
   dataStore = createStore({
     viewerUrl: '',
     client: active,
-    // The store gets a supplier that authorises through the viewer's client, not the credential.
+    // The store gets a supplier that authorises through the viewer's client, not the key.
     authorise: async () => {
-      const session = heldSession ?? (await active.authorise(preset.terms));
+      const session = heldSession ?? (await active.authorise({principal: preset.principal}));
       heldSession = undefined;
       store.update((s) => {
         s.session = session;
@@ -482,7 +482,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
   client = new TesseraClient({
     viewerUrl: dataset.viewerUrl,
     sessionUrl: dataset.sessionUrl,
-    sessionCredential: config.sessionCredential,
+    sessionCredential: dataset.apiKey,
     // Per-response decode time as seen from this thread and in the worker; the difference is
     // the queue.
     onDecode: (ms, bytes, points, workerMs) => {
@@ -526,7 +526,7 @@ async function activate(dataset: Dataset, requestedView: string | null = null): 
     let session: Awaited<ReturnType<TesseraClient['authorise']>>;
     let meta: Awaited<ReturnType<TesseraClient['meta']>>;
     try {
-      session = await client.authorise(first.terms);
+      session = await client.authorise({principal: first.principal});
       meta = await client.meta(session.token);
     } catch (error) {
       // The picker's `change` handler cannot await this, so the refusal is reported here, where
