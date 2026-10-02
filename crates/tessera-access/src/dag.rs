@@ -1,6 +1,7 @@
 //! The shared expression DAG over compound labels.
 //!
-//! A leaf is a term id and an inner node is an AND or an OR over its children. Nodes are
+//! A leaf is a term, numbered here by its name, and an inner node is an AND or an OR over its
+//! children. Nodes are
 //! hash-consed on their kind and their sorted child ids, so a subexpression that several labels
 //! share is one node. Children are interned before their parent and nodes are only appended, so
 //! labels can be added while the service runs. Each node keeps a list of its parents, which the
@@ -10,15 +11,15 @@
 use std::hash::Hasher;
 
 use rustc_hash::{FxHashMap, FxHasher};
-use tessera_types::{LabelId, TermId};
 
-use super::Expr;
+use crate::{Expr, LabelId};
 
 const NONE: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Node {
-    Leaf(TermId),
+    /// The index of the term's name in [`Dag::names`].
+    Leaf(u32),
     And,
     Or,
 }
@@ -36,14 +37,16 @@ pub(super) struct Dag {
     first_parent: Vec<u32>,
     /// Per node: the label whose root it is, or `NONE`.
     root_label: Vec<u32>,
-    leaf: FxHashMap<TermId, u32>,
+    /// Per term name, its leaf node.
+    leaf: FxHashMap<Box<str>, u32>,
+    names: Vec<Box<str>>,
     /// A hash of (kind, children) to the newest inner node with it. Older nodes with the same hash
     /// follow through `chain`.
     cons: FxHashMap<u64, u32>,
     chain: Vec<u32>,
 }
 
-/// Per-caller state for [`super::Labels::authorise`], reused across passes so that a pass costs
+/// Per-caller state for [`crate::Labels::authorise`], reused across passes so that a pass costs
 /// what it visits and never clears the whole array. It grows with the DAG.
 #[derive(Debug, Default)]
 pub struct Scratch {
@@ -97,6 +100,7 @@ impl Dag {
             first_parent: Vec::new(),
             root_label: Vec::new(),
             leaf: FxHashMap::default(),
+            names: Vec::new(),
             cons: FxHashMap::default(),
             chain: Vec::new(),
         }
@@ -115,15 +119,14 @@ impl Dag {
         }
     }
 
-    /// Interns a normalised expression, calling `term` for the id of each term, and returns its
-    /// root.
-    pub(super) fn intern(&mut self, e: &Expr, term: &mut impl FnMut(&str) -> TermId) -> u32 {
+    /// Interns a normalised expression and returns its root.
+    pub(super) fn intern(&mut self, e: &Expr) -> u32 {
         let (kind, operands) = match e {
-            Expr::Term(t) => return self.leaf(term(t)),
+            Expr::Term(t) => return self.leaf(t),
             Expr::And(v) => (Node::And, v),
             Expr::Or(v) => (Node::Or, v),
         };
-        let mut children: Vec<u32> = operands.iter().map(|c| self.intern(c, term)).collect();
+        let mut children: Vec<u32> = operands.iter().map(|c| self.intern(c)).collect();
         children.sort_unstable();
         let mut h = FxHasher::default();
         h.write_u8(u8::from(kind == Node::And));
@@ -147,15 +150,15 @@ impl Dag {
         None
     }
 
-    fn leaf(&mut self, term: TermId) -> u32 {
-        match self.leaf.get(&term) {
-            Some(&n) => n,
-            None => {
-                let n = self.push(Node::Leaf(term), &[], None);
-                self.leaf.insert(term, n);
-                n
-            }
+    fn leaf(&mut self, term: &str) -> u32 {
+        if let Some(&n) = self.leaf.get(term) {
+            return n;
         }
+        let name = index(self.names.len());
+        self.names.push(term.into());
+        let n = self.push(Node::Leaf(name), &[], None);
+        self.leaf.insert(term.into(), n);
+        n
     }
 
     fn push(&mut self, kind: Node, children: &[u32], hash: Option<u64>) -> u32 {
@@ -185,12 +188,17 @@ impl Dag {
         self.root_label[n as usize] = label.raw();
     }
 
-    /// Marks the leaves of `held` true and propagates upwards. An OR becomes true with its first
-    /// true child and an AND when its count reaches its number of children. Appends the label of
-    /// every root that becomes true. Only nodes reachable from `held` are visited.
-    pub(super) fn authorise(&self, held: &[TermId], s: &mut Scratch, out: &mut Vec<LabelId>) {
+    /// Marks the leaves of the terms `held` true and propagates upwards. An OR becomes true with
+    /// its first true child and an AND when its count reaches its number of children. Appends the
+    /// label of every root that becomes true. Only nodes reachable from `held` are visited.
+    pub(super) fn authorise<'a>(
+        &self,
+        held: impl IntoIterator<Item = &'a str>,
+        s: &mut Scratch,
+        out: &mut Vec<LabelId>,
+    ) {
         s.begin(self.node.len());
-        for &leaf in held.iter().filter_map(|t| self.leaf.get(t)) {
+        for &leaf in held.into_iter().filter_map(|t| self.leaf.get(t)) {
             if s.arrive(leaf, 1) {
                 s.queue.push(leaf);
             }
@@ -211,9 +219,9 @@ impl Dag {
     }
 
     /// Top-down evaluation of the expression rooted at `n`.
-    pub(super) fn eval(&self, n: u32, held: &impl Fn(TermId) -> bool) -> bool {
+    pub(super) fn eval(&self, n: u32, held: &impl Fn(&str) -> bool) -> bool {
         match self.node[n as usize] {
-            Node::Leaf(t) => held(t),
+            Node::Leaf(name) => held(&self.names[name as usize]),
             Node::And => self.children(n).iter().all(|&c| self.eval(c, held)),
             Node::Or => self.children(n).iter().any(|&c| self.eval(c, held)),
         }
@@ -223,12 +231,11 @@ impl Dag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::{Label, DEFAULT_MAX_NODES};
+    use crate::{Label, DEFAULT_MAX_NODES};
 
     fn intern(dag: &mut Dag, text: &str) -> u32 {
         let label = Label::parse(text, DEFAULT_MAX_NODES).unwrap();
-        let mut term = |t: &str| TermId::new(u32::from(t.as_bytes()[0]));
-        dag.intern(label.expr().unwrap(), &mut term)
+        dag.intern(label.expr().unwrap())
     }
 
     #[test]
@@ -238,12 +245,7 @@ mod tests {
         for (i, &root) in roots.iter().enumerate() {
             dag.set_root_label(root, LabelId::new(i as u32));
         }
-        let held = |terms: &str| {
-            terms
-                .bytes()
-                .map(|b| TermId::new(u32::from(b)))
-                .collect::<Vec<_>>()
-        };
+        let held = |terms: &'static str| (0..terms.len()).map(move |i| &terms[i..=i]);
         let mut scratch = Scratch::default();
         for (terms, expected) in [
             ("sa", vec![0]),
@@ -252,7 +254,7 @@ mod tests {
             ("ab", vec![2]),
         ] {
             let mut out = Vec::new();
-            dag.authorise(&held(terms), &mut scratch, &mut out);
+            dag.authorise(held(terms), &mut scratch, &mut out);
             assert_eq!(
                 out,
                 expected.into_iter().map(LabelId::new).collect::<Vec<_>>(),
@@ -271,8 +273,8 @@ mod tests {
             ..Scratch::default()
         };
         let mut out = Vec::new();
-        dag.authorise(&[TermId::new(u32::from(b'a'))], &mut scratch, &mut out);
-        dag.authorise(&[TermId::new(u32::from(b'b'))], &mut scratch, &mut out);
+        dag.authorise(["a"], &mut scratch, &mut out);
+        dag.authorise(["b"], &mut scratch, &mut out);
         assert!(out.is_empty());
     }
 }

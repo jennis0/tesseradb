@@ -6,7 +6,7 @@ use croaring::Bitmap;
 
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
 use tessera_lifecycle::wal::ParentRef;
-use tessera_types::label::Label;
+use tessera_access::Label;
 use tessera_types::layer::ServingLayout;
 
 use tessera_store::permutation::RowSpace;

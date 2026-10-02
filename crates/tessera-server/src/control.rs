@@ -1455,7 +1455,7 @@ async fn drop_view(
 /// An artifact record's `access` labels as they are stored, by the rule the build reads
 /// an artifact's labels with. Absent and empty are no label.
 fn access_descriptors(labels: Option<Vec<String>>) -> Result<Vec<Vec<u8>>, ApiError> {
-    tessera_types::label::artifact_access(&labels.unwrap_or_default())
+    tessera_access::artifact_access(&labels.unwrap_or_default())
         .map(|labels| labels.into_iter().map(String::into_bytes).collect())
         .map_err(ApiError::Contract)
 }

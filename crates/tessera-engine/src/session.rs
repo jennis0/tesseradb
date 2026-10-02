@@ -167,7 +167,7 @@ impl Session {
 
     /// Whether the session satisfies any of the stored `labels`.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
-        tessera_types::label::admits(labels, &|term| self.holds(term))
+        tessera_access::admits(labels, &|term| self.holds(term))
     }
 
     /// `sha256(auth_data)`.
@@ -481,7 +481,7 @@ fn fragment_error(e: FragmentCacheError) -> EngineError {
 }
 
 /// The terms a credential presents. `auth_data` is the JSON `{"terms": ["<term>", ...]}`; each
-/// term is held as [`tessera_types::label::held_term`] says, and one it refuses is dropped. A
+/// term is held as [`tessera_access::held_term`] says, and one it refuses is dropped. A
 /// credential that parses to no terms is valid, and its session sees what `public` admits.
 fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let refused = || {
@@ -497,7 +497,7 @@ fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let mut held = Vec::with_capacity(terms.len());
     for term in terms {
         let term = term.as_str().ok_or_else(refused)?;
-        held.extend(tessera_types::label::held_term(term).map(str::to_owned));
+        held.extend(tessera_access::held_term(term).map(str::to_owned));
     }
     held.sort_unstable();
     held.dedup();

@@ -1,7 +1,7 @@
 //! The index over access labels, and their evaluation from a credential's terms.
 //!
-//! The grammar and normalisation are in [`tessera_types::label`], below every crate that reads a
-//! label. This module decides what an item is indexed under, in the one dictionary every posting
+//! The grammar, normalisation and the label DAG are in [`tessera_access`], below every crate that
+//! reads a label. This module decides what an item is indexed under, in the one dictionary every posting
 //! is addressed by:
 //!
 //! - `public` under the term `public`, which every session holds;
@@ -14,11 +14,6 @@
 //! The DAG is derived from the dictionary, so it is rebuilt when a bundle opens and extended when
 //! a flush promotes new keys, and nothing beside the dictionary stores it.
 
-mod dag;
 mod index;
-mod labels;
 
-pub use dag::Scratch;
 pub use index::{index_keys, label_of_key, LabelIndex, COMPOUND_KEY};
-pub use labels::Labels;
-pub use tessera_types::label::*;

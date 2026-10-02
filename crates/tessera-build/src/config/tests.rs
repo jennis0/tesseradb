@@ -586,7 +586,7 @@ fn a_views_own_visibility_is_a_list_of_access_expressions() {
             &format!("name             = \"s0\"\nvisibility       = {declared}"),
         ))
     };
-    // The rules are tested in `tessera_types::label::declared_visibility`; here, that the build
+    // The rules are tested in `tessera_access::declared_visibility`; here, that the build
     // applies them.
     refusal("[]");
     refusal("[\"public\", \"finance\"]");

@@ -1,13 +1,13 @@
 //! The one reader of an access column, for a points file at the build and an ingest batch on a
 //! running service. Each value is one whole label, read through
-//! [`tessera_types::label::label_value`].
+//! [`tessera_access::label_value`].
 
 use std::collections::HashMap;
 
 use arrow::array::{Array, ArrayRef, AsArray, GenericListArray, LargeListArray, ListArray};
 use arrow::array::OffsetSizeTrait;
 use arrow::datatypes::DataType;
-use tessera_types::label::label_value;
+use tessera_access::label_value;
 
 use crate::utf8::{is_utf8, Utf8Column};
 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/tessera-access",
     "crates/tessera-types",
     "crates/tessera-roaring",
     "crates/tessera-cache",

@@ -1174,9 +1174,9 @@ fn plan_inline(
 }
 
 /// An artifact's labels as they are stored, by the rule a running service applies to a published
-/// artifact ([`tessera_types::label::artifact_access`]).
+/// artifact ([`tessera_access::artifact_access`]).
 fn descriptors_of(layer: &str, labels: &[String]) -> Result<Vec<Vec<u8>>> {
-    tessera_types::label::artifact_access(labels)
+    tessera_access::artifact_access(labels)
         .map(|labels| labels.into_iter().map(String::into_bytes).collect())
         .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))
 }

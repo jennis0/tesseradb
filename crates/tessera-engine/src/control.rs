@@ -494,14 +494,14 @@ impl Engine {
         self.write.create_plain_view(declaration)
     }
 
-    /// [`tessera_types::label::point_default`]: the default as stored,
+    /// [`tessera_access::point_default`]: the default as stored,
     /// or a view refusal.
     fn check_point_default(
         &self,
         default: Option<&str>,
     ) -> std::result::Result<Option<String>, crate::write::AcceptError> {
         default
-            .map(tessera_types::label::point_default)
+            .map(tessera_access::point_default)
             .transpose()
             .map_err(|detail| {
                 crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused {
@@ -510,13 +510,13 @@ impl Engine {
             })
     }
 
-    /// [`tessera_types::label::declared_visibility`]: the gate as stored, or a
+    /// [`tessera_access::declared_visibility`]: the gate as stored, or a
     /// view refusal.
     fn check_visibility(
         &self,
         visibility: Option<&[String]>,
     ) -> std::result::Result<Option<Vec<String>>, crate::write::AcceptError> {
-        tessera_types::label::declared_visibility(visibility).map_err(|detail| {
+        tessera_access::declared_visibility(visibility).map_err(|detail| {
             crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
         })
     }

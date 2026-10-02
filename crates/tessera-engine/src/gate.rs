@@ -94,7 +94,7 @@ pub(crate) fn resolve<'m>(
         let Some(labels) = labels else { return true };
         *memo
             .entry(labels)
-            .or_insert_with(|| tessera_types::label::admits(labels, &held))
+            .or_insert_with(|| tessera_access::admits(labels, &held))
     };
 
     let mut groups: FxHashSet<String> = FxHashSet::default();

@@ -1,11 +1,9 @@
 //! What an item is indexed under, and the DAG over the labels indexed under a key of their own.
 
 use rustc_hash::FxHashMap;
-use tessera_types::label::{Label, Shape, DEFAULT_MAX_NODES};
-use tessera_types::{LabelId, TermId};
+use tessera_access::{Expr, Label, LabelId, Labels, Scratch, Shape, DEFAULT_MAX_NODES};
+use tessera_types::TermId;
 
-use super::dag::Scratch;
-use super::labels::Labels;
 use crate::dict::PUBLIC_LABEL;
 
 /// The first byte of a key that indexes one label holding a conjunction. A term holding a control
@@ -26,7 +24,7 @@ pub fn index_keys<'a>(labels: impl IntoIterator<Item = &'a str>) -> Result<Vec<V
         match (label.shape(), label.expr()) {
             (Shape::Public, _) | (_, None) => keys.push(PUBLIC_LABEL.to_vec()),
             (Shape::AnyOf, Some(e)) => keys.extend(e.operands().iter().filter_map(|t| match t {
-                tessera_types::label::Expr::Term(t) => Some(t.as_bytes().to_vec()),
+                Expr::Term(t) => Some(t.as_bytes().to_vec()),
                 _ => None,
             })),
             (Shape::Compound, Some(_)) => {
@@ -52,14 +50,11 @@ pub fn label_of_key(key: &[u8]) -> Option<&str> {
 /// The labels a dictionary indexes under a key of their own, compiled into one shared DAG, each
 /// known by its key's ordinal.
 ///
-/// The DAG's leaves are numbered here, by term name, apart from the dictionary: a term that only
-/// appears inside such labels has no posting and needs no ordinal.
+/// The DAG's leaves are terms by name, apart from the dictionary: a term that only appears inside
+/// such labels has no posting and needs no ordinal.
 #[derive(Clone, Default)]
 pub struct LabelIndex {
     labels: Labels,
-    /// Leaf number of each term the labels name, and the name of each leaf number.
-    leaf: FxHashMap<Box<str>, TermId>,
-    names: Vec<Box<str>>,
     /// Per label id, the ordinal of its key.
     key: Vec<TermId>,
     /// Per key ordinal, its label id.
@@ -77,16 +72,10 @@ impl LabelIndex {
         let Ok(label) = Label::parse(text, usize::MAX) else {
             return;
         };
-        if label.shape() != Shape::Compound {
+        let (Shape::Compound, Some(e)) = (label.shape(), label.expr()) else {
             return;
-        }
-        let (leaf, names) = (&mut self.leaf, &mut self.names);
-        let id = self.labels.intern(&label, |name| {
-            *leaf.entry(name.into()).or_insert_with(|| {
-                names.push(name.into());
-                TermId::new(names.len() as u32 - 1)
-            })
-        });
+        };
+        let id = self.labels.intern(e);
         if id.raw() as usize == self.key.len() {
             self.key.push(ordinal);
         }
@@ -110,16 +99,12 @@ impl LabelIndex {
     /// Appends to `out` the key of every label that a principal holding the terms `held`
     /// satisfies. The pass visits only the part of the DAG `held` reaches.
     pub fn authorise<'a>(&self, held: impl IntoIterator<Item = &'a str>, out: &mut Vec<TermId>) {
-        let leaves: Vec<TermId> = held
-            .into_iter()
-            .filter_map(|name| self.leaf.get(name).copied())
-            .collect();
-        if leaves.is_empty() {
+        if self.labels.is_empty() {
             return;
         }
         let mut satisfied = Vec::new();
         self.labels
-            .authorise(&leaves, &mut Scratch::default(), &mut satisfied);
+            .authorise(held, &mut Scratch::default(), &mut satisfied);
         out.extend(satisfied.iter().map(|id| self.key[id.raw() as usize]));
     }
 
@@ -128,11 +113,7 @@ impl LabelIndex {
     pub fn satisfied(&self, ordinal: TermId, held: &impl Fn(&str) -> bool) -> bool {
         self.by_key
             .get(&ordinal)
-            .is_some_and(|&id| self.labels.satisfied(id, &|leaf| held(self.name(leaf))))
-    }
-
-    fn name(&self, leaf: TermId) -> &str {
-        &self.names[leaf.raw() as usize]
+            .is_some_and(|&id| self.labels.satisfied(id, held))
     }
 }
 

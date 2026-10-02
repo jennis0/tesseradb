@@ -3,7 +3,7 @@
 use super::*;
 use super::out::flat_families;
 use rustc_hash::FxHashMap;
-use tessera_types::label::{conjunction_text, Label};
+use tessera_access::{conjunction_text, Label};
 
 use crate::session::SatisfiedKeys;
 

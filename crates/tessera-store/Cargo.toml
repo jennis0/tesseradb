@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 tessera-types = { path = "../tessera-types", features = ["serde"] }
+tessera-access = { path = "../tessera-access" }
 # The Roaring container assembler, shared with the filter index. `Permutation::project`
 # stamps looked-up rows into a bit array, which *is* the container payload.
 tessera-roaring = { path = "../tessera-roaring" }

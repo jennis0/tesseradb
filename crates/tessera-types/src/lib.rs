@@ -9,7 +9,6 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 /// they are one database; the repository's working method is why they are one implementation). It
 /// carries no feature gate: the calls are platform-gated inside the module, and a crate that never
 /// asks about its own memory never names it.
-pub mod label;
 pub mod process;
 pub mod scalar;
 
@@ -62,8 +61,6 @@ macro_rules! define_id_newtype {
 define_id_newtype!(EntityId, u64);
 define_id_newtype!(RowId, u32);
 define_id_newtype!(TermId, u32);
-// A distinct access label after normalisation. Internal, as a term id is: no response carries one.
-define_id_newtype!(LabelId, u32);
 // An attribute index ordinal, local to one column (`docs/design/filter-index.md` §2.2).
 //
 // **Deliberately not convertible to `TermId`, and the reason is an authorisation one.** The two

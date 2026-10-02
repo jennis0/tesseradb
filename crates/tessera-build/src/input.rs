@@ -581,7 +581,7 @@ pub fn read_access_vocabulary(
 ///   a file that changed underneath the build. The permissive misreading — *null is unspecified,
 ///   so unrestricted* — would put every unlabelled point in everyone's mask.
 /// - **Terms are trimmed** by the label rule every reader of labels applies
-///   ([`tessera_types::label`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
+///   ([`tessera_access`]), so ` cs.LG` and `cs.LG` are one term. A term that is empty after
 ///   trimming is not a term.
 /// - **Filling never overrides.** A point carrying terms of its own keeps exactly those. A point's
 ///   terms are disjunctive — `M_auth` is a union of posting lists — so a label added to a point can

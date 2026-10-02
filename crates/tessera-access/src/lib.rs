@@ -11,12 +11,39 @@
 //! any one of them. The expressions have no negation, so a label is monotone in the terms held:
 //! holding more terms admits a superset.
 //!
-//! The index over labels, and their evaluation from a credential's terms, are in `tessera-authz`.
+//! [`Labels`] holds many labels in one hash-consed DAG and evaluates them from a credential's
+//! terms. What an item is indexed under, and the postings and bitmaps behind each key, are in
+//! `tessera-authz`.
+//!
+//! This crate depends on no other crate of the workspace, so every crate that reads a label or a
+//! credential's terms, the identity catalogue included, may use it.
 
+mod dag;
+mod labels;
 mod normal;
 mod parse;
 
 use std::fmt;
+
+pub use dag::Scratch;
+pub use labels::Labels;
+
+/// A distinct access label after normalisation, numbered by [`Labels`]. Internal: no response
+/// carries one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct LabelId(u32);
+
+impl LabelId {
+    #[inline]
+    pub const fn new(raw: u32) -> Self {
+        LabelId(raw)
+    }
+
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// The label every principal holds, valid only as a whole label.
 pub const PUBLIC: &str = "public";
