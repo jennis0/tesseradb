@@ -107,7 +107,8 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * A settled box or lasso becomes the store's selection, a filter every count narrows to; a tag on
  * its top-left corner gives the count matched inside it and a button that clears it.
  *
- * The map owns the camera and tells the store where it is looking on every move. Density is asked
+ * The map owns the camera and tells the store where it is looking on every move. It starts on the
+ * whole extent, fitted as the Fit button fits it, unless the camera was moved before `meta`. Density is asked
  * for once the camera has rested for 200 ms, as counts by cell over the view and a margin round
  * it, and the last counts are drawn at their own positions until the next land. Keys, with the
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn, else
@@ -743,7 +744,9 @@ export class TesseraMap extends TesseraElement {
     if (!s) return;
     if (!this.metaSeen && s.get('meta')) {
       this.metaSeen = true;
-      this.pushView();
+      // A camera no one has moved starts on the whole extent, where the map has a size to fit.
+      if (!this.cameraSet && this.clientWidth > 0 && this.clientHeight > 0) this.fit();
+      else this.pushView();
     }
     const view = s.get('view');
     // Every switch drops the hover: the marks under the cursor are different rows in the new view.
@@ -921,6 +924,7 @@ export class TesseraMap extends TesseraElement {
       onLoad: () => parent.querySelector('canvas')?.setAttribute('tabindex', '-1'),
       onViewStateChange: ({viewState}) => {
         const v = viewState as {target: number[]; zoom: number};
+        this.cameraSet = true;
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
         this.deck?.setProps({viewState: this.viewState});
         // The tooltip names what was under the pointer before the move.
@@ -1275,7 +1279,11 @@ export class TesseraMap extends TesseraElement {
     emit(this, 'tessera-selectchange', {shape: shapeDetail(shape), status: shape ? 'loading' : 'cleared'});
   }
 
+  /** Whether the camera has been moved, by the user or the host, since the map was made. */
+  private cameraSet = false;
+
   private setViewState(next: Partial<ViewState>): void {
+    this.cameraSet = true;
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
     this.pushView();
