@@ -688,6 +688,7 @@ pub fn test_verifier() -> tessera_server::oidc::Verifier {
     tessera_server::oidc::Verifier::with_intervals(
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(3600),
+        std::time::Duration::from_secs(24 * 3600),
     )
 }
 

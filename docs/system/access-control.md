@@ -94,7 +94,11 @@ A session is minted in one of three ways.
   constant time. An access token's signature is checked against a key its provider publishes at
   its JWKS URL, then its issuer, audience, `exp` and `nbf`; only asymmetric algorithms are
   accepted, and a token whose `typ` header names something other than a JWT or an access token
-  (`at+jwt`) is refused. Every reason a credential is refused answers the same `401`. Password
+  (`at+jwt`) is refused. An OpenID Connect ID token usually carries `typ: JWT`, so the audience
+  check is what refuses it: its `aud` is the client's id, not the API's. A token that more than
+  one provider with its issuer accepts is refused. A provider's keys are fetched again after an
+  hour; when that fetch fails, the keys held are used until they are 24 hours old, and then the
+  provider's tokens are refused until a fetch succeeds. Every reason a credential is refused answers the same `401`. Password
   checks have an admission limit of their own, about one per core, and past it are answered `429`
   whether or not the name exists. The session carries the principal's `read`, `write`, `read-all`
   and `write-all`.

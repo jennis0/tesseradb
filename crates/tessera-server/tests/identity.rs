@@ -834,11 +834,22 @@ async fn providers_declared_in_the_file_are_read_only() {
     assert_eq!(resp.status(), 409);
 }
 
-/// A catalogue declaring `corp` with `idp`'s keys, and a verifier with the intervals given.
+/// A catalogue declaring `corp` with `idp`'s keys, and a verifier with the intervals given and a
+/// ceiling of a day.
 fn verifier_for(
     idp: &Idp,
     refetch: std::time::Duration,
     max_age: std::time::Duration,
+) -> (tessera_catalogue::Catalogue, tessera_server::oidc::Verifier, TempDir) {
+    verifier_with_ceiling(idp, refetch, max_age, std::time::Duration::from_secs(24 * 3600))
+}
+
+/// A catalogue declaring `corp` with `idp`'s keys, and a verifier with the intervals given.
+fn verifier_with_ceiling(
+    idp: &Idp,
+    refetch: std::time::Duration,
+    max_age: std::time::Duration,
+    ceiling: std::time::Duration,
 ) -> (tessera_catalogue::Catalogue, tessera_server::oidc::Verifier, TempDir) {
     let (catalogue, _, dir) = test_identity();
     catalogue
@@ -851,7 +862,7 @@ fn verifier_for(
             role_mappings: Vec::new(),
         })
         .unwrap();
-    let verifier = tessera_server::oidc::Verifier::with_intervals(refetch, max_age);
+    let verifier = tessera_server::oidc::Verifier::with_intervals(refetch, max_age, ceiling);
     (catalogue, verifier, dir)
 }
 
@@ -895,4 +906,67 @@ async fn a_failed_refetch_keeps_the_keys_held() {
     idp.down.store(true, Ordering::SeqCst);
     assert!(verifier.verify(&catalogue, &token).await.is_some());
     assert_eq!(idp.fetches(), 2);
+}
+
+/// A fetch whose caller goes away completes and stores the keys it found, so the next token is
+/// verified without waiting out the refetch interval.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_completes_when_its_caller_goes_away() {
+    let idp = Idp::start().await;
+    let hour = std::time::Duration::from_secs(3600);
+    let (catalogue, verifier, _dir) = verifier_for(&idp, hour, hour);
+    let token = idp.token("k1", claims(&[], now_secs() + 300));
+    let short = std::time::Duration::from_millis(10);
+    let gone = tokio::time::timeout(short, verifier.verify(&catalogue, &token)).await;
+    assert!(gone.is_err(), "the caller went away before the fetch ended");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+    assert_eq!(idp.fetches(), 1);
+}
+
+/// Keys kept after a failed refetch are used until they reach the ceiling, and then the
+/// provider's tokens are refused until a fetch succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_past_the_ceiling_are_not_used() {
+    let idp = Idp::start().await;
+    let zero = std::time::Duration::ZERO;
+    let ceiling = std::time::Duration::from_millis(500);
+    let (catalogue, verifier, _dir) = verifier_with_ceiling(&idp, zero, zero, ceiling);
+    let token = idp.token("k1", claims(&[], now_secs() + 300));
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+    idp.down.store(true, Ordering::SeqCst);
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+    tokio::time::sleep(ceiling).await;
+    assert!(verifier.verify(&catalogue, &token).await.is_none());
+    idp.down.store(false, Ordering::SeqCst);
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+}
+
+/// A token that two providers with the same issuer each accept is refused, and a token only one
+/// of them accepts logs in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_token_two_providers_accept_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let idp = Idp::start().await;
+    let post = reqwest::Method::POST;
+    control(&server, post.clone(), "/control/groups", json!({ "name": "readers" })).await;
+    control(&server, post, "/control/grants", json!({ "group": "readers", "permission": "read" })).await;
+    for (name, audience) in [("corp", "tessera"), ("partner", "tessera-partner")] {
+        let provider = json!({
+            "issuer": ISSUER,
+            "audience": audience,
+            "jwks_url": idp.url,
+            "role_mappings": [{ "claim": "groups[*]", "value": "tessera-readers", "group": "readers" }],
+        });
+        control(&server, reqwest::Method::PUT, &format!("/control/providers/{name}"), provider).await;
+    }
+    let exp = now_secs() + 300;
+    let mut both = claims(&["tessera-readers"], exp);
+    both["aud"] = json!(["tessera", "tessera-partner"]);
+    let resp = login(&server, json!({ "access_token": idp.token("k1", both) })).await;
+    assert_eq!(resp.status(), 401);
+    let one = claims(&["tessera-readers"], exp);
+    let resp = login(&server, json!({ "access_token": idp.token("k1", one) })).await;
+    assert_eq!(resp.status(), 200);
 }

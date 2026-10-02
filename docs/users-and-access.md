@@ -66,13 +66,23 @@ client id accepts that client's ID tokens as access tokens.
 Two providers may not have the same issuer and audience. A token from either would verify against
 both, and which claim rules and role mappings applied would depend on the order the providers
 were tried in. One rule in the catalogue refuses such a provider, whether it is declared through
-the API or in `tessera.toml`.
+the API or in `tessera.toml`. Providers with the same issuer and different audiences are allowed,
+and a token whose `aud` names more than one of their audiences is refused, because nothing in it
+says which provider's rules apply.
 
 A provider's JWKS URL uses `https`, or `http` to a loopback address (`localhost`, `127.0.0.1` or
 `::1`). Any other `http` URL is refused when the provider is declared, because anyone on the network
 path could substitute the keys and then sign a token for any identity. Setting the environment
 variable `TESSERA_ALLOW_INSECURE_JWKS=1` accepts it, for a development provider on a private
 network.
+
+The service fetches a provider's keys when a token first needs them and keeps them for an hour. A
+token naming a key the held set lacks fetches the set again. Each URL is fetched at most once
+every ten seconds, and one fetch at a time; a fetch completes and stores its keys even when the
+request that started it has gone away. When a refetch fails, the keys of the last successful fetch
+stay in use until they are 24 hours old. After that, every token of that provider is refused until
+a fetch succeeds, so a key the provider has withdrawn is not trusted indefinitely while its JWKS
+URL is unreachable.
 
 ## The catalogue
 

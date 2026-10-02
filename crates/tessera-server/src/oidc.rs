@@ -13,13 +13,20 @@
 //! usually carries `typ: JWT` or no `typ`, so this rule cannot tell it apart; its `aud` is the
 //! client's id, so a provider whose `audience` names the API, and not a client, refuses it.
 //!
+//! When more than one provider with the token's issuer accepts it, for example because its `aud`
+//! names both providers' audiences, the token is refused: nothing in it says which provider's
+//! claim rules apply.
+//!
 //! Keys are fetched when first needed and kept for [`KEYS_MAX_AGE`]. A token naming a key the
 //! cached set lacks fetches the set again. Each URL has one fetch in flight at a time, and is
 //! fetched at most once per refetch interval, [`REFETCH_INTERVAL`], whether the last fetch
-//! succeeded or failed. [`Verifier::with_intervals`] sets both durations. A provider's key
-//! rotation is therefore picked up, a stream of unknown key ids costs one fetch per interval, and
-//! a provider that is down is not asked again by every request. A refetch that fails leaves the
-//! keys of the last successful fetch in use, however old they are.
+//! succeeded or failed. A fetch runs as its own task, so it completes and stores what it found
+//! when the request that started it goes away. A request that has fresh keys reads them without
+//! waiting for a fetch in flight. A provider's key rotation is therefore picked up, a stream of
+//! unknown key ids costs one fetch per interval, and a provider that is down is not asked again
+//! by every request. A refetch that fails leaves the keys of the last successful fetch in use
+//! until they are [`KEYS_CEILING`] old. After that, the provider's tokens are refused until a
+//! fetch succeeds. [`Verifier::with_intervals`] sets all three durations.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +41,7 @@ use serde_json::Value;
 use tessera_catalogue::{Catalogue, Provider};
 
 const KEYS_MAX_AGE: Duration = Duration::from_secs(3600);
+const KEYS_CEILING: Duration = Duration::from_secs(24 * 3600);
 const REFETCH_INTERVAL: Duration = Duration::from_secs(10);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest JWKS document read.
@@ -62,22 +70,26 @@ pub struct Accepted {
     pub claims: Value,
 }
 
-/// One URL's keys. Its lock is held across a fetch, so a second caller waits for the fetch in
-/// flight and reads what it found.
+/// One URL's keys. The lock is never held across an await.
 #[derive(Default)]
 struct Keys {
     /// The keys of the last successful fetch, and when it ended.
     keys: Option<(Arc<Vec<Jwk>>, Instant)>,
     /// When the last fetch, successful or not, began.
     attempted: Option<Instant>,
+    /// Why the last fetch failed, until one succeeds.
+    failure: Option<String>,
+    /// Changes when the fetch in flight ends.
+    in_flight: Option<tokio::sync::watch::Receiver<()>>,
 }
 
 /// Verifies access tokens and caches each provider's published keys by URL.
 pub struct Verifier {
     http: reqwest::Client,
-    keys: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Keys>>>>,
+    keys: Mutex<HashMap<String, Arc<Mutex<Keys>>>>,
     refetch_interval: Duration,
     keys_max_age: Duration,
+    keys_ceiling: Duration,
 }
 
 impl Default for Verifier {
@@ -88,12 +100,16 @@ impl Default for Verifier {
 
 impl Verifier {
     pub fn new() -> Verifier {
-        Verifier::with_intervals(REFETCH_INTERVAL, KEYS_MAX_AGE)
+        Verifier::with_intervals(REFETCH_INTERVAL, KEYS_MAX_AGE, KEYS_CEILING)
     }
 
-    /// A verifier that fetches each URL at most once per `refetch_interval`, and fetches keys
-    /// older than `keys_max_age` again.
-    pub fn with_intervals(refetch_interval: Duration, keys_max_age: Duration) -> Verifier {
+    /// A verifier that fetches each URL at most once per `refetch_interval`, fetches keys older
+    /// than `keys_max_age` again, and uses no keys older than `keys_ceiling`.
+    pub fn with_intervals(
+        refetch_interval: Duration,
+        keys_max_age: Duration,
+        keys_ceiling: Duration,
+    ) -> Verifier {
         Verifier {
             http: reqwest::Client::builder()
                 .timeout(FETCH_TIMEOUT)
@@ -103,6 +119,7 @@ impl Verifier {
             keys: Mutex::new(HashMap::new()),
             refetch_interval,
             keys_max_age,
+            keys_ceiling,
         }
     }
 
@@ -140,13 +157,21 @@ impl Verifier {
             return Err(format!("no provider has issuer `{issuer}`"));
         }
         let mut why = String::new();
+        let mut accepted = Vec::new();
         for provider in providers {
             match self.check_with(provider, &header, token).await {
-                Ok(accepted) => return Ok(accepted),
+                Ok(a) => accepted.push(a),
                 Err(e) => why = e,
             }
         }
-        Err(why)
+        match accepted.len() {
+            0 => Err(why),
+            1 => Ok(accepted.pop().expect("one was accepted")),
+            _ => {
+                let names: Vec<&str> = accepted.iter().map(|a| a.provider.as_str()).collect();
+                Err(format!("providers {names:?} each accept the token"))
+            }
+        }
     }
 
     async fn check_with(
@@ -208,70 +233,112 @@ impl Verifier {
 
     /// The keys published at `url`. They are fetched when there are none, when they are older
     /// than the maximum age, or when `refetch` is set, unless a fetch began within the refetch
-    /// interval. A failed fetch answers the keys already held, or the failure when there are none.
+    /// interval. A caller waits for a fetch in flight unless it holds fresh keys and asks for no
+    /// refetch. The answer is the keys held once any fetch has ended, unless they are older than
+    /// the ceiling, or the failure when there are none.
     async fn keys_for(&self, url: &str, refetch: bool) -> Result<Arc<Vec<Jwk>>, String> {
         let slot = Arc::clone(self.keys.lock().entry(url.to_owned()).or_default());
-        let mut slot = slot.lock().await;
-        let held = slot.keys.as_ref().map(|(k, _)| Arc::clone(k));
-        let fresh = slot
-            .keys
-            .as_ref()
-            .is_some_and(|(_, at)| at.elapsed() < self.keys_max_age);
-        let tried_lately = slot
-            .attempted
-            .is_some_and(|at| at.elapsed() < self.refetch_interval);
-        if (fresh && !refetch) || tried_lately {
-            return held.ok_or_else(|| format!("fetching {url} failed lately"));
-        }
-        slot.attempted = Some(Instant::now());
-        match self.fetch(url).await {
-            Ok(keys) => {
-                let keys = Arc::new(keys);
-                slot.keys = Some((Arc::clone(&keys), Instant::now()));
-                Ok(keys)
+        let wait = {
+            let mut held = slot.lock();
+            let fresh = held
+                .keys
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() < self.keys_max_age);
+            let tried_lately = held
+                .attempted
+                .is_some_and(|at| at.elapsed() < self.refetch_interval);
+            if fresh && !refetch {
+                None
+            } else if let Some(wait) = held.in_flight.as_ref().filter(|w| w.has_changed().is_ok()) {
+                Some(wait.clone())
+            } else if tried_lately {
+                None
+            } else {
+                Some(self.start_fetch(url, &slot, &mut held))
             }
-            Err(why) => match held {
-                Some(keys) => {
+        };
+        let waited = wait.is_some();
+        if let Some(mut wait) = wait {
+            // The sender is dropped when the fetch ends, which ends the wait either way.
+            let _ = wait.changed().await;
+        }
+        let held = slot.lock();
+        match &held.keys {
+            Some((keys, at)) if at.elapsed() < self.keys_ceiling => {
+                if let Some(why) = held.failure.as_ref().filter(|_| waited) {
                     tracing::warn!(reason = %why, "a JWKS refetch failed; the keys held are kept");
-                    Ok(keys)
                 }
-                None => Err(why),
-            },
+                Ok(Arc::clone(keys))
+            }
+            Some(_) => Err(format!(
+                "the keys held for {url} are older than {:?} and a refetch failed",
+                self.keys_ceiling
+            )),
+            None => Err(held
+                .failure
+                .clone()
+                .unwrap_or_else(|| format!("fetching {url} failed lately"))),
         }
     }
 
-    /// The keys of the JWKS document at `url`. A key this crate cannot read is skipped.
-    async fn fetch(&self, url: &str) -> Result<Vec<Jwk>, String> {
-        let mut resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("fetching {url}: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("fetching {url}: {}", resp.status()));
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = resp
-            .chunk()
-            .await
-            .map_err(|e| format!("reading {url}: {e}"))?
-        {
-            body.extend_from_slice(&chunk);
-            if body.len() > MAX_JWKS_BYTES {
-                return Err(format!("{url} is larger than {MAX_JWKS_BYTES} bytes"));
+    /// Starts a fetch of `url` as its own task, which stores what it finds in `slot`.
+    fn start_fetch(
+        &self,
+        url: &str,
+        slot: &Arc<Mutex<Keys>>,
+        held: &mut Keys,
+    ) -> tokio::sync::watch::Receiver<()> {
+        let (done, wait) = tokio::sync::watch::channel(());
+        held.attempted = Some(Instant::now());
+        held.in_flight = Some(wait.clone());
+        let (http, url, slot) = (self.http.clone(), url.to_owned(), Arc::clone(slot));
+        tokio::spawn(async move {
+            let fetched = fetch(&http, &url).await;
+            let mut held = slot.lock();
+            match fetched {
+                Ok(keys) => {
+                    held.keys = Some((Arc::new(keys), Instant::now()));
+                    held.failure = None;
+                }
+                Err(why) => held.failure = Some(why),
             }
-        }
-        let doc: Value =
-            serde_json::from_slice(&body).map_err(|e| format!("{url} is not JSON: {e}"))?;
-        let keys = doc["keys"]
-            .as_array()
-            .ok_or_else(|| format!("{url} has no `keys` array"))?;
-        Ok(keys
-            .iter()
-            .filter_map(|k| serde_json::from_value::<Jwk>(k.clone()).ok())
-            .collect())
+            held.in_flight = None;
+            drop(done);
+        });
+        wait
     }
+}
+
+/// The keys of the JWKS document at `url`. A key this crate cannot read is skipped.
+async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<Jwk>, String> {
+    let mut resp = http
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetching {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("fetching {url}: {}", resp.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("reading {url}: {e}"))?
+    {
+        body.extend_from_slice(&chunk);
+        if body.len() > MAX_JWKS_BYTES {
+            return Err(format!("{url} is larger than {MAX_JWKS_BYTES} bytes"));
+        }
+    }
+    let doc: Value =
+        serde_json::from_slice(&body).map_err(|e| format!("{url} is not JSON: {e}"))?;
+    let keys = doc["keys"]
+        .as_array()
+        .ok_or_else(|| format!("{url} has no `keys` array"))?;
+    Ok(keys
+        .iter()
+        .filter_map(|k| serde_json::from_value::<Jwk>(k.clone()).ok())
+        .collect())
 }
 
 /// The `iss` claim of a token whose signature has not been checked, used only to choose the

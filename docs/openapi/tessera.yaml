@@ -263,8 +263,11 @@ paths:
 
         An access token whose `typ` header is present and is not `JWT`, `at+jwt` or
         `application/at+jwt` is refused, so a logout token or another typed JWT is not accepted
-        as an access token. An OpenID Connect ID token is refused by its audience, the client's
-        id, where the provider's `audience` names the API.
+        as an access token. An OpenID Connect ID token usually carries `typ: JWT`, so the audience
+        check is what refuses it: its `aud` is the client's id, where the provider's `audience`
+        names the API. A token that more than one provider with its issuer accepts is refused.
+        When a refetch of a provider's keys fails, the keys held are used until they are 24 hours
+        old, and the provider's tokens are refused after that until a fetch succeeds.
 
         Every reason a credential is not accepted answers the same `401`, so the answer does not
         show whether a principal exists. Password checks have their own admission limit, about one
