@@ -38,17 +38,15 @@ from __future__ import annotations
 
 import json
 import random
-import subprocess
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .harness import (
-    CLI_BIN,
     JOIN_COLUMN,
     JOIN_FIELD,
-    REPO_ROOT,
+    cli_build,
     ensure_cli_built,
     join_attribute_toml,
     write_deployment,
@@ -323,11 +321,7 @@ def build_bundle(work_dir: Path, *, with_layers: bool) -> Path:
     config.write_text(_config(with_layers))
     bundle = work_dir / "bundle"
     deployment = write_deployment(work_dir / "tessera.toml", bundle=bundle, schema=config)
-    subprocess.run(
-        [str(CLI_BIN), "build", "--deployment", str(deployment), "--out", str(bundle)],
-        cwd=REPO_ROOT,
-        check=True,
-    )
+    cli_build(deployment, bundle)
     return bundle
 
 

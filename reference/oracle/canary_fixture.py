@@ -61,7 +61,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, join_attribute_toml, write_deployment
+from .harness import cli_build, ensure_cli_built, join_attribute_toml, write_deployment
 
 N_BASE_ITEMS = 400
 N_TERMS = 6
@@ -160,8 +160,6 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
     canary_bundle = work_dir / "bundle-canary"
     visible_bundle = work_dir / "bundle-visible"
 
-    import subprocess
-
     # One view, its frame, its geometry and the relation its labels are in — the whole declaration
     # this fixture needs. Three corpora share it, so each build overrides the two sources by their
     # own names (`configuration.md` §8); the declaration itself is written once.
@@ -184,35 +182,27 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
         deployment = write_deployment(
             work_dir / f"{out_dir.name}-tessera.toml", bundle=out_dir, schema=config_path
         )
-        subprocess.run(
-            [
-                str(CLI_BIN),
-                "build",
-                "--deployment",
-                str(deployment),
-                "--file",
-                f"points={points_path}",
-                "--file",
-                f"pairs={pairs_path}",
-                "--out",
-                str(out_dir),
-                # Each build generates its own identity key, so the three bundles' `tessera_id`s
-                # are unrelated. `test_canary.py` compares them by entity under each bundle's own
-                # key, and serves every point untruncated so that no sample depends on the key.
-                # Allocation rule 5 (see the module doc): the canary gets its own commit window.
-                # `--batch-items` is the build-side name for the window §11.1 r23 scopes
-                # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
-                # exactly one window and the canary corpus is that window plus a second holding
-                # the canary alone — so the base items' entity IDs, and therefore their
-                # `tessera_id`s and their row order, are identical between the two builds by
-                # construction. Both builds pass it because the value is identity-bearing: two
-                # bundles built with different batch sizes are two different permanent
-                # assignments of the same corpus.
-                "--batch-items",
-                str(N_BASE_ITEMS),
-            ],
-            cwd=REPO_ROOT,
-            check=True,
+        cli_build(
+            deployment,
+            out_dir,
+            "--file",
+            f"points={points_path}",
+            "--file",
+            f"pairs={pairs_path}",
+            # Each build generates its own identity key, so the three bundles' `tessera_id`s
+            # are unrelated. `test_canary.py` compares them by entity under each bundle's own
+            # key, and serves every point untruncated so that no sample depends on the key.
+            # Allocation rule 5 (see the module doc): the canary gets its own commit window.
+            # `--batch-items` is the build-side name for the window §11.1 r23 scopes
+            # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
+            # exactly one window and the canary corpus is that window plus a second holding
+            # the canary alone — so the base items' entity IDs, and therefore their
+            # `tessera_id`s and their row order, are identical between the two builds by
+            # construction. Both builds pass it because the value is identity-bearing: two
+            # bundles built with different batch sizes are two different permanent
+            # assignments of the same corpus.
+            "--batch-items",
+            str(N_BASE_ITEMS),
         )
 
     return free_bundle, canary_bundle, visible_bundle
