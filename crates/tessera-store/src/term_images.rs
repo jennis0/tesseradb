@@ -1048,15 +1048,17 @@ pub struct RouteCosts {
     pub complement_ns_per_entity: f64,
 }
 
-/// ⊘ **Modelled 2026-09-16** from the eleven rung-6 principals in the evidence memo §3, not
-/// measured as a rule. The walk rate predates the projection walk's bucket pool, which made the
-/// walk 15 to 29% faster, so the walk is priced high.
+/// Fitted to the warm forced-route arms of eleven principals over 3.5×10⁹ rows under a 24 GiB cap:
+/// the walk and complement rates through the origin against held and outside entities, the three
+/// split rates by one non-negative least squares over containers and residual entities.
+/// `tessera-bench`'s `route_probe` re-takes them. `split_ns_per_bitset` rests on one principal,
+/// the only one whose bitset count is not in proportion to its array count.
 pub const ROUTE_COSTS: RouteCosts = RouteCosts {
-    walk_ns_per_entity: 6.5,
-    split_ns_per_array_or_run: 350.0,
-    split_ns_per_bitset: 1000.0,
-    residual_ns_per_entity: 11.0,
-    complement_ns_per_entity: 11.0,
+    walk_ns_per_entity: 13.8,
+    split_ns_per_array_or_run: 430.0,
+    split_ns_per_bitset: 12_000.0,
+    residual_ns_per_entity: 24.0,
+    complement_ns_per_entity: 14.1,
 };
 
 /// What [`choose`] prices a session's three routes from.
@@ -1089,6 +1091,35 @@ pub enum Route {
     Complement,
 }
 
+/// What each route would cost a session, in nanoseconds, from [`RouteCosts::price`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoutePrices {
+    /// Always offered.
+    pub walk: f64,
+    /// `None` where the session holds no term with an image: the split is then the walk plus the
+    /// cost of deciding to do it.
+    pub split: Option<f64>,
+    /// `None` where the complement cannot answer for the view.
+    pub complement: Option<f64>,
+}
+
+impl RouteCosts {
+    /// Price the routes `inputs` offers.
+    pub fn price(&self, inputs: &ChooserInputs) -> RoutePrices {
+        RoutePrices {
+            walk: self.walk_ns_per_entity * inputs.held as f64,
+            split: (inputs.kept_terms > 0).then_some(
+                self.split_ns_per_array_or_run * inputs.kept_arrays_and_runs as f64
+                    + self.split_ns_per_bitset * inputs.kept_bitsets as f64
+                    + self.residual_ns_per_entity * inputs.residual_entities as f64,
+            ),
+            complement: inputs.complement_valid.then_some(
+                self.complement_ns_per_entity * inputs.bound.saturating_sub(inputs.held) as f64,
+            ),
+        }
+    }
+}
+
 /// Price the three routes and take the cheapest.
 ///
 /// A tie goes to the walk, then to the split: the walk's rate is the one measured over the widest
@@ -1099,25 +1130,18 @@ pub fn choose(inputs: &ChooserInputs, costs: &RouteCosts) -> Route {
         inputs.held <= inputs.bound,
         "a fragment cannot hold more entities below the bound than the bound admits"
     );
+    let prices = costs.price(inputs);
     let mut route = Route::Walk;
-    let mut cheapest = costs.walk_ns_per_entity * inputs.held as f64;
-
-    // With no kept image the split is the walk plus the cost of deciding to do it.
-    if inputs.kept_terms > 0 {
-        let split = costs.split_ns_per_array_or_run * inputs.kept_arrays_and_runs as f64
-            + costs.split_ns_per_bitset * inputs.kept_bitsets as f64
-            + costs.residual_ns_per_entity * inputs.residual_entities as f64;
-        if split < cheapest {
-            route = Route::Split;
-            cheapest = split;
-        }
+    let mut cheapest = prices.walk;
+    if let Some(split) = prices.split.filter(|split| *split < cheapest) {
+        route = Route::Split;
+        cheapest = split;
     }
-    if inputs.complement_valid {
-        let outside = inputs.bound.saturating_sub(inputs.held);
-        let complement = costs.complement_ns_per_entity * outside as f64;
-        if complement < cheapest {
-            route = Route::Complement;
-        }
+    if prices
+        .complement
+        .is_some_and(|complement| complement < cheapest)
+    {
+        route = Route::Complement;
     }
     route
 }
