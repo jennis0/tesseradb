@@ -312,7 +312,8 @@ async fn read_all_reads_every_item_and_never_reaches_a_minted_session() {
         ]
     );
 
-    // The operator's own session reads every item too, and a suppression applies to both.
+    // The operator's own session reads every item too, carrying `read` and `read-all` alone, and
+    // a suppression applies to both.
     let resp = server
         .client
         .post(server.session_url("/session/authorise"))
@@ -322,8 +323,17 @@ async fn read_all_reads_every_item_and_never_reaches_a_minted_session() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let operator = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
+    let answer = resp.json::<Value>().await.unwrap();
+    let operator = answer["token"].as_str().unwrap().to_owned();
     assert_eq!(visible(&server, &operator).await, N_ITEMS);
+    let listed = control(&server, reqwest::Method::GET, "/control/sessions", json!({})).await;
+    let session = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["token_id"] == answer["token_id"])
+        .unwrap();
+    assert_eq!(session["permissions"], json!(["read", "read-all"]));
     let resp = server
         .client
         .post(server.control_url("/control/changes"))

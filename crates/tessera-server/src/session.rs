@@ -99,8 +99,8 @@ async fn authorise(
              instead"
         ))
     };
-    // The superuser's own session is authorised for itself, so it carries `read-all`; every other
-    // session is minted through `authorise-as` and never does.
+    // The superuser's session over every item carries `read` and `read-all`; every other session
+    // is minted through `authorise-as` and never carries `read-all`.
     let (target, minter) = match (req.principal, req.access_token, req.terms, req.read_all) {
         (Some(principal), None, None, None) => {
             (auth::named(&state.catalogue, &principal)?, Some(minter))
@@ -109,7 +109,7 @@ async fn authorise(
             (auth::terms(&state.catalogue, terms), Some(minter))
         }
         (None, None, Some(_), None) => return Err(operator_only("for a set of terms")),
-        (None, None, None, Some(true)) if operator => (Caller::superuser(), None),
+        (None, None, None, Some(true)) if operator => (auth::every_item(&state.catalogue), None),
         (None, None, None, Some(true)) => return Err(operator_only("reading every item")),
         (None, Some(token), None, None) => {
             let target = auth::access_token(&state, &token).await.map_err(|_| {

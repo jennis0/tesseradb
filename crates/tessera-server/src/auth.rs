@@ -91,6 +91,8 @@ enum Source {
     },
     /// A set of terms the superuser named.
     Terms(Vec<String>),
+    /// The superuser reading every item.
+    EveryItem,
 }
 
 impl Source {
@@ -110,6 +112,11 @@ impl Source {
                     .map(str::to_owned)
                     .collect(),
                 permissions: [Permission::Read].into_iter().collect(),
+                generation: catalogue.generation(),
+            }),
+            Source::EveryItem => Some(Resolution {
+                terms: Default::default(),
+                permissions: [Permission::Read, Permission::ReadAll].into_iter().collect(),
                 generation: catalogue.generation(),
             }),
         }
@@ -243,6 +250,20 @@ pub async fn access_token(state: &AppState, token: &str) -> Result<Caller, ApiEr
 pub fn terms(catalogue: &Catalogue, terms: Vec<String>) -> Caller {
     let source = Source::Terms(terms);
     let resolution = source.resolve(catalogue).expect("a set of terms always resolves");
+    Caller {
+        principal: Principal::Superuser,
+        api_key: None,
+        resolution,
+        expires_at: None,
+        source,
+    }
+}
+
+/// The superuser reading every item, which only the operator credential may ask for: the session
+/// holds `read` and `read-all` and no other permission. No catalogue change ends it.
+pub fn every_item(catalogue: &Catalogue) -> Caller {
+    let source = Source::EveryItem;
+    let resolution = source.resolve(catalogue).expect("every item always resolves");
     Caller {
         principal: Principal::Superuser,
         api_key: None,
