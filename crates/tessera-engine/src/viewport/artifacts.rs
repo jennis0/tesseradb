@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// The layers a request names that this principal reaches, in the request's order. Intersected
+/// with the request, never unioned: asking for a name is not a way to learn it.
+pub(super) fn requested_layers(
+    selection: LayerSelection<'_>,
+    reachable: &tessera_lifecycle::ResolvedLayers,
+) -> Vec<String> {
+    match selection {
+        LayerSelection::Named(list) => list
+            .iter()
+            .filter(|name| reachable.contains(name))
+            .map(|name| name.to_string())
+            .collect(),
+        LayerSelection::All => reachable.names().map(str::to_string).collect(),
+    }
+}
+
 /// Whether one level of one layer is answered for.
 pub(crate) fn level_is_selected(
     selection: LevelSelection<'_>,
@@ -970,15 +986,7 @@ impl Engine {
         req: &ViewportRequest<'_>,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         let reachable = self.reachable_layers(served.session);
-        // Intersected with the request, never unioned: asking for a name is not a way to learn it.
-        let names: Vec<String> = match req.layers {
-            LayerSelection::Named(list) => list
-                .iter()
-                .filter(|name| reachable.contains(name))
-                .map(|name| name.to_string())
-                .collect(),
-            LayerSelection::All => reachable.names().map(str::to_string).collect(),
-        };
+        let names = requested_layers(req.layers, &reachable);
         if names.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -1116,25 +1124,27 @@ impl Engine {
         })
     }
 
-    /// **Stage one: this level, resolved for this request** — the row form and the version it is
-    /// of, the level's masked counts, and the two filter sets. Everything the gate, the cut and the
-    /// assembly read of the level is settled here and read from there.
-    fn level_pass<'a>(
+    /// One level's row form in this request's view and the version it is of, from one call so
+    /// that a histogram is never filed under a later version than the column it counts, with the
+    /// version of the level's lineage beside them.
+    pub(super) fn level_form(
         &self,
-        layer: &'a LayerPass<'a>,
+        served: &ServedView<'_>,
+        registered: &tessera_types::layer::RegisteredLayer,
+        vocabulary: Option<&tessera_store::vocabulary::VocabularyMinter>,
+        source: &crate::containment::PartitionSource<'_>,
         level: u32,
-        runs: &'a tessera_types::layer::ReservedRuns,
-    ) -> LevelPass<'a> {
-        let (pass, served) = (layer.pass, layer.pass.served);
+    ) -> ((Arc<crate::artifacts::ArtifactRows>, u64), u64) {
         let generation = served.generation;
-        let code_of_key = |key: &str| match layer.vocabulary {
+        let code_of_key = |key: &str| match vocabulary {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let recorded = layer.registered.layout_of(level);
-        let ((rows, level_version), lineage_version) = self.write.live().with_artifacts(|store| {
+        let recorded = registered.layout_of(level);
+        let name = &registered.declaration.name;
+        self.write.live().with_artifacts(|store| {
             let predicate = predicate_source(
-                &layer.registered.declaration,
+                &registered.declaration,
                 generation,
                 served.name,
                 served.data,
@@ -1145,24 +1155,41 @@ impl Engine {
                 level,
             );
             (
-                // The form and the version it is of, from one call: filing its histogram under
-                // a later store version would read it as counting a column it has not.
                 self.artifact_projections.get_or_build(
                     &generation.prefix,
                     served.name,
-                    &layer.name,
+                    name,
                     level,
                     store,
                     &served.data.row_space,
-                    Some(pass.source),
+                    Some(source),
                     recorded,
                     predicate.as_ref(),
                     generation.segments_version,
-                    crate::artifacts::serves_column_only(&layer.registered.declaration),
+                    crate::artifacts::serves_column_only(&registered.declaration),
                 ),
-                store.lineage_version(&layer.name, level),
+                store.lineage_version(name, level),
             )
-        });
+        })
+    }
+
+    /// **Stage one: this level, resolved for this request** — the row form and the version it is
+    /// of, the level's masked counts, and the two filter sets. Everything the gate, the cut and the
+    /// assembly read of the level is settled here and read from there.
+    fn level_pass<'a>(
+        &self,
+        layer: &'a LayerPass<'a>,
+        level: u32,
+        runs: &'a tessera_types::layer::ReservedRuns,
+    ) -> LevelPass<'a> {
+        let (pass, served) = (layer.pass, layer.pass.served);
+        let ((rows, level_version), lineage_version) = self.level_form(
+            served,
+            &layer.registered,
+            layer.vocabulary,
+            pass.source,
+            level,
+        );
         // Decided by the level's layout, never the request: artifact-major counts per artifact,
         // row-major reads the histogram.
         let counts = self.masked_counts(
@@ -1700,7 +1727,7 @@ fn settle_response(
 /// Whether a layer's kind holds a lineage the cut climbs and the rung is counted over —
 /// `Some(dag)` for roll-up kinds, `None` for flat and levelled kinds, whose edges are
 /// containment information rather than a ladder to coarsen along.
-fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
+pub(super) fn lineage_kind(kind: tessera_types::layer::HierarchyKind) -> Option<bool> {
     match kind {
         tessera_types::layer::HierarchyKind::Nested => Some(false),
         // A `dag` layer is `nested` with several parents: the cut reads every depth's count

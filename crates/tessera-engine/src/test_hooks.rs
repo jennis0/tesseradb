@@ -269,6 +269,14 @@ impl Engine {
         self.switches.bands_below_zoom.store(zoom, Ordering::Relaxed);
     }
 
+    /// Tag the points of a layer with no lineage from its labels, or, `false`, from the walk's
+    /// served set as a layer with a lineage is: the reference the labels are tested against.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_tags_from_labels_for_test(&self, enabled: bool) {
+        self.switches.tags_from_labels.store(enabled, Ordering::Relaxed);
+    }
+
     /// Publish a new prefix this process just wrote: open it, rotate the term index, the bundle
     /// identity and the fragment cache onto it, retire `retired`, and swap.
     ///

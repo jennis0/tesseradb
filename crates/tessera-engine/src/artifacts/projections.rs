@@ -11,6 +11,7 @@ use tessera_types::layer::LayerDeclaration;
 
 use crate::containment::ContainmentPartition;
 use crate::row_column::RowColumn;
+use tessera_store::membership::LabelColumnPack;
 use crate::tile_index::TileIndex;
 
 use super::*;
@@ -198,6 +199,15 @@ pub(super) struct Held {
     pub(super) rows: Arc<ArtifactRows>,
 }
 
+/// A level's band-order labels as the prefix names them, mapped on first use.
+#[derive(Debug)]
+pub(super) struct HeldBandLabels {
+    /// The segment whose band entries the copy follows.
+    seg_id: String,
+    path: std::path::PathBuf,
+    opened: std::sync::OnceLock<Option<Arc<tessera_store::bands::BandLabels>>>,
+}
+
 /// The engine cache directory's subdirectory for row-column compositions. Its own directory rather
 /// than the cache root, so the open-time sweep cannot reach the fragment cache beside it.
 pub const ROW_COLUMN_SCRATCH_DIR: &str = "row-columns";
@@ -226,6 +236,14 @@ pub struct ArtifactProjections {
     /// rather than claimed, as [`Self::columns_held`] is: it is taken again at every flush, since
     /// the form above it rebuilds on the geometry moving and the base does not.
     pub(super) predicate_bases: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<RowColumn>)>>,
+    /// The label column of each level served artifact-major whose memberships partition the
+    /// rows, as the prefix holds it, keyed at the version it was written for. A point's cluster
+    /// tag is read from it; nothing serves the level from it.
+    pub(super) labels_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<LabelColumnPack>)>>,
+    /// Each level's labels in the base segment's band-entry order, keyed at the version they were
+    /// written for. Opened on first use, since opening checks the file against that segment's
+    /// bands.
+    pub(super) band_labels_held: Mutex<BTreeMap<LevelAddress, (DerivedKey, Arc<HeldBandLabels>)>>,
     /// How many forms this has built since the engine opened. Read by the fold's own log line and
     /// by [`crate::Engine::artifact_cache_builds`].
     pub(super) builds: std::sync::atomic::AtomicU64,
@@ -336,6 +354,123 @@ impl ArtifactProjections {
         self.adopt_all(prefix_dir, prefix, extents, store);
         self.adopt_indexes(prefix_dir, prefix, extents, store);
         self.adopt_columns(prefix_dir, prefix, extents, store);
+        self.adopt_labels(prefix_dir, prefix, extents, store);
+    }
+
+    /// Take the label columns and band-order copies this prefix's manifests name, for every level
+    /// still at the version they were written for. A stale one would name the artifact a row held
+    /// before a growth, so the version check is an equality, and the reader checks it again
+    /// against the form it serves beside.
+    pub fn adopt_labels(
+        &self,
+        prefix_dir: &std::path::Path,
+        prefix: &str,
+        extents: &[tessera_store::manifest::DerivedExtent],
+        store: &ArtifactStore,
+    ) {
+        let mut labels = self.labels_held.lock().unwrap_or_else(|e| e.into_inner());
+        let mut copies = self.band_labels_held.lock().unwrap_or_else(|e| e.into_inner());
+        labels.clear();
+        copies.clear();
+        for extent in extents {
+            let Some(view) = extent.view.as_deref() else {
+                continue;
+            };
+            if store.level_version(&extent.layer, extent.level) != extent.level_version {
+                continue;
+            }
+            let address = (view.to_string(), extent.layer.clone(), extent.level);
+            let key = DerivedKey::of(prefix, extent.level_version);
+            let path = prefix_dir.join(&extent.path);
+            match &extent.form {
+                tessera_store::manifest::DerivedForm::LevelLabels => {
+                    match LabelColumnPack::open(&path) {
+                        Ok(pack) => {
+                            labels.insert(address, (key, Arc::new(pack)));
+                        }
+                        Err(error) => tracing::error!(
+                            layer = %extent.layer,
+                            level = extent.level,
+                            view = %view,
+                            path = %extent.path,
+                            %error,
+                            "ALARM: a level's label column named by the manifest would not open; \
+                             its points are tagged from the level's memberships instead"
+                        ),
+                    }
+                }
+                tessera_store::manifest::DerivedForm::BandLabels { seg_id } => {
+                    copies.insert(
+                        address,
+                        (
+                            key,
+                            Arc::new(HeldBandLabels {
+                                seg_id: seg_id.clone(),
+                                path,
+                                opened: std::sync::OnceLock::new(),
+                            }),
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The label column of `(view, layer, level)` where the prefix holds one written at
+    /// `level_version`.
+    pub(crate) fn level_labels(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+    ) -> Option<Arc<LabelColumnPack>> {
+        let held = self.labels_held.lock().unwrap_or_else(|e| e.into_inner());
+        let (key, pack) = held.get(&(view.to_string(), layer.to_string(), level))?;
+        (*key == DerivedKey::of(prefix, level_version)).then(|| Arc::clone(pack))
+    }
+
+    /// The band-order copy of `(view, layer, level)`'s labels where the prefix holds one written
+    /// at `level_version`, with the `seg_id` of the segment whose bands it follows. `None` also
+    /// where the file will not open against that segment's bands.
+    pub(crate) fn band_labels(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+        segment: &tessera_store::read::SegmentData,
+    ) -> Option<Arc<tessera_store::bands::BandLabels>> {
+        let held = {
+            let held = self.band_labels_held.lock().unwrap_or_else(|e| e.into_inner());
+            let (key, copy) = held.get(&(view.to_string(), layer.to_string(), level))?;
+            if *key != DerivedKey::of(prefix, level_version) || copy.seg_id != segment.seg_id {
+                return None;
+            }
+            Arc::clone(copy)
+        };
+        held.opened
+            .get_or_init(|| {
+                match tessera_store::bands::BandLabels::open(&held.path, &segment.bands) {
+                    Ok(copy) => Some(Arc::new(copy)),
+                    Err(error) => {
+                        tracing::error!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            path = %held.path.display(),
+                            %error,
+                            "ALARM: a level's band-order labels named by the manifest would not \
+                             open; its points are tagged from the level's label column instead"
+                        );
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     /// Take the fold-written partitions this prefix's manifests name, for every level whose
@@ -589,6 +724,14 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, _), _| held != layer);
+        self.labels_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
+        self.band_labels_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
     }
 
     /// Drop everything held for one `(layer, level)`, in every view — what a layout flip needs. The
@@ -615,6 +758,14 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
         self.predicate_bases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+        self.labels_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+        self.band_labels_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);

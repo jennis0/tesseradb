@@ -1,8 +1,9 @@
 //! The masked viewport query. [`Engine::viewport_stream`] resolves the view and this session's
 //! mask (`open_view`), the request's tiles and their row ranges (`resolve_tiles`, `tile_ranges`),
 //! the display threshold θ (`theta`), narrows to any filter (`narrow_to_filters`), sweeps every
-//! tile for its count and selection (`sweep_tiles`), resolves any annotation artifacts
-//! (`serve_artifacts`), and gathers and emits the selected points (`emit_points`).
+//! tile for its count and selection (`sweep_tiles`), tags the selected points with the artifacts
+//! of each requested layer (`tag`), gathers and emits them (`emit_points`), and then serves the
+//! annotation artifacts (`serve_artifacts`).
 //! [`Engine::viewport`] runs the same producer into a collecting sink and returns the batch
 //! [`ViewportOut`]. Selection itself — floor, threshold and cap over `tessera_id`, evaluated
 //! inside the mask — lives in [`crate::select`]; this module resolves the per-request parameters
@@ -67,6 +68,7 @@ mod request;
 mod row_filter;
 mod served;
 mod sweep;
+mod tag;
 
 pub use item::{ItemField, ItemOut, ItemScoped, ItemView};
 pub use meta::{EngineMeta, LeafColumn, MetaGroup, MetaRoster, MetaView, TileAddress};
@@ -95,6 +97,7 @@ pub(crate) use sweep::{
 
 pub(crate) use geometry::OpenView;
 use out::{emit_points, CollectSink, FilterBits, PointSchema};
+use tag::Tagging;
 use sweep::{
     resolve_scalars, scoped_render_scalars, tile_ranges, Gather, Swept, TileSweepOut, Tiling,
     MAX_POINTS_FRAME_BYTES,
@@ -307,26 +310,53 @@ impl Engine {
         .map_err(|SinkClosed| EngineError::Cancelled)?;
         probe.skip();
 
-        // An aggregate channel, after the counts and before any point: a cluster's masked count
-        // belongs beside a tile's, not beside a mark.
-        let (artifacts, served_layers) = self.serve_artifacts(&served, &mask, &tiling, &req)?;
-        if !artifacts.is_empty() {
-            sink.artifacts(&artifacts)
-                .map_err(|SinkClosed| EngineError::Cancelled)?;
-        }
-        probe.skip();
-
-        // Resolved once against the served set the artifacts frame just carried. No artifact
-        // served, no work: the resolver is not built and no chunk carries a column.
-        let membership = if artifacts.is_empty() || highlight_only {
-            None
+        // Each requested layer is tagged on its points from its labels where it has no lineage
+        // and the request names nothing it depends on, and from the walk's served set otherwise.
+        // Only a layer tagged from the walk holds the points back behind it.
+        let reachable = self.reachable_layers(session);
+        let names = artifacts::requested_layers(req.layers, &reachable);
+        let taggings = self.taggings(&served, &names);
+        let gathers = !highlight_only && swept.iter().any(|ts| !ts.rows.is_empty());
+        let walked_first = if gathers && taggings.iter().any(|t| matches!(t, Tagging::Walk)) {
+            Some(self.serve_artifacts(&served, &mask, &tiling, &req)?)
         } else {
-            let gathered: Vec<u32> = swept
+            None
+        };
+        let membership = if gathers {
+            let points = tag::tagged_points(&served, &swept);
+            let ctx = DependencyContext::new(&served, &mask, &reachable);
+            let dependency_served = self.dependency_gate(&ctx);
+            let mut labelled = Vec::new();
+            for tagging in &taggings {
+                if let Tagging::Labels(registered) = tagging {
+                    let tags = self.tag_layer(
+                        &served,
+                        &mask,
+                        &req,
+                        &dependency_served,
+                        registered,
+                        &points,
+                    );
+                    labelled.push((registered.declaration.name.clone(), tags));
+                }
+            }
+            let walk_names: Vec<&str> = names
                 .iter()
-                .flat_map(|ts| ts.rows.iter().copied())
+                .zip(&taggings)
+                .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
+                .map(|(name, _)| name.as_str())
                 .collect();
-            let resolved = crate::membership_column::Resolved::new(gathered, &served_layers);
+            let walked = walked_first.as_ref().map_or(&[][..], |(_, layers)| &layers[..]);
+            let resolved = crate::membership_column::Resolved::joined(
+                points.iter().map(|p| p.row).collect(),
+                walked,
+                &walk_names,
+                labelled,
+                &names,
+            );
             (!resolved.is_empty()).then_some(resolved)
+        } else {
+            None
         };
         probe.skip();
 
@@ -343,6 +373,17 @@ impl Engine {
             &mut probe,
             sink,
         )?;
+
+        // The artifacts, after every point: no point waits on a frame its tag does not need.
+        let (artifacts, _) = match walked_first {
+            Some(walked) => walked,
+            None => self.serve_artifacts(&served, &mask, &tiling, &req)?,
+        };
+        if !artifacts.is_empty() {
+            sink.artifacts(&artifacts)
+                .map_err(|SinkClosed| EngineError::Cancelled)?;
+        }
+        probe.skip();
 
         // `total_ns` is this call's wall clock, which under streaming includes the sink's sends —
         // consumer-paced time, not compute.

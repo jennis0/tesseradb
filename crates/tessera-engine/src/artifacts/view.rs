@@ -130,24 +130,63 @@ pub struct ArtifactView<'a, M: MaskedSet> {
 impl<M: MaskedSet> ArtifactView<'_, M> {
     /// The one predicate.
     pub fn verdict(&self, artifact_entity: EntityId, ordinal: u32) -> ArtifactVerdict {
+        if let Some(withheld) = self.withheld_before_count(artifact_entity, ordinal) {
+            return ArtifactVerdict::Absent(withheld);
+        }
+
+        // Against the live masked count, the same number returned to the caller.
+        let masked_count = self.masked_count(ordinal);
+        if !self.clears(ordinal, masked_count) {
+            return ArtifactVerdict::Absent(Withheld::Criterion);
+        }
+
+        match self.rank(ordinal) {
+            Ok(rank) => ArtifactVerdict::Serve { masked_count, rank },
+            Err(withheld) => ArtifactVerdict::Absent(withheld),
+        }
+    }
+
+    /// [`Self::verdict`] for an artifact the caller has seen hold a member this viewer may see,
+    /// answering with the rank of the content served. A count criterion of at most one is then
+    /// met without counting; any other criterion is counted as the verdict counts it.
+    pub fn serves_visible_member(
+        &self,
+        artifact_entity: EntityId,
+        ordinal: u32,
+    ) -> Result<Option<u32>, Withheld> {
+        if let Some(withheld) = self.withheld_before_count(artifact_entity, ordinal) {
+            return Err(withheld);
+        }
+        let counted = match self.declaration.require_member_visibility {
+            None | Some(ExistenceCriterion::Count(0 | 1)) => true,
+            Some(_) => self.clears(ordinal, self.masked_count(ordinal)),
+        };
+        if !counted {
+            return Err(Withheld::Criterion);
+        }
+        self.rank(ordinal)
+    }
+
+    /// Every test the verdict makes before it reads the masked count, in its order.
+    fn withheld_before_count(&self, artifact_entity: EntityId, ordinal: u32) -> Option<Withheld> {
         // Holes, ordinals past the level's end and another view's group-scoped artifact are absent.
         if !self.rows.holds(ordinal) {
-            return ArtifactVerdict::Absent(Withheld::NoArtifact);
+            return Some(Withheld::NoArtifact);
         }
 
         // The overlay, first and unconditional, asked live so a suppression takes effect at once.
         if self.overlay.is_deleted(artifact_entity) || self.overlay.is_suppressed(artifact_entity) {
-            return ArtifactVerdict::Absent(Withheld::Verdict);
+            return Some(Withheld::Verdict);
         }
 
         // The layer's gate.
         if !self.layer_reachable {
-            return ArtifactVerdict::Absent(Withheld::LayerGate);
+            return Some(Withheld::LayerGate);
         }
 
         // The artifact's own label, before anything reads its membership or its target.
         if !self.admits_label(ordinal) {
-            return ArtifactVerdict::Absent(Withheld::OwnLabel);
+            return Some(Withheld::OwnLabel);
         }
 
         // Before the criterion, so a withheld dependency makes this absent without its own
@@ -155,34 +194,33 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         // an attached artifact directly rather than by traversing the edge.
         if let Some(attachment) = self.rows.attachment(ordinal) {
             if !(self.dependency_served)(attachment) {
-                return ArtifactVerdict::Absent(Withheld::Attachment);
+                return Some(Withheld::Attachment);
             }
         }
+        None
+    }
 
-        // Against the live masked count, the same number returned to the caller.
-        let masked_count = self.masked_count(ordinal);
-        if let Some(criterion) = self.declaration.require_member_visibility {
-            let clears = match criterion {
-                ExistenceCriterion::Count(n) => masked_count >= n,
-                // A zero denominator cannot clear a positive fraction.
-                ExistenceCriterion::Fraction(p) => {
-                    let declared = self.declared_size(ordinal);
-                    declared > 0 && (masked_count as f64) >= p * (declared as f64)
-                }
-            };
-            if !clears {
-                return ArtifactVerdict::Absent(Withheld::Criterion);
+    /// Whether `masked_count` clears the layer's existence criterion.
+    fn clears(&self, ordinal: u32, masked_count: u64) -> bool {
+        match self.declaration.require_member_visibility {
+            None => true,
+            Some(ExistenceCriterion::Count(n)) => masked_count >= n,
+            // A zero denominator cannot clear a positive fraction.
+            Some(ExistenceCriterion::Fraction(p)) => {
+                let declared = self.declared_size(ordinal);
+                declared > 0 && (masked_count as f64) >= p * (declared as f64)
             }
         }
+    }
 
-        // Last: the first content whose generating set this viewer holds entirely, or nothing.
-        let rank = match self.containment(ordinal) {
-            Containment::NothingToContain => None,
-            Containment::Satisfied(i) => Some(i),
-            Containment::Unsatisfied => return ArtifactVerdict::Absent(Withheld::Containment),
-        };
-
-        ArtifactVerdict::Serve { masked_count, rank }
+    /// The verdict's last test: the first content whose generating set this viewer holds
+    /// entirely, or nothing where the layer declares none.
+    fn rank(&self, ordinal: u32) -> Result<Option<u32>, Withheld> {
+        match self.containment(ordinal) {
+            Containment::NothingToContain => Ok(None),
+            Containment::Satisfied(i) => Ok(Some(i)),
+            Containment::Unsatisfied => Err(Withheld::Containment),
+        }
     }
 
     /// Whether the artifact's own label admits this viewer. Reads no membership, so a caller may
