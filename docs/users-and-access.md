@@ -3,11 +3,10 @@
 A design note. It proposes principals stored by Tessera, standard ways to authenticate them,
 permissions for what a principal may do, and Accumulo-style access expressions for what a principal
 may see. The catalogue, the three listeners' credentials, sessions and their ending, and the
-catalogue's verbs over HTTP and the CLI are built, and
+catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients are built, and
 [system/access-control.md](system/access-control.md) describes them. **Not built yet:** access
 expressions and their index, removing the plugin, writes masked by the writer's terms, writes with
-a session token on the viewer listener, the audit log, and the catalogue's verbs in the TypeScript
-and Python clients. A write from a principal without `bypass` is refused until masked writes are
+a session token on the viewer listener, and the audit log. A write from a principal without `bypass` is refused until masked writes are
 built.
 
 ## Decisions

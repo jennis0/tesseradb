@@ -1411,8 +1411,7 @@ class Database:
     def control(self) -> Control:
         """A `Control` for this database's control plane, starting the server if needed."""
         listening = self.serve()
-        credential = (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8")
-        return Control(f"http://{listening.control}", credential.strip())
+        return Control(f"http://{listening.control}", self.operator_credential)
 
     def _payloads(self) -> dict:
         """The request bodies the declaration becomes at a running server, one entry per block kind.
@@ -1433,9 +1432,9 @@ class Database:
             raise Refusal(f"{refused}check FAILED: {why}") from None
 
     def token(self, terms: Sequence[str] | None = None) -> Token:
-        """A token for reading this database, made with its own session credential.
+        """A token for reading this database, made with its operator credential.
 
-        - `terms`: the access terms the token grants. By default it grants every access label the
+        - `terms`: the access terms the token holds. By default it holds every access label the
           database's rows carry, and each view's default label.
 
         Pass the token to `connect` or `Map` to read as that reader.
@@ -1444,7 +1443,7 @@ class Database:
         """
         self.serve()
         chosen = list(terms) if terms is not None else list(self.terms)
-        return authorise(self.session_url, self.session_credential, chosen)
+        return authorise(self.session_url, self.operator_credential, terms=chosen)
 
     def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
         """A reader of this database holding only the access terms given.
@@ -1869,7 +1868,7 @@ class Database:
         Only the token's id is sent. An id that names no live token is accepted without comment.
         """
         self.serve()
-        revoke(self.session_url, self.session_credential, token)
+        revoke(self.session_url, self.operator_credential, token)
 
     def _refuse_before_the_first_commit(self, verb: str) -> None:
         if not self.built:
@@ -1890,9 +1889,11 @@ class Database:
         return self.listening
 
     @property
-    def session_credential(self) -> str:
-        """The secret this database makes its tokens with. It stays on this machine."""
-        return (self.path / ".tessera" / "session.cred").read_text(encoding="utf-8").strip()
+    def operator_credential(self) -> str:
+        """The secret this database's server is run with, which acts as its superuser: `control`
+        writes with it and manages principals with it, and `token` and `viewer` mint with it. It
+        stays on this machine."""
+        return (self.path / ".tessera" / "operator.cred").read_text(encoding="utf-8").strip()
 
     @property
     def viewer_url(self) -> str | None:

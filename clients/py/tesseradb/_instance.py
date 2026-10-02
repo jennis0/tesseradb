@@ -1,4 +1,4 @@
-"""The local server: the deployment file, its secrets, and the `tessera serve` child process.
+"""The local server: the deployment file, its secret, and the `tessera serve` child process.
 
 `commit()` starts `tessera serve` as a child of the kernel over the directory's `tessera.toml`.
 The three planes are on loopback at port 0, so the kernel picks no ports and the child says which
@@ -67,7 +67,8 @@ class Listening:
     """The addresses a database's server listens on, each as `host:port`.
 
     - `viewer`: the viewer plane, where readers read.
-    - `session`: the session plane, where tokens are made and revoked.
+    - `session`: the session plane, where the operator credential, or an API key holding
+      `authorise-as`, makes and revokes tokens.
     - `control`: the control plane, where the operator writes.
     """
 
@@ -84,13 +85,13 @@ def write_deployment(directory: Path) -> Path:
 
     `serve.cors_loopback` lets a page served from this machine read from the server, which is
     what a notebook's map needs, since its page's address is not known in advance. The server
-    listens on this machine only.
+    listens on this machine only. The catalogue of principals, credentials and grants is kept
+    under `.tessera/catalogue`.
     """
     serve = {
         "viewer": "127.0.0.1:0",
         "session": "127.0.0.1:0",
         "control": "127.0.0.1:0",
-        "session_credential_file": ".tessera/session.cred",
         "operator_credential_file": ".tessera/operator.cred",
         "cors_loopback": True,
     }
@@ -104,6 +105,7 @@ def write_deployment(directory: Path) -> Path:
         "plugin": {"module": "builtin:passthrough"},
         "disclosure": {"token_max_lifetime": TOKEN_MAX_LIFETIME},
         "serve": serve,
+        "catalogue": {"dir": ".tessera/catalogue"},
     }
     # The engine's cache directory is opened rather than created, so a deployment file naming one
     # that does not exist refuses to start with an IO error.
@@ -114,17 +116,15 @@ def write_deployment(directory: Path) -> Path:
 
 
 def secrets_for(directory: Path) -> None:
-    """Write the session credential and the operator credential, once per database.
+    """Write the operator credential, once per database.
 
-    Both are written under `.tessera/`, which is owner-only, and each file is created owner-only
+    It is written under `.tessera/`, which is owner-only, and the file is created owner-only
     rather than created and then narrowed: between a write and a `chmod` the secret is readable by
-    anyone on the machine. The operator credential is generated beside the session one because the
-    deployment file requires both.
+    anyone on the machine.
     """
     private = directory / ".tessera"
     private.mkdir(parents=True, exist_ok=True)
     private.chmod(0o700)
-    _secret(private / "session.cred", lambda: secrets.token_urlsafe(32))
     _secret(private / "operator.cred", lambda: secrets.token_urlsafe(32))
 
 

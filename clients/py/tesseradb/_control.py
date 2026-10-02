@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 ARROW = "application/vnd.apache.arrow.stream"
 JSON = "application/json"
@@ -84,16 +84,19 @@ class Answer:
 
 
 class Control:
-    """A client for the control plane of one served database, where the operator writes.
+    """A client for the control plane of one served database, where the operator writes and
+    manages who may read.
 
-    `Database.control` returns one. Each route method sends one request with the operator
-    credential and returns its `Answer`. `status()` and `limits()` return dictionaries, and
+    `Database.control` returns one, and `Control(base, credential)` makes one for a database
+    someone else runs. Each route method sends one request with the credential and returns its
+    `Answer`. `status()` and `limits()` return dictionaries, and
     `limits()` sends its request once and keeps the answer. A `429` is sent again after the wait
     it names, at most 30 seconds, up to 600 attempts in all. Every other status is returned as
     it came.
 
     - `base`: the control plane's address, such as `http://127.0.0.1:41234`.
-    - `credential`: the operator credential.
+    - `credential`: the operator credential, an API key or an OIDC access token. Writes need
+      `write` and `bypass`; status, flush, compaction and the catalogue's verbs need `admin`.
     - `timeout`: how long to wait for one answer, in seconds. The default is 300.
     """
 
@@ -337,6 +340,231 @@ class Control:
         `serve.visible_wait_max_secs` with `visible` set to `false`.
         """
         return self._send("POST", "/control/flush" + _wait(wait), b"")
+
+    # ------------------------------------------------------------------ the catalogue
+    #
+    # Principals, their passwords and API keys, groups, grants, OIDC providers and sessions. Each
+    # route needs `admin`. A change answers `{"sessions_ended": n}`: every live session of every
+    # principal, key or provider whose terms or permissions it could change has ended.
+
+    def _json_send(self, method: str, path: str, body: dict) -> Answer:
+        return self._send(method, path, _json(body), {"content-type": JSON})
+
+    def list_principals(self) -> Answer:
+        """`GET /control/principals`: every local principal, under `principals`.
+
+        Each record holds its `name`, `kind`, `disabled`, `bypass`, `has_password`, and the
+        `terms`, `permissions` and `groups` granted to it directly. No password or key is answered.
+        """
+        return self._send("GET", "/control/principals")
+
+    def show_principal(self, name: str) -> Answer:
+        """`GET /control/principals/{name}`: one principal's record, or `404`."""
+        return self._send("GET", f"/control/principals/{_segment(name)}")
+
+    def create_principal(self, name: str, kind: str) -> Answer:
+        """`POST /control/principals`: a principal holding no password, key, term or permission.
+
+        `kind` is `"person"` or `"service"`. A name already in use is `409`.
+        """
+        return self._json_send("POST", "/control/principals", {"name": name, "kind": kind})
+
+    def change_principal(
+        self, name: str, disabled: bool | None = None, bypass: bool | None = None
+    ) -> Answer:
+        """`PATCH /control/principals/{name}`: disable or enable a principal, or set `bypass`.
+
+        Each argument given is sent. A disabled principal's sessions end and none of its
+        credentials is accepted. `bypass` lets a principal holding `write` write against the
+        whole corpus.
+        """
+        body = {k: v for k, v in (("disabled", disabled), ("bypass", bypass)) if v is not None}
+        return self._json_send("PATCH", f"/control/principals/{_segment(name)}", body)
+
+    def delete_principal(self, name: str) -> Answer:
+        """`DELETE /control/principals/{name}`: the principal, its password, keys, grants and
+        memberships."""
+        return self._send("DELETE", f"/control/principals/{_segment(name)}")
+
+    def set_password(self, name: str, password: str) -> Answer:
+        """`PUT /control/principals/{name}/password`. One shorter than the server's
+        `catalogue.min_password_length` is `422`."""
+        return self._json_send(
+            "PUT", f"/control/principals/{_segment(name)}/password", {"password": password}
+        )
+
+    def clear_password(self, name: str) -> Answer:
+        """`DELETE /control/principals/{name}/password`."""
+        return self._send("DELETE", f"/control/principals/{_segment(name)}/password")
+
+    def list_keys(self, principal: str) -> Answer:
+        """`GET /control/principals/{name}/keys`: the principal's API keys, without their
+        secrets, under `keys`."""
+        return self._send("GET", f"/control/principals/{_segment(principal)}/keys")
+
+    def create_key(
+        self,
+        principal: str,
+        expires_at: int | None = None,
+        permissions: Sequence[str] | None = None,
+    ) -> Answer:
+        """`POST /control/principals/{name}/keys`: issue an API key.
+
+        - `expires_at`: when the key, and every session authorised with it, ends, in seconds
+          since 1970. Not given, the key does not expire.
+        - `permissions`: the key's own permissions, narrower than its principal's. Not given, the
+          key holds its principal's.
+
+        The answer's `key` is the whole key, which is answered here once, and `prefix` names it.
+        """
+        body: dict = {}
+        if expires_at is not None:
+            body["expires_at"] = int(expires_at)
+        if permissions is not None:
+            body["permissions"] = list(permissions)
+        return self._json_send("POST", f"/control/principals/{_segment(principal)}/keys", body)
+
+    def revoke_key(self, prefix: str) -> Answer:
+        """`DELETE /control/keys/{prefix}`: every session authorised or minted with the key
+        ends."""
+        return self._send("DELETE", f"/control/keys/{_segment(prefix)}")
+
+    def list_groups(self) -> Answer:
+        """`GET /control/groups`: every local group, with its terms, permissions and members,
+        under `groups`."""
+        return self._send("GET", "/control/groups")
+
+    def show_group(self, name: str) -> Answer:
+        """`GET /control/groups/{name}`: one group's record, or `404`."""
+        return self._send("GET", f"/control/groups/{_segment(name)}")
+
+    def create_group(self, name: str) -> Answer:
+        """`POST /control/groups`. A name already in use is `409`."""
+        return self._json_send("POST", "/control/groups", {"name": name})
+
+    def delete_group(self, name: str) -> Answer:
+        """`DELETE /control/groups/{name}`: the group, its grants and its memberships."""
+        return self._send("DELETE", f"/control/groups/{_segment(name)}")
+
+    def add_member(self, group: str, principal: str) -> Answer:
+        """`PUT /control/groups/{name}/members/{principal}`."""
+        return self._send("PUT", f"/control/groups/{_segment(group)}/members/{_segment(principal)}")
+
+    def remove_member(self, group: str, principal: str) -> Answer:
+        """`DELETE /control/groups/{name}/members/{principal}`."""
+        return self._send(
+            "DELETE", f"/control/groups/{_segment(group)}/members/{_segment(principal)}"
+        )
+
+    def grant(
+        self,
+        principal: str | None = None,
+        group: str | None = None,
+        term: str | None = None,
+        terms: Sequence[str] | None = None,
+        permission: str | None = None,
+    ) -> Answer:
+        """`POST /control/grants`: grant terms or a permission to a principal or a group.
+
+        Name exactly one of `principal` and `group`, and exactly one of `term`, `terms` and
+        `permission`; the server refuses anything else with `422`. A term says what the grantee
+        may see, and `terms` grants many as one change, refused whole if one is. A permission,
+        `"read"`, `"write"`, `"authorise-as"` or `"admin"`, says what it may do. A grant already
+        held changes nothing.
+        """
+        return self._json_send("POST", "/control/grants", _grant(principal, group, term, terms, permission))
+
+    def revoke_grant(
+        self,
+        principal: str | None = None,
+        group: str | None = None,
+        term: str | None = None,
+        terms: Sequence[str] | None = None,
+        permission: str | None = None,
+    ) -> Answer:
+        """`POST /control/grants/revoke`: the reverse of `grant`, with the same arguments. A
+        grant not held changes nothing."""
+        return self._json_send(
+            "POST", "/control/grants/revoke", _grant(principal, group, term, terms, permission)
+        )
+
+    def list_providers(self) -> Answer:
+        """`GET /control/providers`: every OIDC provider, declared through the API or in
+        `tessera.toml`, under `providers`."""
+        return self._send("GET", "/control/providers")
+
+    def show_provider(self, name: str) -> Answer:
+        """`GET /control/providers/{name}`: one provider's record, or `404`."""
+        return self._send("GET", f"/control/providers/{_segment(name)}")
+
+    def put_provider(
+        self,
+        name: str,
+        issuer: str,
+        audience: str,
+        jwks_url: str,
+        claim_rules: Sequence[dict] | None = None,
+        role_mappings: Sequence[dict] | None = None,
+    ) -> Answer:
+        """`PUT /control/providers/{name}`: declare an OIDC provider, or replace one whole.
+
+        - `issuer`, `audience`: the `iss` its tokens carry and the `aud` they must hold.
+        - `jwks_url`: where its signing keys are published, `https` or `http` to a loopback
+          address.
+        - `claim_rules`: each `{"claim": ..., "template": ...}`, turning a claim's values into
+          terms, such as `{"claim": "groups[*]", "template": "{value}"}`.
+        - `role_mappings`: each `{"claim": ..., "value": ..., "group": ...}`, giving an identity
+          whose claim holds the value exactly the local group's terms and permissions.
+
+        Every session authorised through a provider it replaces ends. A provider declared in
+        `tessera.toml` is `409`.
+        """
+        body: dict = {"issuer": issuer, "audience": audience, "jwks_url": jwks_url}
+        if claim_rules is not None:
+            body["claim_rules"] = list(claim_rules)
+        if role_mappings is not None:
+            body["role_mappings"] = list(role_mappings)
+        return self._json_send("PUT", f"/control/providers/{_segment(name)}", body)
+
+    def drop_provider(self, name: str) -> Answer:
+        """`DELETE /control/providers/{name}`: every session authorised through it ends."""
+        return self._send("DELETE", f"/control/providers/{_segment(name)}")
+
+    def list_sessions(self, principal: str | None = None, provider: str | None = None) -> Answer:
+        """`GET /control/sessions`: live sessions, under `sessions`: all of them, or a local
+        principal's, including those minted for it, or those authorised through a provider."""
+        query = {k: v for k, v in (("principal", principal), ("provider", provider)) if v is not None}
+        path = "/control/sessions"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        return self._send("GET", path)
+
+    def end_sessions(
+        self,
+        token_id: int | None = None,
+        principal: str | None = None,
+        provider: str | None = None,
+    ) -> Answer:
+        """`POST /control/sessions/end`: one session by `token_id`, or every session of a local
+        principal or a provider. Name exactly one."""
+        body = {
+            k: v
+            for k, v in (("token_id", token_id), ("principal", principal), ("provider", provider))
+            if v is not None
+        }
+        return self._json_send("POST", "/control/sessions/end", body)
+
+
+def _grant(principal, group, term, terms, permission) -> dict:
+    """A grant's body: the arguments given, under the route's own names."""
+    named = {
+        "principal": principal,
+        "group": group,
+        "term": term,
+        "terms": None if terms is None else list(terms),
+        "permission": permission,
+    }
+    return {k: v for k, v in named.items() if v is not None}
 
 
 def _wait(wait: bool) -> str:

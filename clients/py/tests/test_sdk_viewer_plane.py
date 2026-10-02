@@ -166,7 +166,7 @@ def test_a_layer_is_dropped_and_its_name_is_not_freed(db):
 
 def test_a_session_is_revoked_by_its_handle_and_the_token_stops_reading(db):
     """The capability never transits a second time: what is sent is the `token_id`."""
-    token = authorise(db.session_url, db.session_credential, ["public"])
+    token = authorise(db.session_url, db.operator_credential, terms=["public"])
     viewer = connect(db.viewer_url, token)
     assert viewer.meta()["views"]
 

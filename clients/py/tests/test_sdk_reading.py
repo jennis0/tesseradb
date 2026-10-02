@@ -18,7 +18,7 @@ import time
 import pytest
 
 from conftest import notebook_corpus  # noqa: F401  (the fixtures below use `corpus`)
-from tesseradb import Token, authorise, connect
+from tesseradb import Token, authorise, connect, login, logout
 from tesseradb._refusal import Refusal
 
 from test_sdk_corpus import declare_notebook
@@ -63,7 +63,7 @@ def test_neither_the_token_nor_the_credential_is_widget_state(db, stub_bundle):
     minted = m._current_token(renew=False)
     state = {k: v for k, v in m.get_state().items() if k != "_esm"}
     assert minted.token not in json.dumps(state)
-    assert db.session_credential not in json.dumps(state)
+    assert db.operator_credential not in json.dumps(state)
     assert not any("token" in name or "credential" in name for name in m.trait_names())
 
 
@@ -153,7 +153,7 @@ def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
     found = db.lookup("s0", "id", [carried])
     assert found.column("tessera_id").to_pylist() == [one]
 
-    token = authorise(db.session_url, db.session_credential, db.terms)
+    token = authorise(db.session_url, db.operator_credential, terms=db.terms)
     assert connect(db.viewer_url, token).item(one)["fields"]["id"] == carried
 
 
@@ -162,7 +162,7 @@ def test_an_items_join_value_is_one_of_its_fields_and_finds_it_again(db):
 
 def test_connect_reads_a_hosted_deployment_with_the_token_it_was_given(db):
     """§10.6: the same three verbs against a deployment somebody else runs."""
-    token = authorise(db.session_url, db.session_credential, [ONE_TERM])
+    token = authorise(db.session_url, db.operator_credential, terms=[ONE_TERM])
     v = connect(db.viewer_url, token)
     assert v.meta()["views"][0]["id"] == "s0"
     table = v.view("s0").sample(k=8)
@@ -180,7 +180,7 @@ def test_connect_has_no_way_to_mint_another_principal_and_no_way_to_write(db):
 
 def test_connect_takes_a_string_a_token_or_a_callable(db):
     """As `Map` takes one today (client-components §7)."""
-    minted = authorise(db.session_url, db.session_credential, [ONE_TERM])
+    minted = authorise(db.session_url, db.operator_credential, terms=[ONE_TERM])
     for source in (minted.token, minted, lambda: minted):
         assert connect(db.viewer_url, source).meta()["views"][0]["id"] == "s0"
 
@@ -225,6 +225,66 @@ def test_a_token_past_its_expiry_is_renewed_and_the_next_read_answers(db):
     v._token = Token(first.token, expires_at=time.time() - 1.0, renew=first.renew)
     assert v.meta()["views"][0]["id"] == "s0"
     assert v.token().expires_at > time.time()
+
+
+# ---------------------------------------------------------------------------- the catalogue
+
+
+def reader(db, name: str, terms: list[str]) -> str:
+    """A local principal of `db`'s catalogue holding `read` and `terms`, with an API key."""
+    control = db.control
+    for answer in (
+        control.create_principal(name, "person"),
+        control.grant(principal=name, permission="read"),
+        control.grant(principal=name, terms=terms),
+    ):
+        assert answer.ok, answer.detail
+    return control.create_key(name).body["key"]
+
+
+def test_login_with_a_password_or_a_key_reads_as_the_principal_and_logout_ends_it(db):
+    """`login` takes one credential; the session reads what the principal's terms admit."""
+    key = reader(db, "ann", [ONE_TERM])
+    password = "a password long enough for the minimum"
+    assert db.control.set_password("ann", password).ok
+    expected = db.viewer([ONE_TERM]).view("s0").count()
+
+    by_password = login(db.viewer_url, principal="ann", password=password)
+    assert by_password.principal == "ann"
+    assert connect(db.viewer_url, by_password).view("s0").count() == expected
+    by_key = login(db.viewer_url, api_key=key)
+    assert connect(db.viewer_url, by_key).view("s0").count() == expected
+
+    logout(db.viewer_url, by_key)
+    with pytest.raises(Refusal):
+        connect(db.viewer_url, by_key.token).meta()
+    with pytest.raises(PermissionError):
+        login(db.viewer_url, principal="ann", password="not the password at all")
+
+
+def test_a_reader_whose_session_a_grant_ended_reads_with_a_new_one(db):
+    """A grant ends the sessions of its principal; a reader that can log in again does."""
+    key = reader(db, "bob", [ONE_TERM])
+    v = connect(db.viewer_url, login(db.viewer_url, api_key=key))
+    before = v.view("s0").count()
+    held = v.token().token
+    assert db.control.grant(principal="bob", term="cs.AI").body["sessions_ended"] == 1
+    assert v.view("s0").count() > before
+    assert v.token().token != held
+
+
+def test_an_integrator_key_mints_for_a_principal_and_may_not_name_terms(db):
+    """`authorise-as` mints a session carrying the principal's terms; terms are the operator's."""
+    reader(db, "cy", [ONE_TERM])
+    portal = reader(db, "portal", [])
+    assert db.control.grant(principal="portal", permission="authorise-as").ok
+    minted = authorise(db.session_url, portal, principal="cy")
+    expected = db.viewer([ONE_TERM]).view("s0").count()
+    assert connect(db.viewer_url, minted).view("s0").count() == expected
+    with pytest.raises(PermissionError):
+        authorise(db.session_url, portal, terms=[ONE_TERM])
+    with pytest.raises(PermissionError):
+        authorise(db.session_url, minted.token, terms=[ONE_TERM])
 
 
 def test_the_widget_answers_reauthorise_with_a_token_the_plane_accepts(db, stub_bundle):

@@ -76,9 +76,9 @@ class Map(anywidget.AnyWidget):
 
     - `url`: the address of the database's viewer plane.
     - `token`: required, though the signature gives it a default of `None`. The token your
-      deployment issued you, as a string, a `Token` from `authorise`, which is renewed before it
-      expires, or a function returning either, which is called again then. A `Map` without one
-      raises `TypeError`.
+      deployment issued you, as a string, a `Token` from `login` or `authorise`, which is renewed
+      before it expires, or a function returning either, which is called again then. A `Map`
+      without one raises `TypeError`.
     - `view`: the view to open on. `None`, the default, opens the first one.
     - `layers`: the annotation layers to draw, each with the layers it depends on. `None`, the
       default, lets the map choose, and `[]` draws none. `"all"` is not a layer name and is
@@ -186,8 +186,9 @@ class Map(anywidget.AnyWidget):
     ) -> None:
         if token is None:
             raise TypeError(
-                "Map needs a token: the viewer token your deployment issued you. An operator "
-                "running locally mints one with tesseradb.authorise(session_url, credential, terms)."
+                "Map needs a token: the viewer token your deployment issued you, one from "
+                "tesseradb.login(url, ...), or one an operator running locally mints with "
+                "db.token(terms)."
             )
         bundle = bundle_path()
         if bundle is None:
