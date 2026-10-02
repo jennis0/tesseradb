@@ -131,10 +131,8 @@ def test_a_card_serves_each_held_term_and_one_clause_of_each_satisfied_conjuncti
     assert card_labels(labels, holding("ir:secret")) == ["ir:secret"]
     assert card_labels(labels, holding("x")) == []
     assert card_labels(["public", "a"], holding("a")) == ["a", "public"]
-    assert card_labels(['s&"team b"', '"team b"'], holding("s", "team b")) == [
-        '"team b"',
-        's&"team b"',
-    ]
+    assert card_labels(['s&"team b"', '"team b"'], holding("s", "team b")) == ['"team b"']
+    assert card_labels(['s&"team b"', '"team c"'], holding("s", "team b")) == ['s&"team b"']
 
 
 def test_a_card_serves_a_clause_of_each_operand_of_the_labels_read_as_one_disjunction():
