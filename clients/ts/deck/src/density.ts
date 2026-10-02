@@ -1,4 +1,4 @@
-import {WORLD_SIZE, type AggregateTable} from '@tesseradb/client';
+import {WORLD_SIZE, type AggregateTable, type TilesProjection} from '@tesseradb/client';
 import {RAMPS, rampAt, type Rgb} from './colour.js';
 
 /**
@@ -182,11 +182,33 @@ export function densityCellsOf(table: Pick<AggregateTable, 'rows'>, depth: numbe
       lo = Number(code & 0xffffffffn);
       hi = Number(code >> 32n);
     }
-    const x = evenBits(lo) + evenBits(hi) * 65536;
-    const y = evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536;
-    cells.push({x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: n});
+    cells.push(cellAt(lo, hi, span, n));
   }
   return cells;
+}
+
+/**
+ * The cells of a frame's tiles at `depth`: one per tile carrying the server's counts, its count the
+ * highlighted items, which are the matched items where no highlight is set, as the aggregate route
+ * counts them. A tile's prefix is the Morton cell the aggregate route names at the same depth.
+ */
+export function densityOfTiles(tiles: TilesProjection['tiles'], depth: number): DensityCounts {
+  const span = WORLD_SIZE / 2 ** depth;
+  const cells: DensityCell[] = [];
+  for (const tile of tiles) {
+    if (tile.depth !== depth || tile.counts === null) continue;
+    const n = Number(tile.counts.highlighted);
+    if (!(n > 0)) continue;
+    cells.push(cellAt(Number(tile.prefix & 0xffffffffn), Number(tile.prefix >> 32n), span, n));
+  }
+  return {depth, cells};
+}
+
+/** The cell whose Morton code has these 32-bit halves, low half first, holding `count` items. */
+function cellAt(lo: number, hi: number, span: number, count: number): DensityCell {
+  const x = evenBits(lo) + evenBits(hi) * 65536;
+  const y = evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536;
+  return {x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count};
 }
 
 /** The even bits of a 32-bit number, packed into its low 16. */

@@ -1,4 +1,4 @@
-import {BandCache, type Band} from './bands.js';
+import {BandCache, type Band, type CountedTile} from './bands.js';
 import {WORLD_SIZE} from './coords.js';
 import type {ReplicaFrame} from './replica.js';
 import type {TileRect} from './rects.js';
@@ -15,7 +15,9 @@ import type {TileRect} from './rects.js';
  * - Descendant stand-ins are density-matched per drawn tile, by largest remainder across bands. A
  *   floor per band would give a coarse tile one mark per small deep band.
  * - The work is per contributing band on the integer grid, never per viewport tile.
- * - Tiles that are not exact carry no counts, since their marks are a superset.
+ * - A stand-in carries no counts, since its marks are a superset.
+ * - A tile whose counts have landed and whose points have not is an entry that draws nothing and
+ *   carries the server's counts. Its band carries the same counts, and replaces the entry.
  */
 
 /**
@@ -31,13 +33,15 @@ export type ComposedTile = {
   depth: number;
   /**
    * True where the marks are the server's served points for this tile at the frame's depth. False
-   * for a stand-in, whose marks may be a superset of what the server would serve here.
+   * for a stand-in, whose marks may be a superset of what the server would serve here, and for a
+   * tile counted before its points, which draws nothing.
    */
   exact: boolean;
   /** Marks this entry puts on screen; the tile's `served` count for an exact tile. */
   drawn: number;
   /**
-   * The server's counts for the tile, or `null` for a stand-in. `visible` is how many items this
+   * The server's counts for the tile, or `null` for a stand-in. A tile counted before its points
+   * carries them with `drawn` 0. `visible` is how many items this
    * principal may see in the tile, `matched` how many of those match the filter, `highlighted` how
    * many of those match the highlight, and `served` how many points were sent.
    */
@@ -106,6 +110,16 @@ function exactTileSet(exact: readonly Band[], dim: number): Set<number> {
   return tiles;
 }
 
+/**
+ * The entries for tiles counted before their points, at `depth`, less those an exact or truncated
+ * band answers.
+ */
+function countedEntries(counted: readonly CountedTile[], answered: readonly Band[], depth: number): ComposedTile[] {
+  if (counted.length === 0) return [];
+  const drawn = new Set(answered.map((band) => band.prefix));
+  return counted.filter((c) => !drawn.has(c.prefix)).map((c) => ({prefix: c.prefix, depth, exact: false, drawn: 0, counts: c.counts}));
+}
+
 /** Derives a full composition from a replica frame. The expensive path; the caller rate-limits it. @internal */
 export function compose(frame: ReplicaFrame): Composition {
   const tiles: ComposedTile[] = [];
@@ -136,6 +150,8 @@ export function compose(frame: ReplicaFrame): Composition {
       counts: {visible: band.visible, matched: band.matched, highlighted: band.highlighted, served: band.served}
     });
   }
+
+  tiles.push(...countedEntries(frame.counted ?? [], [...exact, ...truncated], frame.depth));
 
   const dim = 2 ** frame.depth;
   const exactTiles = exactTileSet(exact, dim);
@@ -219,11 +235,13 @@ export function compose(frame: ReplicaFrame): Composition {
 /**
  * Folds fresh exact bands into a held composition. The exact half is recomputed; the stand-in
  * pieces are carried, with ground now exact removed, and returned by reference when nothing was
- * removed so a consumer can keep its buffers.
+ * removed so a consumer can keep its buffers. `counted` is the tiles counted before their points;
+ * left out, the held composition's are carried.
  *
  * @internal
  */
-export function fold(held: Composition, exact: Band[], version: number): Composition {
+export function fold(held: Composition, exact: Band[], version: number, counted?: readonly CountedTile[]): Composition {
+  const carried = counted ?? held.tiles.filter((t) => !t.exact && t.drawn === 0 && t.counts !== null).map((t) => ({prefix: t.prefix, counts: t.counts!}));
   const tiles: ComposedTile[] = [];
   const live: Band[] = [];
   const truncated: Band[] = [];
@@ -251,6 +269,7 @@ export function fold(held: Composition, exact: Band[], version: number): Composi
       counts: {visible: band.visible, matched: band.matched, highlighted: band.highlighted, served: band.served}
     });
   }
+  tiles.push(...countedEntries(carried, [...live, ...truncated], held.depth));
   const exactTiles = exactTileSet(live, dim);
   // As in {@link compose}, a truncated head answers its tile.
   for (const band of truncated) exactTiles.add(band.x * dim + band.y);

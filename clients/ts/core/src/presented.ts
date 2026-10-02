@@ -99,8 +99,8 @@ export type PresenterEvents = {
 
 /**
  * Throws where the picture differs from what was served: where exact tiles draw a different number
- * of marks than were served, or a tile that is not exact carries counts, since a superset read as
- * density overstates. A dropped mark discloses nothing, but it is the sign of an assembly bug.
+ * of marks than were served, or a stand-in carries counts, since a superset read as density
+ * overstates. A tile counted before its points draws nothing, and carries counts. A dropped mark discloses nothing, but it is the sign of an assembly bug.
  *
  * @internal
  */
@@ -112,7 +112,7 @@ export function assertCompositionMatchesServed(c: Composition): void {
     );
   }
   for (const tile of c.tiles) {
-    if (!tile.exact && tile.counts !== null) {
+    if (!tile.exact && tile.drawn > 0 && tile.counts !== null) {
       throw new Error(
         `tile ${tile.prefix} draws a superset of its served set but carries counts. ` +
           `A superset of marks must never be read as density.`
@@ -251,7 +251,7 @@ export class Presenter {
       // repairs it.
       if (held === null) return;
       frame = this.phase('refresh', () =>
-        fold(held, this.replica.exactIn(held.want, held.depth), this.replica.version)
+        fold(held, this.replica.exactIn(held.want, held.depth), this.replica.version, this.replica.countedIn(held.want, held.depth))
       );
     } else {
       const fetched = verdict.frame;
@@ -261,8 +261,9 @@ export class Presenter {
         standIn: fetched.fallback.length
       });
     }
-    // An empty frame over nothing drawn is not a paint; the status reports `empty`.
-    if (frame.exactDrawn + frame.provisional === 0 && this.held === null) return;
+    // A frame with nothing drawn and nothing counted, over nothing drawn, is not a paint; the status
+    // reports `empty`.
+    if (frame.tiles.length === 0 && this.held === null) return;
     assertCompositionMatchesServed(frame);
     this.held = frame;
     this.status = 'shown';

@@ -1,6 +1,6 @@
 import {MAX_DEPTH, WORLD_SIZE, tileContains, tileXY} from './coords.js';
 import {NO_ORDINAL, type ArtifactRef, type SessionArtifactTable} from './artifactTable.js';
-import type {ScalarColumn, ViewportResult} from './types.js';
+import type {ScalarColumn, TileCounts, ViewportResult} from './types.js';
 import {
   coverageAdd,
   coverageAt,
@@ -28,6 +28,21 @@ import {
 
 /** A tile's address: its Morton prefix at a depth. Depth is not recoverable from the prefix. @internal */
 export type TileAddress = {depth: number; prefix: bigint};
+
+/**
+ * A tile's counts from the server, held from the moment its response's tiles frame lands until the
+ * tile's band arrives, so the tile is counted before its points are drawn. The counts are the ones
+ * the band will carry: the same frame supplies both.
+ *
+ * @internal
+ */
+export type CountedTile = {
+  prefix: bigint;
+  counts: {visible: bigint; matched: bigint; highlighted: bigint; served: number};
+};
+
+/** A counted tile as the cache holds it: where it is, and the content key it was counted under. */
+type HeldCount = CountedTile & {depth: number; x: number; y: number; contentKey: string};
 
 /** `${depth}:${prefix}`, the map key. @internal */
 export type BandKey = string;
@@ -501,6 +516,11 @@ export class BandCache {
    * entry per tile, keep this small and let a plan subtract regions without listing tiles.
    */
   private covered: Coverage[] = [];
+  /**
+   * Counts for tiles whose points are on their way, under the latest content key only. A tile's
+   * entry goes when its band is put, and every entry goes with the principal.
+   */
+  private counted = new Map<BandKey, HeldCount>();
   private identityKey: string | null = null;
   private held = 0;
   private heldPoints = 0;
@@ -581,6 +601,43 @@ export class BandCache {
     return exact;
   }
 
+  /**
+   * Holds the counts of a response's tiles at `depth` that will carry points, until each tile's
+   * band arrives. A tile that serves no point gets no band, so it is not held. Counts under an
+   * older content key are dropped, and a change of principal drops everything, as {@link put} does.
+   */
+  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string): void {
+    if (this.identityKey !== identityKey) {
+      this.dropIdentity();
+      this.identityKey = identityKey;
+    }
+    for (const [key, held] of this.counted) if (held.contentKey !== contentKey) this.counted.delete(key);
+    for (const tile of tiles) {
+      if (tile.served === 0n) continue;
+      const key = bandKey(depth, tile.tile);
+      if (this.bands.get(key)?.contentKey === contentKey) continue;
+      const {x, y} = tileXY(tile.tile, depth);
+      this.counted.set(key, {
+        prefix: tile.tile,
+        depth,
+        x,
+        y,
+        contentKey,
+        counts: {visible: tile.visible, matched: tile.matched, highlighted: tile.highlighted, served: Number(tile.served)}
+      });
+    }
+    this.changes++;
+  }
+
+  /** The counted tiles inside a region at one depth; see {@link putCounts}. */
+  countedIn(want: TileRect, depth: number): CountedTile[] {
+    const out: CountedTile[] = [];
+    for (const held of this.counted.values()) {
+      if (held.depth === depth && rectContainsTile(want, held.x, held.y)) out.push(held);
+    }
+    return out;
+  }
+
   /** See {@link changes}. Compare for equality only. */
   get version(): number {
     return this.changes;
@@ -624,6 +681,7 @@ export class BandCache {
       this.heldPoints -= previous.ids.length;
     }
     this.bands.set(key, band);
+    this.counted.delete(key);
     this.index(band, key);
     this.held += band.bytes;
     this.heldPoints += band.ids.length;
@@ -661,6 +719,7 @@ export class BandCache {
     this.bands.clear();
     this.byDepth.clear();
     this.covered = [];
+    this.counted.clear();
     this.changes++;
     this.identityKey = null;
     this.held = 0;

@@ -2208,3 +2208,55 @@ describe('the item a click opens and the record a hover names', () => {
     expect(item).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('counts before points', () => {
+  /**
+   * A fake whose viewport hands over its counts at once and its points only when `land` is called,
+   * as a streamed response does.
+   */
+  async function held(identityKey = 'ik') {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    let land: () => void = () => {};
+    viewport.mockImplementation((async (_t: string, _req: FakeRequest, _s: unknown, _b: unknown, _p: unknown, onCounts?: (c: unknown) => void) => {
+      const answer = response('ck', identityKey);
+      // A count-only request takes no sink and answers at once.
+      if (!onCounts) return answer;
+      onCounts({tiles: answer.result.tiles, subCells: null, identityKey, contentKey: 'ck'});
+      await new Promise<void>((resolve) => (land = resolve));
+      return answer;
+    }) as never);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    return {store, clock, scheduler, land: async () => {
+      land();
+      await clock.advance(600);
+      scheduler.flush();
+    }};
+  }
+
+  it('shows a region’s counts before its points, then the same counts with the points', async () => {
+    const {store, land} = await held();
+    // Counted and not drawn: the figures are the server's, and no mark is on screen.
+    expect(store.get('view').visible.value).toBe(10_000_000);
+    expect(store.get('view').served.shown).toBe(0);
+    expect(store.get('marks').count.shown).toBe(0);
+    expect(store.get('tiles').tiles.map((t) => ({exact: t.exact, drawn: t.drawn, visible: t.counts?.visible}))).toEqual([{exact: false, drawn: 0, visible: 10_000_000n}]);
+
+    await land();
+    // The points carry the same counts, which replace the early ones rather than add to them.
+    expect(store.get('view').visible.value).toBe(10_000_000);
+    expect(store.get('view').served.shown).toBe(3);
+    expect(store.get('tiles').tiles.map((t) => ({exact: t.exact, drawn: t.drawn, visible: t.counts?.visible}))).toEqual([{exact: true, drawn: 3, visible: 10_000_000n}]);
+  });
+
+  it('drops counts whose points have not landed when the store forgets its answers', async () => {
+    const {store} = await held();
+    expect(store.get('tiles').tiles.length).toBe(1);
+    store.clear();
+    expect(store.get('tiles').tiles).toEqual([]);
+    expect(store.get('view').visible.value).toBe(0);
+  });
+});
