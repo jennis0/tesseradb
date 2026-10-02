@@ -1,4 +1,4 @@
-import {Aggregates, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, joinedAggregate, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
@@ -877,12 +877,18 @@ export function createStore(options: StoreOptions): Store {
     trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
   });
 
+  /** `client.aggregate`, with the requests asked for in one task over the same set joined. */
+  const aggregate = joinedAggregate(
+    (token, req, signal) => client.aggregate(token, req, signal),
+    () => meta?.selection.maxAggregateGroupings ?? 1
+  );
+
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
       const filters = aggregateFilters(spec);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
-      const result = await client.aggregate(
+      const result = await aggregate(
         asked.token,
         {view: asked.view, groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})},
         signal
@@ -905,7 +911,7 @@ export function createStore(options: StoreOptions): Store {
       const asked = await viewed();
       const area = countedArea()!;
       const filters = withArea(aggregateFilters(spec), area);
-      const result = await client.aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
+      const result = await aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
       if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
       return {result, view: asked.view};
     },

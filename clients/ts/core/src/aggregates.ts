@@ -1,6 +1,6 @@
 import {retryDelayMs, type Clock, type RetryOptions} from './driver.js';
 import {refusalOf, type Refusal} from './presented.js';
-import type {AggregateResult, FilterExpr, Grouping} from './types.js';
+import type {AggregateRequest, AggregateResult, FilterExpr, Grouping} from './types.js';
 
 /**
  * What a component registers with {@link Store.setAggregate}: the groupings to count, and the
@@ -175,4 +175,83 @@ export class Aggregates {
     this.entries = next;
     this.publish(next);
   }
+}
+
+/** One caller's share of a joined request. */
+type Part = {groupings: Grouping[]; signal: AbortSignal; resolve: (result: AggregateResult) => void; reject: (error: unknown) => void};
+
+/**
+ * How many microtasks a request waits for others to join it. Elements that answer one store change
+ * update one after another within the same task, each in a microtask of its own, and their requests
+ * arrive within this many of each other. Counting microtasks rather than waiting for a timer keeps
+ * the join independent of the clock.
+ */
+const JOIN_MICROTASKS = 64;
+
+/**
+ * Sends aggregate requests, joining those that differ only in their groupings into one request
+ * when they are asked for together. Elements that answer one store change each register their own
+ * aggregate, and over the same filters they are one read of the same set. Each caller gets its own
+ * tables back, numbered from 0. The joined request is aborted once every caller's signal has
+ * aborted, and one whose groupings would pass `maxGroupings` is sent alone.
+ *
+ * @internal
+ */
+export function joinedAggregate(
+  send: (token: string, req: AggregateRequest, signal: AbortSignal) => Promise<AggregateResult>,
+  maxGroupings: () => number
+): (token: string, req: AggregateRequest, signal: AbortSignal) => Promise<AggregateResult> {
+  const waiting = new Map<string, {token: string; req: Omit<AggregateRequest, 'groupings'>; parts: Part[]}>();
+
+  const flush = (key: string) => {
+    const batch = waiting.get(key)!;
+    waiting.delete(key);
+    const live = batch.parts.filter((p) => !p.signal.aborted);
+    if (live.length === 0) return;
+    const controller = new AbortController();
+    let open = live.length;
+    for (const part of live) {
+      part.signal.addEventListener(
+        'abort',
+        () => {
+          part.reject(part.signal.reason);
+          if (--open === 0) controller.abort();
+        },
+        {once: true}
+      );
+    }
+    send(batch.token, {...batch.req, groupings: live.flatMap((p) => p.groupings)}, controller.signal).then(
+      (result) => {
+        let from = 0;
+        for (const part of live) {
+          const own = (t: AggregateResult['tables'][number]) => t.grouping >= from && t.grouping < from + part.groupings.length;
+          const tables = result.tables.filter(own).map((t) => ({...t, grouping: t.grouping - from}));
+          from += part.groupings.length;
+          part.resolve({...result, tables});
+        }
+      },
+      (error: unknown) => {
+        for (const part of live) part.reject(error);
+      }
+    );
+  };
+
+  return (token, req, signal) =>
+    new Promise<AggregateResult>((resolve, reject) => {
+      const {groupings, ...rest} = req;
+      const key = JSON.stringify([token, rest], (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+      const batch = waiting.get(key);
+      if (batch && batch.parts.reduce((n, p) => n + p.groupings.length, 0) + groupings.length > maxGroupings()) {
+        send(token, req, signal).then(resolve, reject);
+        return;
+      }
+      const part = {groupings, signal, resolve, reject};
+      if (batch) {
+        batch.parts.push(part);
+        return;
+      }
+      waiting.set(key, {token, req: rest, parts: [part]});
+      const hop = (left: number): void => (left === 0 ? flush(key) : queueMicrotask(() => hop(left - 1)));
+      hop(JOIN_MICROTASKS);
+    });
 }
