@@ -87,6 +87,7 @@ class Deployment:
         ports: tuple[int, int, int],
         binary: Path,
         cap_bytes: int | None = None,
+        swap_bytes: int = 0,
         env: dict[str, str] | None = None,
         ingest: dict | None = None,
         serve: dict | None = None,
@@ -97,6 +98,9 @@ class Deployment:
         self.ports = ports
         self.binary = Path(binary)
         self.cap_bytes = cap_bytes
+        #: The scope's `MemorySwapMax`. Zero by default, so `memory.reclaim` can only drop file
+        #: pages rather than swap anonymous memory out.
+        self.swap_bytes = swap_bytes
         #: `[ingest]` keys written into the copy. Empty means the server's own defaults.
         self.ingest = dict(ingest or {})
         #: Extra `[serve]` keys written into the copy, beside the ports and the credentials.
@@ -179,10 +183,8 @@ module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
             "--scope",
             "--collect",
             "--quiet",
-            # Swap off, so `memory.reclaim` can only drop file pages rather than swap anonymous
-            # memory out.
             "-p",
-            "MemorySwapMax=0",
+            f"MemorySwapMax={self.swap_bytes}",
         ]
         if self.cap_bytes is not None:
             scope += ["-p", f"MemoryMax={self.cap_bytes}"]
