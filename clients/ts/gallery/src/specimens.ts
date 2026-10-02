@@ -1,10 +1,10 @@
 import type {AggregateSpec, Artifact, ArtifactDetail, BrowsePage, PaletteScheme, Projections, RegionProjection, Store} from '@tesseradb/client';
-import {NO_MASKED} from '@tesseradb/client';
+import {NO_MASKED, WORLD_SIZE} from '@tesseradb/client';
 import type {TesseraMap} from '@tesseradb/components';
 import type {Colouring, Sizing} from '@tesseradb/deck';
 import {setColouring, setSizing} from '../../components/src/colouring.js';
 import {aggregateEntry, fakeStore, meta as baseMeta, settle, status, type AggregateRow, type FakeStore} from '../../components/test/fake-store.js';
-import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestionPage, topicArtifacts, withDraft} from './corpus.js';
+import {AREA, FIELDS, LAYERS, MANY_FIELDS, META, TOPIC, VENUES, browseRow, cellCounts, emptyDraft, filtersOf, legendOf, mapState, paper, ranksOf, suggestionPage, topicArtifacts, withDraft} from './corpus.js';
 
 /**
  * Every element in every state its source handles, each built from its own fake store. A specimen
@@ -55,7 +55,7 @@ function store(over: Partial<Projections> = {}, answered = true): FakeStore {
     queueMicrotask(() => {
       const held = new Map(s.get('aggregates'));
       if (spec === null) held.delete(id);
-      else held.set(id, aggregateOf(spec));
+      else held.set(id, aggregateOf(spec, s.get('view').id));
       s.set('aggregates', held);
     });
   };
@@ -76,8 +76,8 @@ const ARTIFACT_COUNTS = new Map<string, number>([
 ]);
 const fieldCount = (key: string) => Math.round(CORPUS_TOTAL * (FIELD_SHARES[MANY_FIELDS.findIndex((f) => f.key === key)] ?? 0.004));
 
-/** An answer to `spec` from the corpus's figures. */
-function aggregateOf(spec: AggregateSpec) {
+/** An answer to `spec` in `view` from the corpus's figures. */
+function aggregateOf(spec: AggregateSpec, view: string) {
   return aggregateEntry(
     spec.groupings.map((g) => {
       const by = g.by;
@@ -88,8 +88,11 @@ function aggregateOf(spec: AggregateSpec) {
         return {rows, groups: 'values' in by ? null : MANY_FIELDS.length, total: CORPUS_TOTAL};
       }
       if (by && 'artifacts' in by) rows = by.artifacts.map((id) => ({key: id, count: ARTIFACT_COUNTS.get(id.toString()) ?? 12_400}));
+      // The gallery's frame maps world units to data coordinates one for one.
+      if (g.cells) rows = cellCounts(g.cells.depth, g.cells.area ?? [0, 0, WORLD_SIZE, WORLD_SIZE]);
       return {rows, total: CORPUS_TOTAL};
-    })
+    }),
+    view
   );
 }
 
