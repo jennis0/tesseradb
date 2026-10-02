@@ -77,6 +77,9 @@ pub enum EngineError {
     /// clamped: a Morton prefix carries no depth of its own, so a silently-reduced offset would
     /// hand the client cells it cannot interpret.
     UnderlayRefused(String),
+    /// A `/v1/viewport` request's `point_rows` named a column that is not one of the view's render
+    /// columns. The detail names only what the caller sent and the view.
+    PointRowsRefused(String),
     /// This session's row projection was being built by a concurrent request, and this request
     /// waited until the wait budget ran out. A racer parks on the build rather than being
     /// refused, since refusing sheds no load while the work is already happening. Maps to 429
@@ -157,6 +160,7 @@ impl std::fmt::Display for EngineError {
                  narrow the bbox or request a shallower zoom"
             ),
             EngineError::UnderlayRefused(detail) => write!(f, "underlay refused: {detail}"),
+            EngineError::PointRowsRefused(detail) => write!(f, "{detail}"),
             EngineError::ProjectionBuilding => write!(
                 f,
                 "this session's row projection is being built by a concurrent request; retry \

@@ -634,7 +634,8 @@ paths:
             - an `underlay_offset` beyond `selection.max_underlay_offset`, past depth 16, or over the sub-cell budget, which is refused and not clamped;
             - an unknown filter column, or an operator outside its column's family (an unknown value is an empty operand and is not refused);
             - `none_of` naming a text column or two columns;
-            - a `layers`, `levels`, `computed`, `artifact_rows` or `point_rows` value outside its schema.
+            - a `layers`, `levels`, `computed`, `artifact_rows` or `point_rows` value outside its schema;
+            - a `point_rows` list naming a column that is not one of the view's render columns.
           content:
             application/json:
               schema:
@@ -3299,18 +3300,27 @@ components:
           enum: [full, identity]
         point_rows:
           description: |
-            The columns of each served point, as `artifact_rows` is for artifacts. Absent or
-            `"full"` is every column. `"highlight"` is the same points as `(tessera_id,
-            highlighted)`, the other columns absent from the schema. The points and the per-tile
-            `served` counts are the same under either value.
+            The columns of each served point, as `artifact_rows` is for artifacts. The points and
+            the per-tile `served` counts are the same under every value; only the columns change.
 
-            Nine bytes a point. It is for a client that changed only its highlight and holds every
-            point it needs; it joins the bits to its points by `tessera_id`. When
-            `x-tessera-stale` moves, the held points may no longer be what the same request serves,
-            and the client asks again with `"full"`. Without a `highlight` it answers as `"full"`.
-            Any other value is `422`.
-          type: string
-          enum: [full, highlight]
+            Absent or `"full"` is every render column. A list names the render columns to serve:
+            each point is `tessera_id`, `code` and those columns, in the view's declaration order,
+            followed by `highlighted` and the membership columns as under `"full"`. No other render
+            column is read, so a map that colours by one column asks for that one and pays for
+            nothing else; `[]` is position alone. A name that is not one of the view's render
+            columns in `/v1/meta` is `422`. Fetch the rest of an item from `/v1/items`.
+
+            `"highlight"` is the same points as `(tessera_id, highlighted)`, the other columns
+            absent from the schema. Nine bytes a point. It is for a client that changed only its
+            highlight and holds every point it needs; it joins the bits to its points by
+            `tessera_id`. When `x-tessera-stale` moves, the held points may no longer be what the
+            same request serves, and the client asks again with its columns. Without a `highlight`
+            it answers as `"full"`. Any other string is `422`.
+          oneOf:
+            - type: string
+              enum: [full, highlight]
+            - type: array
+              items: { type: string }
 
     BrowseRequest:
       type: object

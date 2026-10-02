@@ -740,17 +740,26 @@ struct ViewportReq {
     /// filtered candidate.
     #[serde(default)]
     highlight: Option<serde_json::Value>,
-    /// Point columns: `"full"` (the default) or `"highlight"`, the same points as `(tessera_id,
-    /// highlighted)` for a client that changed only its highlight. A stale stamp means re-ask with
-    /// `"full"`; with no `highlight` it answers as `"full"`.
+    /// Point columns: `"full"` (the default), a list of render column names (`tessera_id`, `code`
+    /// and those columns, no other column read), or `"highlight"`, the same points as
+    /// `(tessera_id, highlighted)` for a client that changed only its highlight. A stale stamp
+    /// means re-ask; with no `highlight`, `"highlight"` answers as `"full"`.
     #[serde(default)]
     point_rows: Option<PointRowsReq>,
 }
 
-/// The `point_rows` field's two values; see [`ArtifactRowsReq`].
+/// The `point_rows` field: a word or a list of render column names, untagged as [`LayersReq`] is.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PointRowsReq {
+    Word(PointRowsWord),
+    Columns(Vec<String>),
+}
+
+/// The `point_rows` field's two words; see [`ArtifactRowsReq`].
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum PointRowsReq {
+enum PointRowsWord {
     Full,
     Highlight,
 }
@@ -844,8 +853,9 @@ struct WireSink {
     /// Which artifacts frame shape [`Self::artifacts`] writes; the engine computes the same rows
     /// either way.
     artifact_rows: tessera_engine::ArtifactRows,
-    /// Which points frame shape [`Self::points`] writes.
-    point_rows: tessera_engine::PointRows,
+    /// Whether [`Self::points`] writes the `(tessera_id, highlighted)` frame where a chunk carries
+    /// the bits.
+    highlight_rows: bool,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
@@ -949,8 +959,8 @@ impl ViewportSink for WireSink {
             .map(|m| (m.layer.as_str(), m.ids.as_slice()))
             .collect();
         // The highlight projection writes the two-column frame; the rows are the same either way.
-        let frame = match (self.point_rows, chunk.highlighted.as_deref()) {
-            (tessera_engine::PointRows::Highlight, Some(bits)) => {
+        let frame = match (self.highlight_rows, chunk.highlighted.as_deref()) {
+            (true, Some(bits)) => {
                 points_highlight_frame(&chunk.tessera_ids, bits)
             }
             (_, bits) => points_frame(
@@ -1150,11 +1160,12 @@ fn run_viewport_stream(
     };
     sink.artifact_rows = artifact_rows;
     // The same shape one field over: omitted is `"full"`, and the projection is the opt-in.
-    let point_rows = match req.point_rows {
-        Some(PointRowsReq::Highlight) => tessera_engine::PointRows::Highlight,
-        Some(PointRowsReq::Full) | None => tessera_engine::PointRows::Full,
+    let point_rows = match &req.point_rows {
+        Some(PointRowsReq::Word(PointRowsWord::Highlight)) => tessera_engine::PointRows::Highlight,
+        Some(PointRowsReq::Word(PointRowsWord::Full)) | None => tessera_engine::PointRows::Full,
+        Some(PointRowsReq::Columns(names)) => tessera_engine::PointRows::Columns(names),
     };
-    sink.point_rows = point_rows;
+    sink.highlight_rows = point_rows == tessera_engine::PointRows::Highlight;
     let mut request = ViewportRequest::new(&view_id, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
@@ -1325,7 +1336,7 @@ async fn viewport(
         start,
         // Set from the request inside the producer.
         artifact_rows: tessera_engine::ArtifactRows::Full,
-        point_rows: tessera_engine::PointRows::Full,
+        highlight_rows: false,
         arrow_serialise_ns: 0,
         shape_guard_fired: 0,
         points_total: 0,
