@@ -73,7 +73,7 @@ describe('placing a card beside its point', () => {
 
   it('grows down from where it sat when its content grows', () => {
     const first = placeCallout([400, 450], CARD, MAP)!;
-    const taller = placeCallout([400, 450], {width: 300, height: 400}, MAP, [], undefined, {side: first.side, offset: first.offset, firm: true})!;
+    const taller = placeCallout([400, 450], {width: 300, height: 400}, MAP, [], undefined, {side: first.side, offset: first.offset, firm: false})!;
     expect(taller.top).toBe(first.top);
     expect(taller.height).toBe(400);
   });

@@ -1334,8 +1334,8 @@ export class TesseraExplorer extends TesseraElement {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0 ? [{left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height}] : [];
     });
-    // A card that grew, as under Show all, keeps its side and grows down.
-    this.placeCallouts(true);
+    // A card that grew, as under Show all, keeps its side and grows down where that is clear.
+    this.placeCallouts();
   }
 
   /** The cards over the map that callouts keep clear of. */

@@ -39,7 +39,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, Ma
  *
  * A `kept` placement is taken first, slid along its side to stay inside the map: always where it is
  * `firm` and the card stays inside the map across the side, else only where it meets nothing in
- * `avoid`. Otherwise the sides are tried in the order of the room each leaves once the card is in
+ * `avoid`, if need be shortened as below. Otherwise the sides are tried in the order of the room each leaves once the card is in
  * it, most first; along a side the card is centred on the point and slid to stay inside the map, or
  * slid further, still level with the point, to clear a rectangle in the way. Beside the point, a
  * card that fits nowhere at its own height is shortened, down to `minHeight`, to the clear span
@@ -104,7 +104,8 @@ export function placeCallout(
   const keptRect = (k: Kept): Rect | null => {
     const s = sides.find((x) => x.side === k.side)!;
     const r = k.side === 'right' || k.side === 'left' ? {...s.rect, top: clamp(py + k.offset, EDGE, map.height - EDGE - h)} : {...s.rect, left: clamp(px + k.offset, EDGE, map.width - EDGE - w)};
-    return (k.firm ? inside(r) : clear(r)) ? r : null;
+    if (k.firm) return inside(r) ? r : null;
+    return clear(r) ? r : shortened(s);
   };
   const ranked = [...sides].sort((a, b) => b.room - a.room);
   const pick = (): {side: Side; rect: Rect} => {
