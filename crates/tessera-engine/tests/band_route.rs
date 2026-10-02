@@ -46,7 +46,7 @@ fn mix(mut z: u64) -> u64 {
 /// A position in the fixture's extent, clustered so that tiles range from dense to nearly empty.
 fn position(e: u64) -> (f64, f64) {
     let h = mix(e);
-    let spread = if e % 4 == 0 { 1000.0 } else { 120.0 };
+    let spread = if e.is_multiple_of(4) { 1000.0 } else { 120.0 };
     let x = (h % 1_000_000) as f64 / 1_000_000.0 * spread;
     let y = ((h >> 20) % 1_000_000) as f64 / 1_000_000.0 * spread;
     (x, y)
@@ -55,10 +55,10 @@ fn position(e: u64) -> (f64, f64) {
 /// Every item carries "0"; every third "1"; every fiftieth "2"; [`LONE`] alone "3".
 fn terms(e: u64) -> Vec<u32> {
     let mut t = vec![0];
-    if e % 3 == 0 {
+    if e.is_multiple_of(3) {
         t.push(1);
     }
-    if e % 50 == 0 {
+    if e.is_multiple_of(50) {
         t.push(2);
     }
     if e == LONE {
@@ -92,7 +92,7 @@ fn build_fixture(root: &Path) {
             )),
             Arc::new(Int32Array::from(
                 ids.iter()
-                    .map(|&e| (e % 7 != 0).then_some(e as i32 - 30_000))
+                    .map(|&e| (!e.is_multiple_of(7)).then_some(e as i32 - 30_000))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(BooleanArray::from(
@@ -297,7 +297,7 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
     let mut rows: Vec<UnallocatedRow> = (0..6_000u64)
         .map(|i| {
             let (x, y) = position(ROWS + i);
-            let descriptors = if i % 3 == 0 {
+            let descriptors = if i.is_multiple_of(3) {
                 vec![b"0".to_vec(), b"1".to_vec()]
             } else {
                 vec![b"0".to_vec()]
@@ -310,12 +310,12 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
                 y,
                 scalars: vec![
                     WalScalar::U64(key_id(&format!("new-{i}"))),
-                    if i % 4 == 0 {
+                    if i.is_multiple_of(4) {
                         WalScalar::Null
                     } else {
                         WalScalar::I32(i as i32)
                     },
-                    WalScalar::Bool(i % 2 == 0),
+                    WalScalar::Bool(i.is_multiple_of(2)),
                     WalScalar::F64(-(i as f64)),
                 ],
                 terms: Vec::new(),
@@ -335,12 +335,12 @@ fn the_band_route_serves_what_the_scan_serves_through_writes_a_fold_and_a_restar
 
     // Deletions and suppressions, applied through the mask: the denied rows stay in the bands.
     let mut changes: Vec<(EntityId, ChangeOp)> = (0..ROWS)
-        .filter(|e| e % 3 == 0 && e % 11 == 0)
+        .filter(|e| e.is_multiple_of(3) && e.is_multiple_of(11))
         .map(|e| (entity_of(&map, e), ChangeOp::Delete))
         .collect();
     changes.extend(
         (0..ROWS)
-            .filter(|e| e % 13 == 0 && *e != LONE)
+            .filter(|e| e.is_multiple_of(13) && *e != LONE)
             .map(|e| (entity_of(&map, e), ChangeOp::Suppress)),
     );
     engine
