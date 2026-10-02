@@ -240,14 +240,23 @@ is sent again as the map's own requests are, after the same backoff or the serve
 and box as the request's `filters`, so every grouping's total is the selection's count.
 
 The map draws density from this route. `DensityCounter` in `@tesseradb/deck` registers one
-grouping of cells, at the depth whose cells come nearest a chosen size on screen at the camera's
-zoom, over the viewport and a margin of a quarter of its width and height on each side. It asks
-only once the camera has rested for 200 ms, draws the last answer at its own world positions until
-the next lands, and asks nothing while the viewport stays inside the area held at the same depth.
-A depth whose cells over that area would pass `selection.max_aggregate_cells` is not asked for;
-the finest size that fits is drawn instead, and a refusal naming the deepest depth that fits is
-asked again at that depth. The counts are exact and follow the store's filters, selected region
-and, under a highlight, the highlight, as the map's points do.
+grouping of cells with the store, at the depth whose cells come nearest a chosen size on screen at
+the camera's zoom, over the viewport and a margin of a quarter of its width and height on each
+side. The registration is `highlighted`, so the counts are the highlighted items' under a
+highlight and the filtered items' otherwise, over the store's filters and selected region, as the
+map's points are; the store asks again when any of these changes. The counter asks only once the
+camera has rested for 200 ms, draws the last answer at its own world positions until the next
+lands, and asks nothing while the viewport stays inside the area held at the same depth. A move
+that leaves the area drops the registration at once, so a filter changed during the move sends
+nothing for an area no longer shown. A view switch asks again at once, over the area in the new
+view's coordinates.
+
+A depth whose cells over the area could pass `selection.max_aggregate_cells` is not asked for,
+counting one column and one row more than the area spans, since the server quantises the area's
+corners itself; the finest size that fits is drawn instead. A `422` is asked again one depth
+coarser, up to three times. Any other refusal draws nothing until the camera next rests, when the
+counter asks again. A `TesseraLayer` given a store and neither counts nor a counter keeps a counter
+of its own over its viewport.
 
 There is no command-line command for this route. It is reached over HTTP and through the
 TypeScript and Python clients.
