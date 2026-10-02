@@ -1,4 +1,4 @@
-import {WORLD_SIZE, type AggregateResult, type AggregateSpec, type Refusal, type Store} from '@tesseradb/client';
+import {WORLD_SIZE, type AggregateResult, type AggregateSpec, type Meta, type Refusal, type Store} from '@tesseradb/client';
 import {worldBbox} from '@tesseradb/client/internal';
 import {densityCellsOf, type DensityCounts} from './density.js';
 
@@ -30,8 +30,8 @@ export const DENSITY_SETTLE_MS = 200;
  */
 const MARGIN = 1.5;
 
-/** The deepest depth asked for: a cell's column and row at this depth fit a 31-bit integer. */
-const DEEPEST = 30;
+/** The deepest depth the aggregate route counts, the stored position's. */
+const DEEPEST = 32;
 
 /**
  * A camera over the 512-unit world, as deck's `OrthographicView` view state holds it, with the
@@ -76,8 +76,6 @@ export type DensitySettings = {
   on: boolean;
   /** The cell size on screen, in CSS pixels, taken as the nearest of {@link DENSITY_CELL_SIZES}. */
   cellPx: number;
-  /** Whether the counts are over the items that also satisfy the store's highlight. */
-  highlighted: boolean;
 };
 
 type Box = [number, number, number, number];
@@ -93,12 +91,16 @@ export function cellDepth(zoom: number, cellPx: number): number {
   return Math.min(DEEPEST, Math.max(0, depth));
 }
 
-/** How many cells at `depth` a world-space box intersects, as the server counts them for an `area`. */
-export function cellsIn(area: Box, depth: number): number {
+/**
+ * How many cells at `depth` a world-space box may count against the server's limit: the columns
+ * and rows it intersects, each one more, since the server quantises the area's corners in data
+ * coordinates and a corner on a cell's edge can fall on either side of it.
+ */
+function cellsIn(area: Box, depth: number): number {
   const side = 2 ** depth;
   const span = WORLD_SIZE / side;
   const index = (v: number) => Math.min(side - 1, Math.max(0, Math.floor(v / span)));
-  return (index(area[2]) - index(area[0]) + 1) * (index(area[3]) - index(area[1]) + 1);
+  return (index(area[2]) - index(area[0]) + 2) * (index(area[3]) - index(area[1]) + 2);
 }
 
 /** The deepest depth whose cells over `area` number at most `limit`; -1 where none does. */
@@ -109,9 +111,9 @@ function deepestFitting(area: Box, limit: number): number {
   return depth;
 }
 
-/** The area asked for at `camera`: the viewport with its margin, clamped to the world. */
-function askedArea(camera: DensityCamera): Box {
-  return worldBbox({target: [camera.target[0] ?? 0, camera.target[1] ?? 0], zoom: camera.zoom, width: camera.width, height: camera.height}, MARGIN);
+/** The viewport at `camera` with its half-extents scaled by `margin`, clamped to the world. */
+function areaOf(camera: DensityCamera, margin: number): Box {
+  return worldBbox({target: [camera.target[0] ?? 0, camera.target[1] ?? 0], zoom: camera.zoom, width: camera.width, height: camera.height}, margin);
 }
 
 /**
@@ -121,7 +123,7 @@ function askedArea(camera: DensityCamera): Box {
  * @category Colour
  */
 export function resolutionStops(camera: DensityCamera, limit: number): ResolutionStop[] {
-  const deepest = deepestFitting(askedArea(camera), limit);
+  const deepest = deepestFitting(areaOf(camera, MARGIN), limit);
   return DENSITY_CELL_SIZES.map((px) => {
     const depth = cellDepth(camera.zoom, px);
     return {px, depth, enabled: depth <= deepest};
@@ -133,14 +135,17 @@ export function resolutionStops(camera: DensityCamera, limit: number): Resolutio
  * finest stop enabled where that one is not, or the deepest that fits where no stop does. `null`
  * where no depth fits.
  */
-export function densityDepth(camera: DensityCamera, cellPx: number, limit: number): number | null {
-  const area = askedArea(camera);
-  const deepest = deepestFitting(area, limit);
+function densityDepth(camera: DensityCamera, cellPx: number, limit: number): number | null {
+  const deepest = deepestFitting(areaOf(camera, MARGIN), limit);
   if (deepest < 0) return null;
   return Math.min(cellDepth(camera.zoom, nearestStop(cellPx)), deepest);
 }
 
-/** The stop of {@link DENSITY_CELL_SIZES} nearest `px` on a log scale. */
+/**
+ * The stop of {@link DENSITY_CELL_SIZES} nearest `px` on a log scale.
+ *
+ * @category Colour
+ */
 export function nearestStop(px: number): number {
   let best = DENSITY_CELL_SIZES[0]!;
   for (const stop of DENSITY_CELL_SIZES) if (Math.abs(Math.log(stop / px)) < Math.abs(Math.log(best / px))) best = stop;
@@ -149,40 +154,47 @@ export function nearestStop(px: number): number {
 
 const contains = (outer: Box, inner: Box) => outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3];
 
-/** Where a cell-limit refusal names the deepest depth that fits, that depth. */
-function deepestNamed(refusal: Refusal): number | null {
-  const named = /depth (\d+) or less/.exec(refusal.detail);
-  return named ? Number(named[1]) : null;
-}
+/** How many times one ask steps a depth coarser after the server refuses it. */
+const COARSER_TRIES = 3;
 
 let counters = 0;
 
+/** What the counter last registered with the store. */
+type Asked = {view: string; depth: number; area: Box; tries: number};
+
 /**
  * Keeps the counts density is drawn from for a camera: one `POST /v1/aggregate` grouping of cells,
- * registered with the store, which sends its filters with it and asks again when they change.
+ * registered with the store, which sends its filters and its highlight with it and asks again when
+ * either changes. The counts are the highlighted items' under a highlight and the filtered items'
+ * otherwise.
  *
  * A camera change asks nothing while the camera moves. {@link DENSITY_SETTLE_MS} after the last
  * one, the counter works out the depth whose cells are nearest the chosen size on screen and asks
  * for that depth over the viewport and a margin, unless the counts asked for last are at that depth
- * and their area holds the viewport. The counts held are drawn at their own world positions until
- * the next answer lands, so a zoom scales them with the map and a pan within the margin asks
- * nothing. A depth past `selection.maxAggregateCells` over the area is never asked for; where the
- * server refuses a depth anyway and names the deepest that fits, the counter asks for that one.
+ * and their area holds the viewport. A move that leaves the area asked for drops the registration
+ * at once, so a filter changed during the move asks nothing for an area no longer shown. The counts
+ * held are drawn at their own world positions until the next answer lands, so a zoom scales them
+ * with the map and a pan within the margin asks nothing. A view switch asks again at once.
+ *
+ * A depth whose cells over the area would pass `selection.maxAggregateCells` is never asked for.
+ * Where the server refuses a request with `422` anyway, the counter asks one depth coarser, up to
+ * three times; after any other refusal it draws nothing and asks again at the camera's next rest.
  *
  * `onChange` is called when the counts to draw change.
  *
  * @category Colour
  */
 export class DensityCounter {
-  /** The registrations made, one per request the counter started. */
+  /** @internal The registrations made, one per request the counter started. */
   requests = 0;
   private readonly id: string;
-  private settings: DensitySettings = {on: false, cellPx: DEFAULT_DENSITY_CELL_PX, highlighted: false};
+  private settings: DensitySettings = {on: false, cellPx: DEFAULT_DENSITY_CELL_PX};
   private camera: DensityCamera | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private asked: {view: string; depth: number; area: Box; highlighted: boolean} | null = null;
+  private asked: Asked | null = null;
   private held: {view: string; counts: DensityCounts} | null = null;
   private seen: AggregateResult | Refusal | null = null;
+  private meta: Meta | null = null;
   private readonly unsubscribe: () => void;
 
   constructor(
@@ -192,13 +204,16 @@ export class DensityCounter {
   ) {
     counters += 1;
     this.id = `density#${counters}`;
+    this.meta = store.get('meta');
     this.unsubscribe = store.subscribe(() => this.read());
   }
 
   /** The camera moved or the canvas was resized. Counts are asked for once it has rested. */
   look(camera: DensityCamera): void {
     this.camera = camera;
-    if (this.settings.on) this.schedule();
+    if (!this.settings.on) return;
+    if (this.asked && !contains(this.asked.area, areaOf(camera, 1))) this.drop();
+    this.schedule();
   }
 
   /** What to draw. Off drops the registration and the counts held at once. */
@@ -209,7 +224,7 @@ export class DensityCounter {
       this.stop();
       return;
     }
-    if (!was.on || was.cellPx !== settings.cellPx || was.highlighted !== settings.highlighted) this.schedule();
+    if (!was.on || nearestStop(was.cellPx) !== nearestStop(settings.cellPx)) this.schedule();
   }
 
   /** The counts to draw: the last answer, while it was counted in the store's current view. */
@@ -235,80 +250,94 @@ export class DensityCounter {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.ask();
+      this.ask(false);
     }, this.settleMs);
   }
 
-  private ask(): void {
+  /** Ask for the counts at the camera, unless what was asked for last holds the viewport; `force` asks regardless. */
+  private ask(force: boolean): void {
     const meta = this.store.get('meta');
     const camera = this.camera;
     if (!this.settings.on || !meta || !camera || !this.store.frame()) return;
     const depth = densityDepth(camera, this.settings.cellPx, meta.selection.maxAggregateCells);
     if (depth === null) return;
     const view = this.store.get('view').id;
-    const visible = worldBbox({target: [camera.target[0] ?? 0, camera.target[1] ?? 0], zoom: camera.zoom, width: camera.width, height: camera.height}, 1);
     const a = this.asked;
-    if (a && a.view === view && a.depth === depth && a.highlighted === this.settings.highlighted && contains(a.area, visible)) return;
-    this.register(view, depth, askedArea(camera));
+    if (!force && a && a.view === view && a.depth === depth && contains(a.area, areaOf(camera, 1))) return;
+    this.register({view, depth, area: areaOf(camera, MARGIN), tries: 0});
   }
 
-  private register(view: string, depth: number, area: Box): void {
-    const [x0, y0] = this.store.dataXY(area[0], area[1]);
-    const [x1, y1] = this.store.dataXY(area[2], area[3]);
-    const highlighted = this.settings.highlighted;
+  private register(asked: Asked): void {
+    const [x0, y0] = this.store.dataXY(asked.area[0], asked.area[1]);
+    const [x1, y1] = this.store.dataXY(asked.area[2], asked.area[3]);
     const spec: AggregateSpec = {
-      groupings: [{cells: {depth, area: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]}}],
-      ...(highlighted ? {highlighted} : {})
+      groupings: [{cells: {depth: asked.depth, area: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]}}],
+      highlighted: true
     };
-    this.asked = {view, depth, area, highlighted};
+    this.asked = asked;
     this.requests += 1;
     this.store.setAggregate(this.id, spec);
   }
 
-  /** Take an answer that landed, or act on a refusal. */
+  /** Take an answer that landed, or act on a refusal or a change of `meta` or view. */
   private read(): void {
-    if (this.store.get('meta') === null) {
-      // The store has forgotten what the server answered.
-      this.asked = null;
-      if (this.held) {
-        this.held = null;
-        this.onChange();
+    const meta = this.store.get('meta');
+    if (meta !== this.meta) {
+      this.meta = meta;
+      if (meta === null) {
+        // The store has forgotten what the server answered.
+        this.drop();
+        this.clear();
+        return;
       }
-      return;
+      // The stops depend on `meta`'s limit, and a first `meta` after the camera makes an ask possible.
+      this.onChange();
+      if (this.settings.on && this.camera && !this.asked && this.timer === null) this.schedule();
     }
     const asked = this.asked;
-    if (!asked) {
-      // `meta` has arrived after the camera: ask now that it can be.
-      if (this.settings.on && this.camera && this.timer === null) this.schedule();
+    if (!asked) return;
+    const view = this.store.get('view').id;
+    if (view !== asked.view) {
+      // The area asked for is in the old view's coordinates; ask at once in the new one's.
+      this.ask(true);
       return;
     }
     const entry = this.store.get('aggregates').get(this.id);
-    if (!entry) return;
+    if (!entry || entry.view !== null && entry.view !== view) return;
     if (entry.status === 'shown' && entry.result && entry.result !== this.seen) {
       this.seen = entry.result;
       const table = entry.result.tables[0];
-      this.held = {view: entry.view ?? asked.view, counts: {depth: asked.depth, cells: table ? densityCellsOf(table, asked.depth) : []}};
+      this.held = {view, counts: {depth: asked.depth, cells: table ? densityCellsOf(table, asked.depth) : []}};
       this.onChange();
     } else if (entry.status === 'refused' && entry.refusal && entry.refusal !== this.seen) {
       this.seen = entry.refusal;
-      const deepest = deepestNamed(entry.refusal);
-      if (deepest !== null && deepest < asked.depth) this.register(asked.view, deepest, asked.area);
-      else if (this.held) {
-        this.held = null;
-        this.onChange();
+      if (entry.refusal.code === 'contract' && asked.depth > 0 && asked.tries < COARSER_TRIES) {
+        this.register({...asked, depth: asked.depth - 1, tries: asked.tries + 1});
+        return;
       }
+      // Asked again at the camera's next rest.
+      this.asked = null;
+      this.clear();
     }
+  }
+
+  /** Drop the registration with the store; the counts held are still drawn. */
+  private drop(): void {
+    if (this.asked) this.store.setAggregate(this.id, null);
+    this.asked = null;
+    this.seen = null;
+  }
+
+  private clear(): void {
+    if (!this.held) return;
+    this.held = null;
+    this.onChange();
   }
 
   private stop(): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
-    if (this.asked) this.store.setAggregate(this.id, null);
-    this.asked = null;
-    this.seen = null;
-    if (this.held) {
-      this.held = null;
-      this.onChange();
-    }
+    this.drop();
+    this.clear();
   }
 }

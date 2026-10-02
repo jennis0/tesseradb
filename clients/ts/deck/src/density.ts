@@ -126,11 +126,26 @@ export function densityCellsOf(table: Pick<AggregateTable, 'rows'>, depth: numbe
   const count = rows.getChild('count');
   if (!cell || !count) return [];
   const span = WORLD_SIZE / 2 ** depth;
+  const codes = cell.toArray() as ArrayLike<bigint>;
+  const tallies = count.toArray() as ArrayLike<bigint | number>;
+  // A 64-bit column as 32-bit halves, low half first, so no cell needs bigint arithmetic.
+  const halves = codes instanceof BigUint64Array || codes instanceof BigInt64Array ? new Uint32Array(codes.buffer, codes.byteOffset, codes.length * 2) : null;
   const cells: DensityCell[] = [];
   for (let i = 0; i < rows.numRows; i++) {
-    const n = Number(count.get(i) as bigint | number);
+    const n = Number(tallies[i]);
     if (!(n > 0)) continue;
-    const {x, y} = cellXY(BigInt(cell.get(i) as bigint | number));
+    let lo: number;
+    let hi: number;
+    if (halves) {
+      lo = halves[2 * i]!;
+      hi = halves[2 * i + 1]!;
+    } else {
+      const code = BigInt(codes[i]!);
+      lo = Number(code & 0xffffffffn);
+      hi = Number(code >> 32n);
+    }
+    const x = evenBits(lo) + evenBits(hi) * 65536;
+    const y = evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536;
     cells.push({x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: n});
   }
   return cells;
@@ -146,14 +161,27 @@ function evenBits(v: number): number {
 }
 
 /**
- * A cell's column and row from its Morton prefix: x on the even bits and y on the odd, as
- * `mortonOfTile` writes them. Split into two 32-bit halves, since a row of a table holds thousands
- * of cells and bigint arithmetic per bit would cost more than the rest of the read.
+ * `counts` merged to coarser cells, a depth at a time, until at most `budget` cells remain: each
+ * coarser cell counts the items of the finer cells it holds. The hexagons and contours aggregate
+ * on the CPU in time proportional to the cells, so their input is held to a budget.
  */
-function cellXY(cell: bigint): {x: number; y: number} {
-  const lo = Number(cell & 0xffffffffn);
-  const hi = Number(cell >> 32n);
-  return {x: evenBits(lo) + evenBits(hi) * 65536, y: evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536};
+export function coarsened(counts: DensityCounts, budget: number): DensityCounts {
+  let {depth, cells} = counts;
+  while (cells.length > budget && depth > 0) {
+    depth -= 1;
+    const span = WORLD_SIZE / 2 ** depth;
+    const merged = new Map<number, DensityCell>();
+    for (const c of cells) {
+      const x = Math.floor(c.x / 2);
+      const y = Math.floor(c.y / 2);
+      const key = x * 2 ** 32 + y;
+      const held = merged.get(key);
+      if (held) held.count += c.count;
+      else merged.set(key, {x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: c.count});
+    }
+    cells = [...merged.values()];
+  }
+  return cells === counts.cells ? counts : {depth, cells};
 }
 
 /**
@@ -187,14 +215,8 @@ export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], d
 /** The most alpha {@link binDensity} writes, so an intensity is `alpha / BIN_ALPHA_MAX`. */
 const BIN_ALPHA_MAX = 178;
 
-/**
- * Bin the cells into one texel each, over the rectangle they span. A texel's alpha is its intensity
- * and its colour is unset; {@link filterDensity} paints it. `null` where no cell has a count.
- */
-export function binDensity(counts: DensityCounts): DensityImage | null {
-  const {depth} = counts;
-  const cells = counts.cells.filter((c) => c.count > 0);
-  if (cells.length === 0) return null;
+/** The columns and rows `cells` span, inclusive. */
+function extentOf(cells: readonly DensityCell[]): {x0: number; y0: number; x1: number; y1: number} {
   let x0 = Infinity;
   let y0 = Infinity;
   let x1 = -Infinity;
@@ -205,6 +227,18 @@ export function binDensity(counts: DensityCounts): DensityImage | null {
     if (x > x1) x1 = x;
     if (y > y1) y1 = y;
   }
+  return {x0, y0, x1, y1};
+}
+
+/**
+ * Bin the cells into one texel each, over the rectangle they span. A texel's alpha is its intensity
+ * and its colour is unset; {@link filterDensity} paints it. `null` where no cell has a count.
+ */
+export function binDensity(counts: DensityCounts): DensityImage | null {
+  const {depth} = counts;
+  const cells = counts.cells.filter((c) => c.count > 0);
+  if (cells.length === 0) return null;
+  const {x0, y0, x1, y1} = extentOf(cells);
 
   const width = x1 - x0 + 1;
   const height = y1 - y0 + 1;
@@ -232,8 +266,20 @@ export function binDensity(counts: DensityCounts): DensityImage | null {
   };
 }
 
-/** Texels per cell in the filtered image. */
+/** Texels per cell in the filtered image, where the image fits {@link WASH_TEXELS} at that many. */
 export const DENSITY_SUPERSAMPLE = 4;
+
+/**
+ * The most texels the filtered image holds. Each filtering pass visits every texel, so a viewport
+ * of fine cells takes fewer texels per cell, down to one, which the texture's linear filtering
+ * still smooths.
+ */
+const WASH_TEXELS = 1 << 20;
+
+/** Texels per cell for an image of `cells` cells: {@link DENSITY_SUPERSAMPLE} where it fits {@link WASH_TEXELS}. */
+function texelsPerCell(cells: number, most: number): number {
+  return Math.max(1, Math.min(most, Math.floor(Math.sqrt(WASH_TEXELS / cells))));
+}
 
 /**
  * The binned image as a soft field: one padding cell around it so a halo can extend past an
@@ -243,9 +289,9 @@ export const DENSITY_SUPERSAMPLE = 4;
  * part of the range.
  */
 export function filterDensity(image: DensityImage, depth: number, paint: DensityPaint = {kind: 'hue', rgb: WASH_HUE.light}): DensityImage {
-  const S = DENSITY_SUPERSAMPLE;
   const W = image.width + 2;
   const H = image.height + 2;
+  const S = texelsPerCell(W * H, DENSITY_SUPERSAMPLE);
   // The coarse intensity field, from the binned alpha, with a one-cell border of nothing.
   const field = new Float32Array(W * H);
   let peak = 0;
@@ -322,4 +368,44 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
   const span = WORLD_SIZE / 2 ** depth;
   const [bx0, by0, bx1, by1] = image.bounds;
   return {width, height, data, bounds: [bx0 - span, by0 - span, bx1 + span, by1 + span], filled};
+}
+
+/** The most texels per cell the grid's image takes, enough to leave a hairline between cells. */
+const GRID_SUPERSAMPLE = 8;
+
+/**
+ * The grid as one image: each cell a square in the colour of its count's rank among the distinct
+ * counts drawn, in `steps` steps of `stops`, drawn with nearest filtering so the squares keep their
+ * edges. Where the image has room for four or more texels a cell, the last row and column of each
+ * cell's texels are left clear, so neighbouring cells show a hairline gap. `null` where no cell has a
+ * count.
+ */
+export function gridImage(counts: DensityCounts, stops: readonly Rgb[], steps: number): DensityImage | null {
+  const cells = counts.cells.filter((c) => c.count > 0);
+  if (cells.length === 0) return null;
+  const {x0, y0, x1, y1} = extentOf(cells);
+  const columns = x1 - x0 + 1;
+  const rows = y1 - y0 + 1;
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
+  const colours = Array.from({length: steps}, (_, i) => rampAt(stops, i / (steps - 1)));
+  const S = texelsPerCell(columns * rows, GRID_SUPERSAMPLE);
+  const fill = S >= 4 ? S - 1 : S;
+  const width = columns * S;
+  const data = new Uint8ClampedArray(width * rows * S * 4);
+  for (const c of cells) {
+    const colour = colours[Math.min(steps - 1, Math.floor((rank.get(c.count) ?? 0) * steps))]!;
+    for (let dy = 0; dy < fill; dy++) {
+      let i = (((c.y - y0) * S + dy) * width + (c.x - x0) * S) * 4;
+      for (let dx = 0; dx < fill; dx++, i += 4) {
+        data[i] = colour[0];
+        data[i + 1] = colour[1];
+        data[i + 2] = colour[2];
+        data[i + 3] = 255;
+      }
+    }
+  }
+  const span = WORLD_SIZE / 2 ** counts.depth;
+  return {width, height: rows * S, data, bounds: [x0 * span, y0 * span, (x1 + 1) * span, (y1 + 1) * span], filled: cells.length};
 }

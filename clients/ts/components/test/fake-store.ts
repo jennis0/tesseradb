@@ -231,8 +231,8 @@ export type AggregateRow = {group?: 'listed' | 'rest' | 'none'; key?: string | b
  */
 export function aggregateEntry(tables: {rows: AggregateRow[]; groups?: number | null; total?: number}[], view = 's0'): AggregateEntry {
   const table = (rows: AggregateRow[]) => {
-    const column = (read: (r: AggregateRow) => unknown) => ({get: (i: number) => read(rows[i]!)});
-    const columns: Record<string, {get(i: number): unknown}> = {
+    const column = (read: (r: AggregateRow) => unknown) => ({get: (i: number) => read(rows[i]!), toArray: () => rows.map(read)});
+    const columns: Record<string, {get(i: number): unknown; toArray(): unknown[]}> = {
       group: column((r) => r.group ?? 'listed'),
       key: column((r) => r.key ?? null),
       title: column((r) => r.title ?? null),

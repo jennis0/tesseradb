@@ -75,10 +75,20 @@ function host() {
     /** Draw once, with no time to settle. */
     drawNow: (props: Partial<TesseraLayerInternalProps>) =>
       manager.setLayers([new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as TesseraLayerInternalProps)]),
-    /** The grid's squares: each one's centre and the index of its colour among `stops`' steps. */
-    squares: () => {
-      const props = sublayer('density-grid')?.props as unknown as {data: {polygon: [number, number][]; colour: number[]}[]} | undefined;
-      return props?.data.map((d) => ({centre: [(d.polygon[0]![0] + d.polygon[2]![0]) / 2, (d.polygon[0]![1] + d.polygon[2]![1]) / 2], width: d.polygon[1]![0] - d.polygon[0]![0], colour: d.colour})) ?? null;
+    /**
+     * The grid's colour at a world point, `[r, g, b, a]`, read from the image it draws; `null`
+     * where no grid is drawn.
+     */
+    gridAt: (world: [number, number]): number[] | null => {
+      const props = sublayer('density-grid')?.props as unknown as {visible: boolean; image: {data: Uint8ClampedArray; width: number; height: number}; bounds: [number, number, number, number]} | undefined;
+      if (!props?.visible) return null;
+      const [left, bottom, right, top] = props.bounds;
+      const {data, width, height} = props.image;
+      const px = Math.floor(((world[0] - left) / (right - left)) * width);
+      const py = Math.floor(((world[1] - top) / (bottom - top)) * height);
+      if (px < 0 || py < 0 || px >= width || py >= height) return [0, 0, 0, 0];
+      const i = (py * width + px) * 4;
+      return [...data.slice(i, i + 4)];
     },
     /** What an aggregation sublayer was given: each cell's position and the weight its accessor reads. */
     aggregated: (id: string): {position: [number, number]; weight: number}[] | null => {
@@ -120,15 +130,32 @@ describe('density modes', () => {
     ]);
   });
 
-  it('draws the grid as one square per cell, coloured by the cell’s count, whatever the sample holds', () => {
+  it('draws the grid as one image, a square per cell coloured by the cell’s count, whatever the sample holds', () => {
     const h = host();
     h.draw({density: 'grid', densityColours: 'greys', scheme: 'light'});
-    const squares = h.squares()!;
-    expect(squares.map((q) => q.centre)).toEqual([centre(4, 4), centre(8, 4)]);
-    for (const q of squares) expect(q.width).toBeCloseTo(SPAN * 0.94);
+    const dense = h.gridAt(centre(4, 4))!;
+    const sparse = h.gridAt(centre(8, 4))!;
+    expect(dense[3]).toBe(255);
+    expect(sparse[3]).toBe(255);
+    // A cell with no count is clear.
+    expect(h.gridAt(centre(6, 4))![3]).toBe(0);
     // On a light ground the dense end of Greys is the darker: the three-mark cell of 80,000.
     const lum = (c: number[]) => c[0]! + c[1]! + c[2]!;
-    expect(lum(squares[0]!.colour)).toBeLessThan(lum(squares[1]!.colour));
+    expect(lum(dense)).toBeLessThan(lum(sparse));
+  });
+
+  it('feeds the hexagons and contours at most their budget of cells, merged to a coarser depth, every item kept', () => {
+    const h = host();
+    const many: DensityCell[] = [];
+    for (let x = 0; x < 160; x++) for (let y = 0; y < 100; y++) many.push(cell(x, y, 1));
+    const fine = {depth: 10, cells: many.map((c) => ({...c, position: [(c.x + 0.5) * (WORLD_SIZE / 1024), (c.y + 0.5) * (WORLD_SIZE / 1024)] as [number, number]}))};
+    for (const [density, id] of [['hex', 'density-hex'], ['contours', 'density-contours']] as const) {
+      h.draw({density, densityCounts: fine});
+      const fed = h.aggregated(id)!;
+      expect(fed.length).toBeLessThan(many.length);
+      expect(fed.length).toBeLessThanOrEqual(density === 'hex' ? 10_000 : 2_000);
+      expect(fed.reduce((n, c) => n + c.weight, 0)).toBe(many.length);
+    }
   });
 
   it('bins hexagons one cell wide at the counts’ depth, whatever the marks’ depth', () => {
@@ -140,11 +167,12 @@ describe('density modes', () => {
   it('draws the counts it is given and nothing without them', () => {
     const h = host();
     h.draw({density: 'grid'});
-    expect(h.squares()).toHaveLength(2);
-    h.drawNow({density: 'grid', densityCounts: {depth: CELLS, cells: [cell(1, 1, 10)]}});
-    expect(h.squares()!.map((q) => q.centre)).toEqual([centre(1, 1)]);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(255);
+    h.draw({density: 'grid', densityCounts: {depth: CELLS, cells: [cell(1, 1, 10)]}});
+    expect(h.gridAt(centre(1, 1))![3]).toBe(255);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(0);
     h.drawNow({density: 'grid', densityCounts: null});
-    expect(h.squares()).toBeNull();
+    expect(h.gridAt(centre(1, 1))).toBeNull();
   });
 
   it('draws contours at counts taken from the cells', () => {
@@ -158,7 +186,8 @@ describe('density modes', () => {
     const h = host();
     for (const density of ['none', 'smooth'] as const) {
       h.draw({density});
-      expect(h.sublayer('density-hex') ?? h.sublayer('density-grid') ?? h.sublayer('density-contours')).toBeUndefined();
+      expect(h.sublayer('density-hex') ?? h.sublayer('density-contours')).toBeUndefined();
+      expect(h.gridAt(centre(4, 4))).toBeNull();
       expect((h.sublayer('wash')!.props as {visible: boolean}).visible).toBe(density === 'smooth');
     }
   });
@@ -167,7 +196,7 @@ describe('density modes', () => {
     const h = host();
     h.draw({density: 'grid', points: false});
     expect(h.errors).toEqual([]);
-    expect(h.squares()).toHaveLength(2);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(255);
     const drawnMarks = (h.sublayer('marks-p0')?.props as {visible: boolean} | undefined)?.visible ?? false;
     expect(drawnMarks).toBe(false);
     h.draw({density: 'grid', points: true});
