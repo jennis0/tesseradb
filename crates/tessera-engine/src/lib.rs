@@ -10,6 +10,7 @@ mod aggregate;
 pub mod artifact_content;
 pub mod artifacts;
 mod attributes;
+pub mod bands;
 pub mod browse;
 mod bundle_lock;
 mod cache;

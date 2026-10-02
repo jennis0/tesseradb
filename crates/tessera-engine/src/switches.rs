@@ -1,7 +1,7 @@
 //! The switches only a gated test hook writes; in a shipped build each holds its default for the
 //! life of the process.
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
 
 pub(crate) struct TestSwitches {
     /// Whether the background refresh runs.
@@ -30,6 +30,9 @@ pub(crate) struct TestSwitches {
     /// The effective serial/parallel fan-out threshold every `viewport` call reads. Exists so
     /// `set_serial_fallback_max_rows_for_test` has something per-`Engine` to override.
     pub(crate) serial_fallback_max_rows: AtomicU64,
+    /// The zoom from which a map request is answered by the shipped scan rather than the identity
+    /// bands ([`crate::bands::BANDS_BELOW_ZOOM`]).
+    pub(crate) bands_below_zoom: AtomicU8,
     /// The fewest rows of the view one chunk of an aggregate's cell count spans.
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
@@ -121,6 +124,7 @@ impl Default for TestSwitches {
             merge_publication_paused: AtomicBool::new(false),
             occupancy_stage_enabled: AtomicBool::new(true),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
+            bands_below_zoom: AtomicU8::new(crate::bands::BANDS_BELOW_ZOOM),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
             #[cfg(feature = "fault-injection")]

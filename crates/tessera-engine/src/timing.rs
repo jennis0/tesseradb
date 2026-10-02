@@ -212,6 +212,8 @@ pub struct StageTimings {
     /// `ViewportOut::sub_cells.len()` where a sub-cell's rows are all hidden from the viewer, or
     /// lie in more than one segment.
     pub underlay_cells_evaluated: u64,
+    /// Tiles whose served rows were read from the identity bands rather than the identity column.
+    pub tiles_from_bands: u64,
     /// Number of clock reads taken. Multiply by the per-lap cost from `tessera-bench calibrate`
     /// to get the perturbation this instrumentation itself introduced, and subtract it honestly
     /// rather than pretending it is zero.
@@ -401,6 +403,7 @@ pub struct TileStats {
     pub select_rows_visited: u64,
     pub points_gathered: u64,
     pub underlay_cells_evaluated: u64,
+    pub tiles_from_bands: u64,
     pub clock_laps: u64,
 }
 
@@ -419,6 +422,7 @@ impl TileStats {
         t.select_rows_visited += self.select_rows_visited;
         t.points_gathered += self.points_gathered;
         t.underlay_cells_evaluated += self.underlay_cells_evaluated;
+        t.tiles_from_bands += self.tiles_from_bands;
         t.clock_laps += self.clock_laps;
     }
 }

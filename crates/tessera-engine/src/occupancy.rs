@@ -80,10 +80,12 @@
 //! # The walk, and the two routes that were measured and rejected
 //!
 //! Rows are stored in Morton order within a segment, so the code column ascends with the row id
-//! and a tile is a contiguous range of it. The walk takes the mask's visible runs and, inside a
-//! run, hops from one occupied tile's code boundary to the next by exponential search
-//! ([`gallop`]). Cost is `O((runs + N_occ(d)) · log)` per depth, against the oracle's one pass per
-//! visible row.
+//! and a tile is a contiguous range of it. The walk takes the mask's visible runs, finds the leaf
+//! cells each run touches in the cut index, and hops from one occupied tile's code boundary to
+//! the next through those cells' codes by exponential search ([`gallop`]). Cost is
+//! `O((runs + N_occ(d)) · log)` per depth, against the oracle's one pass per visible row. It reads
+//! the cut index and the cell codes, one entry per occupied cell, and never the Morton column,
+//! which holds one per row.
 //!
 //! **Endpoint arithmetic on a run is wrong.** Crediting `tile(end) − tile(start) + 1` per run
 //! counts the tile indices a run *spans*, not the occupied tiles inside it: a run's Morton codes
@@ -185,7 +187,7 @@ use crate::compose::EffectiveMask;
 /// 2²² rows is 64 croaring containers — small enough that the temporary is a few hundred
 /// kilobytes, large enough that a 233-million-row view is 56 chunks rather than thousands.
 ///
-/// Splitting a run at a chunk boundary changes no answer: [`Walk::visit_run`] carries the last
+/// Splitting a run at a chunk boundary changes no answer: [`Walk::visit_cells`] carries the last
 /// credited tile across runs, so the two halves credit their shared tile once.
 const CHUNK_ROWS: u32 = 1 << 22;
 
@@ -217,6 +219,7 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 
 /// One segment's walk state: the depth, the last tile credited, and where the credits go.
 struct Walk<'a, F: FnMut(u64)> {
+    /// Each occupied cell's code, ascending.
     codes: &'a [u32],
     depth: u8,
     /// The shift from a code to its depth-`depth` tile index.
@@ -228,19 +231,19 @@ struct Walk<'a, F: FnMut(u64)> {
 }
 
 impl<F: FnMut(u64)> Walk<'_, F> {
-    /// Credit every occupied tile in one segment-local run, ascending.
-    fn visit_run(&mut self, run: Range<u32>) {
-        let end = run.end as usize;
-        let mut i = run.start as usize;
+    /// Credit every occupied tile among the cells `cells`, ascending.
+    fn visit_cells(&mut self, cells: Range<usize>) {
+        let end = cells.end;
+        let mut i = cells.start;
         while i < end {
             let tile = tile_of(self.codes[i], self.depth);
             if tile != self.last {
                 self.last = tile;
                 (self.emit)(tile);
             }
-            // The first code at or above the next tile's low bound. At depth 0 the shift is 32 and
-            // `(tile + 1) << 32` exceeds every code, so the gallop lands on `end` and the run
-            // finishes in one step — one tile covers the grid.
+            // The first cell at or above the next tile's low bound. At depth 0 the shift is 32 and
+            // `(tile + 1) << 32` exceeds every code, so the gallop lands on `end` and the cells
+            // finish in one step — one tile covers the grid.
             let target = (tile + 1) << self.shift;
             i = gallop(&self.codes[..end], i + 1, target).max(i + 1);
         }
@@ -251,7 +254,9 @@ impl<F: FnMut(u64)> Walk<'_, F> {
 /// without repetition.
 ///
 /// `row_base` is where this segment's rows begin in the view's row space, which is the space the
-/// mask is over; `segment.morton` is indexed segment-locally.
+/// mask is over; the segment's cut index is segment-local. A run touches every cell from the one
+/// holding its first row to the one holding its last, so the tiles of those cells are the tiles
+/// of its rows.
 ///
 /// **Public so a measurement prices an accumulator over the identical walk.**
 /// `tessera-bench`'s `occupancy_sketch` compares this arm against the ones it replaced, and a
@@ -263,20 +268,26 @@ pub fn for_each_occupied_tile(
     depth: u8,
     emit: impl FnMut(u64),
 ) {
-    let codes = segment.morton.u32();
+    let starts = segment.cuts.starts();
     let mut walk = Walk {
-        codes,
+        codes: segment.cell_codes.codes(),
         depth,
         shift: 32 - 2 * depth as u32,
         last: u64::MAX,
         emit,
     };
-    let rows = segment.row_count.min(codes.len() as u32);
+    let rows = segment.row_count;
+    // The runs ascend, so the cell holding each one's first row is at or past the last one's.
+    let mut cell = 0usize;
     let mut start = 0u32;
     while start < rows {
         let end = start.saturating_add(CHUNK_ROWS).min(rows);
         mask.for_each_visible_run(row_base + start..row_base + end, |run| {
-            walk.visit_run(run.start - row_base..run.end - row_base);
+            let (first, last) = (run.start - row_base, run.end - row_base);
+            // `starts[0]` is row 0, so some cell begins at or before the run's first row.
+            cell = gallop(starts, cell, u64::from(first) + 1) - 1;
+            let through = gallop(starts, cell, u64::from(last));
+            walk.visit_cells(cell..through);
         });
         start = end;
     }
@@ -419,7 +430,7 @@ pub fn occupied_tiles_ladder(
 ///
 /// # Sound only at one segment, and the caller is what makes it so
 ///
-/// One segment's walk emits ascending and without repetition ([`Walk::visit_run`] carries the last
+/// One segment's walk emits ascending and without repetition ([`Walk::visit_cells`] carries the last
 /// tile across runs and across chunks), so at each depth the ancestor changes exactly once per
 /// distinct depth-*d* tile and the increments below are that depth's tile count. Two segments break
 /// it in both directions — a tile split across segments would be counted twice, and the last-seen

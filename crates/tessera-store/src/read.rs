@@ -2421,19 +2421,29 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
     }
 }
 
-/// The row range `tile` occupies within `seg`'s Morton order, found by binary search over
-/// `seg.morton.u32()` (contracts §2.5). Callers must treat a tile as resolving to a **set** of
-/// ranges — one per segment sharing the tile's view — even though a build writes exactly one
-/// segment per view; the engine-level signature is `Vec<Range<u32>>` accordingly.
+/// The row range `tile` occupies within `seg`'s Morton order (contracts §2.5), found by binary
+/// search over the segment's cell codes: a tile holds whole leaf cells, so its rows begin at its
+/// first cell's start and end at the first start past it. Callers must treat a tile as resolving
+/// to a **set** of ranges — one per segment sharing the tile's view — even though a build writes
+/// exactly one segment per view; the engine-level signature is `Vec<Range<u32>>` accordingly.
 ///
 /// `Tile::code_range` returns `u64` bounds deliberately: at depth 0 the exclusive end is
 /// `1 << 32`, which does not fit in `u32`. Each stored code is widened for the comparison
 /// rather than the bounds being narrowed, which would overflow to an empty range there.
 pub fn tile_ranges(seg: &SegmentData, tile: &Tile) -> Range<u32> {
-    tile_ranges_within(seg, tile, 0..seg.morton.len() as u32)
+    let (lo, hi) = tile.code_range();
+    let codes = seg.cell_codes.codes();
+    let first = codes.partition_point(|&c| u64::from(c) < lo);
+    let end = first + codes[first..].partition_point(|&c| u64::from(c) < hi);
+    cell_row(seg, first)..cell_row(seg, end)
 }
 
-/// [`tile_ranges`], but searching only `within` rather than the whole column.
+/// The row at which cell `cell` begins, or the segment's row count past its last cell.
+fn cell_row(seg: &SegmentData, cell: usize) -> u32 {
+    seg.cuts.starts().get(cell).copied().unwrap_or(seg.row_count)
+}
+
+/// [`tile_ranges`], but searching the Morton column over `within` alone.
 ///
 /// For a tile **contained** in `within` this returns exactly what [`tile_ranges`] would, because the
 /// Morton column is sorted: every row of a contained tile lies inside its container's contiguous
@@ -2508,28 +2518,23 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 ///
 /// # Why this exists
 ///
-/// Called once per tile, [`tile_ranges`] does two full-column binary searches. A viewport asks
-/// for a few hundred tiles, so a sparse request spends most of its time binary searching
-/// `morton.u32` several hundred times over — measured at 26–64% of a low-density request
-/// (docs/evidence/memos/2026-07-30-f1-selection-overdraw.md), and *flat in density*, because the
-/// cost is the searching, not the rows found. At 2.42M rows, zoom 8, 289 tiles, that is ~20 µs of
-/// a 31 µs request.
+/// Called once per tile, [`tile_ranges`] does two binary searches. A viewport asks for a few
+/// hundred tiles, so a sparse request spends most of its time searching several hundred times
+/// over, flat in density, because the cost is the searching, not the rows found. This replaces
+/// `2 × tiles` independent searches with one monotone sweep of [`gallop`]s, each costing
+/// `log2(distance from the previous tile)`.
 ///
-/// This replaces `2 × tiles` independent `log2(rows)` searches with one monotone sweep of
-/// [`gallop`]s, each costing `log2(distance from the previous tile)` — measured at 20.0 µs →
-/// 4.5 µs on that request, and 21.8 µs → 4.6 µs on the same viewport over 25M rows.
-///
-/// Note what the win is *not*. The doubling was expected to pay mostly in avoided page faults on
-/// a cold 4 GB column; at these fixture scales the column is resident and it pays in avoided
-/// *probes* instead, which is why the ratio is roughly the probe-count ratio and not larger. The
-/// page-fault saving is still there at 10^9 rows, and only makes the case stronger.
+/// The sweep runs over the cell codes rather than the Morton column: one code per occupied cell
+/// rather than per row, so at 83 rows a cell (GBIF) it searches a fortieth of the bytes, and a
+/// cold request faults that much less. A tile holds whole cells, so the cell found maps back to
+/// the row it begins at.
 ///
 /// # Why it is correct
 ///
 /// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
-/// **non-decreasing in `t`** — a larger threshold can only admit more codes. `MortonSlice::load`
-/// is what guarantees the column is ascending (it refuses to open one that is not), so the lemma
-/// is not an assumption about the data.
+/// **non-decreasing in `t`** — a larger threshold can only admit more codes. The cell codes
+/// ascend strictly, because they are the Morton column's distinct values in row order, and
+/// `tessera verify --deep` checks that they are.
 ///
 /// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
 /// `from` is at or below the answer. This sweep establishes that in both places it calls it:
@@ -2562,7 +2567,7 @@ pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
     if tiles.is_empty() {
         return out;
     }
-    let codes = seg.morton.u32();
+    let codes = seg.cell_codes.codes();
 
     let mut order: Vec<usize> = (0..tiles.len()).collect();
     order.sort_unstable_by_key(|&i| tiles[i].code_range().0);
@@ -2573,7 +2578,7 @@ pub fn tile_ranges_all(seg: &SegmentData, tiles: &[Tile]) -> Vec<Range<u32>> {
         let start = gallop(codes, floor, lo);
         let end = gallop(codes, start, hi);
         floor = start;
-        out[i] = start as u32..end as u32;
+        out[i] = cell_row(seg, start)..cell_row(seg, end);
     }
     out
 }
