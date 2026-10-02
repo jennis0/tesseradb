@@ -373,7 +373,7 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     for entity_id, op, terms in batch:
         item = {"op": op, "match": {"tessera_id": str(oracle_bundle.tessera_id_of(entity_id))}}
         if op == "predicate":
-            # `builtin:passthrough`'s access label is the comma-joined decimal term ids (R6);
+            # The access label is the comma-joined decimal term ids (R6);
             # the dictionary's descriptor bytes for these ids are exactly those decimal strings.
             access = ",".join(dictionary[t].decode("ascii") for t in sorted(terms))
             item["access"] = access

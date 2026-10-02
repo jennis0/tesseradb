@@ -753,7 +753,7 @@ class Block:
     """One contiguous entity-ID range, carrying exactly one term.
 
     `term_id` is the term id the **source corpus** writes into its `(entity_id, term_id)` relation,
-    and the `builtin:passthrough` descriptor is its decimal spelling. It is **not** the bundle's own
+    and its access descriptor is its decimal spelling. It is **not** the bundle's own
     dictionary id: `public` is interned first at term `0`, so the dictionary's is one higher. Use
     [`Block.dict_term_id`] for anything read out of the bundle, and see the module doc for why
     asking one file with the other's number is silently wrong rather than an error.

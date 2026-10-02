@@ -36,8 +36,6 @@ struct RawConfig {
     /// What `tessera build` and `tessera check` read.
     #[serde(default)]
     build: RawBuild,
-    /// The rule that reads credentials and access labels. It has one value.
-    plugin: RawPlugin,
     /// How long a viewer's token lasts.
     ///
     /// Required.
@@ -147,14 +145,6 @@ struct RawBuild {
     ///
     /// Default: `"schema.toml"`.
     schema: Option<PathBuf>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawPlugin {
-    /// `builtin:passthrough`, the one value, and any other is refused: a credential's terms are
-    /// taken as presented, and every access label is an access expression.
-    module: String,
 }
 
 #[derive(Deserialize)]
@@ -802,11 +792,12 @@ pub fn open(explicit: Option<&Path>, from: &Path) -> std::result::Result<(PathBu
 }
 
 fn parse(text: &str) -> Result<Config> {
-    let raw: RawConfig = toml::from_str(text)?;
-
-    if raw.plugin.module != "builtin:passthrough" {
-        return Err(ConfigError::UnsupportedPlugin(raw.plugin.module));
-    }
+    let raw: RawConfig = toml::from_str(text).map_err(|e| {
+        match toml::from_str::<toml::Table>(text) {
+            Ok(table) if table.contains_key("plugin") => ConfigError::PluginTable,
+            _ => ConfigError::Toml(e),
+        }
+    })?;
 
     let token_max_lifetime_secs = raw
         .disclosure
@@ -1223,8 +1214,6 @@ mod tests {
             path = "b"
             cache = "c"
             wal = "w"
-            [plugin]
-            module = "builtin:passthrough"
             [disclosure]
             token_max_lifetime = 3600
             {ingest_section}
@@ -1246,8 +1235,6 @@ mod tests {
             path = "b"
             cache = "c"
             wal = "w"
-            [plugin]
-            module = "builtin:passthrough"
             [disclosure]
             token_max_lifetime = 3600
         "#;
@@ -1258,14 +1245,19 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_table_is_refused() {
+        let toml = valid_toml("") + "\n[plugin]\nmodule = \"builtin:passthrough\"\n";
+        let err = parse(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::PluginTable));
+    }
+
+    #[test]
     fn missing_disclosure_section_refuses_to_start() {
         let toml = r#"
             [bundle]
             path = "b"
             cache = "c"
             wal = "w"
-            [plugin]
-            module = "builtin:passthrough"
         "#;
         let err = parse(toml).unwrap_err();
         assert!(matches!(err, ConfigError::MissingDisclosureSection));
@@ -1278,8 +1270,6 @@ mod tests {
             path = "b"
             cache = "c"
             wal = "w"
-            [plugin]
-            module = "builtin:passthrough"
             [disclosure]
         "#;
         let err = parse(toml).unwrap_err();
@@ -1298,8 +1288,6 @@ mod tests {
                 path = "b"
                 cache = "c"
                 wal = "w"
-                [plugin]
-                module = "builtin:passthrough"
                 [disclosure]
                 token_max_lifetime = 3600
                 {extra}

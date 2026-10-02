@@ -459,8 +459,6 @@ async fn h_config_missing_disclosure_refuses_to_start() {
         path = "{bundle}"
         cache = "{cache}"
         wal = "{wal}"
-        [plugin]
-        module = "builtin:passthrough"
         [serve]
         viewer = "127.0.0.1:0"
         session = "127.0.0.1:0"

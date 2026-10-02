@@ -183,7 +183,7 @@ export TESSERA_OPERATOR_CRED="${TESSERA_OPERATOR_CRED:-dev-operator-credential}"
 bundle_override=""
 # A `tessera.toml` an operator already has — a dataset-ladder rung's, which `prepare.py` writes
 # beside its parquets. Unlike `--bundle`, nothing here is generated: the bundle path, the three
-# ports, the plugin, the disclosure floor and the credential variable names are that file's, and it
+# ports, the disclosure floor and the credential variable names are that file's, and it
 # is read rather than rewritten. It is the only route that serves a bundle whose credentials are
 # not the demo's, and the only one that leaves the deployment under the operator's control.
 deployment_override=""
@@ -458,9 +458,6 @@ wal   = "$DEMO/$scale/wal.log"
 [build]
 schema = "$(schema_of "$scale")"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
@@ -632,7 +629,7 @@ start_scale() {
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 
-  # Poll `/readyz` rather than sleeping: it is 2.3's verified + pinned + plugin-loaded +
+  # Poll `/readyz` rather than sleeping: it is 2.3's verified + pinned +
   # workers-ready gate, so a 200 means the bundle actually opened. A fixed sleep would race the
   # mmap and the fragment cache on a cold start and report a broken demo.
   printf 'waiting for %s readyz' "$scale"

@@ -125,7 +125,6 @@ def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
     # The widget's page is served from a loopback address, and its origin cannot be enumerated.
     assert "cors_loopback = true" in text
     assert "cors_origins" not in text
-    assert 'module = "builtin:passthrough"' in text
     assert (tmp_path / ".tessera" / "cache").is_dir()
 
 

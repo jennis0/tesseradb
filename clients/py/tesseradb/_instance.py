@@ -102,7 +102,6 @@ def write_deployment(directory: Path) -> Path:
             "wal": ".tessera/wal.log",
         },
         "build": {"schema": "schema.toml"},
-        "plugin": {"module": "builtin:passthrough"},
         "disclosure": {"token_max_lifetime": TOKEN_MAX_LIFETIME},
         "serve": serve,
         "catalogue": {"dir": ".tessera/catalogue"},

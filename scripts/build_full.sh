@@ -75,9 +75,6 @@ wal   = "$OUT.wal"
 [build]
 schema = "$CONFIG"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 
