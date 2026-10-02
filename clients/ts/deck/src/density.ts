@@ -1,31 +1,28 @@
-import {WORLD_SIZE, type ComposedTile} from '@tesseradb/client';
-import {tileXY} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type AggregateTable} from '@tesseradb/client';
 import {RAMPS, rampAt, type Rgb} from './colour.js';
 
 /**
- * Density: the tile counts drawn as a smooth wash, as hexagons, as a grid or as contour lines.
+ * Density: counts by cell drawn as a smooth wash, as hexagons, as a grid or as contour lines.
  *
- * Every mode reads counts, not marks. A tile's counts are exact masked aggregates from the server;
- * the marks are a per-tile-capped sample and their density on screen says nothing about the
- * corpus. The hexagons, grid and contours aggregate one point per exact tile at its centre,
- * weighted by its count ({@link densityCells}).
+ * Every mode reads counts, not marks. The counts are the aggregate route's cell grouping
+ * (`POST /v1/aggregate` with `cells`), exact and taken inside the viewer's visible set under the
+ * map's filters; the marks are a per-tile-capped sample and their density on screen says nothing
+ * about the corpus. The hexagons, grid and contours aggregate one point per cell at its centre,
+ * weighted by its count. {@link DensityCounter} keeps the counts for a camera.
  *
- * The smooth wash is one texture under the marks, with one bin per exact tile at the drawn depth.
- * A tile that is not exact (drawn from an ancestor or from held descendants) contributes nothing to
- * any mode, because its counts cover a superset and would overstate.
+ * The smooth wash is one texture under the marks, with one bin per cell.
  *
  * Density is coloured by count alone: a bin coloured by its majority cluster would take its colour
- * from the sample. Intensity is histogram-equalised over the bins on screen (datashader's
- * `eq_hist`), since the counts span several orders of magnitude; the hexagons and grid use a
- * quantile scale, which is the same idea per bin.
+ * from the sample. Intensity is histogram-equalised over the bins drawn (datashader's `eq_hist`),
+ * since the counts span several orders of magnitude; the hexagons and grid use a quantile scale,
+ * which is the same idea per bin.
  *
- * Rebuilt at the settle in O(tiles). {@link filterDensity} smooths the binned image so the tile
- * grid does not show as hard-edged squares.
+ * {@link filterDensity} smooths the binned image so the cells do not show as hard-edged squares.
  */
 
 /**
  * How density is drawn: `none`; `smooth`, a soft wash; `hex`, hexagonal bins; `grid`, square bins
- * one tile wide; or `contours`, lines of equal density.
+ * one cell wide; or `contours`, lines of equal density.
  *
  * @category Colour
  */
@@ -89,24 +86,102 @@ export function densityPaint(colours: DensityColours, scheme: 'light' | 'dark'):
   return colours === 'warm-grey' ? {kind: 'hue', rgb: WASH_HUE[scheme]} : {kind: 'ramp', stops: densityStops(colours, scheme)};
 }
 
-/** One exact tile as the hexagons, grid and contours aggregate it: its centre and its count. */
-export type DensityCell = {position: [number, number]; count: number};
+/**
+ * One cell of {@link DensityCounts}.
+ *
+ * @category Colour
+ */
+export type DensityCell = {
+  /** The cell's column at its depth, from 0 at the world's left edge. */
+  x: number;
+  /** The cell's row at its depth, from 0 at the world's top edge. */
+  y: number;
+  /** The cell's centre in world units. */
+  position: [number, number];
+  /** The items counted in the cell. */
+  count: number;
+};
 
 /**
- * One cell per exact tile at `depth` whose `channel` count is not zero, at the tile's centre in
- * world units. A tile that is not exact, or is at another depth, gives none.
+ * The counts density is drawn from: one {@link DensityCell} per non-empty cell at `depth`, where a
+ * cell at depth `d` is one of `2^d` by `2^d` over the view, as a tile is at depths up to 16.
+ *
+ * @category Colour
  */
-export function densityCells(tiles: readonly ComposedTile[], depth: number, channel: 'visible' | 'matched' | 'highlighted'): DensityCell[] {
+export type DensityCounts = {
+  /** The depth the cells are at. */
+  depth: number;
+  /** The cells with a count, in any order. */
+  cells: readonly DensityCell[];
+};
+
+/**
+ * The cells of an aggregate table counted by `cells` at `depth`: one per row with a count, at the
+ * cell's centre in world units. The table's `cell` column is the first `2·depth` bits of the Morton
+ * position, which is a tile's prefix at depths up to 16.
+ */
+export function densityCellsOf(table: Pick<AggregateTable, 'rows'>, depth: number): DensityCell[] {
+  const rows = table.rows;
+  const cell = rows.getChild('cell');
+  const count = rows.getChild('count');
+  if (!cell || !count) return [];
   const span = WORLD_SIZE / 2 ** depth;
+  const codes = cell.toArray() as ArrayLike<bigint>;
+  const tallies = count.toArray() as ArrayLike<bigint | number>;
+  // A 64-bit column as 32-bit halves, low half first, so no cell needs bigint arithmetic.
+  const halves = codes instanceof BigUint64Array || codes instanceof BigInt64Array ? new Uint32Array(codes.buffer, codes.byteOffset, codes.length * 2) : null;
   const cells: DensityCell[] = [];
-  for (const tile of tiles) {
-    if (!tile.exact || !tile.counts || tile.depth !== depth) continue;
-    const count = Number(tile.counts[channel]);
-    if (count <= 0) continue;
-    const {x, y} = tileXY(tile.prefix, depth);
-    cells.push({position: [(x + 0.5) * span, (y + 0.5) * span], count});
+  for (let i = 0; i < rows.numRows; i++) {
+    const n = Number(tallies[i]);
+    if (!(n > 0)) continue;
+    let lo: number;
+    let hi: number;
+    if (halves) {
+      lo = halves[2 * i]!;
+      hi = halves[2 * i + 1]!;
+    } else {
+      const code = BigInt(codes[i]!);
+      lo = Number(code & 0xffffffffn);
+      hi = Number(code >> 32n);
+    }
+    const x = evenBits(lo) + evenBits(hi) * 65536;
+    const y = evenBits(lo >>> 1) + evenBits(hi >>> 1) * 65536;
+    cells.push({x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: n});
   }
   return cells;
+}
+
+/** The even bits of a 32-bit number, packed into its low 16. */
+function evenBits(v: number): number {
+  v &= 0x55555555;
+  v = (v | (v >>> 1)) & 0x33333333;
+  v = (v | (v >>> 2)) & 0x0f0f0f0f;
+  v = (v | (v >>> 4)) & 0x00ff00ff;
+  return (v | (v >>> 8)) & 0x0000ffff;
+}
+
+/**
+ * `counts` merged to coarser cells, a depth at a time, until at most `budget` cells remain: each
+ * coarser cell counts the items of the finer cells it holds. The hexagons and contours aggregate
+ * on the CPU in time proportional to the cells, so their input is held to a budget.
+ */
+export function coarsened(counts: DensityCounts, budget: number): DensityCounts {
+  let {depth, cells} = counts;
+  while (cells.length > budget && depth > 0) {
+    depth -= 1;
+    const span = WORLD_SIZE / 2 ** depth;
+    const merged = new Map<number, DensityCell>();
+    for (const c of cells) {
+      const x = Math.floor(c.x / 2);
+      const y = Math.floor(c.y / 2);
+      const key = x * 2 ** 32 + y;
+      const held = merged.get(key);
+      if (held) held.count += c.count;
+      else merged.set(key, {x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: c.count});
+    }
+    cells = [...merged.values()];
+  }
+  return cells === counts.cells ? counts : {depth, cells};
 }
 
 /**
@@ -123,11 +198,11 @@ export function contourThresholds(cells: readonly DensityCell[]): number[] {
 export type DensityImage = {
   width: number;
   height: number;
-  /** RGBA, row-major from the lowest tile row. */
+  /** RGBA, row-major from the lowest cell row. */
   data: Uint8ClampedArray<ArrayBuffer>;
   /** World-space `[x0, y0, x1, y1]` the image covers, half-open on the far edges. */
   bounds: [number, number, number, number];
-  /** How many bins carry a count; zero means nothing exact is on screen. */
+  /** How many bins carry a count. */
   filled: number;
 };
 
@@ -140,49 +215,45 @@ export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], d
 /** The most alpha {@link binDensity} writes, so an intensity is `alpha / BIN_ALPHA_MAX`. */
 const BIN_ALPHA_MAX = 178;
 
-/**
- * Bin the exact tiles at `depth` into one texel each, over the rectangle those tiles span. A texel's
- * alpha is its intensity and its colour is unset; {@link filterDensity} paints it. `channel` chooses the count: `matched` narrows with a filter, `visible` does not, and
- * `highlighted` shows where a highlight's members are when the marks are too sparse a sample to.
- */
-export function binDensity(
-  tiles: readonly ComposedTile[],
-  depth: number,
-  channel: 'visible' | 'matched' | 'highlighted' = 'matched'
-): DensityImage | null {
-  const cells: {x: number; y: number; count: number}[] = [];
+/** The columns and rows `cells` span, inclusive. */
+function extentOf(cells: readonly DensityCell[]): {x0: number; y0: number; x1: number; y1: number} {
   let x0 = Infinity;
   let y0 = Infinity;
   let x1 = -Infinity;
   let y1 = -Infinity;
-  for (const tile of tiles) {
-    if (!tile.exact || !tile.counts || tile.depth !== depth) continue;
-    const {x, y} = tileXY(tile.prefix, depth);
-    cells.push({x, y, count: Number(tile.counts[channel])});
+  for (const {x, y} of cells) {
     if (x < x0) x0 = x;
     if (y < y0) y0 = y;
     if (x > x1) x1 = x;
     if (y > y1) y1 = y;
   }
+  return {x0, y0, x1, y1};
+}
+
+/**
+ * Bin the cells into one texel each, over the rectangle they span. A texel's alpha is its intensity
+ * and its colour is unset; {@link filterDensity} paints it. `null` where no cell has a count.
+ */
+export function binDensity(counts: DensityCounts): DensityImage | null {
+  const {depth} = counts;
+  const cells = counts.cells.filter((c) => c.count > 0);
   if (cells.length === 0) return null;
+  const {x0, y0, x1, y1} = extentOf(cells);
 
   const width = x1 - x0 + 1;
   const height = y1 - y0 + 1;
   const data = new Uint8ClampedArray(width * height * 4);
 
-  // Rank the distinct non-zero counts: a bin's intensity is its rank among the counts on screen.
-  const distinct = [...new Set(cells.map((c) => c.count).filter((n) => n > 0))].sort((a, b) => a - b);
+  // Rank the distinct counts: a bin's intensity is its rank among the counts drawn.
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
   const rank = new Map<number, number>();
   distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
 
-  let filled = 0;
   for (const cell of cells) {
-    if (cell.count === 0) continue;
     const t = rank.get(cell.count) ?? 0;
     const i = ((cell.y - y0) * width + (cell.x - x0)) * 4;
     // Faint at the low end and never opaque, so the points stay legible over the densest bin.
     data[i + 3] = Math.round(28 + t * (BIN_ALPHA_MAX - 28));
-    filled++;
   }
 
   const span = WORLD_SIZE / 2 ** depth;
@@ -191,24 +262,36 @@ export function binDensity(
     height,
     data,
     bounds: [x0 * span, y0 * span, (x1 + 1) * span, (y1 + 1) * span],
-    filled
+    filled: cells.length
   };
 }
 
-/** Texels per tile in the filtered image. */
+/** Texels per cell in the filtered image, where the image fits {@link WASH_TEXELS} at that many. */
 export const DENSITY_SUPERSAMPLE = 4;
 
 /**
+ * The most texels the filtered image holds. Each filtering pass visits every texel, so a viewport
+ * of fine cells takes fewer texels per cell, down to one, which the texture's linear filtering
+ * still smooths.
+ */
+const WASH_TEXELS = 1 << 20;
+
+/** Texels per cell for an image of `cells` cells: {@link DENSITY_SUPERSAMPLE} where it fits {@link WASH_TEXELS}. */
+function texelsPerCell(cells: number, most: number): number {
+  return Math.max(1, Math.min(most, Math.floor(Math.sqrt(WASH_TEXELS / cells))));
+}
+
+/**
  * The binned image as a soft field: one padding cell around it so a halo can extend past an
- * edge tile, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
+ * edge cell, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
  * centres and box-blurred by one texel. Under a hue, alpha is proportional to intensity. Under a
  * ramp, the intensity picks the colour and the alpha rises from nothing to opaque over the lower
  * part of the range.
  */
 export function filterDensity(image: DensityImage, depth: number, paint: DensityPaint = {kind: 'hue', rgb: WASH_HUE.light}): DensityImage {
-  const S = DENSITY_SUPERSAMPLE;
   const W = image.width + 2;
   const H = image.height + 2;
+  const S = texelsPerCell(W * H, DENSITY_SUPERSAMPLE);
   // The coarse intensity field, from the binned alpha, with a one-cell border of nothing.
   const field = new Float32Array(W * H);
   let peak = 0;
@@ -285,4 +368,44 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
   const span = WORLD_SIZE / 2 ** depth;
   const [bx0, by0, bx1, by1] = image.bounds;
   return {width, height, data, bounds: [bx0 - span, by0 - span, bx1 + span, by1 + span], filled};
+}
+
+/** The most texels per cell the grid's image takes, enough to leave a hairline between cells. */
+const GRID_SUPERSAMPLE = 8;
+
+/**
+ * The grid as one image: each cell a square in the colour of its count's rank among the distinct
+ * counts drawn, in `steps` steps of `stops`, drawn with nearest filtering so the squares keep their
+ * edges. Where the image has room for four or more texels a cell, the last row and column of each
+ * cell's texels are left clear, so neighbouring cells show a hairline gap. `null` where no cell has a
+ * count.
+ */
+export function gridImage(counts: DensityCounts, stops: readonly Rgb[], steps: number): DensityImage | null {
+  const cells = counts.cells.filter((c) => c.count > 0);
+  if (cells.length === 0) return null;
+  const {x0, y0, x1, y1} = extentOf(cells);
+  const columns = x1 - x0 + 1;
+  const rows = y1 - y0 + 1;
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
+  const colours = Array.from({length: steps}, (_, i) => rampAt(stops, i / (steps - 1)));
+  const S = texelsPerCell(columns * rows, GRID_SUPERSAMPLE);
+  const fill = S >= 4 ? S - 1 : S;
+  const width = columns * S;
+  const data = new Uint8ClampedArray(width * rows * S * 4);
+  for (const c of cells) {
+    const colour = colours[Math.min(steps - 1, Math.floor((rank.get(c.count) ?? 0) * steps))]!;
+    for (let dy = 0; dy < fill; dy++) {
+      let i = (((c.y - y0) * S + dy) * width + (c.x - x0) * S) * 4;
+      for (let dx = 0; dx < fill; dx++, i += 4) {
+        data[i] = colour[0];
+        data[i + 1] = colour[1];
+        data[i + 2] = colour[2];
+        data[i + 3] = 255;
+      }
+    }
+  }
+  const span = WORLD_SIZE / 2 ** counts.depth;
+  return {width, height: rows * S, data, bounds: [x0 * span, y0 * span, (x1 + 1) * span, (y1 + 1) * span], filled: cells.length};
 }

@@ -1,9 +1,9 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
-import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
+import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
+import {SessionArtifactTable, servedLineage} from '@tesseradb/client/internal';
 import {band} from '../../core/test/support.js';
-import {binDensity, filterDensity} from '../src/density.js';
+import {binDensity, filterDensity, type DensityCounts} from '../src/density.js';
 import {TesseraLayer, type TesseraLayerInternalProps} from '../src/layer.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice, type FakeResource} from './fake-device.js';
@@ -149,13 +149,13 @@ describe('TesseraLayer density wash', () => {
   });
 
   const DEPTH = 3;
-  const tiles = (x: number, y: number): TilesProjection => {
-    const tile: ComposedTile = {prefix: mortonOfTile(x, y, DEPTH), depth: DEPTH, exact: true, drawn: 10, counts: {visible: 50n, matched: 50n, highlighted: 50n, served: 10}};
-    return {tiles: [tile]};
+  const counts = (x: number, y: number): DensityCounts => {
+    const span = WORLD_SIZE / 2 ** DEPTH;
+    return {depth: DEPTH, cells: [{x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count: 50}]};
   };
-  /** The bounds deck is given for a wash built from these tiles: `[left, bottom, right, top]`. */
-  const drawnBounds = (t: TilesProjection) => {
-    const [x0, y0, x1, y1] = filterDensity(binDensity(t.tiles, DEPTH)!, DEPTH).bounds;
+  /** The bounds deck is given for a wash built from these counts: `[left, bottom, right, top]`. */
+  const drawnBounds = (c: DensityCounts) => {
+    const [x0, y0, x1, y1] = filterDensity(binDensity(c)!, DEPTH).bounds;
     return [x0, y1, x1, y0];
   };
 
@@ -166,11 +166,11 @@ describe('TesseraLayer density wash', () => {
     });
     const a = host();
     const b = host();
-    const a1 = tiles(0, 0);
-    const a2 = tiles(2, 2);
-    const onB = tiles(6, 6);
-    const drawA = (t: TilesProjection) => a.draw({marks: marks(3), depth: DEPTH, tiles: t});
-    const drawB = () => b.draw({marks: marks(3), depth: DEPTH, tiles: onB});
+    const a1 = counts(0, 0);
+    const a2 = counts(2, 2);
+    const onB = counts(6, 6);
+    const drawA = (c: DensityCounts) => a.draw({marks: marks(3), depth: DEPTH, densityCounts: c});
+    const drawB = () => b.draw({marks: marks(3), depth: DEPTH, densityCounts: onB});
 
     drawA(a1);
     drawB();

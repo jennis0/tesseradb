@@ -77,9 +77,18 @@ export type TesseraEventDetails = {
   /**
    * A display setting was changed in the explorer's Layers popover; the detail is every setting as
    * it now stands. `radius` and `pointOpacity` are null where the map sizes and fades the points by
-   * how many are drawn, and `densityColours` is null where the map chooses.
+   * how many are drawn, and `densityColours` is null where the map chooses. `densityResolution` is
+   * the cell size chosen on the Resolution slider, in CSS pixels.
    */
-  'tessera-displaychange': {points: boolean; radius: number | null; pointOpacity: number | null; density: DensityMode; densityColours: DensityColours | null; densityStrength: number};
+  'tessera-displaychange': {
+    points: boolean;
+    radius: number | null;
+    pointOpacity: number | null;
+    density: DensityMode;
+    densityColours: DensityColours | null;
+    densityStrength: number;
+    densityResolution: number;
+  };
   /**
    * A filter changed. `column` is the column whose control changed, or null for Clear all. After an
    * edit in a control or a legend row, `expr` is the expression the edited position now composes,

@@ -30,6 +30,13 @@ export type AggregateSpec = {
    * nothing out.
    */
   withoutMembersOf?: string;
+  /**
+   * Whether the counts are taken over the items that also satisfy the store's highlight: the
+   * controls and `member_of` clauses in the highlight position are joined to `filters` by `all_of`,
+   * so each count is the viewport's `highlighted` count over the same items. Unset, or with no
+   * highlight set, `filters` is sent as it stands.
+   */
+  highlighted?: boolean;
 };
 
 /**

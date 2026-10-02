@@ -251,6 +251,27 @@ function generateMarks(): Mark[] {
 
 const MARKS = generateMarks();
 
+/**
+ * The marks counted by cell at `depth`, as the aggregate route's cell grouping counts them: one row
+ * per non-empty cell that `area`, in world units, intersects, by ascending cell, each count scaled
+ * as the tiles' counts are.
+ */
+export function cellCounts(depth: number, area: [number, number, number, number]): {cell: bigint; count: number}[] {
+  const side = 2 ** depth;
+  const span = WORLD_SIZE / side;
+  const index = (v: number) => Math.min(side - 1, Math.max(0, Math.floor(v / span)));
+  const [ax0, ay0, ax1, ay1] = [index(area[0]), index(area[1]), index(area[2]), index(area[3])];
+  const counts = new Map<bigint, number>();
+  for (const m of MARKS) {
+    const x = index(m.x);
+    const y = index(m.y);
+    if (x < ax0 || x > ax1 || y < ay0 || y > ay1) continue;
+    const cell = mortonOfTile(x, y, depth);
+    counts.set(cell, (counts.get(cell) ?? 0) + SCALE);
+  }
+  return [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([cell, count]) => ({cell, count}));
+}
+
 /** The depth the frame is composed at: 32 × 32 tiles of 16 world units. */
 const DEPTH = 5;
 

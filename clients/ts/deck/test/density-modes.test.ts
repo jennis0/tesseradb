@@ -1,34 +1,28 @@
 import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 import {LayerManager, type Layer} from '@deck.gl/core';
-import {WORLD_SIZE, type ArtifactsProjection, type ComposedTile, type MarksProjection, type TilesProjection} from '@tesseradb/client';
+import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
 import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {band} from '../../core/test/support.js';
-import {contourThresholds, densityStops, type DensityMode} from '../src/density.js';
+import {contourThresholds, densityStops, type DensityCell, type DensityCounts, type DensityMode} from '../src/density.js';
 import {TesseraLayer, loadAggregationLayers, type TesseraLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 
 /**
- * Every density mode draws the server's exact tile counts. The marks are a sample capped per tile,
- * so the tests serve a sample that disagrees with the counts: a tile with three marks and a large
- * count beside a tile with many marks and a small one. What each mode was given to draw is read off
+ * Every density mode draws the counts by cell it is given. The marks are a sample capped per tile,
+ * so the tests serve a sample that disagrees with the counts: a cell with three marks and a large
+ * count beside a cell with many marks and a small one. What each mode was given to draw is read off
  * the sublayer the Tessera layer rendered.
  */
 
 const DEPTH = 3;
-const SPAN = WORLD_SIZE / 2 ** DEPTH;
+/** The counts' depth, finer than the marks' bands. */
+const CELLS = DEPTH + 2;
+const SPAN = WORLD_SIZE / 2 ** CELLS;
 
-const tile = (x: number, y: number, exact: boolean, visible: number, matched = visible, highlighted = matched, depth = DEPTH): ComposedTile => ({
-  prefix: mortonOfTile(x, y, depth),
-  depth,
-  exact,
-  drawn: 10,
-  counts: exact ? {visible: BigInt(visible), matched: BigInt(matched), highlighted: BigInt(highlighted), served: 10} : null
-});
+const cell = (x: number, y: number, count: number): DensityCell => ({x, y, position: [(x + 0.5) * SPAN, (y + 0.5) * SPAN], count});
 
-/** Many marks where the count is small, few where it is large. */
-const tiles: TilesProjection = {
-  tiles: [tile(1, 1, true, 90_000, 80_000, 10), tile(2, 1, true, 400, 300, 200), tile(5, 5, false, 7), tile(0, 0, true, 5, 5, 5, DEPTH + 1)]
-};
+/** Few marks where the count is large, many where it is small. */
+const counts: DensityCounts = {depth: CELLS, cells: [cell(4, 4, 80_000), cell(8, 4, 300)]};
 const marks: MarksProjection = {
   bands: [band(DEPTH, mortonOfTile(1, 1, DEPTH), 3), band(DEPTH, mortonOfTile(2, 1, DEPTH), 400)],
   standIn: [],
@@ -56,7 +50,7 @@ function artifacts(): ArtifactsProjection {
   };
 }
 
-type Cell = {position: [number, number]; count: number};
+type Cell = DensityCell;
 
 function host() {
   const manager = new LayerManager(fakeDevice(), {});
@@ -73,18 +67,28 @@ function host() {
     props,
     /** Draw, and draw again once the cells have settled, as a host's next frame would. */
     draw: (props: Partial<TesseraLayerInternalProps>) => {
-      const layer = () => new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, tiles, ...props} as TesseraLayerInternalProps);
+      const layer = () => new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as TesseraLayerInternalProps);
       manager.setLayers([layer()]);
       vi.advanceTimersByTime(1000);
       manager.setLayers([layer()]);
     },
     /** Draw once, with no time to settle. */
     drawNow: (props: Partial<TesseraLayerInternalProps>) =>
-      manager.setLayers([new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, tiles, ...props} as TesseraLayerInternalProps)]),
-    /** The grid's squares: each one's centre and the index of its colour among `stops`' steps. */
-    squares: () => {
-      const props = sublayer('density-grid')?.props as unknown as {data: {polygon: [number, number][]; colour: number[]}[]} | undefined;
-      return props?.data.map((d) => ({centre: [(d.polygon[0]![0] + d.polygon[2]![0]) / 2, (d.polygon[0]![1] + d.polygon[2]![1]) / 2], width: d.polygon[1]![0] - d.polygon[0]![0], colour: d.colour})) ?? null;
+      manager.setLayers([new TesseraLayer({id: 'tessera', depth: DEPTH, status: 'shown', artifacts: artifacts(), marks, densityCounts: counts, ...props} as TesseraLayerInternalProps)]),
+    /**
+     * The grid's colour at a world point, `[r, g, b, a]`, read from the image it draws; `null`
+     * where no grid is drawn.
+     */
+    gridAt: (world: [number, number]): number[] | null => {
+      const props = sublayer('density-grid')?.props as unknown as {visible: boolean; image: {data: Uint8ClampedArray; width: number; height: number}; bounds: [number, number, number, number]} | undefined;
+      if (!props?.visible) return null;
+      const [left, bottom, right, top] = props.bounds;
+      const {data, width, height} = props.image;
+      const px = Math.floor(((world[0] - left) / (right - left)) * width);
+      const py = Math.floor(((world[1] - top) / (bottom - top)) * height);
+      if (px < 0 || py < 0 || px >= width || py >= height) return [0, 0, 0, 0];
+      const i = (py * width + px) * 4;
+      return [...data.slice(i, i + 4)];
     },
     /** What an aggregation sublayer was given: each cell's position and the weight its accessor reads. */
     aggregated: (id: string): {position: [number, number]; weight: number}[] | null => {
@@ -116,69 +120,74 @@ describe('density modes', () => {
   it.each<[DensityMode, string]>([
     ['hex', 'density-hex'],
     ['contours', 'density-contours']
-  ])('%s aggregates one point per exact tile at the drawn depth, weighted by its count, whatever the sample holds', (density, id) => {
+  ])('%s aggregates one point per cell, weighted by its count, whatever the sample holds', (density, id) => {
     const h = host();
-    h.draw({density, densityChannel: 'matched'});
+    h.draw({density});
     expect(h.errors).toEqual([]);
-    // The non-exact tile and the tile at another depth give nothing; the weights are the counts,
-    // with the three-mark tile the heavier by far.
     expect(h.aggregated(id)).toEqual([
-      {position: centre(1, 1), weight: 80_000},
-      {position: centre(2, 1), weight: 300}
+      {position: centre(4, 4), weight: 80_000},
+      {position: centre(8, 4), weight: 300}
     ]);
   });
 
-  it('reads the count the channel names, so a highlight draws where its members are', () => {
+  it('draws the grid as one image, a square per cell coloured by the cell’s count, whatever the sample holds', () => {
     const h = host();
-    h.draw({density: 'hex', densityChannel: 'highlighted'});
-    expect(h.aggregated('density-hex')!.map((c) => c.weight)).toEqual([10, 200]);
-    h.draw({density: 'hex', densityChannel: 'visible'});
-    expect(h.aggregated('density-hex')!.map((c) => c.weight)).toEqual([90_000, 400]);
-  });
-
-  it('draws the grid as one square per exact tile, coloured by the tile’s count, whatever the sample holds', () => {
-    const h = host();
-    h.draw({density: 'grid', densityChannel: 'matched', densityColours: 'greys', scheme: 'light'});
-    const squares = h.squares()!;
-    expect(squares.map((q) => q.centre)).toEqual([centre(1, 1), centre(2, 1)]);
-    for (const q of squares) expect(q.width).toBeCloseTo(SPAN * 0.94);
-    // On a light ground the dense end of Greys is the darker: the three-mark tile of 80,000.
+    h.draw({density: 'grid', densityColours: 'greys', scheme: 'light'});
+    const dense = h.gridAt(centre(4, 4))!;
+    const sparse = h.gridAt(centre(8, 4))!;
+    expect(dense[3]).toBe(255);
+    expect(sparse[3]).toBe(255);
+    // A cell with no count is clear.
+    expect(h.gridAt(centre(6, 4))![3]).toBe(0);
+    // On a light ground the dense end of Greys is the darker: the three-mark cell of 80,000.
     const lum = (c: number[]) => c[0]! + c[1]! + c[2]!;
-    expect(lum(squares[0]!.colour)).toBeLessThan(lum(squares[1]!.colour));
+    expect(lum(dense)).toBeLessThan(lum(sparse));
   });
 
-  it('bins hexagons one tile wide, so no bin is finer than the counts', () => {
+  it('feeds the hexagons and contours at most their budget of cells, merged to a coarser depth, every item kept', () => {
+    const h = host();
+    const many: DensityCell[] = [];
+    for (let x = 0; x < 160; x++) for (let y = 0; y < 100; y++) many.push(cell(x, y, 1));
+    const fine = {depth: 10, cells: many.map((c) => ({...c, position: [(c.x + 0.5) * (WORLD_SIZE / 1024), (c.y + 0.5) * (WORLD_SIZE / 1024)] as [number, number]}))};
+    for (const [density, id] of [['hex', 'density-hex'], ['contours', 'density-contours']] as const) {
+      h.draw({density, densityCounts: fine});
+      const fed = h.aggregated(id)!;
+      expect(fed.length).toBeLessThan(many.length);
+      expect(fed.length).toBeLessThanOrEqual(density === 'hex' ? 10_000 : 2_000);
+      expect(fed.reduce((n, c) => n + c.weight, 0)).toBe(many.length);
+    }
+  });
+
+  it('bins hexagons one cell wide at the counts’ depth, whatever the marks’ depth', () => {
     const h = host();
     h.draw({density: 'hex'});
     expect(h.props<{radius: number}>('density-hex').radius).toBe(SPAN);
   });
 
-  it('keeps the bins it drew while tiles stream, and redraws once they settle', () => {
+  it('draws the counts it is given and nothing without them', () => {
     const h = host();
     h.draw({density: 'grid'});
-    expect(h.squares()).toHaveLength(2);
-    const next: TilesProjection = {tiles: [tile(4, 4, true, 10)]};
-    h.drawNow({density: 'grid', tiles: next});
-    expect(h.squares()).toHaveLength(2);
-    h.draw({density: 'grid', tiles: next});
-    expect(h.squares()!.map((q) => q.centre)).toEqual([centre(4, 4)]);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(255);
+    h.draw({density: 'grid', densityCounts: {depth: CELLS, cells: [cell(1, 1, 10)]}});
+    expect(h.gridAt(centre(1, 1))![3]).toBe(255);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(0);
+    h.drawNow({density: 'grid', densityCounts: null});
+    expect(h.gridAt(centre(1, 1))).toBeNull();
   });
 
-  it('draws contours at counts taken from the tiles', () => {
+  it('draws contours at counts taken from the cells', () => {
     const h = host();
     h.draw({density: 'contours'});
     const contours = h.props<{contours: {threshold: number}[]}>('density-contours').contours;
-    expect(contours.map((c) => c.threshold)).toEqual(contourThresholds([
-      {position: centre(1, 1), count: 80_000},
-      {position: centre(2, 1), count: 300}
-    ]));
+    expect(contours.map((c) => c.threshold)).toEqual(contourThresholds(counts.cells));
   });
 
   it('draws no aggregation layer under none or smooth, and the wash only under smooth', () => {
     const h = host();
     for (const density of ['none', 'smooth'] as const) {
       h.draw({density});
-      expect(h.sublayer('density-hex') ?? h.sublayer('density-grid') ?? h.sublayer('density-contours')).toBeUndefined();
+      expect(h.sublayer('density-hex') ?? h.sublayer('density-contours')).toBeUndefined();
+      expect(h.gridAt(centre(4, 4))).toBeNull();
       expect((h.sublayer('wash')!.props as {visible: boolean}).visible).toBe(density === 'smooth');
     }
   });
@@ -187,7 +196,7 @@ describe('density modes', () => {
     const h = host();
     h.draw({density: 'grid', points: false});
     expect(h.errors).toEqual([]);
-    expect(h.squares()).toHaveLength(2);
+    expect(h.gridAt(centre(4, 4))![3]).toBe(255);
     const drawnMarks = (h.sublayer('marks-p0')?.props as {visible: boolean} | undefined)?.visible ?? false;
     expect(drawnMarks).toBe(false);
     h.draw({density: 'grid', points: true});

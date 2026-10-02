@@ -221,7 +221,7 @@ the items the selection counts.
 | Client | Call | What it gives back |
 |---|---|---|
 | TypeScript | `client.aggregate(token, request)` | every response read through the cursor, one Arrow table per grouping with its head's figures, whether a page counted a changed corpus, and the region verdict |
-| TypeScript store | `store.setAggregate(id, {groupings, reference, without})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
+| TypeScript store | `store.setAggregate(id, {groupings, reference, without, highlighted})` | the `aggregates` projection, each entry answered over the store's current filters and selected region and asked again when either, or the view, changes; a request the next one supersedes is aborted |
 | Python | `viewer.aggregate(view, groupings, filters, reference)`, `db.aggregate` and `selection.aggregate` | one `pyarrow` table per grouping, the head's figures in its schema metadata |
 
 The store sends a reference only where the component registered one, as a filter expression or as
@@ -231,11 +231,32 @@ control. A category control uses this to list its own values: with its clause se
 excludes are still counted, and every other clause, the `member_of` clauses and the selected
 region still narrow them. A registration can also name one layer in `withoutMembersOf`, and the
 store then leaves out that layer's `member_of` clauses in the filter position; a cluster control
-uses this to keep counting the clusters its own clauses exclude. The region is always sent, and
-nothing is left out unless a registration names it. A `429` or `503`
+uses this to keep counting the clusters its own clauses exclude. A registration with
+`highlighted` has the store join its highlight to the filters, so each count is the viewport's
+highlighted count over the same items. The region is always sent, and nothing is left out unless a
+registration names it. A `429` or `503`
 is sent again as the map's own requests are, after the same backoff or the server's
 `Retry-After` where that is longer, and a newer change cancels the wait. `selection.aggregate` sends the selection's filters
 and box as the request's `filters`, so every grouping's total is the selection's count.
+
+The map draws density from this route. `DensityCounter` in `@tesseradb/deck` registers one
+grouping of cells with the store, at the depth whose cells come nearest a chosen size on screen at
+the camera's zoom, over the viewport and a margin of a quarter of its width and height on each
+side. The registration is `highlighted`, so the counts are the highlighted items' under a
+highlight and the filtered items' otherwise, over the store's filters and selected region, as the
+map's points are; the store asks again when any of these changes. The counter asks only once the
+camera has rested for 200 ms, draws the last answer at its own world positions until the next
+lands, and asks nothing while the viewport stays inside the area held at the same depth. A move
+that leaves the area drops the registration at once, so a filter changed during the move sends
+nothing for an area no longer shown. A view switch asks again at once, over the area in the new
+view's coordinates.
+
+A depth whose cells over the area could pass `selection.max_aggregate_cells` is not asked for,
+counting one column and one row more than the area spans, since the server quantises the area's
+corners itself; the finest size that fits is drawn instead. A `422` is asked again one depth
+coarser, up to three times. Any other refusal draws nothing until the camera next rests, when the
+counter asks again. A `TesseraLayer` given a store and neither counts nor a counter keeps a counter
+of its own over its viewport.
 
 There is no command-line command for this route. It is reached over HTTP and through the
 TypeScript and Python clients.

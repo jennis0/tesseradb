@@ -58,7 +58,7 @@ export const displayStyles = css`
   }
   .sliders {
     display: grid;
-    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-columns: 72px minmax(0, 1fr);
     align-items: center;
     gap: 6px 0;
     padding: 2px 0 10px;
@@ -97,6 +97,38 @@ export const displayStyles = css`
   .modes button[aria-checked='true'] {
     background: var(--_tessera-surface);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    color: var(--_tessera-ink);
+    font-weight: 500;
+  }
+  .resolution {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .resolution input[type='range'] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  /* The stops the server will not count for this view, struck through on the track. */
+  .resolution .past {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    height: 6px;
+    margin-top: -3px;
+    border-radius: 3px;
+    background: repeating-linear-gradient(135deg, var(--_tessera-ink-3) 0 1.5px, transparent 1.5px 4px) var(--_tessera-surface);
+    opacity: 0.8;
+    pointer-events: none;
+  }
+  .ends {
+    display: flex;
+    justify-content: space-between;
+    margin-top: -2px;
+    font-size: 11px;
+    color: var(--_tessera-ink-3);
+  }
+  .ends .readout {
     color: var(--_tessera-ink);
     font-weight: 500;
   }

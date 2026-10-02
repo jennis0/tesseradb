@@ -4,6 +4,7 @@ import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
+import {DEFAULT_DENSITY_CELL_PX, DENSITY_CELL_SIZES, nearestStop} from '@tesseradb/deck';
 import {artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
@@ -125,8 +126,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * another view, the card goes first in the right column, as a region's does.
  *
  * The Layers button opens a popover with a Display section (whether the points are drawn, what sizes
- * them, their opacity, and how density is drawn, in which colours and how strongly) over the layer
- * picker. Size by lists None and the number columns the points arrive with. Under None one Size
+ * them, their opacity, and how density is drawn, at what resolution, in which colours and how
+ * strongly) over the layer picker. Size by lists None and the number columns the points arrive with. Under None one Size
  * slider sets every point's radius, which `hide-size` leaves out; under a column two sliders set the
  * radii of its smallest and largest value, and a Linear, Log or Rank choice places values between
  * them. The display settings are the explorer's properties of the same names, passed to its map.
@@ -212,6 +213,9 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart point-opacity - The Opacity slider.
  * @csspart density-mode - The Density choice: None, Smooth, Hex, Grid and Lines, each with
  *   `data-mode` and `aria-checked`.
+ * @csspart density-resolution - The Resolution slider, while density is drawn: the cell size on
+ *   screen, coarse to fine. Its stops past the finest the server will count for the view are shown
+ *   struck through, and the slider stops at the last one it can count.
  * @csspart density-colours - The button that opens the list of density colours, while density is
  *   drawn in colours.
  * @csspart density-strength - The Strength slider, while density is drawn.
@@ -781,6 +785,11 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'density-colours'}) accessor densityColours: DensityColours | '' = '';
   /** Passed to the map's `density-strength`; the Strength slider in the Layers popover changes it. */
   @property({type: Number, attribute: 'density-strength'}) accessor densityStrength = 1;
+  /**
+   * Passed to the map's `density-resolution`, the cell size on screen in CSS pixels; the Resolution
+   * slider in the Layers popover changes it.
+   */
+  @property({type: Number, attribute: 'density-resolution'}) accessor densityResolution = DEFAULT_DENSITY_CELL_PX;
   /** Passed to the map's `category-palette`. */
   @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
   /** Passed to the map's `ramp`. */
@@ -1108,6 +1117,7 @@ export class TesseraExplorer extends TesseraElement {
           .density=${this.density}
           .densityColours=${this.densityColours}
           .densityStrength=${this.densityStrength}
+          .densityResolution=${this.densityResolution}
           .categoryPalette=${this.categoryPalette}
           .ramp=${this.ramp}
           .rampScale=${this.rampScale}
@@ -1328,11 +1338,20 @@ export class TesseraExplorer extends TesseraElement {
    * The camera moved: place the callouts in the next frame, and draw again only where the zoom
    * changed the level the layers are drawn at.
    */
+  /** The enabled resolution stops the popover last drew, so a camera change that alters them redraws it. */
+  private stopsSeen = '';
+
   private onCamera(): void {
     if (this.placing !== null || typeof requestAnimationFrame === 'undefined') return;
     this.placing = requestAnimationFrame(() => {
       this.placing = null;
       this.placeCallouts();
+      // The resolution stops the server can count change with the camera.
+      const stops = this.layersOpen && this.density !== 'none' ? (this.map?.densityStops().map((s) => (s.enabled ? '1' : '0')).join('') ?? '') : '';
+      if (stops !== this.stopsSeen) {
+        this.stopsSeen = stops;
+        this.requestUpdate();
+      }
       const zoom = this.map?.zoom ?? null;
       if (zoom !== this.zoomSeen && this.level === null) {
         this.zoomSeen = zoom;
@@ -1419,7 +1438,8 @@ export class TesseraExplorer extends TesseraElement {
       pointOpacity: this.pointOpacity,
       density: this.density,
       densityColours: this.densityColours || null,
-      densityStrength: this.densityStrength
+      densityStrength: this.densityStrength,
+      densityResolution: this.densityResolution
     };
   }
 
@@ -1452,6 +1472,7 @@ export class TesseraExplorer extends TesseraElement {
       s.density === 'none'
         ? html`<div class="gap"></div>`
         : html`<div class="sliders">
+            ${this.resolutionControl(change)}
             ${ramped
               ? html`<span id="colours-label">Colours</span>
                   <button part="density-colours" class="ramp-choice" type="button" aria-labelledby="colours-label" aria-expanded=${this.densityColoursOpen ? 'true' : 'false'} aria-controls="density-colour-list"
@@ -1484,6 +1505,36 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       ${densityControls}
     </div>`;
+  }
+
+  /**
+   * The Resolution slider: one stop per cell size, coarse to fine. The stops past the finest the
+   * map can ask for at its camera are struck through on the track. Moving the slider onto one
+   * keeps the size asked for, which the map draws once the camera lets it, and shows the slider on
+   * the finest it can draw now. The readout gives the cell size drawn.
+   */
+  private resolutionControl(change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
+    const last = DENSITY_CELL_SIZES.length - 1;
+    // Before the map has a camera and `meta`, every stop is offered.
+    const enabled = this.map?.densityStops().map((s) => s.enabled) ?? [];
+    const finest = enabled.length === 0 ? last : Math.max(0, enabled.lastIndexOf(true));
+    const at = Math.min(DENSITY_CELL_SIZES.indexOf(nearestStop(this.densityResolution)), finest);
+    const px = DENSITY_CELL_SIZES[at]!;
+    // The track runs between the thumb's centres at either end; the struck part starts half a stop past the finest.
+    const past = finest < last ? html`<span class="past" style=${`left:calc(8px + (100% - 16px) * ${(finest + 0.5) / last})`}></span>` : nothing;
+    const onInput = (e: Event) => {
+      const input = e.target as HTMLInputElement;
+      const i = Number(input.value);
+      input.value = String(Math.min(i, finest));
+      change({densityResolution: DENSITY_CELL_SIZES[i]!});
+    };
+    return html`<label for="density-resolution">Resolution</label>
+      <div class="resolution">
+        <input id="density-resolution" part="density-resolution" type="range" min="0" max=${last} step="1" .value=${String(at)}
+          aria-valuetext=${`Cells about ${px} px across`} @input=${onInput} />${past}
+      </div>
+      <span></span>
+      <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${px} px</span><span>Fine</span></div>`;
   }
 
   /**
@@ -1632,6 +1683,7 @@ export class TesseraExplorer extends TesseraElement {
       this.densityColoursOpen = false;
     }
     if (patch.densityStrength !== undefined) this.densityStrength = patch.densityStrength;
+    if (patch.densityResolution !== undefined) this.densityResolution = patch.densityResolution;
     emit(this, 'tessera-displaychange', this.display);
   }
 
