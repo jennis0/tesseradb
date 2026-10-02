@@ -1,17 +1,19 @@
 import {Deck, OrthographicView} from '@deck.gl/core';
 import {createStore, type Store} from '@tesseradb/client';
-import {TesseraLayer, viewInputOf} from '@tesseradb/deck';
+import {DensityCounter, TesseraLayer, viewInputOf} from '@tesseradb/deck';
 import {fitWorld, worldEdge, type ViewState} from './view.js';
 
 /**
  * `TesseraLayer` in a `Deck` the host builds. The host owns the view and the camera, tells the
- * store where the camera is through `viewInputOf`, and draws a layer of its own under the marks.
+ * store where the camera is through `viewInputOf` and the density counter through `look`, and
+ * draws a layer of its own under the marks.
  * The layer makes its GPU buffers on the deck's device and releases them itself.
  */
 const parent = document.getElementById('map') as HTMLDivElement;
 const size = () => ({width: parent.clientWidth || 1, height: parent.clientHeight || 1});
 
 let store: Store | null = null;
+let density: DensityCounter | null = null;
 let viewState: ViewState = fitWorld(size().width, size().height);
 let unsubscribe: (() => void) | null = null;
 
@@ -36,11 +38,12 @@ function tell(): void {
   const {width, height} = size();
   const input = viewInputOf(store, viewState, width, height);
   if (input) store.setView(input);
+  density?.look({...viewState, width, height});
 }
 
 /** The layer list: the host's own layer, then Tessera's over the current store. */
 function draw(): void {
-  deck.setProps({layers: [worldEdge(), store ? new TesseraLayer({id: 'tessera', store}) : null]});
+  deck.setProps({layers: [worldEdge(), store ? new TesseraLayer({id: 'tessera', store, densityCounts: density?.counts() ?? null}) : null]});
 }
 
 /** The newest sign-in asked for; an older one's token that lands later is dropped. */
@@ -50,6 +53,8 @@ async function open(user: string): Promise<void> {
   const ticket = ++opening;
   unsubscribe?.();
   unsubscribe = null;
+  density?.dispose();
+  density = null;
   store?.dispose();
   store = null;
   draw();
@@ -57,6 +62,9 @@ async function open(user: string): Promise<void> {
   if (ticket !== opening) return;
   const s = createStore({viewerUrl: location.origin, token});
   store = s;
+  // The smooth wash under the marks, from counts of cells about 12 px across.
+  density = new DensityCounter(s, draw);
+  density.set({on: true, cellPx: 12, highlighted: false});
   // The first view goes out once `meta` has arrived: the store's frame comes with it.
   unsubscribe = s.subscribe('meta', (meta) => {
     if (meta) tell();

@@ -1,73 +1,57 @@
 import {describe, expect, it} from 'vitest';
-import {type ComposedTile} from '@tesseradb/client';
+import {tableFromArrays} from 'apache-arrow';
+import {WORLD_SIZE} from '@tesseradb/client';
 import {mortonOfTile} from '@tesseradb/client/internal';
-import {binDensity} from '../src/density.js';
+import {binDensity, densityCellsOf, type DensityCell, type DensityCounts} from '../src/density.js';
 import {resolvePick} from '../src/pick.js';
 
-/**
- * The wash reads the number channel and only the exact half of it: counts land in the bin of the
- * tile they belong to at the drawn depth, and a non-exact tile contributes nothing at all.
- */
+/** One cell at `depth` with `count`, as {@link densityCellsOf} reads it from an answer. */
+const cell = (x: number, y: number, depth: number, count: number): DensityCell => {
+  const span = WORLD_SIZE / 2 ** depth;
+  return {x, y, position: [(x + 0.5) * span, (y + 0.5) * span], count};
+};
+const counts = (depth: number, cells: DensityCell[]): DensityCounts => ({depth, cells});
 
-const tile = (x: number, y: number, depth: number, exact: boolean, matched: number, visible = matched, highlighted?: number): ComposedTile => ({
-  prefix: mortonOfTile(x, y, depth),
-  depth,
-  exact,
-  drawn: exact ? 10 : 7,
-  counts: exact ? {visible: BigInt(visible), matched: BigInt(matched), highlighted: BigInt(highlighted ?? matched), served: 10} : null
+describe('densityCellsOf', () => {
+  it('places each row at its cell’s centre, at the viewport’s depths and past them', () => {
+    for (const depth of [3, 16, 20]) {
+      const span = WORLD_SIZE / 2 ** depth;
+      const table = tableFromArrays({cell: BigUint64Array.from([mortonOfTile(1, 2, depth), mortonOfTile(5, 3, depth)]), count: BigUint64Array.from([7n, 40n])});
+      expect(densityCellsOf({rows: table}, depth)).toEqual([
+        {x: 1, y: 2, position: [1.5 * span, 2.5 * span], count: 7},
+        {x: 5, y: 3, position: [5.5 * span, 3.5 * span], count: 40}
+      ]);
+    }
+  });
+
+  it('reads nothing from a table without cells', () => {
+    expect(densityCellsOf({rows: tableFromArrays({count: BigUint64Array.from([3n])})}, 4)).toEqual([]);
+  });
 });
 
 describe('binDensity', () => {
-  /**
-   * The wash reads the channel it is given. Two tiles with equal `matched` and different
-   * `highlighted` must bin differently under `highlighted`.
-   */
-  it('washes the channel it is given, so a highlight and a filter are different pictures', () => {
-    const tiles = [tile(0, 0, 1, true, 100, 100, 1), tile(1, 0, 1, true, 100, 100, 100)];
-    const matched = binDensity(tiles, 1, 'matched')!;
-    const highlighted = binDensity(tiles, 1, 'highlighted')!;
-    // Equal `matched` in both bins is one distinct count, so both bins take the same intensity.
-    expect(matched.data[3]).toBe(matched.data[7]);
-    // The highlight tells them apart: the tile matching one is far below the tile matching a
-    // hundred, and neither is empty.
-    expect(highlighted.data[3]!).toBeLessThan(highlighted.data[7]!);
-    expect(highlighted.filled).toBe(2);
-  });
-
-
-  it('lands each exact tile’s count in its own bin, over the rectangle the tiles span', () => {
-    const image = binDensity([tile(4, 6, 3, true, 100), tile(6, 7, 3, true, 5), tile(5, 6, 3, true, 0)], 3)!;
+  it('lands each cell’s count in its own bin, over the rectangle the cells span', () => {
+    const image = binDensity(counts(3, [cell(4, 6, 3, 100), cell(6, 7, 3, 5), cell(5, 6, 3, 0)]))!;
     expect(image.width).toBe(3);
     expect(image.height).toBe(2);
-    // Depth 3: 64 world units a tile; x 4..6, y 6..7.
+    // Depth 3: 64 world units a cell; x 4..6, y 6..7.
     expect(image.bounds).toEqual([256, 384, 448, 512]);
     const alphaAt = (x: number, y: number) => image.data[((y - 6) * 3 + (x - 4)) * 4 + 3]!;
     expect(alphaAt(4, 6)).toBeGreaterThan(alphaAt(6, 7)); // the larger count is the stronger bin
     expect(alphaAt(6, 7)).toBeGreaterThan(0);
     expect(alphaAt(5, 6)).toBe(0); // a zero count is transparent
-    expect(alphaAt(5, 7)).toBe(0); // a tile not on screen is transparent
+    expect(alphaAt(5, 7)).toBe(0); // a cell with no row is transparent
     expect(image.filled).toBe(2);
   });
 
-  it('gives a non-exact tile no bin — a superset must not read as density', () => {
-    const image = binDensity([tile(1, 1, 3, true, 50), tile(2, 1, 3, false, 999)], 3)!;
-    expect(image.width).toBe(1);
-    expect(image.filled).toBe(1);
-    expect(image.bounds).toEqual([64, 64, 128, 128]);
+  it('gives cells of equal count equal intensity', () => {
+    const image = binDensity(counts(1, [cell(0, 0, 1, 100), cell(1, 0, 1, 100)]))!;
+    expect(image.data[3]).toBe(image.data[7]);
   });
 
-  it('ignores an exact tile at another depth, and washes nothing when none is at the drawn one', () => {
-    expect(binDensity([tile(1, 1, 4, true, 50)], 3)).toBeNull();
-    expect(binDensity([tile(2, 1, 3, false, 999)], 3)).toBeNull();
-    expect(binDensity([], 3)).toBeNull();
-  });
-
-  it('washes the chosen channel', () => {
-    const tiles = [tile(0, 0, 2, true, 1, 1000), tile(1, 0, 2, true, 1000, 1000)];
-    const matched = binDensity(tiles, 2, 'matched')!;
-    const visible = binDensity(tiles, 2, 'visible')!;
-    expect(matched.data[3]).toBeLessThan(matched.data[7]!);
-    expect(visible.data[3]).toBe(visible.data[7]);
+  it('washes nothing where no cell has a count', () => {
+    expect(binDensity(counts(3, [cell(2, 1, 3, 0)]))).toBeNull();
+    expect(binDensity(counts(3, []))).toBeNull();
   });
 });
 
@@ -108,9 +92,9 @@ describe('resolvePick — a miss is not a broken pick', () => {
 
 import {DENSITY_SUPERSAMPLE, filterDensity} from '../src/density.js';
 
-describe('filterDensity: the tile grid is not shown', () => {
+describe('filterDensity: the cell grid is not shown', () => {
   it('turns a single non-zero bin into a halo with no one-texel step from nothing to full', () => {
-    const binned = binDensity([tile(4, 6, 3, true, 100)], 3)!;
+    const binned = binDensity(counts(3, [cell(4, 6, 3, 100)]))!;
     const soft = filterDensity(binned, 3);
     const S = DENSITY_SUPERSAMPLE;
     // One padding cell each side, S texels a cell.
@@ -138,7 +122,7 @@ describe('filterDensity: the tile grid is not shown', () => {
   });
 
   it('keeps an empty bin between two filled ones dimmer than either', () => {
-    const binned = binDensity([tile(0, 0, 3, true, 100), tile(2, 0, 3, true, 100)], 3)!;
+    const binned = binDensity(counts(3, [cell(0, 0, 3, 100), cell(2, 0, 3, 100)]))!;
     const soft = filterDensity(binned, 3);
     const S = DENSITY_SUPERSAMPLE;
     const mid = S + S / 2;

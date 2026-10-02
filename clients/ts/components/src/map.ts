@@ -11,7 +11,7 @@ import {
   type SelectionShape
 } from '@tesseradb/client';
 import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
-import {TesseraLayer, resolvePick, viewInputOf, type Picked} from '@tesseradb/deck';
+import {DEFAULT_DENSITY_CELL_PX, DensityCounter, TesseraLayer, nearestStop, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
 import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
@@ -43,6 +43,8 @@ export type MapProbe = {
   marks: number;
   /** Viewport requests the store has issued, when its instruments report them; else 0. */
   requests: number;
+  /** Aggregate requests density has started. */
+  densityRequests: number;
   encoding: string;
   view: {depth: number; status: string; stale: boolean; visible: number; matched: number; served: number; provisional: number};
   /** `ms` is from the selection to its counts arriving, on the store's clock. */
@@ -106,7 +108,9 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * A settled box or lasso becomes the store's selection, a filter every count narrows to; a tag on
  * its top-left corner gives the count matched inside it and a button that clears it.
  *
- * The map owns the camera and tells the store where it is looking on every move. Keys, with the
+ * The map owns the camera and tells the store where it is looking on every move. Density is asked
+ * for once the camera has rested for 200 ms, as counts by cell over the view and a margin round
+ * it, and the last counts are drawn at their own positions until the next land. Keys, with the
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn or
  * clears the selection. On connecting, the map sets `role="application"` on itself, replacing
  * any role the host set, and sets `tabindex="0"` and an `aria-label` unless the host set them.
@@ -399,12 +403,20 @@ export class TesseraMap extends TesseraElement {
    */
   @property({type: Number, attribute: 'point-opacity'}) accessor pointOpacity: number | null = null;
   /**
-   * How density is drawn under the points, from the tiles' exact counts and never from the points,
-   * which are a sample: `none`, `smooth` (a soft wash), `hex` (hexagons), `grid` (square cells one
-   * tile wide) or `contours` (lines of equal density). It counts the highlighted items under a
-   * highlight, the matched items under a filter or selection, else the visible items.
+   * How density is drawn under the points, from exact counts by cell (`POST /v1/aggregate`) and
+   * never from the points, which are a sample: `none`, `smooth` (a soft wash), `hex` (hexagons),
+   * `grid` (square cells) or `contours` (lines of equal density). It counts the highlighted items
+   * under a highlight, the matched items under a filter or selection, else the visible items.
    */
   @property({reflect: true}) accessor density: DensityMode = 'none';
+  /**
+   * How large density's cells are on screen, in CSS pixels: 32, 24, 16, 12, 8, 6 or 4, and any
+   * other size is taken as the nearest of them. The cells asked for are those of the depth nearest
+   * that size at the current zoom. Where that depth's cells over the area asked for are more than
+   * the server's `selection.maxAggregateCells`, the finest size that fits is drawn instead;
+   * {@link TesseraMap.densityStops} says which sizes fit.
+   */
+  @property({type: Number, attribute: 'density-resolution'}) accessor densityResolution = DEFAULT_DENSITY_CELL_PX;
   /**
    * The colours density is drawn in: `warm-grey`, `viridis`, `cividis`, `magma` or `greys`. Unset,
    * the smooth wash under the points is warm grey and every other density is Viridis. While density
@@ -506,6 +518,7 @@ export class TesseraMap extends TesseraElement {
     at: 0,
     marks: 0,
     requests: 0,
+    densityRequests: 0,
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
@@ -589,6 +602,7 @@ export class TesseraMap extends TesseraElement {
       if (changed.has('ground')) s.setScheme(this.scheme());
       this.pushColouring(s, changed);
     }
+    if (changed.has('density') || changed.has('densityResolution')) this.pushDensity();
     const repaint = ['mode', 'drag', 'dragPolygon', 'basemap', 'ground', 'radius', 'clusterLevel', 'hoveredArtifact', 'noPoints', 'pointOpacity', 'density', 'densityColours', 'densityStrength'] as const;
     if (repaint.some((k) => changed.has(k))) this.paint();
   }
@@ -656,7 +670,35 @@ export class TesseraMap extends TesseraElement {
   /** Stops following the colour and size choices of the store adopted last. */
   private unwatchChoices: (() => void) | null = null;
 
+  /** Keeps the counts density is drawn from, over the store adopted last. */
+  private densityCounter: DensityCounter | null = null;
+
+  /** Tell the density counter what to draw: whether, at which cell size, and over the highlight. */
+  private pushDensity(): void {
+    const s = this.resolvedStore;
+    if (!this.densityCounter || !s) return;
+    const highlighted = densityChannel(s.get('filters'), s.get('view'), s.get('region')) === 'highlighted';
+    this.densityCounter.set({on: this.density !== 'none', cellPx: nearestStop(this.densityResolution), highlighted});
+  }
+
+  /**
+   * The resolution stops at the camera as it stands: each cell size, the depth it asks for, and
+   * whether that depth's cells over the area asked for fit the server's
+   * `selection.maxAggregateCells`. Every stop is enabled before `meta` has arrived.
+   */
+  densityStops(): ResolutionStop[] {
+    return this.densityCounter?.stops() ?? [];
+  }
+
   protected override onStoreAdopted(store: Store | null): void {
+    this.densityCounter?.dispose();
+    this.densityCounter = store
+      ? new DensityCounter(store, () => {
+          this.probe.densityRequests = this.densityCounter?.requests ?? 0;
+          this.paint();
+        })
+      : null;
+    this.pushDensity();
     this.unwatchChoices?.();
     this.unwatchChoices = store
       ? watchChoices(store, () => {
@@ -786,11 +828,14 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
-    // Likewise for `highlighting` and `densityChannel`.
+    // Likewise for `highlighting`; density's counts follow the highlight.
     const channel = densityChannel(s.get('filters'), view, region);
-    if (view.highlighting !== this.paintedHighlighting || channel !== this.paintedChannel) {
+    if (channel !== this.pushedChannel) {
+      this.pushedChannel = channel;
+      this.pushDensity();
+    }
+    if (view.highlighting !== this.paintedHighlighting) {
       this.paintedHighlighting = view.highlighting;
-      this.paintedChannel = channel;
       this.paint();
     }
     super.onStoreChange();
@@ -802,7 +847,8 @@ export class TesseraMap extends TesseraElement {
   private paintedOpened: bigint | null = null;
   /** What the last paint told the layer about the highlight. */
   private paintedHighlighting = false;
-  private paintedChannel: ReturnType<typeof densityChannel> | null = null;
+  /** The count density was last told to read. */
+  private pushedChannel: ReturnType<typeof densityChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
   /** What `measure` adds on a store change: the composition check and the cluster sample. */
@@ -845,6 +891,8 @@ export class TesseraMap extends TesseraElement {
 
   /** Dispose of the store this map built, as on every element, and release its GPU resources now. */
   override dispose(): void {
+    this.densityCounter?.dispose();
+    this.densityCounter = null;
     super.dispose();
     this.deck?.finalize();
     this.deck = null;
@@ -892,6 +940,8 @@ export class TesseraMap extends TesseraElement {
     const input = viewInputOf(s, this.viewState, width, height);
     if (!input) return;
     s.setView(input);
+    this.densityCounter?.look({target: this.viewState.target, zoom: this.viewState.zoom, width, height});
+    this.probe.densityRequests = this.densityCounter?.requests ?? 0;
     emit(this, 'tessera-viewchange', {bbox: input.bbox, zoom: this.viewState.zoom, width, height});
   }
 
@@ -919,7 +969,7 @@ export class TesseraMap extends TesseraElement {
           radius: this.radius,
           pointOpacity: this.pointOpacity,
           density: this.density,
-          densityChannel: densityChannel(s.get('filters'), s.get('view'), s.get('region')),
+          densityCounts: this.densityCounter?.counts() ?? null,
           densityColours: this.densityColours || null,
           densityStrength: this.densityStrength,
           colouring: colouringOf(s),
