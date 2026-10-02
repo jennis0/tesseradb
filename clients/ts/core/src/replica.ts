@@ -1,8 +1,8 @@
-import {BandBudget, BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import {BandBudget, BandCache, bandSplitter, type Band, type CountedTile, type Resolved} from './bands.js';
 import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
-import type {Quantisation, TileCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
+import type {Quantisation, TileCounts, ViewportCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
  * The read-through replica: callers ask for a region of tiles at a depth and get bands back.
@@ -47,6 +47,8 @@ export type ReplicaOptions = {
    * timed from outside. Changes no behaviour.
    */
   onPhase?: (kind: string, ms: number, n: number) => void;
+  /** A response's counts landed ahead of its points, so a frame derived now counts more tiles. */
+  onCounts?: () => void;
 };
 
 /** What one {@link Replica.fetchRegion} call resolved to. @internal */
@@ -61,6 +63,11 @@ export type ReplicaFrame = {
    * not held at this depth. A superset of what is served there, so drawn stale and not counted.
    */
   fallback: {band: Band; clip: TileRect}[];
+  /**
+   * The server's counts for tiles at this depth inside the region whose points have not arrived.
+   * Absent is none.
+   */
+  counted?: CountedTile[];
   /**
    * The store's change counter when this frame was derived. A caller compares it with
    * `Replica.version` to know whether a frame it has is still current.
@@ -192,7 +199,9 @@ export class Replica {
        * Takes each points frame as it lands; see `TesseraClient.viewport`. The response then
        * carries no points. A transport that cannot stream may ignore this and answer whole.
        */
-      onPart?: (part: ViewportPart) => void | Promise<void>
+      onPart?: (part: ViewportPart) => void | Promise<void>,
+      /** Takes the response's counts as they land; see `TesseraClient.viewport`. */
+      onCounts?: (counts: ViewportCounts) => void
     ) => Promise<ViewportResponse>,
     private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
@@ -244,6 +253,11 @@ export class Replica {
   /** See {@link BandCache.exactIn}. */
   exactIn(want: TileRect, depth: number): Band[] {
     return this.cache.exactIn(want, depth);
+  }
+
+  /** See {@link BandCache.countedIn}. */
+  countedIn(want: TileRect, depth: number): CountedTile[] {
+    return this.cache.countedIn(want, depth);
   }
 
   /** See {@link BandCache.retract}; the caller schedules the refetch. */
@@ -307,6 +321,7 @@ export class Replica {
       want,
       exact,
       fallback,
+      counted: this.cache.countedIn(want, depth),
       version: this.cache.version,
       response: null,
       plan: {wanted: plan.wanted, novel: plan.novel, requests: 0, bytes: 0}
@@ -386,6 +401,12 @@ export class Replica {
         async (part) => {
           piece.parts += 1;
           for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
+        },
+        (counts) => {
+          this.observe(counts);
+          if (this.opts.cache === false) return;
+          this.cache.putCounts(depth, counts.tiles, counts.identityKey, counts.contentKey);
+          this.opts.onCounts?.();
         }
       );
       // The loop below may throw on an earlier piece while this one is in flight; this keeps this
@@ -447,6 +468,7 @@ export class Replica {
       want: render,
       exact,
       fallback,
+      counted: this.opts.cache === false ? [] : this.cache.countedIn(render, depth),
       version: this.cache.version,
       response,
       plan: {wanted: plan.wanted, novel: plan.novel, requests: issued, bytes: responseBytes}

@@ -300,7 +300,7 @@ export type MarksProjection = {
 export type TilesProjection = {
   /**
    * One entry per contributing tile: its address, whether it is exact, how many marks it draws and,
-   * for an exact tile, the server's counts.
+   * for an exact tile or one whose counts have landed before its points, the server's counts.
    */
   tiles: Composition['tiles'];
 };
@@ -976,7 +976,7 @@ export function createStore(options: StoreOptions): Store {
     const admitted = (identityKey: string, token: string): boolean => own !== null && views.holds(own) && admit(id, identityKey, token);
 
     const built = new Replica(
-      async (req, signal, background, onPart) => {
+      async (req, signal, background, onPart, onCounts) => {
         const tok = await tokens.use();
         // The layers named put a membership column on each band. A counts-only revalidation
         // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
@@ -994,13 +994,22 @@ export function createStore(options: StoreOptions): Store {
             ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
-          signal,
-          background,
-          onPart &&
-            ((part) => {
-              if (!admitted(part.identityKey, tok)) throw identityChanged();
-              return onPart(part);
-            })
+          {
+            signal,
+            background,
+            onPart:
+              onPart &&
+              ((part) => {
+                if (!admitted(part.identityKey, tok)) throw identityChanged();
+                return onPart(part);
+              }),
+            onCounts:
+              onCounts &&
+              ((counts) => {
+                if (!admitted(counts.identityKey, tok)) throw identityChanged();
+                onCounts(counts);
+              })
+          }
         );
         if (!admitted(response.identityKey, tok)) throw identityChanged();
         return response;
@@ -1017,6 +1026,8 @@ export function createStore(options: StoreOptions): Store {
           // A stored slice is drawable, so the first marks arrive with the first slice.
           if (kind === 'piece' || kind === 'store') ownPresenter?.absorbed();
         },
+        // Counts are drawable as density and figures before the points that follow them.
+        onCounts: () => ownPresenter?.absorbed(),
         now: () => clock.now()
       }
     );
@@ -1269,7 +1280,8 @@ export function createStore(options: StoreOptions): Store {
       visible += tile.counts.visible;
       matched += tile.counts.matched;
       highlighted += tile.counts.highlighted;
-      served += tile.counts.served;
+      // Marks on screen: a tile counted before its points draws none.
+      served += tile.drawn;
     }
 
     // A frame with marks means the session answered, while the request may still be streaming.

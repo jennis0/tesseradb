@@ -238,3 +238,43 @@ describe('Replica.fetchRegion', () => {
     expect(back.plan.novel).toBe(4);
   });
 });
+
+describe('counts held before their points', () => {
+  /**
+   * A replica whose fetches hand over the counts of one tile, column `x` of row 0, with `visible`
+   * items under the keys given, then fail before any point, as an aborted stream does.
+   */
+  function counting() {
+    let next = {x: 0, visible: 0n, identityKey: 'ik', contentKey: 'ck'};
+    const r = new Replica(
+      async (req, _signal, _background, _onPart, onCounts) => {
+        const tiles = [tile(mortonOfTile(next.x, 0, req.zoom), next.visible, {served: 2n})];
+        onCounts?.({tiles, subCells: null, identityKey: next.identityKey, contentKey: next.contentKey});
+        throw new Error('aborted');
+      },
+      Q,
+      {view: 's', now: () => 0, revalidateAfterMs: Infinity}
+    );
+    const ask = async (x: number, visible: bigint, identityKey: string, contentKey: string) => {
+      next = {x, visible, identityKey, contentKey};
+      await r.fetchRegion(world(2), 2, 10).catch(() => {});
+      return r.frameFromCache(world(2), 2, 10).counted!.map((c) => c.counts.visible);
+    };
+    return {ask};
+  }
+
+  it('keeps the counts of an aborted request, and drops them for a new content key', async () => {
+    const {ask} = counting();
+    expect(await ask(0, 30n, 'ik', 'ck')).toEqual([30n]);
+    // Another tile under the same key is held beside it.
+    expect(await ask(1, 20n, 'ik', 'ck')).toEqual([30n, 20n]);
+    // A new content key: its counts alone.
+    expect(await ask(2, 5n, 'ik', 'ck2')).toEqual([5n]);
+  });
+
+  it('drops every held count when another principal answers', async () => {
+    const {ask} = counting();
+    expect(await ask(0, 30n, 'ik', 'ck')).toEqual([30n]);
+    expect(await ask(1, 7n, 'ik-other', 'ck')).toEqual([7n]);
+  });
+});

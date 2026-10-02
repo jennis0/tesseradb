@@ -112,6 +112,24 @@ def test_an_underlay_offset_serves_the_sub_cells_frame(db):
     assert db.view("map").sample(zoom=0).sub_cells is None
 
 
+def test_on_counts_receives_the_counts_once_and_they_are_the_samples(db):
+    """The counts reach `on_counts` as they land, with the sub-cells where an offset asks for
+    them, and they are the counts the finished sample carries."""
+    for offset in (None, 2):
+        seen = []
+        served = db.view("map").sample(
+            zoom=0, underlay_offset=offset, on_counts=lambda tiles, cells: seen.append((tiles, cells))
+        )
+        assert len(seen) == 1
+        tiles, cells = seen[0]
+        totals = json.loads(served.schema.metadata[b"tessera.counts"])
+        assert {name: sum(tiles.column(name).to_pylist()) for name in totals} == totals
+        if offset is None:
+            assert cells is None
+        else:
+            assert cells.equals(served.sub_cells)
+
+
 # ---------------------------------------------------------------------------- the artifact verbs
 
 

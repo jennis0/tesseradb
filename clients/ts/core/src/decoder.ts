@@ -1,8 +1,5 @@
-import {decodeHead, decodePoints, decodeViewport, type PointsPart, type ViewportHead} from './decode.js';
+import {decodeArtifacts, decodePoints, decodeViewport, type PointsPart, type ViewportHead} from './decode.js';
 import type {ViewportResult} from './types.js';
-
-/** The head frames of one response, as they came off the wire. */
-export type HeadFrames = {tiles: Uint8Array; subCells: Uint8Array | null; artifacts: Uint8Array | null};
 
 /**
  * Turns a `/v1/viewport` body into typed arrays. The default decodes in web workers, off the thread
@@ -18,8 +15,8 @@ export type Decoder = {
    * `Error` for a malformed body.
    */
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
-  /** The counts, the underlay and the artifacts: everything before the first points frame. @internal */
-  decodeHead(frames: HeadFrames, background?: boolean): Promise<ViewportHead>;
+  /** A response's artifacts frame, or none where it has none. @internal */
+  decodeArtifacts(frame: Uint8Array | null, background?: boolean): Promise<Pick<ViewportHead, 'artifacts' | 'artifactsIdentity'>>;
   /** One kind-3 frame, decoded alone. Each frame is an independent Arrow stream. @internal */
   decodePoints(frame: Uint8Array, background?: boolean): Promise<PointsPart>;
   /** Terminates the workers, if there are any, and rejects the decodes they hold. */
@@ -42,7 +39,7 @@ export function inlineDecoder(): Decoder {
   // Synchronous, so `background` has no effect.
   return {
     decode: async (bytes) => decodeViewport(bytes),
-    decodeHead: async (frames) => decodeHead(frames),
+    decodeArtifacts: async (frame) => decodeArtifacts(frame),
     decodePoints: async (frame) => decodePoints([frame]),
     close: () => {},
     lastWorkerMs: null
@@ -201,17 +198,14 @@ export function workerDecoder(): Decoder | null {
         background
       );
     },
-    decodeHead(frames, background = false) {
+    decodeArtifacts(frame, background = false) {
       return send(
         {
           request: () => {
-            const tiles = detachable(frames.tiles);
-            const subCells = frames.subCells ? detachable(frames.subCells) : null;
-            const artifacts = frames.artifacts ? detachable(frames.artifacts) : null;
-            const transfer = [tiles, subCells, artifacts].filter((b) => b !== null);
-            return {message: {kind: 'head', tiles, subCells, artifacts}, transfer};
+            const bytes = frame ? detachable(frame) : null;
+            return {message: {kind: 'artifacts', bytes}, transfer: bytes ? [bytes] : []};
           },
-          inline: () => inline.decodeHead(frames)
+          inline: () => inline.decodeArtifacts(frame)
         },
         background
       );

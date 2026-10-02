@@ -1463,7 +1463,7 @@ describe('a store serves one viewer', () => {
     const scheduler = fakeScheduler();
     const whose = (token: string): Who => (token === 't1' ? 'a' : opts.renewal);
     const viewport = vi.fn(
-      async (token: string, req: FakeRequest, _signal?: AbortSignal, _background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => {
+      async (token: string, req: FakeRequest, {onPart}: {onPart?: (part: ViewportPart) => void | Promise<void>} = {}) => {
         const answer = answerOf(whose(token), req);
         if (opts.gate && token === 't2' && (req.k ?? 1) > 0 && onPart) {
           await onPart({result: answer.result, identityKey: answer.identityKey, contentKey: answer.contentKey});
@@ -1755,8 +1755,8 @@ describe('a store serves one viewer', () => {
     let gate: Promise<void> | null = null;
     const {store, viewport, clock, scheduler} = perViewer({metaOf: () => (who === 'a' ? metas.a : metas.b)});
     const answer = (req: FakeRequest) => ({...answerOf(who, req), identityKey: `${who}:${req.view}`});
-    type Fetch = (token: string, req: FakeRequest, signal?: AbortSignal, background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => Promise<ViewportResponse>;
-    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, _signal, _background, onPart) => {
+    type Fetch = (token: string, req: FakeRequest, opts?: {onPart?: (part: ViewportPart) => void | Promise<void>}) => Promise<ViewportResponse>;
+    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, {onPart} = {}) => {
       // One request for s0 hands over a part only once the gate opens, and never answers.
       if (gate && req.view === 's0' && (req.k ?? 1) > 0 && onPart) {
         const held = gate;
@@ -2206,5 +2206,57 @@ describe('the item a click opens and the record a hover names', () => {
     await clock.advance(1);
     await store.describe(7n);
     expect(item).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('counts before points', () => {
+  /**
+   * A fake whose viewport hands over its counts at once and its points only when `land` is called,
+   * as a streamed response does.
+   */
+  async function held(identityKey = 'ik') {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
+    let land: () => void = () => {};
+    viewport.mockImplementation((async (_t: string, _req: FakeRequest, {onCounts}: {onCounts?: (c: unknown) => void} = {}) => {
+      const answer = response('ck', identityKey);
+      // A count-only request takes no sink and answers at once.
+      if (!onCounts) return answer;
+      onCounts({tiles: answer.result.tiles, subCells: null, identityKey, contentKey: 'ck'});
+      await new Promise<void>((resolve) => (land = resolve));
+      return answer;
+    }) as never);
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    return {store, clock, scheduler, land: async () => {
+      land();
+      await clock.advance(600);
+      scheduler.flush();
+    }};
+  }
+
+  it('shows a region’s counts before its points, then the same counts with the points', async () => {
+    const {store, land} = await held();
+    // Counted and not drawn: the figures are the server's, and no mark is on screen.
+    expect(store.get('view').visible.value).toBe(10_000_000);
+    expect(store.get('view').served.shown).toBe(0);
+    expect(store.get('marks').count.shown).toBe(0);
+    expect(store.get('tiles').tiles.map((t) => ({exact: t.exact, drawn: t.drawn, visible: t.counts?.visible}))).toEqual([{exact: false, drawn: 0, visible: 10_000_000n}]);
+
+    await land();
+    // The points carry the same counts, which replace the early ones rather than add to them.
+    expect(store.get('view').visible.value).toBe(10_000_000);
+    expect(store.get('view').served.shown).toBe(3);
+    expect(store.get('tiles').tiles.map((t) => ({exact: t.exact, drawn: t.drawn, visible: t.counts?.visible}))).toEqual([{exact: true, drawn: 3, visible: 10_000_000n}]);
+  });
+
+  it('drops counts whose points have not landed when the store forgets its answers', async () => {
+    const {store} = await held();
+    expect(store.get('tiles').tiles.length).toBe(1);
+    store.clear();
+    expect(store.get('tiles').tiles).toEqual([]);
+    expect(store.get('view').visible.value).toBe(0);
   });
 });

@@ -92,7 +92,11 @@ def split_frames(body: bytes) -> list[tuple[int, bytearray]]:
     comes last and marks the body complete, so a body cut short is refused rather than read as a
     smaller answer.
     """
-    frames = list(_frames(io.BytesIO(body)))
+    return _checked(list(_frames(io.BytesIO(body))))
+
+
+def _checked(frames: list[tuple[int, bytearray]]) -> list[tuple[int, bytearray]]:
+    """`frames` if they are a whole `/v1/viewport` body, or a refusal saying what is wrong."""
     for kind, _ in frames:
         if kind not in _KINDS:
             raise Refusal(f"viewport: unknown frame kind {kind}")
@@ -287,9 +291,8 @@ def _no_points():
     return pa.table({"tessera_id": pa.array([], pa.uint64()), "code": pa.array([], pa.uint64())})
 
 
-def _tile_counts(frames: Sequence[tuple[int, bytes]]) -> dict:
-    """The tiles frame's counts, summed over its tiles."""
-    counted = _tables([p for kind, p in frames if kind == FRAME_TILES])
+def _tile_counts(counted) -> dict:
+    """The tiles frame's counts, as a pyarrow table, summed over its tiles."""
     return {
         name: sum(int(v) for v in counted.column(name).to_pylist())
         for name in ("visible", "matched", "highlighted", "served")
@@ -517,7 +520,8 @@ class Selection:
         if expression is not None:
             request["filters"] = expression
         body = self._reader()._request("POST", "/v1/viewport", request)
-        return _tile_counts(split_frames(body)).get("matched", 0)
+        tiles = _tables([p for kind, p in split_frames(body) if kind == FRAME_TILES])
+        return _tile_counts(tiles).get("matched", 0)
 
     def sample(
         self,
@@ -534,6 +538,7 @@ class Selection:
         point_rows: Optional[str] = None,
         underlay_offset: Optional[int] = None,
         pin: Any = None,
+        on_counts: Optional[Callable[[Any, Any], None]] = None,
     ) -> Sample:
         """The points a map of this selection draws at `zoom`, as a table.
 
@@ -559,6 +564,9 @@ class Selection:
           only, which is enough to update a highlight on points already held.
         - `pin`: the `x-tessera-pin` value from an earlier answer. The answer then says whether
           the data has changed since.
+        - `on_counts`: a function called once with the per-tile counts as a pyarrow table, and
+          the `sub_cells` table or `None`, as soon as they arrive. The server sends them before
+          the annotations and the points, so a caller can show them while the rest is read.
 
         Every option is sent only when given, so the server's own setting applies otherwise.
 
@@ -587,10 +595,21 @@ class Selection:
         ):
             if value is not None:
                 request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
-        body = reader._request("POST", "/v1/viewport", request)
-        frames = split_frames(body)
+        frames = []
+        # The counts are decoded once, as they land, and handed to `on_counts` then.
+        tiles = sub_cells = None
+        with reader._open("POST", "/v1/viewport", request) as response:
+            for kind, payload in _frames(response):
+                frames.append((kind, payload))
+                if kind == FRAME_TILES:
+                    tiles = _tables([payload])
+                elif kind == FRAME_SUB_CELLS:
+                    sub_cells = _tables([payload])
+                counted = kind == (FRAME_SUB_CELLS if underlay_offset else FRAME_TILES)
+                if on_counts is not None and counted and tiles is not None:
+                    on_counts(tiles, sub_cells)
+        frames = _checked(frames)
         artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
-        sub_cells = _tables([p for kind, p in frames if kind == FRAME_SUB_CELLS])
         # A points frame with no rows is still the server's schema, so test for None, not falsity.
         points = _tables([p for kind, p in frames if kind == FRAME_POINTS])
         if points is None:
@@ -610,7 +629,7 @@ class Selection:
         return Sample(
             points.replace_schema_metadata(
                 {
-                    "tessera.counts": json.dumps(_tile_counts(frames)),
+                    "tessera.counts": json.dumps(_tile_counts(tiles)),
                     "tessera.trailer": json.dumps(trailer),
                     "tessera.request": json.dumps(request),
                 }

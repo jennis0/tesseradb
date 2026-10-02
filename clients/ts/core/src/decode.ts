@@ -591,21 +591,14 @@ export type ViewportHead = {
   artifactsIdentity: ArtifactIdentity[] | null;
 };
 
-/** Decodes the head frames together, as the streaming client asks its decoder to. */
-export function decodeHead(frames: {
-  tiles: Uint8Array;
-  subCells: Uint8Array | null;
-  artifacts: Uint8Array | null;
-}): ViewportHead {
-  const {artifacts, artifactsIdentity} = frames.artifacts
-    ? decodeArtifactsFrame(frames.artifacts)
-    : {artifacts: [] as Artifact[], artifactsIdentity: null};
-  return {
-    tiles: decodeTiles(frames.tiles),
-    subCells: frames.subCells ? decodeSubCells(frames.subCells) : null,
-    artifacts,
-    artifactsIdentity
-  };
+/**
+ * A response's artifacts: its artifacts frame decoded, or none where it has no such frame, which
+ * is one answer whether no layer was asked for, none is reachable or none is in view. The
+ * streaming client asks its decoder for this half of the head; it decodes the counts itself as
+ * they land.
+ */
+export function decodeArtifacts(payload: Uint8Array | null): Pick<ViewportHead, 'artifacts' | 'artifactsIdentity'> {
+  return payload ? decodeArtifactsFrame(payload) : {artifacts: [] as Artifact[], artifactsIdentity: null};
 }
 
 /**

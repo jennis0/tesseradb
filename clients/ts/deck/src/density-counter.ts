@@ -1,6 +1,6 @@
 import {WORLD_SIZE, type AggregateResult, type AggregateSpec, type Meta, type Refusal, type Store} from '@tesseradb/client';
 import {worldBbox} from '@tesseradb/client/internal';
-import {densityCellsOf, type DensityCounts} from './density.js';
+import {densityCellsOf, densityOfTiles, type DensityCounts} from './density.js';
 
 /**
  * The cell sizes on screen density's resolution is chosen from, in CSS pixels, coarse to fine.
@@ -178,7 +178,12 @@ type Asked = {view: string; depth: number; area: Box; tries: number};
  *
  * A depth whose cells over the area would pass `selection.maxAggregateCells` is never asked for.
  * Where the server refuses a request with `422` anyway, the counter asks one depth coarser, up to
- * three times; after any other refusal it draws nothing and asks again at the camera's next rest.
+ * three times. After any other refusal it drops the answer it held, so density is drawn from the
+ * frame's tile counts as below, and it asks again at the camera's next rest.
+ *
+ * Until an answer is held for the view, density is drawn from the counts the frame's tiles carry,
+ * which land with each viewport response ahead of its points. They count the same items, at the
+ * tiles' coarser cells, and are not drawn once an answer is held.
  *
  * `onChange` is called when the counts to draw change.
  *
@@ -195,6 +200,8 @@ export class DensityCounter {
   private held: {view: string; counts: DensityCounts} | null = null;
   private seen: AggregateResult | Refusal | null = null;
   private meta: Meta | null = null;
+  /** The tiles projection last read, and the counts derived from it. */
+  private tiles: {tiles: unknown; counts: DensityCounts} | null = null;
   private readonly unsubscribe: () => void;
 
   constructor(
@@ -227,10 +234,25 @@ export class DensityCounter {
     if (!was.on || nearestStop(was.cellPx) !== nearestStop(settings.cellPx)) this.schedule();
   }
 
-  /** The counts to draw: the last answer, while it was counted in the store's current view. */
+  /**
+   * The counts to draw: the last answer, while it was counted in the store's current view, and
+   * until there is one the frame's tile counts. Nothing while density is off.
+   */
   counts(): DensityCounts | null {
+    if (!this.settings.on) return null;
+    return this.answered() ?? this.tileCounts();
+  }
+
+  private answered(): DensityCounts | null {
     const held = this.held;
     return held && held.view === this.store.get('view').id ? held.counts : null;
+  }
+
+  /** The frame's tile counts at its depth, derived once per tiles projection; null where none. */
+  private tileCounts(): DensityCounts | null {
+    const tiles = this.store.get('tiles').tiles;
+    if (this.tiles?.tiles !== tiles) this.tiles = {tiles, counts: densityOfTiles(tiles, this.store.get('view').depth)};
+    return this.tiles.counts.cells.length > 0 ? this.tiles.counts : null;
   }
 
   /** The resolution stops at the camera as it stands; every stop is enabled before a camera and `meta`. */
@@ -281,6 +303,11 @@ export class DensityCounter {
 
   /** Take an answer that landed, or act on a refusal or a change of `meta` or view. */
   private read(): void {
+    // New tile counts are drawn while no answer is held for the view.
+    if (this.settings.on && this.answered() === null && this.store.get('tiles').tiles !== this.tiles?.tiles) {
+      this.tileCounts();
+      this.onChange();
+    }
     const meta = this.store.get('meta');
     if (meta !== this.meta) {
       this.meta = meta;
