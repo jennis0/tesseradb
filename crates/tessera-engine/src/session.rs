@@ -54,8 +54,8 @@ impl SatisfiedKeys for FxHashSet<TermId> {
     }
 }
 
-/// The terms a session authorised for terms holds. A `read-all` session has none: it holds every
-/// term.
+/// What a session authorised for a set of terms holds. A `read-all` session has none of this: it
+/// holds every term.
 struct HeldTerms {
     /// The term the credential presented for each satisfied term ordinal, and `public`. A label
     /// key has no entry: the item card names it by a witness drawn from [`Self::credentials`].
@@ -146,7 +146,11 @@ impl Session {
     /// The term the session's item card names for the index key `key`, where `key` is a term the
     /// session holds. A label's own key names none: the card writes a clause of the label. A
     /// `read-all` session holds every term, so every term key is named from `dict`.
-    pub(crate) fn term_of<'a>(&'a self, key: TermId, dict: &'a tessera_authz::Dict) -> Option<&'a [u8]> {
+    pub(crate) fn term_of<'a>(
+        &'a self,
+        key: TermId,
+        dict: &'a tessera_authz::Dict,
+    ) -> Option<&'a [u8]> {
         match &self.held {
             Some(held) => held.descriptors.get(&key).map(Vec::as_slice),
             None if dict.labels().is_label_key(key) => None,

@@ -23,7 +23,7 @@ the access labels those terms satisfy, are what every later check in this chapte
 
 A principal holding `read-all`, granted directly, through a group or through an OIDC role
 mapping, authorises a session for itself that satisfies every index key, including one promoted
-after the session was authorised. Its authorised set is the union of every posting at the
+after the session was authorised. Its authorised set is every item listed under any key at the
 corpus's current watermark, rebuilt at each publication, so it is every item the corpus holds, and
 an item a flush places joins it when that publication reaches the session. The overlay is
 subtracted from it at every request, so a deletion or suppression applies to it. It satisfies

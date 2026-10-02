@@ -148,13 +148,13 @@ with the terms of each local group a role mapping names. The principal must hold
 service hands the engine the resolved terms, and the engine builds the authorised set from them.
 
 A session holding `read-all` holds no terms. It satisfies every index key, including a key
-promoted after it was authorised, so its authorised set is the union of every posting the term
-index and its delta tiers carry: every item, since a build and an ingest each refuse an item that
-would have no label. The engine rebuilds that union at each publication, as it brings every
+promoted after it was authorised, so its authorised set is every item listed under any key in the
+term index or its delta tiers: every item, since a build and an ingest each refuse an item that
+would have no label. The engine rebuilds that set at each publication, as it brings every
 session's set forward, so an item a flush places under a new term or a new label joins the set
 when that publication reaches the session, and the session is never behind the dictionary. The
-union is keyed by the watermark alone, so every `read-all` session at one watermark shares one
-cached copy. The overlay is subtracted from it at each request as from any other, so a deletion or
+set is cached under the watermark alone, so every `read-all` session at one watermark shares one
+copy. The overlay is subtracted from it at each request as from any other, so a deletion or
 a suppression applies to it. It satisfies every view's, group's, layer's and artifact's own label
 and every layer's default label, as a session holding every term would. An artifact's membership
 requirement still applies, and its members and counts are computed from the visible set. The item
