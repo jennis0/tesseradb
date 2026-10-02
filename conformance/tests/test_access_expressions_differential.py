@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import io
 
-import pyarrow.ipc as ipc
 import pytest
+from pyarrow import ipc
 
 from oracle import expression_fixture as fx
 from oracle import wire
