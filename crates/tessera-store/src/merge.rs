@@ -369,7 +369,7 @@ pub fn execute_merge(
         )
     };
     let mut files = BTreeMap::new();
-    for name in ["morton.u32", crate::read::CutIndex::FILE, "columns.arrow"] {
+    for name in crate::SEGMENT_FILES {
         files.insert(rel(name), digest_of(&out_dir.join(name))?);
     }
     for column in presence_written {

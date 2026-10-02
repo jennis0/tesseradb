@@ -404,11 +404,7 @@ pub(crate) struct Assembly<'a> {
 pub(crate) struct Assembled {
     pub(crate) rows_in_view: u32,
     pub(crate) occupancy: Occupancy,
-    pub(crate) morton_path: PathBuf,
-    /// The Morton column's run-length index — `tessera_store::read::CutIndex`.
-    pub(crate) cuts_path: PathBuf,
     pub(crate) row_entity_path: PathBuf,
-    pub(crate) columns_path: PathBuf,
     pub(crate) permutation_path: PathBuf,
     pub(crate) presence_paths: Vec<PathBuf>,
     /// The largest Morton bucket the boundaries admitted, for the stage's line.
@@ -597,6 +593,9 @@ pub(crate) fn write_segment(
     let cuts_path = job.segment_dir.join(tessera_store::read::CutIndex::FILE);
     let mut cuts_out =
         CutWriter::create(job.segment_dir).map_err(|e| BuildError::io(&cuts_path, e))?;
+    // The identity bands, from the writer every other producer of a segment uses.
+    let mut bands_out = tessera_store::bands::BandWriter::create(job.segment_dir)
+        .map_err(|e| BuildError::io(job.segment_dir, e))?;
     let mut row_entity_out = std::io::BufWriter::new(
         std::fs::File::create(&row_entity_path)
             .map_err(|e| BuildError::io(&row_entity_path, e))?,
@@ -658,6 +657,9 @@ pub(crate) fn write_segment(
                 cuts_out
                     .push(record.morton)
                     .map_err(|e| BuildError::io(&cuts_path, e))?;
+                bands_out
+                    .push(record.identity, record.morton, record.residual)
+                    .map_err(|e| BuildError::io(job.segment_dir, e))?;
                 codes.extend_from_slice(&record.morton.to_le_bytes());
                 entities.extend_from_slice(&record.entity.to_le_bytes());
                 identities.extend_from_slice(&record.identity.to_le_bytes());
@@ -792,13 +794,15 @@ pub(crate) fn write_segment(
     columns
         .finish()
         .map_err(|e| BuildError::io(&columns_path, e))?;
+    // The bands copy the render columns out of the finished `columns.arrow`, so they come last.
+    let bands_path = job.segment_dir.join(tessera_store::bands::BANDS_FILE);
+    bands_out
+        .finish(job.segment_dir)
+        .map_err(|e| BuildError::io(&bands_path, e))?;
     Ok(Assembled {
         rows_in_view,
         occupancy: occupancy.finish(),
-        morton_path,
-        cuts_path,
         row_entity_path,
-        columns_path,
         permutation_path,
         presence_paths,
         largest_bucket: boundaries.largest(),

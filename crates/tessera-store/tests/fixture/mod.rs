@@ -22,7 +22,7 @@ use tessera_store::manifest::{
     Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::permutation::SegmentExtent;
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_flush_segment, Bundle, FlushInput, FlushRow};
 use tessera_types::{EntityId, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -81,28 +81,15 @@ pub fn build_bundle(root: &Path, n: u64) {
     write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n).expect("permutation");
 
     let mut files = BTreeMap::new();
-    for (rel, path) in [
-        (
-            format!("partitions/{PARTITION}/views/{VIEW}/permutation.bin"),
-            view_dir.join("permutation.bin"),
-        ),
-        (
-            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/columns.arrow"),
-            seg_dir.join("columns.arrow"),
-        ),
-        (
-            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/morton.u32"),
-            seg_dir.join("morton.u32"),
-        ),
-        (
-            format!(
-                "partitions/{PARTITION}/views/{VIEW}/segments/seg0/{}",
-                tessera_store::read::CutIndex::FILE
-            ),
-            seg_dir.join(tessera_store::read::CutIndex::FILE),
-        ),
-    ] {
-        files.insert(rel, file_digest(&path));
+    files.insert(
+        format!("partitions/{PARTITION}/views/{VIEW}/permutation.bin"),
+        file_digest(&view_dir.join("permutation.bin")),
+    );
+    for name in tessera_store::SEGMENT_FILES {
+        files.insert(
+            format!("partitions/{PARTITION}/views/{VIEW}/segments/seg0/{name}"),
+            file_digest(&seg_dir.join(name)),
+        );
     }
 
     let segments_manifest = SegmentsManifest {
@@ -238,18 +225,13 @@ pub fn flush_segment(
         .join(VIEW)
         .join("segments")
         .join(&seg_id);
-    let segment = SegmentData {
-        entities: tessera_store::edited::RowEntities::Numbers,
-        seg_id,
-        row_count: out.segment.row_count,
-        morton: MortonSlice::load(&seg_dir.join("morton.u32")).expect("morton"),
-        cuts: tessera_store::read::CutIndex::load(
-            &seg_dir.join(tessera_store::read::CutIndex::FILE),
-            out.segment.row_count,
-        )
-        .expect("cuts"),
-        columns: ColumnsRef::load(&seg_dir.join("columns.arrow")).expect("columns"),
-    };
+    let segment = SegmentData::load(
+        &seg_dir,
+        &seg_id,
+        out.segment.row_count,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .expect("the flushed segment opens");
     (segment, out.extent)
 }
 

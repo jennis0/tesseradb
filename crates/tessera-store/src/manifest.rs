@@ -1720,7 +1720,8 @@ pub struct LevelVersion {
 }
 
 /// One file derived from an artifact level: a containment partition, a tile index, a row-major
-/// column, a segment's shape row form, or a level's held shapes.
+/// column, a segment's shape row form, a level's held shapes, or a level's label column and its
+/// band-order copy.
 ///
 /// A reader adopts the file only where the level it seeded is at exactly `level_version`, and
 /// derives the structure again otherwise. A stale file is narrow (a growth added members it does
@@ -1760,6 +1761,17 @@ pub enum DerivedForm {
         row_count: u32,
     },
     ShapeHeld,
+    /// One label per base row, in the row-major label column's format, for a level that is not
+    /// served from such a column. Written wherever the level's memberships partition the rows;
+    /// nothing serves the level from it, and the level's artifact-major form is unchanged.
+    LevelLabels,
+    /// The level's label for each entry of one segment's `bands.bin`, in entry order
+    /// ([`crate::bands::BandLabels`]). Copied from the level's label column, a
+    /// [`Self::RowColumn`] in the label layout or a [`Self::LevelLabels`], when that column is
+    /// written, and at no other time. Named only while its level is at `level_version`.
+    BandLabels {
+        seg_id: String,
+    },
 }
 
 impl DerivedForm {
@@ -1771,6 +1783,8 @@ impl DerivedForm {
             DerivedForm::RowColumn { .. } => "row-column",
             DerivedForm::ShapeRows { .. } => "shape-rows",
             DerivedForm::ShapeHeld => "shape-held",
+            DerivedForm::LevelLabels => "labels",
+            DerivedForm::BandLabels { .. } => "band-labels",
         }
     }
 }
@@ -2555,6 +2569,13 @@ mod tests {
                 Some("s0"),
             ),
             entry(DerivedForm::ShapeHeld, Some("s0")),
+            entry(DerivedForm::LevelLabels, Some("s0")),
+            entry(
+                DerivedForm::BandLabels {
+                    seg_id: "base".to_string(),
+                },
+                Some("s0"),
+            ),
         ];
         let bytes = serde_json::to_vec(&manifest).expect("a manifest serialises");
         let parsed: SegmentsManifest = serde_json::from_slice(&bytes).expect("and parses back");

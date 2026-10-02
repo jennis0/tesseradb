@@ -189,7 +189,8 @@ enum Command {
         /// Also check the bundle's internal structures.
         ///
         /// The term lists must be sorted, free of duplicates and in range; dictionary records must
-        /// not repeat; record blobs and Morton cells must agree with their indexes; each group-scoped
+        /// not repeat; record blobs, Morton cells, cell codes and identity bands must agree with
+        /// the columns they index or copy, as must each level's band label copy; each group-scoped
         /// render column must be present in every segment; each unique column's index must be
         /// hashed against the manifest, name at most one live item for a value and agree with the
         /// column's values in both directions; and `pairs.parquet`, when present, must match the
@@ -1503,8 +1504,8 @@ fn main() -> ExitCode {
                         println!(
                             "deep: {} term(s), {} delta tier(s), {} pairs row(s), {} dict \
                              record(s), {} record blob row(s), {} scoped render lane(s), {} \
-                             Morton cell(s), {} unique index entr(ies), {} edited item(s) over {} \
-                             row(s)",
+                             Morton cell(s), {} band entr(ies), {} band label cop(ies), {} unique \
+                             index entr(ies), {} edited item(s) over {} row(s)",
                             report.terms,
                             report.delta_tiers,
                             report.pairs_rows,
@@ -1512,6 +1513,8 @@ fn main() -> ExitCode {
                             report.record_rows,
                             report.scoped_render_lanes,
                             report.cells,
+                            report.band_entries,
+                            report.band_label_copies,
                             report.unique_entries,
                             report.edited_pairs,
                             report.edited_rows

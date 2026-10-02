@@ -101,21 +101,12 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         "partitions/default/views/main/permutation.bin".to_string(),
         file_digest(&view_dir.join("permutation.bin")),
     );
-    segments_files.insert(
-        "partitions/default/views/main/segments/seg0/columns.arrow".to_string(),
-        file_digest(&seg_dir.join("columns.arrow")),
-    );
-    segments_files.insert(
-        "partitions/default/views/main/segments/seg0/morton.u32".to_string(),
-        file_digest(&seg_dir.join("morton.u32")),
-    );
-    segments_files.insert(
-        format!(
-            "partitions/default/views/main/segments/seg0/{}",
-            tessera_store::read::CutIndex::FILE
-        ),
-        file_digest(&seg_dir.join(tessera_store::read::CutIndex::FILE)),
-    );
+    for name in tessera_store::SEGMENT_FILES {
+        segments_files.insert(
+            format!("partitions/default/views/main/segments/seg0/{name}"),
+            file_digest(&seg_dir.join(name)),
+        );
+    }
 
     let segments_manifest = SegmentsManifest {
         watermark: n,
@@ -909,6 +900,30 @@ fn open_bundle_rejects_a_segments_manifest_that_omits_columns_arrow_from_files()
         }
         other => panic!("expected UnverifiedFile, got: {other}"),
     }
+}
+
+/// A segment whose `bands.bin` is gone does not open: the segment's load names the band file, and
+/// the bundle has no manifest left to serve.
+#[test]
+fn a_segment_without_its_bands_does_not_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 40);
+    let seg_dir = dir
+        .path()
+        .join("v00000/partitions/default/views/main/segments/seg0");
+    fs::remove_file(seg_dir.join(tessera_store::bands::BANDS_FILE)).unwrap();
+    let refused = tessera_store::read::SegmentData::load(
+        &seg_dir,
+        "seg0",
+        40,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .expect_err("a segment without its bands must not load");
+    assert_eq!(refused.file, "bands");
+    assert!(matches!(
+        open_bundle(dir.path()),
+        Err(StoreError::NoVerifyingSegmentsManifest { .. })
+    ));
 }
 
 #[test]

@@ -101,6 +101,12 @@ pub struct VerifyDeepReport {
     /// Leaf Morton cells confirmed to begin where `cuts.u32` says and to hold ascending
     /// identities ([`check_cut_index`]), across every segment of every view.
     pub cells: u64,
+    /// Band entries confirmed to be their rows, with their copies and the cell codes beside them
+    /// ([`check_bands`]), across every segment of every view.
+    pub band_entries: u64,
+    /// Band label copies confirmed to hold their label column's label at every entry
+    /// ([`check_band_labels`]).
+    pub band_label_copies: u64,
     /// Unique index entries confirmed to agree with their column's values in both directions,
     /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
     pub unique_entries: u64,
@@ -137,6 +143,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         record_rows: 0,
         scoped_render_lanes: 0,
         cells: 0,
+        band_entries: 0,
+        band_label_copies: 0,
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
@@ -163,6 +171,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
         check_cut_index(phash, partition, &mut report)?;
+        check_bands(&prefix_dir, phash, partition, &mut report)?;
+        check_band_labels(&prefix_dir, partition, &mut report)?;
         check_unique_indexes(
             root,
             &prefix_dir,
@@ -646,6 +656,143 @@ fn check_cut_index(
             }
             report.cells += cell as u64;
         }
+    }
+    Ok(())
+}
+
+/// A file whose bytes disagree with what they were derived from, named by its path.
+fn disagrees(path: PathBuf, reason: String) -> BuildError {
+    BuildError::Store(tessera_store::StoreError::FileVerificationFailed { path, reason })
+}
+
+/// **Every segment's bands are its rows, and its cell codes its cells.** Each band holds exactly
+/// the rows whose identity has that many leading zero bits, in row order, with the row's own
+/// identity, code and residual and a copy of each render column's value; each cell code is the
+/// Morton code of the cell's first row ([`tessera_store::bands`]). A refusal names the file.
+fn check_bands(
+    prefix_dir: &Path,
+    phash: &str,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(phash), view)
+                .join("segments")
+                .join(&segment.seg_id);
+            let codes = segment.morton.u32();
+            let expected: Vec<u32> = segment
+                .cuts
+                .starts()
+                .iter()
+                .map(|&start| codes[start as usize])
+                .collect();
+            if segment.cell_codes.codes() != expected.as_slice() {
+                return Err(disagrees(
+                    dir.join(tessera_store::bands::CELL_CODES_FILE),
+                    "a cell code is not its cell's Morton code".to_string(),
+                ));
+            }
+            segment
+                .bands
+                .check_against(codes, &segment.columns)
+                .map_err(|reason| disagrees(dir.join(tessera_store::bands::BANDS_FILE), reason))?;
+            report.band_entries += segment.bands.entries() as u64;
+        }
+    }
+    Ok(())
+}
+
+/// **Every current label column has a band label copy, and every copy holds its column's label at
+/// each entry's row.** A label column is current where the manifest records its level at the
+/// version it was written at: a [`DerivedForm::LevelLabels`] is named only then, and a row-major
+/// label column is named past it, without a copy. A copy is read against the label column of the
+/// same view, layer, level and level version, and against the bands of the segment it names. A
+/// refusal names the file: the copy, or the column that has none.
+fn check_band_labels(
+    prefix_dir: &Path,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use tessera_store::manifest::{DerivedExtent, DerivedForm};
+    use tessera_types::layer::ServingLayout;
+    let extents = &partition.manifest.derived_extents;
+    let current = |e: &DerivedExtent| {
+        partition
+            .manifest
+            .level_versions
+            .iter()
+            .any(|v| v.layer == e.layer && v.level == e.level && v.version == e.level_version)
+    };
+    let is_label_column = |e: &DerivedExtent| {
+        matches!(
+            e.form,
+            DerivedForm::LevelLabels
+                | DerivedForm::RowColumn {
+                    layout: ServingLayout::RowMajorLabel
+                }
+        )
+    };
+    let same_level = |a: &DerivedExtent, b: &DerivedExtent| {
+        a.layer == b.layer
+            && a.level == b.level
+            && a.view == b.view
+            && a.level_version == b.level_version
+    };
+    for column in extents.iter().filter(|e| is_label_column(e) && current(e)) {
+        let copied = extents
+            .iter()
+            .any(|e| matches!(e.form, DerivedForm::BandLabels { .. }) && same_level(e, column));
+        if !copied {
+            return Err(disagrees(
+                prefix_dir.join(&column.path),
+                format!(
+                    "layer '{}' level {}'s label column has no copy in band order",
+                    column.layer, column.level
+                ),
+            ));
+        }
+    }
+    for copy in extents {
+        let DerivedForm::BandLabels { seg_id } = &copy.form else {
+            continue;
+        };
+        let path = prefix_dir.join(&copy.path);
+        let column = extents
+            .iter()
+            .find(|e| is_label_column(e) && same_level(e, copy))
+            .ok_or_else(|| disagrees(path.clone(), "names no label column".to_string()))?;
+        let segment = copy
+            .view
+            .as_ref()
+            .and_then(|view| partition.views.get(view))
+            .and_then(|data| data.segments.iter().find(|s| &s.seg_id == seg_id))
+            .ok_or_else(|| {
+                disagrees(
+                    path.clone(),
+                    format!("names segment '{seg_id}', which its view does not hold"),
+                )
+            })?;
+        let labels =
+            tessera_store::membership::LabelColumnPack::open(&prefix_dir.join(&column.path))
+                .map_err(BuildError::Store)?;
+        let copied = tessera_store::bands::BandLabels::open(&path, &segment.bands)
+            .map_err(|e| disagrees(path.clone(), e.to_string()))?;
+        for (e, &row) in segment.bands.rows().iter().enumerate() {
+            if copied.label(e) != labels.label(row as usize) {
+                return Err(disagrees(
+                    path,
+                    format!(
+                        "holds {} at entry {e} and its label column holds {} at row {row}",
+                        copied.label(e),
+                        labels.label(row as usize)
+                    ),
+                ));
+            }
+        }
+        report.band_label_copies += 1;
     }
     Ok(())
 }

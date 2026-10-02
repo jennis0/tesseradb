@@ -48,7 +48,7 @@ use tessera_engine::projection::RowProjection;
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::unsplit32;
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::{MortonSlice, SegmentData};
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, MortonCode, TermId, TesseraId};
@@ -261,18 +261,13 @@ fn build_layout(codes: &[u32], parts: usize, split: Split) -> SegmentLayout {
 
         let temp = TempDir::new().expect("a temp dir for the segment");
         write_segment(temp.path(), &items, &written, &[]).expect("write_segment");
-        let data = SegmentData {
-            entities: tessera_store::edited::RowEntities::Numbers,
-            seg_id: format!("bench-{g}"),
-            row_count: items.len() as u32,
-            morton: MortonSlice::load(&temp.path().join("morton.u32")).expect("morton"),
-            cuts: tessera_store::read::CutIndex::load(
-                &temp.path().join(tessera_store::read::CutIndex::FILE),
-                items.len() as u32,
-            )
-            .expect("cuts"),
-            columns: ColumnsRef::load(&temp.path().join("columns.arrow")).expect("columns"),
-        };
+        let data = SegmentData::load(
+            temp.path(),
+            &format!("bench-{g}"),
+            items.len() as u32,
+            tessera_store::edited::RowEntities::Numbers,
+        )
+        .expect("the segment opens");
         bases.push(base);
         base += items.len() as u32;
         segments.push(data);

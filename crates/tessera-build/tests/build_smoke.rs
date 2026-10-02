@@ -287,6 +287,9 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
         // The Morton column's run-length index, which selection walks per cell
         // (`tessera_store::read::CutIndex`).
         "partitions/default/views/s0/segments/seg-0/cuts.u32",
+        // Each cell's code, and the identity bands (`tessera_store::bands`).
+        "partitions/default/views/s0/segments/seg-0/cell-codes.u32",
+        "partitions/default/views/s0/segments/seg-0/bands.bin",
         // The view's term images (`tessera_store::term_images`), one file per view with rows.
         "partitions/default/term-images/term-images-000000-000.timg",
     ] {
@@ -298,7 +301,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     }
     assert_eq!(
         bundle.manifest.files.len(),
-        17,
+        19,
         "MANIFEST.json must list every build-written file and nothing else"
     );
 

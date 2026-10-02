@@ -1985,16 +1985,17 @@ fn build_bundle(
         let rows_in_view = assembled.rows_in_view;
         occupancies.push(assembled.occupancy);
         let presence_paths = assembled.presence_paths;
-        let morton_path = assembled.morton_path;
-        let cuts_path = assembled.cuts_path;
         let row_entity_path = assembled.row_entity_path;
-        let columns_path = assembled.columns_path;
         let permutation_path = assembled.permutation_path;
+        let segment_paths: Vec<std::path::PathBuf> = tessera_store::SEGMENT_FILES
+            .iter()
+            .map(|name| segment_dir.join(name))
+            .collect();
         fsync_file(&permutation_path)?;
         fsync_file(&row_entity_path)?;
-        fsync_file(&columns_path)?;
-        fsync_file(&morton_path)?;
-        fsync_file(&cuts_path)?;
+        for path in &segment_paths {
+            fsync_file(path)?;
+        }
         timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
 
         // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
@@ -2049,9 +2050,7 @@ fn build_bundle(
 
         view_files.push(permutation_path);
         view_files.push(row_entity_path);
-        view_files.push(columns_path);
-        view_files.push(morton_path);
-        view_files.push(cuts_path);
+        view_files.extend(segment_paths);
         view_files.extend(presence_paths);
         segments.push(tessera_store::manifest::SegmentDescriptor {
             view: view.view_id.clone(),

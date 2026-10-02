@@ -39,7 +39,7 @@ use tessera_engine::projection::RowProjection;
 use tessera_engine::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
@@ -217,18 +217,13 @@ fn fixture(v_per_tile: usize) -> (TempDir, SegmentData, EffectiveMask) {
     let mut entity_ids: Vec<EntityId> = (0..items.len() as u64).map(EntityId::new).collect();
     let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
-    let seg = SegmentData {
-        entities: tessera_store::edited::RowEntities::Numbers,
-        seg_id: "seg0".into(),
-        row_count: items.len() as u32,
-        morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
-        cuts: tessera_store::read::CutIndex::load(
-            &temp.path().join(tessera_store::read::CutIndex::FILE),
-            items.len() as u32,
-        )
-        .unwrap(),
-        columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
-    };
+    let seg = SegmentData::load(
+        temp.path(),
+        "seg0",
+        items.len() as u32,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .unwrap();
 
     let bound = items.len() as u64;
     let all: Vec<u32> = (0..items.len() as u32).collect();

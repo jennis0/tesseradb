@@ -240,11 +240,7 @@ fn fold_row_spaces(
         )
         .map_err(failed("pass 1 (row space)"))?;
 
-        for name in [
-            "morton.u32",
-            tessera_store::read::CutIndex::FILE,
-            "columns.arrow",
-        ] {
+        for name in tessera_store::SEGMENT_FILES {
             output.push(format!("{segment_rel}/{name}"), segment_dir.join(name));
         }
         for column in &out.presence_columns {

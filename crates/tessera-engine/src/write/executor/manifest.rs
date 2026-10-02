@@ -4,8 +4,10 @@ use super::*;
 /// level has moved is dropped, so a manifest never names one nothing could adopt, except the row
 /// column of a layer in `enumerated`: an enumerated membership only grows between folds, and an
 /// open completes a column the level has moved past
-/// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). A spatial layer's column is read
-/// only at its level's version, so it is dropped like any other file.
+/// ([`crate::artifacts::ArtifactProjections::adopt_columns`]). Nothing completes a level's label
+/// column or its band-order copy, so those are dropped with every other file, and a level holds
+/// a copy only while the copy is current. A spatial layer's column is read only at its level's
+/// version, so it is dropped like any other file.
 pub(super) fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::DerivedExtent],
