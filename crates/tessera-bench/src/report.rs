@@ -105,7 +105,6 @@ pub struct Timing {
     /// noise and page-cache warmth without needing a separate warm-up phase.
     pub min_ns: u64,
     pub median_ns: u64,
-    #[serde(default)]
     pub p95_ns: u64,
     pub p99_ns: u64,
     pub max_ns: u64,

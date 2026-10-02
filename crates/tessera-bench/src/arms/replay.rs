@@ -1,7 +1,9 @@
 //! `tessera-bench replay`: sends a log written by `[serve] request_log` back at a server, as one
 //! viewer or as many, and reports each route's latency beside the latency the log recorded.
 //!
-//! A recorded session is a `token_id`. Each copy of the log mints its own session for each one by
+//! A recorded session is a `token_id` within a run: each server process numbers its sessions from
+//! 0 and marks its lines with a run of its own. Runs are replayed one after another, without the
+//! time the server was down between them. Each copy of the log mints its own session for each one by
 //! sending the recorded `/session/authorise` body again, and every request of that session carries
 //! the new token. A session whose authorisation falls before the window is authorised when its
 //! copy starts, before the copy's clock, and those requests are reported apart as `setup`.
@@ -54,6 +56,7 @@ pub struct Options {
 /// One line of the request log.
 #[derive(Debug, Clone, Deserialize)]
 struct Logged {
+    run: String,
     start_us: u64,
     plane: String,
     method: String,
@@ -83,23 +86,26 @@ struct Planned {
     /// Microseconds from the first request in the window.
     offset_us: u64,
     kind: Kind,
-    /// The recorded `token_id` whose fresh session this request needs or, for an authorise,
-    /// mints.
-    session: Option<u64>,
+    /// The recorded session whose fresh session this request needs or, for an authorise, mints.
+    session: Option<SessionKey>,
     route: String,
 }
+
+/// A recorded session: the run's index in the log, in order of its first line, and the `token_id`.
+type SessionKey = (usize, u64);
 
 pub(crate) struct Plan {
     requests: Vec<Planned>,
     /// Each recorded session's `/session/authorise` body, from the whole log.
-    authorise_bodies: HashMap<u64, Value>,
+    authorise_bodies: HashMap<SessionKey, Value>,
     /// Sessions the window uses but does not authorise.
-    setup: Vec<u64>,
+    setup: Vec<SessionKey>,
     /// Lines not replayed, by reason.
     skipped: BTreeMap<&'static str, usize>,
 }
 
-/// The route a path is reported under: the method and the path with its parameters named.
+/// The route a path is reported under: the method and the path with its parameters named. The
+/// patterns follow the routes `tessera_server::viewer::router` declares, and change with them.
 fn route_template(method: &str, path: &str) -> String {
     let path = path.split('?').next().unwrap_or(path);
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
@@ -129,11 +135,18 @@ pub(crate) fn plan(text: &str, since_s: Option<f64>, until_s: Option<f64>) -> Re
         return Err("the log holds no requests".into());
     };
 
+    let mut runs: HashMap<String, usize> = HashMap::new();
+    for line in &lines {
+        let next = runs.len();
+        runs.entry(line.run.clone()).or_insert(next);
+    }
+    let key = |line: &Logged| line.token_id.map(|id| (runs[&line.run], id));
+
     let mut authorise_bodies = HashMap::new();
     for line in &lines {
         if line.plane == "session" && line.path.starts_with("/session/authorise") {
-            if let (Some(id), Some(body)) = (line.token_id, &line.body) {
-                authorise_bodies.insert(id, body.clone());
+            if let (Some(session), Some(body)) = (key(line), &line.body) {
+                authorise_bodies.insert(session, body.clone());
             }
         }
     }
@@ -142,7 +155,6 @@ pub(crate) fn plan(text: &str, since_s: Option<f64>, until_s: Option<f64>) -> Re
     let until_us = until_s.map_or(u64::MAX, |s| (s * 1e6) as u64);
     let mut skipped: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut requests = Vec::new();
-    let mut window_start = None;
     for line in lines {
         let at = line.start_us - first_us;
         if at < since_us || at >= until_us {
@@ -165,7 +177,7 @@ pub(crate) fn plan(text: &str, since_s: Option<f64>, until_s: Option<f64>) -> Re
                 continue;
             }
         };
-        let session = line.token_id;
+        let session = key(&line);
         if kind != Kind::Authorise {
             match session {
                 None => {
@@ -181,9 +193,8 @@ pub(crate) fn plan(text: &str, since_s: Option<f64>, until_s: Option<f64>) -> Re
                 Some(_) => {}
             }
         }
-        let start = *window_start.get_or_insert(line.start_us);
         requests.push(Planned {
-            offset_us: line.start_us - start,
+            offset_us: 0,
             route: route_template(&line.method, &line.path),
             kind,
             session,
@@ -191,12 +202,35 @@ pub(crate) fn plan(text: &str, since_s: Option<f64>, until_s: Option<f64>) -> Re
         });
     }
 
-    let authorised: HashSet<u64> = requests
+    // Offsets from the window's first request, with each run starting where the one before it
+    // stopped: the end of its last-ending request.
+    let mut base_us = 0u64;
+    let mut current: Option<(&str, u64, u64)> = None; // run, its first start, its last end
+    let mut offsets = Vec::with_capacity(requests.len());
+    for p in &requests {
+        let (start, end) = (p.line.start_us, p.line.start_us + p.line.end_us);
+        match &mut current {
+            Some((run, _, last)) if *run == p.line.run => *last = (*last).max(end),
+            _ => {
+                if let Some((_, first, last)) = current {
+                    base_us += last - first;
+                }
+                current = Some((&p.line.run, start, end));
+            }
+        }
+        let (_, first, _) = current.expect("set above");
+        offsets.push(base_us + (start - first));
+    }
+    for (p, offset_us) in requests.iter_mut().zip(offsets) {
+        p.offset_us = offset_us;
+    }
+
+    let authorised: HashSet<SessionKey> = requests
         .iter()
         .filter(|p| p.kind == Kind::Authorise)
         .filter_map(|p| p.session)
         .collect();
-    let mut setup: Vec<u64> = requests
+    let mut setup: Vec<SessionKey> = requests
         .iter()
         .filter_map(|p| p.session)
         .filter(|id| !authorised.contains(id))
@@ -225,7 +259,7 @@ type SessionSlot = watch::Sender<Option<Option<Fresh>>>;
 
 struct Copy {
     copy: usize,
-    sessions: HashMap<u64, SessionSlot>,
+    sessions: HashMap<SessionKey, SessionSlot>,
 }
 
 /// What one replayed request did.
@@ -337,7 +371,8 @@ async fn authorise(
 fn line(copy: usize, p: Option<&Planned>, route: &str, sent: &Sent, wait_us: u64) -> Value {
     json!({
         "copy": copy,
-        "session": p.and_then(|p| p.session),
+        "run": p.map(|p| p.line.run.as_str()),
+        "session": p.and_then(|p| p.session).map(|(_, token_id)| token_id),
         "route": route,
         "path": p.map(|p| p.line.path.as_str()),
         "offset_us": p.map(|p| p.offset_us),
@@ -462,7 +497,7 @@ async fn run_copy(
     at: Instant,
 ) -> Vec<Value> {
     tokio::time::sleep_until(at.into()).await;
-    let sessions: HashMap<u64, SessionSlot> = plan
+    let sessions: HashMap<SessionKey, SessionSlot> = plan
         .requests
         .iter()
         .filter_map(|p| p.session)
@@ -480,7 +515,7 @@ async fn run_copy(
         setup.spawn(async move {
             let sent = authorise(&client, &opts, &body, copy_state.sessions.get(&id), None).await;
             let mut line = line(copy, None, "POST /session/authorise", &sent, 0);
-            line["session"] = json!(id);
+            line["session"] = json!(id.1);
             line["setup"] = json!(true);
             line
         });
@@ -511,7 +546,7 @@ async fn run_copy(
             }
         }
         Pace::Asap => {
-            let mut by_session: BTreeMap<Option<u64>, Vec<usize>> = BTreeMap::new();
+            let mut by_session: BTreeMap<Option<SessionKey>, Vec<usize>> = BTreeMap::new();
             for (index, p) in plan.requests.iter().enumerate() {
                 by_session.entry(p.session).or_default().push(index);
             }
@@ -550,8 +585,12 @@ struct RouteSummary {
     errors: usize,
     timeouts: usize,
     cancelled: usize,
-    /// To the end of the body, over replayed requests whose body ended.
+    /// To the end of the body as the replaying client saw it, network included, over replayed
+    /// requests whose body ended.
     timing: Option<Timing>,
+    /// The log's own medians over the requests it records as completed: measured by the server,
+    /// from the request reaching it to its headers and to the end of its body.
+    recorded_headers_p50_us: Option<u64>,
     recorded_p50_us: Option<u64>,
 }
 
@@ -564,15 +603,16 @@ fn summarise(plan: &Plan, lines: &[Value]) -> Vec<RouteSummary> {
         }
         by_route.entry(route).or_default().push(line);
     }
-    let mut recorded: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    let mut recorded: BTreeMap<&str, (Vec<u64>, Vec<u64>)> = BTreeMap::new();
     for p in &plan.requests {
         if p.line.outcome == "completed" {
-            recorded
-                .entry(&p.route)
-                .or_default()
-                .push(p.line.end_us * 1000);
+            let (headers, ends) = recorded.entry(&p.route).or_default();
+            headers.extend(p.line.headers_us.map(|us| us * 1000));
+            ends.push(p.line.end_us * 1000);
         }
     }
+    let median_us =
+        |ns: &Vec<u64>| (!ns.is_empty()).then(|| Timing::from_samples(ns.clone()).median_ns / 1000);
     by_route
         .into_iter()
         .map(|(route, lines)| {
@@ -592,21 +632,30 @@ fn summarise(plan: &Plan, lines: &[Value]) -> Vec<RouteSummary> {
                 timeouts: outcome("timeout"),
                 cancelled: outcome("cancelled"),
                 timing: (!ended.is_empty()).then(|| Timing::from_samples(ended)),
+                recorded_headers_p50_us: recorded
+                    .get(route.as_str())
+                    .and_then(|(headers, _)| median_us(headers)),
                 recorded_p50_us: recorded
                     .get(route.as_str())
-                    .cloned()
-                    .map(|r| Timing::from_samples(r).median_ns / 1000),
+                    .and_then(|(_, ends)| median_us(ends)),
                 route,
             }
         })
         .collect()
 }
 
+/// The table on stdout. The replayed columns are the client's times to the end of the body,
+/// network included; the recorded columns are the server's own, from the log.
 fn print_summary(rows: &[RouteSummary]) {
     let ms = |ns: u64| format!("{:.1}", ns as f64 / 1e6);
+    let us = |us: Option<u64>| us.map_or("-".to_string(), |us| format!("{:.1}", us as f64 / 1e3));
     println!(
-        "{:<44} {:>6} {:>6} {:>5} {:>5} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "route", "n", "ok", "err", "t/o", "cxl", "p50 ms", "p95 ms", "p99 ms", "max ms", "rec p50"
+        "{:<44} {:>6} {:>6} {:>5} {:>5} {:>5} | {:^39} | {:^21}",
+        "", "", "", "", "", "", "replayed, client end of body (ms)", "recorded, server (ms)"
+    );
+    println!(
+        "{:<44} {:>6} {:>6} {:>5} {:>5} {:>5} | {:>9} {:>9} {:>9} {:>9} | {:>10} {:>10}",
+        "route", "n", "ok", "err", "t/o", "cxl", "p50", "p95", "p99", "max", "hdr p50", "end p50"
     );
     for row in rows {
         let (p50, p95, p99, max) = match &row.timing {
@@ -614,7 +663,7 @@ fn print_summary(rows: &[RouteSummary]) {
             None => ("-".into(), "-".into(), "-".into(), "-".into()),
         };
         println!(
-            "{:<44} {:>6} {:>6} {:>5} {:>5} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9}",
+            "{:<44} {:>6} {:>6} {:>5} {:>5} {:>5} | {:>9} {:>9} {:>9} {:>9} | {:>10} {:>10}",
             row.route,
             row.count,
             row.ok,
@@ -625,8 +674,8 @@ fn print_summary(rows: &[RouteSummary]) {
             p95,
             p99,
             max,
-            row.recorded_p50_us
-                .map_or("-".to_string(), |us| format!("{:.1}", us as f64 / 1e3)),
+            us(row.recorded_headers_p50_us),
+            us(row.recorded_p50_us),
         );
     }
 }
@@ -714,6 +763,7 @@ pub fn run(ctx: &Context, opts: Options) -> Result<()> {
             "end_us_p95": r.timing.as_ref().map(|t| t.p95_ns / 1000),
             "end_us_p99": r.timing.as_ref().map(|t| t.p99_ns / 1000),
             "end_us_max": r.timing.as_ref().map(|t| t.max_ns / 1000),
+            "recorded_headers_us_p50": r.recorded_headers_p50_us,
             "recorded_end_us_p50": r.recorded_p50_us,
         })).collect::<Vec<_>>(),
     });
@@ -923,24 +973,147 @@ mod tests {
         })
     }
 
-    /// A session recorded against a server replays against it as two viewers, each on sessions of
-    /// its own; and a request the log records as cancelled is cancelled at the recorded time, so
-    /// the server logs it cancelled again.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_recorded_session_replays_with_fresh_sessions_and_its_cancellations() {
-        let tmp = tempfile::tempdir().unwrap();
-        let prepared = tessera_server::prepare(&deployment(tmp.path())).unwrap();
-        let state = prepared.state;
+    /// A server prepared from `deployment` as `tessera serve` prepares one, its viewer and session
+    /// routers served on tasks the test can stop.
+    struct Running {
+        state: Arc<tessera_server::state::AppState>,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+        viewer: String,
+        session: String,
+    }
+
+    async fn start(deployment: &Path) -> Running {
+        let state = tessera_server::prepare(deployment).unwrap().state;
         let mut urls = Vec::new();
+        let mut tasks = Vec::new();
         for router in [
             tessera_server::viewer::router(Arc::clone(&state)),
             tessera_server::session::router(Arc::clone(&state)),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             urls.push(format!("http://{}", listener.local_addr().unwrap()));
-            tokio::spawn(async move { axum::serve(listener, router).await });
+            tasks.push(tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            }));
         }
-        let (viewer, session) = (urls[0].clone(), urls[1].clone());
+        Running {
+            state,
+            tasks,
+            viewer: urls[0].clone(),
+            session: urls[1].clone(),
+        }
+    }
+
+    impl Running {
+        /// Stops serving and waits for the state, and with it the log's writer, to be dropped.
+        /// Callers drop their clients first, so no kept-alive connection holds the state.
+        async fn stop(self) {
+            for task in &self.tasks {
+                task.abort();
+            }
+            for task in self.tasks {
+                let _ = task.await;
+            }
+            let state = self.state;
+            wait_until("the state to be released", || Arc::strong_count(&state) == 1).await;
+        }
+    }
+
+    async fn authorise(client: &reqwest::Client, session: &str, terms: &str) -> Value {
+        let auth_data = base64::engine::general_purpose::STANDARD.encode(terms);
+        client
+            .post(format!("{session}/session/authorise"))
+            .bearer_auth(CREDENTIAL)
+            .json(&json!({ "auth_data": auth_data }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    /// Two server runs both number their sessions from 0. Each run's requests replay on the
+    /// session minted for that run's principal, and the second run follows the first without the
+    /// time the server was down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_run_in_a_log_replays_on_sessions_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = deployment(tmp.path());
+        let log = tmp.path().join("requests.jsonl");
+        let viewport = json!({"view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200});
+        // Term 0 sees every point and term 1 none, so the two principals' viewports differ.
+        for terms in [r#"{"terms":["0"]}"#, r#"{"terms":["1"]}"#] {
+            let server = start(&toml).await;
+            let client = reqwest::Client::new();
+            let auth = authorise(&client, &server.session, terms).await;
+            assert_eq!(auth["token_id"], 0, "each run numbers its sessions from 0");
+            client
+                .post(format!("{}/v1/viewport", server.viewer))
+                .bearer_auth(auth["token"].as_str().unwrap())
+                .json(&viewport)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            drop(client);
+            server.stop().await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let recorded = log_lines(&log);
+        assert_eq!(recorded.len(), 4);
+        assert_ne!(recorded[0]["run"], recorded[2]["run"]);
+        // A response's trailer varies by a few bytes from one request to the next; the two
+        // principals' responses differ by far more.
+        let bytes = |line: &Value| line["bytes"].as_u64().unwrap() as i64;
+        const SLACK: i64 = 32;
+        assert!(
+            (bytes(&recorded[1]) - bytes(&recorded[3])).abs() > 4 * SLACK,
+            "the two principals must be told apart by what they are served: {} and {}",
+            bytes(&recorded[1]),
+            bytes(&recorded[3])
+        );
+
+        let server = start(&toml).await;
+        let planned = Arc::new(plan(&std::fs::read_to_string(&log).unwrap(), None, None).unwrap());
+        let lines = replay(
+            planned,
+            options(&server.viewer, &server.session, 1, Pace::Recorded),
+        )
+        .await
+        .unwrap();
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_eq!(line["outcome"], "ok", "{line}");
+            assert!(
+                (bytes(line) - bytes(&line["recorded"])).abs() <= SLACK,
+                "served as the recorded principal was: {line}"
+            );
+        }
+        let second = lines
+            .iter()
+            .find(|l| l["route"] == "POST /session/authorise" && l["run"] == recorded[2]["run"])
+            .unwrap();
+        let downtime_us =
+            recorded[2]["start_us"].as_u64().unwrap() - recorded[1]["start_us"].as_u64().unwrap();
+        assert!(
+            second["offset_us"].as_u64().unwrap() + 2_000_000 <= downtime_us,
+            "the second run starts where the first stopped, not after the downtime: {second}"
+        );
+        server.stop().await;
+    }
+
+    /// A session recorded against a server replays against it as two viewers, each on sessions of
+    /// its own; and a request the log records as cancelled is cancelled at the recorded time, so
+    /// the server logs it cancelled again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recorded_session_replays_with_fresh_sessions_and_its_cancellations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = start(&deployment(tmp.path())).await;
+        let state = &server.state;
+        let (viewer, session) = (server.viewer.clone(), server.session.clone());
         let log = tmp.path().join("requests.jsonl");
 
         // Record: authorise, meta, a viewport, a category the bundle lacks, and a revoke.
