@@ -198,7 +198,6 @@ def check_committed(tessera: str, declaration: Path, directory: Path) -> str:
         "[bundle]\n"
         'path = "bundle"\ncache = "cache"\nwal = "wal.log"\n\n'
         f'[build]\nschema = "{declaration}"\n\n'
-        '[plugin]\nmodule = "builtin:passthrough"\n\n'
         "[disclosure]\ntoken_max_lifetime = 3600\n"
     )
     done = subprocess.run(

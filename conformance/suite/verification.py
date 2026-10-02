@@ -450,7 +450,7 @@ def terms_of(files: CorpusFiles, es: Iterable[int]) -> dict[int, frozenset[int]]
     relation for the built prefix, the posted ingest batch's `access` labels beyond it.
 
     The `access` column is a list, one label per element, and each element is one descriptor
-    verbatim — `builtin:passthrough`'s rule at both entry points (decision 0129). Nothing here
+    verbatim, at both entry points (decision 0129). Nothing here
     splits a label."""
     import pyarrow.parquet as pq
 

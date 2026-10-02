@@ -26,16 +26,6 @@ What `tessera build` and `tessera check` read.
 | --- | --- | --- | --- |
 | `schema` | string (a path) | `"schema.toml"` | The corpus declaration. `--config` names another. |
 
-## `[plugin]`
-
-The rule that reads credentials and access labels. It has one value.
-
-The table is required.
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `module` | string | required | `builtin:passthrough`, the one value, and any other is refused: a credential's terms are taken as presented, and every access label is an access expression. |
-
 ## `[disclosure]`
 
 How long a viewer's token lasts.

@@ -153,9 +153,6 @@ wal   = "{(self.scratch / 'wal.log').resolve()}"
 [build]
 schema = "{(self.source_dir / 'corpus.toml').resolve()}"
 
-[plugin]
-module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
-
 [disclosure]
 {toml_lines(source.get("disclosure") or {"token_max_lifetime": 3600})}
 [serve]

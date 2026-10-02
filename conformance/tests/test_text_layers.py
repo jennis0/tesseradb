@@ -70,7 +70,7 @@ from oracle.wire import decode_viewport, decode_viewport_points, split_frames
 ZOOM = 3
 
 # The access label every ingested row carries, and the descriptor a session is granted to see them.
-# `builtin:passthrough` makes the two the same string.
+# A session's terms are taken as presented, so the two are the same string.
 INGEST_ACCESS = "text-extent"
 
 # The principal: one catalogue block plus the ingested rows. `cross_lo` because it holds every

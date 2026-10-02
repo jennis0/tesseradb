@@ -56,8 +56,6 @@ fn write_deployment(tmp: &Path, control: &str) -> std::path::PathBuf {
         path = "{bundle}"
         cache = "{cache}"
         wal = "{wal}"
-        [plugin]
-        module = "builtin:passthrough"
         [disclosure]
         token_max_lifetime = 3600
         [serve]

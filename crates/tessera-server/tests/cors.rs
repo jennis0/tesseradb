@@ -600,8 +600,6 @@ fn a_wildcard_origin_is_refused_when_the_deployment_file_is_loaded() {
             path = "b"
             cache = "c"
             wal = "w"
-            [plugin]
-            module = "builtin:passthrough"
             [disclosure]
             token_max_lifetime = 3600
             [serve]

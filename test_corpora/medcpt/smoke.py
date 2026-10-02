@@ -179,9 +179,6 @@ wal   = ".tessera/wal.log"
 [build]
 schema = "corpus.toml"
 
-[plugin]
-module = "builtin:passthrough"
-
 [disclosure]
 token_max_lifetime = 3600
 

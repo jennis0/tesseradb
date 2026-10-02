@@ -778,8 +778,6 @@ fn deployment(tmp: &TempDir, catalogue: &str) -> std::path::PathBuf {
         format!("path = {:?}", bundle.display().to_string()),
         "cache = \"cache\"".into(),
         "wal = \"wal.log\"".into(),
-        "[plugin]".into(),
-        "module = \"builtin:passthrough\"".into(),
         "[disclosure]".into(),
         "token_max_lifetime = 3600".into(),
         "[serve]".into(),
