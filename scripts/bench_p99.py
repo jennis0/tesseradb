@@ -73,7 +73,6 @@ def spawn_with_long_boot_deadline(bundle_root: Path, tmp_dir: Path, boot_deadlin
     import os
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_SESSION_CRED"] = harness.SESSION_CREDENTIAL
     env["TESSERA_REFERENCE_OPERATOR_CRED"] = harness.OPERATOR_CREDENTIAL
 
     log_file = open(log_path, "ab")

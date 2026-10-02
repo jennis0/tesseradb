@@ -36,7 +36,6 @@ MACHINE_SPECIFIC_SERVE = frozenset(
         "dev_cors_origins",
         "cors_origins",
         "cors_loopback",
-        "session_credential_file",
         "operator_credential_file",
     }
 )
@@ -63,17 +62,13 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def minted_credentials(source_dir: Path) -> dict[str, str]:
-    """A value for every credential variable this deployment names that the environment and the
-    deployment's own `.env` do not carry, minted for this run only.
+    """A value for the operator credential variable this deployment names, where the environment
+    and the deployment's own `.env` do not carry one, minted for this run only.
     """
     deployment = tomllib.loads((source_dir / "tessera.toml").read_text())
-    serve = deployment["serve"]
+    name = deployment["serve"]["operator_credential_env"]
     env = dict(os.environ) | read_env_file(source_dir / ".env")
-    return {
-        serve[f"{which}_credential_env"]: secrets.token_urlsafe(32)
-        for which in ("session", "operator")
-        if not env.get(serve[f"{which}_credential_env"])
-    }
+    return {} if env.get(name) else {name: secrets.token_urlsafe(32)}
 
 
 class Deployment:
@@ -128,12 +123,12 @@ class Deployment:
     def cache(self) -> Path:
         return self.scratch / "cache"
 
-    def credential(self, which: str) -> str:
-        """The `session` or `operator` credential's value, from the environment, never from the
-        copy this class writes, which carries only the variable's name.
+    def operator_credential(self) -> str:
+        """The operator credential's value, from the environment, never from the copy this class
+        writes, which carries only the variable's name.
         """
         source = tomllib.loads((self.source_dir / "tessera.toml").read_text())["serve"]
-        return self.env[source[f"{which}_credential_env"]]
+        return self.env[source["operator_credential_env"]]
 
     def _write_toml(self) -> None:
         source = tomllib.loads((self.source_dir / "tessera.toml").read_text())
@@ -164,7 +159,10 @@ module = "{source.get('plugin', {}).get('module', 'builtin:passthrough')}"
 [disclosure]
 {toml_lines(source.get("disclosure") or {"token_max_lifetime": 3600})}
 [serve]
-{toml_lines(serve)}"""
+{toml_lines(serve)}
+[catalogue]
+dir = "{(self.scratch / 'catalogue').resolve()}"
+"""
         if self.ingest:
             body += "\n[ingest]\n" + toml_lines(self.ingest)
         self.toml.write_text(body)

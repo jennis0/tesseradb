@@ -219,8 +219,8 @@ struct RawServe {
     /// Default: `false`.
     cors_loopback: Option<bool>,
     /// Browser origins whose pages may call both the viewer plane and the session plane, so a
-    /// page in development can hold the session credential. The server logs a warning at start
-    /// when it is set. `"*"` is refused.
+    /// page in development can hold an API key that mints sessions for other principals. The
+    /// server logs a warning at start when it is set. `"*"` is refused.
     ///
     /// Default: `[]`.
     dev_cors_origins: Option<Vec<String>>,

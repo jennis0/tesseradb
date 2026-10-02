@@ -60,9 +60,9 @@ struct Args {
     ///
     /// **The broadest rung is 93.75% and not 100%, and that is a measured ceiling rather than a
     /// choice.** At this term width a whole-corpus principal holds all 1 048 576 terms, and
-    /// `/session/authorise` buffers `auth_data` under axum's 2 MB default body limit — about
-    /// 150 000 seven-digit descriptors. Two whole term levels (131 072 terms, 93.75% of the
-    /// corpus) is the broadest grant that fits; the campaign's README records the refusal.
+    /// `POST /control/grants` reads its body under axum's 2 MB default limit, about 200 000
+    /// seven-digit terms in one `terms` array. Two whole term levels (131 072 terms, 93.75% of
+    /// the corpus) is the broadest grant that fits in one request.
     #[arg(long, value_delimiter = ',', default_values_t = vec![0.9375, 0.75, 0.5, 0.25, 0.094, 0.031])]
     breadths: Vec<f64>,
     /// Skip the O(*n*) measuring pass and report the analytic breadth alone. For a driver that

@@ -150,9 +150,9 @@ class Cycle:
         #: The filters and category lists each view's census asks, and the all-in census.
         self.probes: dict[str, list[dict]] = {}
         self.reference: dict = {}
-        #: The served deployment, its session credential and the 100% principal's terms.
+        #: The served deployment, how sessions are minted on it, and the 100% principal's terms.
         self.served: Deployment | None = None
-        self.session_cred = ""
+        self.sessions: serve_battery.Sessions | None = None
         self.all_terms: list[str] = []
         #: The rung's unique field, which every row, change and membership names its item by.
         self.naming = unique_field(self.rung)
@@ -385,9 +385,11 @@ class Cycle:
 
     def open_session(self, served: Deployment, ranks: list[dict]) -> None:
         """The 100% principal's terms, every view's frame off `/v1/meta`, and the base's count."""
-        self.session_cred = served.credential("session")
+        self.sessions = serve_battery.Sessions(
+            served.session, served.control, served.operator_credential()
+        )
         self.all_terms = sorted(r["term"] for r in ranks)
-        token, _ = serve_battery.authorise(served.session, self.session_cred, self.all_terms)
+        token, _ = self.sessions.authorise(self.all_terms)
         m = serve_battery.meta(served.viewer, token)
         self.frames = {v["id"]: v["quantisation"] for v in m["views"]}
         self.result["base_visible"] = self.visible()
@@ -396,7 +398,7 @@ class Cycle:
         """A control client for one view's batches, unlabelled where the bundle has one view."""
         return Control(
             served.control,
-            served.credential("operator"),
+            served.operator_credential(),
             view=view if len(self.views) > 1 else None,
         )
 
@@ -764,7 +766,7 @@ class Cycle:
         a record change moves the level's version, so the next layered request rebuilds its row
         form and can be shed. Recorded rather than routed around."""
         served = self.served
-        token, _ = serve_battery.authorise(served.session, self.session_cred, self.all_terms)
+        token, _ = self.sessions.authorise(self.all_terms)
         t0 = time.perf_counter()
         try:
             s = serve_battery.viewport(
@@ -905,14 +907,13 @@ class Cycle:
             self.log(f"  {name}: census boxes at zooms {zooms}, {wanted} each")
             self.census_boxes[name] = chosen
 
-    def census_views(self, deployment, cred: str, ladder) -> dict:
+    def census_views(self, deployment, sessions, ladder) -> dict:
         """One census per declared view, keyed by view, in the folded deployment's frames
         whichever deployment is asked, over the boxes chosen for that view."""
         return {
             name: census(
                 deployment.viewer,
-                deployment.session,
-                cred,
+                sessions,
                 name,
                 self.frames[name],
                 ladder,
@@ -927,9 +928,7 @@ class Cycle:
         `layers=None`, since a layered request rebuilds the level's row form after a growth and a
         poll needs only the count."""
         view = view or self.anchor
-        token, _ = serve_battery.authorise(
-            self.served.session, self.session_cred, self.all_terms
-        )
+        token, _ = self.sessions.authorise(self.all_terms)
         return serve_battery.viewport(
             self.served.viewer, token, view, 0, full_box(self.frames[view]), k=1, layers=None
         )["counts"]["visible"]
@@ -958,9 +957,10 @@ class Cycle:
         allin.clear_scratch()
         allin.start()
         try:
-            reference_token, _ = serve_battery.authorise(
-                allin.session, allin.credential("session"), self.all_terms
+            allin_sessions = serve_battery.Sessions(
+                allin.session, allin.control, allin.operator_credential()
             )
+            reference_token, _ = allin_sessions.authorise(self.all_terms)
             all_in_meta = serve_battery.meta(allin.viewer, reference_token)
             all_in_frames = {v["id"]: v["quantisation"] for v in all_in_meta["views"]}
             self.meta_layers = all_in_meta.get("layers") or []
@@ -970,11 +970,11 @@ class Cycle:
                 self.probes[view["name"]], offered[view["name"]] = filter_probes(
                     self.rung, self.views, view, all_in_meta, self.binary
                 )
-            reference = self.census_views(allin, allin.credential("session"), ladder)
+            reference = self.census_views(allin, allin_sessions, ladder)
             self.reference = reference
         finally:
             allin.stop()
-        folded = self.census_views(self.served, self.session_cred, ladder)
+        folded = self.census_views(self.served, self.sessions, ladder)
         out: dict = {
             "ladder": [{"target": r["target"], "terms": r["terms"]} for r in ladder],
             "views": {},
@@ -1026,14 +1026,14 @@ class Cycle:
             self.visible() or 1,
             [float(t) for t in self.args.targets.split(",")],
         )
-        before = self.census_views(served, self.session_cred, ladder)
+        before = self.census_views(served, self.sessions, ladder)
         visible_before = self.visible()
         served.stop()
         t0 = time.perf_counter()
         served.start()
         open_s = round(time.perf_counter() - t0, 2)
         self.log(f"reopened pid={served.pid} in {open_s} s")
-        after = self.census_views(served, self.session_cred, ladder)
+        after = self.census_views(served, self.sessions, ladder)
         out = {
             "open_s": open_s,
             "visible": self.visible(),
@@ -1307,8 +1307,7 @@ class Cycle:
         after = {
             name: census(
                 self.served.viewer,
-                self.served.session,
-                self.session_cred,
+                self.sessions,
                 name,
                 self.frames[name],
                 self.ladder,
@@ -1362,7 +1361,7 @@ class Cycle:
 
     def viewport_status(self, view: str) -> int:
         """The status a fresh session's zoom-0 viewport on `view` answers."""
-        token, _ = serve_battery.authorise(self.served.session, self.session_cred, self.all_terms)
+        token, _ = self.sessions.authorise(self.all_terms)
         r = serve_battery.viewport_request(
             self.served.viewer, token, view, 0, full_box(self.frames[view]), 0, layers=None, timeout=60
         )

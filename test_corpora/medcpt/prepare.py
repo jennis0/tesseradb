@@ -416,12 +416,14 @@ module = "builtin:passthrough"
 [disclosure]
 token_max_lifetime = 3600
 
+[catalogue]
+dir = ".tessera/catalogue"
+
 [serve]
 viewer  = "127.0.0.1:8111"
 session = "127.0.0.1:8112"
 control = "127.0.0.1:8113"
 max_k   = 5000
-session_credential_env  = "TESSERA_MEDCPT_SESSION_CRED"
 operator_credential_env = "TESSERA_MEDCPT_OPERATOR_CRED"
 
 # Development only: the origin the demo viewer is served from (client-interaction §7). Without
@@ -437,7 +439,7 @@ dev_cors_origins = ["http://localhost:PORT", "http://127.0.0.1:PORT"]
     # start with `wal io error: No such file or directory` and names no path.
     (out / ".tessera").mkdir(exist_ok=True)
 
-    # The two plane credentials are minted once, each only if absent, so a rerun keeps the
+    # The operator credential is minted once, only if absent, so a rerun keeps the
     # values a running client already holds.
     import secrets
 
@@ -446,7 +448,7 @@ dev_cors_origins = ["http://localhost:PORT", "http://127.0.0.1:PORT"]
     held = {line.split("=", 1)[0] for line in lines if "=" in line}
     minted = [
         f"{var}={secrets.token_hex(16)}"
-        for var in ("TESSERA_MEDCPT_SESSION_CRED", "TESSERA_MEDCPT_OPERATOR_CRED")
+        for var in ("TESSERA_MEDCPT_OPERATOR_CRED",)
         if var not in held
     ]
     if minted:
