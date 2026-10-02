@@ -164,6 +164,48 @@ describe('chooseDepth on a bimodal field', () => {
   });
 });
 
+/**
+ * A corpus far below the cap: 64 x 64 cells at depth 6 over the whole map, 12 members each. Unfiltered,
+ * the server serves `θ_d · n` of a tile's `n`, with `θ_d = 16 · occupied(d) / 49,152`, so every depth
+ * serves 16 marks a tile until `θ` reaches 1 at depth 6, where each cell is served whole.
+ */
+describe('chooseDepth under the threshold', () => {
+  const cells = [];
+  for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) cells.push({x, y, count: 12});
+  const sparse: CountField = {depth: 6, cells, covers: {x0: 0, y0: 0, x1: 63, y1: 63}};
+  const thinning = {target: 16, kMin: 2, seen: new Map<number, number>()};
+  const inputs = {budget: 500_000, mTarget: 16, maxTiles: 262_144, worldBbox: full, k: 500, counts: sparse};
+
+  it('goes on to the depth where every member is served, where the cap alone would stop as soon as no tile reaches it', () => {
+    // Read as `min(k, count)`, depth 4's 192 members a tile are under the cap and look served whole.
+    expect(chooseDepth(inputs).depth).toBe(4);
+    const thinned = chooseDepth({...inputs, thinning});
+    expect(thinned.depth).toBe(6);
+    expect(thinned.limitedBy).toBe('saturated');
+    expect(thinned.predictedMarks).toBe(64 * 64 * 12);
+  });
+
+  it('predicts what the threshold serves: the occupied tiles times the target, at depths it thins', () => {
+    expect(countedMarks(sparse, full, 4, 500, thinning)!.marks).toBeCloseTo(16 * 256);
+    expect(countedMarks(sparse, full, 5, 500, thinning)!.marks).toBeCloseTo(16 * 1024);
+    expect(countedMarks(sparse, full, 4, 500, thinning)!.thinned).toBe(true);
+    expect(countedMarks(sparse, full, 6, 500, thinning)!.thinned).toBe(false);
+  });
+
+  it('a budget below the whole set stops where the threshold’s marks exceed it', () => {
+    // 16 x 1,024 at depth 5 fits 20,000; depth 6 serves all 49,152.
+    expect(chooseDepth({...inputs, budget: 20_000, thinning}).depth).toBe(5);
+  });
+
+  it('takes θ as a response showed it, carried to other depths by the occupied cells', () => {
+    // Seen at a tenth at depth 5: depth 6 has four times the occupied cells, so 0.4, still thinned;
+    // depth 7 would be 1.6, so every member is served there.
+    const seen = {...thinning, seen: new Map([[5, 0.1]])};
+    expect(countedMarks(sparse, full, 6, 500, seen)!.marks).toBeCloseTo(0.4 * 49_152);
+    expect(chooseDepth({...inputs, thinning: seen}).depth).toBe(7);
+  });
+});
+
 describe('countedMarks', () => {
   const bbox = view;
 
@@ -171,7 +213,7 @@ describe('countedMarks', () => {
     const at = countedMarks(field(), bbox, FIELD_DEPTH, K)!;
     expect(at.exact).toBe(true);
     expect(at.marks).toBe(truth(FIELD_DEPTH));
-    expect(at.capped).toBe(true);
+    expect(at.thinned).toBe(true);
   });
 
   it('bounds a depth finer than the counts from above, and never below the truth', () => {

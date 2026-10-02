@@ -80,6 +80,37 @@ describe('the aggregates projection', () => {
     expect(store.requestFilters()).not.toBeNull();
   });
 
+  it('sends the aggregates asked for in one task over the same set as one request, and gives each its own tables', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('legend', {groupings: [{by: {field: 'archive', top: 5}}]});
+    store.setAggregate('list', {groupings: [{}]});
+    await flush();
+    expect(pending.map((p) => p.req)).toEqual([{view: 's0', groupings: [{by: {field: 'archive', top: 5}}, {}]}]);
+    pending[0]!.release(7);
+    await flush();
+    for (const id of ['legend', 'list']) {
+      const entry = store.get('aggregates').get(id)!;
+      expect(entry.status).toBe('shown');
+      expect(entry.result!.tables.map((t) => t.grouping)).toEqual([0]);
+    }
+  });
+
+  it('sends each joined aggregate alone where the joined request is refused, so one bad grouping refuses only its own', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('good', {groupings: [{}]});
+    store.setAggregate('bad', {groupings: [{by: {field: 'archive', top: 5}}]});
+    await flush();
+    expect(pending).toHaveLength(1);
+    pending[0]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    await flush();
+    expect(pending.slice(1).map((p) => p.req.groupings)).toEqual([[{}], [{by: {field: 'archive', top: 5}}]]);
+    pending[1]!.release(7);
+    pending[2]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    await flush();
+    expect(store.get('aggregates').get('good')).toMatchObject({status: 'shown'});
+    expect(store.get('aggregates').get('bad')).toMatchObject({status: 'refused', refusal: {code: 'contract'}});
+  });
+
   it('joins the highlight to the filters by all_of under highlighted, and sends the filters alone without a highlight', async () => {
     const {store, pending} = await storeWith();
     store.setAggregate('lit', {groupings: [{}], highlighted: true});

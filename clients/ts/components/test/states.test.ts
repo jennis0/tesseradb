@@ -26,7 +26,8 @@ const view = {
   highlighted: {value: 3_210, exact: true},
   highlighting: false,
   served: {shown: 500, total: 12_040, exact: true},
-  provisional: 0
+  provisional: 0,
+  inView: {status: 'shown' as const, visible: {value: 12_040, exact: true}, matched: {value: 3_210, exact: true}, highlighted: {value: 3_210, exact: true}, shown: 500}
 };
 
 describe('stateOf maps status onto the eight states exactly as the table says', () => {
@@ -78,7 +79,7 @@ describe('<tessera-status> renders every state through part="state"', () => {
    * the view in the store, so a view with no answer must render no figure in any state.
    */
   it('renders no count from a view with no answer, in any state', async () => {
-    const empty = {...view, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, highlighted: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}};
+    const empty = {...view, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, highlighted: {value: 0, exact: false}, served: {shown: 0, total: 0, exact: false}, inView: null};
     for (const over of [{status: 'loading'}, {status: 'retrying'}, {status: 'refused', refusal: {code: 'x', detail: ''}}, {status: 'refused', refusal: {code: 'expired-token', detail: ''}, expired: true}, {status: 'shown'}] as const) {
       const host = await mount('<tessera-status></tessera-status>');
       (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status(over), view: empty});
@@ -88,17 +89,28 @@ describe('<tessera-status> renders every state through part="state"', () => {
     }
   });
 
-  it('names the up-to-date state through the dot’s accessible name, and no other state that way', async () => {
+  it('names up to date and updating through the dot’s accessible name, so the strip keeps its width through a pan, and every other state in words beside a dot', async () => {
     const host = await mount('<tessera-status></tessera-status>');
     const el = host.querySelector('tessera-status') as TesseraStatus;
-    const store = fakeStore({status: status({}), view});
+    const store = fakeStore({status: status({sessionWarm: true}), view});
     el.store = store;
     await settle(host);
-    expect(deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label')).toBeTruthy();
-    store.set('status', status({status: 'retrying'}));
+    const named = () => deep(host, '[part="state"] [role="img"]')?.getAttribute('aria-label') ?? null;
+    expect(named()).toBe('Up to date');
+    store.set('status', status({status: 'loading', sessionWarm: true}));
     await settle(host);
-    expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('retrying');
-    expect(deep(host, '[part="state"] [role="img"]')).toBeNull();
+    expect(named()).toBe('Updating');
+    expect(deep(host, '[part="state"]')?.textContent?.trim()).toBe('');
+    for (const [over, words] of [
+      [{status: 'retrying'}, 'Reconnecting'],
+      [{status: 'empty'}, 'Nothing in view']
+    ] as const) {
+      store.set('status', status(over));
+      await settle(host);
+      expect(named()).toBeNull();
+      expect(deep(host, '[part="state"] .dot')).not.toBeNull();
+      expect(deep(host, '[part="state"]')?.textContent?.trim()).toBe(words);
+    }
   });
 
   it('shows the matched count out of the visible count, then the shown count', async () => {
@@ -107,13 +119,13 @@ describe('<tessera-status> renders every state through part="state"', () => {
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
     expect(counts.map((c) => c.textContent)).toEqual(['3,210', '12,040', '500']);
-    // The shown cell carries the sample's total for a host to read.
-    expect(counts[2]!.getAttribute('data-total')).toBe('12,040');
+    // The shown cell carries the matched count it samples, for a host to read.
+    expect(counts[2]!.getAttribute('data-total')).toBe('3,210');
   });
 
   it('shortens the figures and drops the shown count when compact', async () => {
     const host = await mount('<tessera-status compact></tessera-status>');
-    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view: {...view, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}});
+    (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view: {...view, inView: {...view.inView, matched: {value: 16_822_190, exact: true}, visible: {value: 21_406_522, exact: true}}}});
     await settle(host);
     expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['16.8M', '21.4M']);
     expect(deep(host, '[part="count-shown"]')).toBeNull();
@@ -132,7 +144,7 @@ describe('<tessera-status> renders every state through part="state"', () => {
     expect(deep(host, '[part="count-highlighted"]')).toBeNull();
 
     // Nothing narrows what matches: the strip reads "812 highlighted of 3,210".
-    const lit = {...view, highlighted: {value: 812, exact: true}, highlighting: true};
+    const lit = {...view, highlighting: true, inView: {...view.inView, highlighted: {value: 812, exact: true}}};
     el.store = fakeStore({status: status({}), view: lit});
     await settle(host);
     expect(deepAll(host, '[part="count"]').map((c) => c.textContent)).toEqual(['812', '3,210', '500']);

@@ -101,6 +101,19 @@ describe('MarkSlab', () => {
     expect(slab.departed).toBe(0);
   });
 
+  it('keeps what it draws within the mark budget: past it, marks that left the frame are dropped', () => {
+    const slab = new MarkSlab();
+    const a = band(1, 150_000);
+    const b = band(2, 150_000);
+    // Under the slack and the floor, but 300k drawn against a 250k budget.
+    slab.sync([a, b], 2, UNIFORM_ENCODING, null, '', undefined, 250_000);
+    const away = slab.sync([a], 2, UNIFORM_ENCODING, null, '', undefined, 250_000);
+    expect(away.length).toBe(150_000);
+    expect(slab.departed).toBe(0);
+    // A frame larger than the budget is still drawn whole.
+    expect(slab.sync([a, b], 2, UNIFORM_ENCODING, null, '', undefined, 250_000).length).toBe(300_000);
+  });
+
   it('keeps what is resident across a frame with nothing in it', () => {
     const slab = new MarkSlab();
     const a = band(1, 3);

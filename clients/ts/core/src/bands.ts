@@ -1,6 +1,6 @@
 import {MAX_DEPTH, WORLD_SIZE, tileContains, tileXY} from './coords.js';
 import {NO_ORDINAL, type ArtifactRef, type SessionArtifactTable} from './artifactTable.js';
-import type {ScalarColumn, ViewportResult} from './types.js';
+import type {ScalarColumn, TileCounts, ViewportResult} from './types.js';
 import {
   coverageAdd,
   coverageAt,
@@ -28,6 +28,21 @@ import {
 
 /** A tile's address: its Morton prefix at a depth. Depth is not recoverable from the prefix. @internal */
 export type TileAddress = {depth: number; prefix: bigint};
+
+/**
+ * A tile's counts from the server, held from the moment its response's tiles frame lands until the
+ * tile's band arrives, so the tile is counted before its points are drawn. The counts are the ones
+ * the band will carry: the same frame supplies both.
+ *
+ * @internal
+ */
+export type CountedTile = {
+  prefix: bigint;
+  counts: {visible: bigint; matched: bigint; highlighted: bigint; served: number};
+};
+
+/** A counted tile as the cache holds it: where it is, and the content key it was counted under. */
+type HeldCount = CountedTile & {depth: number; x: number; y: number; contentKey: string};
 
 /** `${depth}:${prefix}`, the map key. @internal */
 export type BandKey = string;
@@ -63,7 +78,10 @@ export type Band = {
    * point.
    */
   positions: Float32Array;
-  /** The rendered columns the response carried, by name, one value per point. */
+  /**
+   * The rendered columns the band's points carry, by name, one value per point: those its request
+   * named, and those an earlier fetch of the same points carried.
+   */
   scalars: Record<string, ScalarColumn>;
   /**
    * For each layer the request named, each point's artifact ordinal on the session's
@@ -108,6 +126,11 @@ export type Band = {
    * touched first within a depth.
    */
   touchedAt: number;
+  /**
+   * The render columns the band's request named in `pointRows`; absent or `null` where it asked
+   * for every one.
+   */
+  columnsAsked?: readonly string[] | null;
 };
 
 /**
@@ -278,7 +301,15 @@ function tableCleared(): Error {
 export function bandSplitter(
   result: ViewportResult,
   depth: number,
-  meta: {identityKey: string; contentKey: string; capUsed: number; now: number; table?: SessionArtifactTable; onRemap?: (ms: number) => void}
+  meta: {
+    identityKey: string;
+    contentKey: string;
+    capUsed: number;
+    now: number;
+    columnsAsked?: readonly string[] | null;
+    table?: SessionArtifactTable;
+    onRemap?: (ms: number) => void;
+  }
 ): BandSplitter {
   let offset = 0;
   let i = 0;
@@ -339,7 +370,8 @@ export function bandSplitter(
           identityKey: meta.identityKey,
           contentKey: meta.contentKey,
           bytes: bandBytes(ids, positions, scalars, membership, highlightBits),
-          touchedAt: meta.now
+          touchedAt: meta.now,
+          columnsAsked: meta.columnsAsked ?? null
         });
         offset = end;
       }
@@ -501,6 +533,11 @@ export class BandCache {
    * entry per tile, keep this small and let a plan subtract regions without listing tiles.
    */
   private covered: Coverage[] = [];
+  /**
+   * Counts for tiles whose points are on their way, under the latest content key only. A tile's
+   * entry goes when its band is put, and every entry goes with the principal.
+   */
+  private counted = new Map<BandKey, HeldCount>();
   private identityKey: string | null = null;
   private held = 0;
   private heldPoints = 0;
@@ -581,6 +618,48 @@ export class BandCache {
     return exact;
   }
 
+  /**
+   * Holds the counts of a response's tiles at `depth` that will carry points, until each tile's
+   * band arrives. A tile that serves no point gets no band, so it is not held. Counts under an
+   * older content key are dropped, and a change of principal drops everything, as {@link put} does.
+   */
+  putCounts(depth: number, tiles: readonly TileCounts[], identityKey: string, contentKey: string): void {
+    if (this.identityKey !== identityKey) {
+      this.dropIdentity();
+      this.identityKey = identityKey;
+    }
+    for (const [key, held] of this.counted) if (held.contentKey !== contentKey) this.counted.delete(key);
+    for (const tile of tiles) {
+      if (tile.served === 0n) continue;
+      const key = bandKey(depth, tile.tile);
+      if (this.bands.get(key)?.contentKey === contentKey) continue;
+      const {x, y} = tileXY(tile.tile, depth);
+      this.counted.set(key, {
+        prefix: tile.tile,
+        depth,
+        x,
+        y,
+        contentKey,
+        counts: {
+          visible: tile.visible,
+          matched: tile.matched,
+          highlighted: tile.highlighted,
+          served: Number(tile.served)
+        }
+      });
+    }
+    this.changes++;
+  }
+
+  /** The counted tiles inside a region at one depth; see {@link putCounts}. */
+  countedIn(want: TileRect, depth: number): CountedTile[] {
+    const out: CountedTile[] = [];
+    for (const held of this.counted.values()) {
+      if (held.depth === depth && rectContainsTile(want, held.x, held.y)) out.push(held);
+    }
+    return out;
+  }
+
   /** See {@link changes}. Compare for equality only. */
   get version(): number {
     return this.changes;
@@ -609,9 +688,17 @@ export class BandCache {
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
     if (previous) {
-      // A layer's column survives a refetch that did not name the layer, provided the served set is
-      // the same, so turning a layer back on costs nothing. Under a new content key nothing carries.
+      // A layer's or a render column's values survive a refetch that did not name them, provided
+      // the served set is the same, so asking for them again costs nothing. Under a new content key
+      // nothing carries.
       const sameSet = previous.contentKey === band.contentKey && previous.ids.length === band.ids.length;
+      if (sameSet) {
+        for (const [name, column] of Object.entries(previous.scalars)) {
+          if (name in band.scalars) continue;
+          band.scalars[name] = column;
+          band.bytes += scalarBytes(column);
+        }
+      }
       for (const [layer, held] of Object.entries(previous.membership)) {
         if (sameSet && !(layer in band.membership)) {
           band.membership[layer] = held;
@@ -624,6 +711,7 @@ export class BandCache {
       this.heldPoints -= previous.ids.length;
     }
     this.bands.set(key, band);
+    this.counted.delete(key);
     this.index(band, key);
     this.held += band.bytes;
     this.heldPoints += band.ids.length;
@@ -647,12 +735,15 @@ export class BandCache {
   /**
    * Withdraws coverage over each band's tile so the next plan fetches it again. Used for a band
    * that is colour-stale: its ordinals no longer resolve, or it lacks the column for a layer now
-   * on. The band stays drawn until its replacement arrives.
+   * on or a render column now asked for. The band stays drawn until its replacement arrives.
+   * Returns how many bands had coverage to withdraw.
    */
-  retract(bands: readonly Band[]): void {
+  retract(bands: readonly Band[]): number {
+    let withdrawn = 0;
     for (const band of bands) {
-      if (this.bands.get(bandKey(band.depth, band.prefix)) === band) this.retractCoverage(band.depth, band.x, band.y);
+      if (this.bands.get(bandKey(band.depth, band.prefix)) === band && this.retractCoverage(band.depth, band.x, band.y)) withdrawn++;
     }
+    return withdrawn;
   }
 
   /** Drops everything. Called when the token changes. */
@@ -661,6 +752,7 @@ export class BandCache {
     this.bands.clear();
     this.byDepth.clear();
     this.covered = [];
+    this.counted.clear();
     this.changes++;
     this.identityKey = null;
     this.held = 0;
@@ -823,11 +915,14 @@ export class BandCache {
    * region and the discarded points would not be fetched again. The whole containing rectangle
    * goes, since a rectangle less one tile is not a rectangle; the cost is a refetch.
    */
-  private retractCoverage(depth: number, x: number, y: number): void {
+  private retractCoverage(depth: number, x: number, y: number): boolean {
+    const before = this.covered.length;
     this.covered = this.covered.filter(
       (c) => c.depth !== depth || !rectContainsTile(c.rect, x, y)
     );
+    if (this.covered.length === before) return false;
     this.changes++;
+    return true;
   }
 
   /** Cuts a band to its first `keep` points and lowers its bound to match. */

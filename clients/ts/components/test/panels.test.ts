@@ -328,6 +328,7 @@ describe('<tessera-filter> on a category, before anything is typed', () => {
     await settle(host);
     expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}]}]);
     el.remove();
+    await settle(host);
     expect(registered(store).size).toBe(0);
   });
 
@@ -436,13 +437,29 @@ describe('<tessera-filter> on a keyword column', () => {
     store.set('filters', filtersOf({filter: {author: {family: 'keyword', needle: '', op: 'eq'}}, highlight: {}}));
     el.store = store;
     await settle(host);
-    const select = deep(host, 'select[part="mode"]') as HTMLSelectElement;
-    expect([...select.options].map((o) => o.value)).toEqual(['eq', 'prefix']);
-    expect(select.value).toBe('eq');
+    const button = deep(host, '[part="mode"]') as HTMLButtonElement;
+    expect(button.textContent?.trim()).toBe('is');
+    button.click();
+    await settle(host);
+    const operators = () => deepAll(host, '[part~="operator"]');
+    expect(operators().map((o) => [o.getAttribute('data-op'), o.getAttribute('aria-checked')])).toEqual([
+      ['eq', 'true'],
+      ['prefix', 'false']
+    ]);
+    button.click();
+    await settle(host);
+    expect(operators()).toHaveLength(0);
     await type(host, 'Knuth');
     await vi.runAllTimersAsync();
-    const sent = store.calls.find((c) => c.name === 'setFilters')!.args[0] as {filter: {author: {op: string; needle: string}}};
-    expect(sent.filter.author).toMatchObject({op: 'eq', needle: 'Knuth'});
+    const sent = () => store.calls.filter((c) => c.name === 'setFilters').at(-1)!.args[0] as {filter: {author: {op: string; needle: string}}};
+    expect(sent().filter.author).toMatchObject({op: 'eq', needle: 'Knuth'});
+    // Choosing an operator closes the menu and sends it at once.
+    (deep(host, '[part="mode"]') as HTMLButtonElement).click();
+    await settle(host);
+    (operators()[1] as HTMLButtonElement).click();
+    await settle(host);
+    expect(operators()).toHaveLength(0);
+    expect(sent().filter.author).toMatchObject({op: 'prefix', needle: 'Knuth'});
   });
 });
 
@@ -474,6 +491,27 @@ describe('<tessera-filter-panel>', () => {
     await settle(host);
     expect(fields()).toEqual([['submitted_at', true]]);
     expect(deep(host, '[part="add-list"]')).toBeNull();
+  });
+
+  it('adds a field at the end of the list, so the fields shown do not move, and marks it Shown in Add filter', async () => {
+    const {host, fields} = await mountPanel(none());
+    const add = async (column: string) => {
+      (deep(host, '[part="add"]') as HTMLButtonElement).click();
+      await settle(host);
+      (deep(host, `[part~="add-option"][data-column="${column}"]`) as HTMLButtonElement).click();
+      await settle(host);
+    };
+    await add('submitted_at');
+    await add('archive');
+    expect(fields().map(([c]) => c)).toEqual(['submitted_at', 'archive']);
+    (deep(host, '[part="add"]') as HTMLButtonElement).click();
+    await settle(host);
+    const said = deepAll(host, '[part~="add-option"]').map((o) => [o.getAttribute('data-column'), o.querySelector('.kind')?.textContent ?? '']);
+    expect(said).toEqual([
+      ['archive', 'Shown'],
+      ['title', ''],
+      ['submitted_at', 'Shown']
+    ]);
   });
 
   it('checks the listed fields in Add filter, and choosing one takes it off with its clause in both positions', async () => {

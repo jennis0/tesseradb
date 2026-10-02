@@ -31,13 +31,38 @@ body {
   z-index: 10;
 }
 
-/* Below this the column would take more of the window than the map does. */
-@media (max-width: 900px) {
-  #instruments {
-    width: 240px;
-  }
+/* Below this the explorer takes the whole window, so its own layout has the width, and the
+   instruments open over it from a button. */
+#instruments-toggle {
+  display: none;
+}
+@media (max-width: 1000px) {
   #explorer {
-    left: 240px;
+    left: 0;
+  }
+  #instruments {
+    display: none;
+    height: 100%;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  }
+  body.instruments-open #instruments {
+    display: block;
+  }
+  #instruments-toggle {
+    display: block;
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    z-index: 11;
+    padding: 5px 10px;
+    font: 500 12px 'Instrument Sans', system-ui, sans-serif;
+    color: #dfe3e8;
+    background: #1b1e23;
+    border: 1px solid #2c3036;
+    border-radius: 6px;
+    cursor: pointer;
   }
 }
 

@@ -188,11 +188,15 @@ def viewport_request(
     filters: dict | None = None,
     layers: str | None = "all",
     timeout: float = 300.0,
+    point_rows: str | list[str] | None = None,
 ) -> requests.Response:
-    """`POST /v1/viewport`, answered as a stream whose body the caller reads."""
+    """`POST /v1/viewport`, answered as a stream whose body the caller reads. `point_rows` is sent
+    when given: a list of rendered columns asks for those alone."""
     body: dict = {"view": view_id, "zoom": zoom, "bbox": list(bbox), "k": k}
     if layers is not None:
         body["layers"] = layers
+    if point_rows is not None:
+        body["point_rows"] = point_rows
     if filters is not None:
         body["filters"] = filters
     return requests.post(
@@ -215,6 +219,7 @@ def viewport(
     layers: str | None = "all",
     timeout: float = 300.0,
     keep_body: bool = False,
+    point_rows: str | list[str] | None = None,
 ) -> dict:
     """One `/v1/viewport` at the depth and `k` the caller has already chosen. A stream the
     server cuts mid-body is a result, not an exception: read chunk by chunk ([`drain`]) and
@@ -222,7 +227,9 @@ def viewport(
     frames as they arrived under `body`, for a caller reading a frame this module does not
     summarise; a sample that is written to a result file asks for figures only."""
     t0 = time.perf_counter()
-    r = viewport_request(viewer_base, token, view_id, zoom, bbox, k, filters, layers, timeout)
+    r = viewport_request(
+        viewer_base, token, view_id, zoom, bbox, k, filters, layers, timeout, point_rows
+    )
     content, shed_error = drain(r)
     wall = time.perf_counter() - t0
     out = {
@@ -561,6 +568,12 @@ def _log(message: str) -> None:
 class Battery:
     def __init__(self, args, log: Callable[[str], None] = _log):
         self.args = args
+        #: The rendered columns each point asks for: `None` sends no `point_rows`, every column.
+        self.point_rows = (
+            None
+            if args.point_rows is None
+            else [c for c in args.point_rows.split(",") if c]
+        )
         self.log = log
         self.evictor = Evictor(
             [Path(args.bundle)] + ([Path(args.cache)] if args.cache else []),
@@ -620,7 +633,10 @@ class Battery:
         before = self.evictor.majflt() if cold else None
         t0 = time.perf_counter()
         try:
-            s = viewport(self.args.viewer, token, self.view_id, depth, box, k=self.k, **kw)
+            s = viewport(
+                self.args.viewer, token, self.view_id, depth, box, k=self.k,
+                point_rows=self.point_rows, **kw,
+            )
         except Exception as e:  # noqa: BLE001 — the failure is the measurement
             self.failures += 1
             return {
@@ -690,7 +706,8 @@ class Battery:
         """One budget request over the whole extent, logged."""
         box = full_box(self.quant)
         whole = viewport(
-            self.args.viewer, token, self.view_id, self._depth(box, 0), box, k=self.k, layers=None
+            self.args.viewer, token, self.view_id, self._depth(box, 0), box, k=self.k, layers=None,
+            point_rows=self.point_rows,
         )
         counts = whole["counts"] or {}
         served, occupied = int(counts.get("served") or 0), int(counts.get("n_tiles") or 0)
@@ -868,6 +885,7 @@ class Battery:
                 "budget_depth": args.budget_depth,
                 "grid_depth": GRID_DEPTH,
                 "k": self.k,
+                "point_rows": self.point_rows,
                 "rank_k": RANK_K,
                 "max_k": selection.get("max_k"),
                 "k_max_marks": selection.get("k_max_marks"),
@@ -1029,6 +1047,12 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--text-samples", type=int, default=10)
     ap.add_argument("--drilldowns", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--point-rows",
+        default=None,
+        help="comma-separated rendered columns each point carries, sent as `point_rows`; an "
+        "empty string asks for position alone; left out, every rendered column",
+    )
     # Booted here rather than handed one, since a battery needs the server's pid and cgroup.
     ap.add_argument("--boot-rung", help="a rung directory to serve, instead of an already-running server")
     ap.add_argument("--boot-bundle", help="the bundle to serve; defaults to <rung>/bundle")

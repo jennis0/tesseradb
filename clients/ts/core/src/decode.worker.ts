@@ -2,8 +2,8 @@
  * Arrow decoding off the render thread. Decoding a large response takes far longer than the server
  * takes to answer it, and on the render thread it holds up every gesture.
  *
- * Three request shapes: a whole body, from a batch caller; and a head (the tile, sub-cell and
- * artifact frames) followed by one points frame at a time, from the streaming client. Each frame
+ * Three request shapes: a whole body, from a batch caller; and an artifacts frame followed by one
+ * points frame at a time, from the streaming client, which decodes the counts itself. Each frame
  * is an independent Arrow stream, so they decode separately.
  *
  * A plain worker without `SharedArrayBuffer`: shared memory needs a cross-origin isolated page,
@@ -13,14 +13,14 @@
  * No authorisation happens here. The worker parses a response the server has already restricted,
  * and `tessera_id` is opaque on either side.
  */
-import {decodeHead, decodePoints, decodeViewport} from './decode.js';
+import {decodeArtifacts, decodePoints, decodeViewport} from './decode.js';
 import type {MembershipColumn, ScalarColumn} from './types.js';
 
 export type DecodeRequest =
   /** A whole framed body, trailer included. */
   | {id: number; kind?: 'body'; bytes: ArrayBuffer}
-  /** The frames before the first points frame: tiles, and the two optional ones. */
-  | {id: number; kind: 'head'; tiles: ArrayBuffer; subCells: ArrayBuffer | null; artifacts: ArrayBuffer | null}
+  /** The artifacts frame, or null where the response has none. */
+  | {id: number; kind: 'artifacts'; bytes: ArrayBuffer | null}
   /** One kind-3 frame. */
   | {id: number; kind: 'points'; bytes: ArrayBuffer};
 
@@ -47,13 +47,9 @@ self.onmessage = (event: MessageEvent<DecodeRequest>) => {
   const {id} = request;
   try {
     const started = performance.now();
-    if (request.kind === 'head') {
-      const result = decodeHead({
-        tiles: new Uint8Array(request.tiles),
-        subCells: request.subCells ? new Uint8Array(request.subCells) : null,
-        artifacts: request.artifacts ? new Uint8Array(request.artifacts) : null
-      });
-      // The head is plain objects, so it crosses by structured clone.
+    if (request.kind === 'artifacts') {
+      const result = decodeArtifacts(request.bytes ? new Uint8Array(request.bytes) : null);
+      // The artifacts are plain objects, so they cross by structured clone.
       self.postMessage({id, result, ms: performance.now() - started});
       return;
     }

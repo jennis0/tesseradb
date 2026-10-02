@@ -9,10 +9,14 @@ import './count.js';
 
 /**
  * The view's state and counts on one line: `● | 16,822,190 of 21,406,522 match | 5,390 shown`.
- * While a highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
+ * The counts are the store's counts in view (`ViewProjection.inView`): over the camera's box, or
+ * over the selected region while one is selected, as the selection card counts it. While a
+ * highlight is set, a cell reads `N highlighted of M`, M being the matched count, and the
  * match cell is left out unless a filter or selection narrows what matches. While the view is up to
- * date the first cell is a dot alone, titled "Up to date"; otherwise it names the state in two or
- * three words (Updating, Reconnecting, Data updated, View refused, Session expired) with the action
+ * date the first cell is a dot alone, titled "Up to date", and while it updates a grey dot alone,
+ * titled "Updating", so the strip keeps its width through a pan; otherwise it names the state in two
+ * or three words beside its dot (Connecting, Reconnecting, Nothing in view, Data updated, View
+ * refused, Session expired) with the action
  * the state offers: Refresh when the data changed, Retry when the view was refused, and Sign in on
  * expiry where `reauthorise` is set. The counts grey out while they are not current. The strip
  * sizes to its content and does not wrap. `compact` shortens the figures (`16.8M of 21.4M match`)
@@ -185,10 +189,18 @@ export class TesseraStatus extends TesseraElement {
     const stale = status?.stale ?? false;
     const v = this.view;
     const refresh = () => this.resolvedStore?.refresh();
+    // Up to date and updating, the two states a pan moves between, are each a dot alone, so the
+    // strip keeps its width through a gesture; every other state names itself beside its dot.
+    const bare = (cls: string, words: string) =>
+      html`<div class="cell state bare"><span part="state" data-state=${state}><span class=${cls} role="img" aria-label=${words} title=${words}></span></span></div>`;
     const first =
       state === 'shown'
-        ? html`<div class="cell state bare"><span part="state" data-state="shown"><span class="dot" role="img" aria-label="Up to date" title="Up to date"></span></span></div>`
-        : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
+        ? bare('dot', 'Up to date')
+        : state === 'loading' && status?.sessionWarm
+          ? bare('dot quiet', 'Updating')
+          : state === 'empty'
+            ? html`<div class="cell state"><span part="state" data-state="empty"><span class="dot quiet"></span>Nothing in view</span></div>`
+            : html`<div class="cell state">${renderState(state, status, {onRefresh: refresh, onRetry: refresh, onReauthorise: this.reauthorise})}</div>`;
     return html`<div part="strip" role="status" aria-live="polite" data-state=${state}>${first}${this.counts(state, v, stale)}</div>
       ${this.expanded && showsContent(state) && v ? this.card(v, stale) : nothing}`;
   }
@@ -201,10 +213,10 @@ export class TesseraStatus extends TesseraElement {
   private counts(state: PanelState, v: ViewProjection | null, stale: boolean): TemplateResult | typeof nothing {
     if (state === 'detached' || state === 'empty' || !v) return nothing;
     if (state === 'loading' && this.status?.sessionWarm === false) return nothing;
-    const dim = state !== 'shown';
-    const answered = v.matched.exact || v.matched.value > 0 || v.visible.value > 0;
+    const n = v.inView;
+    const dim = state !== 'shown' || n?.status !== 'shown';
     const cls = `cell${dim ? ' dim' : ''}`;
-    if (!answered || stale) {
+    if (!n || stale) {
       const skel = html`<span class="skel" aria-hidden="true"></span>`;
       return html`<div class=${cls}>${skel}<span>match</span></div>${this.compact ? nothing : html`<div class=${cls}>${skel}<span>shown</span></div>`}`;
     }
@@ -212,24 +224,25 @@ export class TesseraStatus extends TesseraElement {
     // the highlight's, so the highlight's cell stands alone and names M.
     const narrowed = this.resolvedStore?.requestFilters() != null;
     const match = html`<div class=${cls}>
-      <tessera-count part="count-matched" .masked=${v.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
-        part="count-visible" .masked=${v.visible} .compact=${this.compact}></tessera-count><span>match</span>
+      <tessera-count part="count-matched" .masked=${n.matched} .compact=${this.compact}></tessera-count><span>of</span><tessera-count
+        part="count-visible" .masked=${n.visible} .compact=${this.compact}></tessera-count><span>match</span>
     </div>`;
     return html`${v.highlighting && !narrowed ? nothing : match}
       ${v.highlighting
-        ? html`<div class=${cls}><tessera-count part="count-highlighted" class="lit" .masked=${v.highlighted} .compact=${this.compact}></tessera-count><span>highlighted of</span><tessera-count
-              part="count-of" .masked=${v.matched} .compact=${this.compact}></tessera-count></div>`
+        ? html`<div class=${cls}><tessera-count part="count-highlighted" class="lit" .masked=${n.highlighted} .compact=${this.compact}></tessera-count><span>highlighted of</span><tessera-count
+              part="count-of" .masked=${n.matched} .compact=${this.compact}></tessera-count></div>`
         : nothing}
-      ${this.compact || !v.served.exact ? nothing : html`<div class=${cls}><tessera-count part="count-shown" .count=${v.served} figure="shown" label="shown"></tessera-count></div>`}`;
+      ${this.compact ? nothing : html`<div class=${cls}><tessera-count part="count-shown" .count=${{shown: n.shown, total: n.matched.value, exact: true}} figure="shown" label="shown"></tessera-count></div>`}`;
   }
 
   private card(v: ViewProjection, stale: boolean) {
     const row = (label: string, value: unknown) => html`<div class="k">${label}</div><div class="v">${value}</div>`;
+    const n = v.inView;
     return html`<div part="card"><div class="kv">
-      ${row('Shown', html`<tessera-count .count=${v.served ?? NO_COUNT} .stale=${stale}></tessera-count>`)}
-      ${row('Match the filters', html`<tessera-count .masked=${v.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
-      ${v.highlighting ? row('Highlighted', html`<tessera-count .masked=${v.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
-      ${row('In this view', html`<tessera-count .masked=${v.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
+      ${row('Shown', html`<tessera-count .count=${n ? {shown: n.shown, total: n.matched.value, exact: true} : NO_COUNT} .stale=${stale}></tessera-count>`)}
+      ${row('Match the filters', html`<tessera-count .masked=${n?.matched ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
+      ${v.highlighting ? row('Highlighted', html`<tessera-count .masked=${n?.highlighted ?? NO_MASKED} .stale=${stale}></tessera-count>`) : nothing}
+      ${row('In this view', html`<tessera-count .masked=${n?.visible ?? NO_MASKED} .stale=${stale}></tessera-count>`)}
     </div></div>`;
   }
 }

@@ -114,9 +114,11 @@ export const chrome = css`
     cursor: pointer;
     padding: 0;
   }
+  /* The focus ring: the accent at half strength, close to the control, so it marks the control
+     without outshining the data. */
   :focus-visible {
-    outline: 2px solid var(--_tessera-accent);
-    outline-offset: 2px;
+    outline: 2px solid color-mix(in srgb, var(--_tessera-accent) 50%, transparent);
+    outline-offset: 1px;
   }
   input[type='checkbox'],
   input[type='radio'] {
@@ -193,6 +195,7 @@ export const chrome = css`
   [part='value'],
   .v {
     color: var(--_tessera-ink);
+    user-select: text;
   }
   [part='refusal'] {
     color: var(--_tessera-refuse);
@@ -219,7 +222,9 @@ export const chrome = css`
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
+  /* A card's title is text a reader may copy, wherever the card's chrome takes no selection. */
   .card-title {
+    user-select: text;
     font-size: var(--_tessera-title-size, 15px);
     font-weight: 600;
     line-height: 1.3;
@@ -265,7 +270,7 @@ export const chrome = css`
     outline: none;
   }
   .input:focus-within {
-    outline: 2px solid var(--_tessera-accent);
+    outline: 2px solid color-mix(in srgb, var(--_tessera-accent) 50%, transparent);
     outline-offset: 1px;
   }
   /* A select drawn as text with a chevron, such as the view and colour choices. */
@@ -387,8 +392,12 @@ export const chrome = css`
   .btn svg {
     flex: none;
   }
-  /* Quiet text at the right of a section heading, such as Clear all. */
+  /* Quiet text at the right of a section heading, such as Clear all, no taller than the heading's
+     line, so the heading does not move as it comes and goes. */
   .quiet {
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: 16px;
     font-size: 12px;
     font-weight: 500;
     letter-spacing: 0;

@@ -4,14 +4,14 @@ import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, nearestStop} from '@tesseradb/deck';
-import {artifactName, emptyDraft} from '@tesseradb/client';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, cellDepth, nearestStop} from '@tesseradb/deck';
+import {WORLD_SIZE, activeCount, artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
 import {listedAt} from './artifact-list.js';
 import {HeldAggregate} from './aggregate.js';
 import {TesseraElement, columnCaption, emit} from './base.js';
-import {placeCallout, type Rect} from './callout.js';
+import {placeCallout, type Rect, type Side} from './callout.js';
 import {sizingOf, watchChoices} from './colouring.js';
 import {densityGradient, displayStyles, radioKeys, type DisplaySettings} from './display.js';
 import {storeContext} from './context.js';
@@ -84,6 +84,10 @@ type Pinned = {key: string; world: [number, number]; view: string} & (
 );
 /** A card's size before it has been measured. */
 const CALLOUT_SIZE = {width: 300, height: 220};
+/** How long after the camera stops a callout may move to another side. */
+const CALLOUT_REST_MS = 200;
+/** The shortest a callout is made to fit beside its point; what does not fit scrolls inside it. */
+const CALLOUT_MIN_HEIGHT = 180;
 
 /** The narrow layout's tabs, each opening a sheet, drawn where its panel is. */
 const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}[] = [
@@ -582,18 +586,16 @@ export class TesseraExplorer extends TesseraElement {
         --_tessera-panel-padding: 12px 14px 10px;
         --_tessera-panel-inline: 14px;
         --_tessera-panel-rule: transparent;
-        --_tessera-key-width: 76px;
+        --_tessera-key-width: 104px;
         --_tessera-field-gap: 4px 10px;
         font-size: 12px;
+        overflow-y: auto;
+        user-select: none;
       }
       /* A callout whose point is off the map keeps its box, so its size stays known. */
       [part~='callout'][hidden] {
         display: block;
         visibility: hidden;
-      }
-      [part~='callout'] tessera-artifact-card {
-        max-height: 360px;
-        overflow-y: auto;
       }
       [part='pin'] {
         flex: none;
@@ -629,7 +631,7 @@ export class TesseraExplorer extends TesseraElement {
       .compact [part='detail'] {
         --_tessera-panel-padding: 12px 12px 10px;
         --_tessera-title-size: 14px;
-        --_tessera-key-width: 76px;
+        --_tessera-key-width: 104px;
         --_tessera-field-gap: 4px 10px;
       }
       .right {
@@ -665,16 +667,18 @@ export class TesseraExplorer extends TesseraElement {
         [part='tabs'] {
           display: flex;
           height: 56px;
+          padding: 0 8px env(safe-area-inset-bottom, 0px);
           border-top: 1px solid var(--_tessera-line);
           background: var(--_tessera-surface);
         }
         [part='tabs'] button {
-          flex: 1;
+          flex: 1 1 0;
+          min-width: 0;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
-          gap: 3px;
+          gap: 4px;
           color: var(--_tessera-ink-2);
           font-size: 11px;
           font-weight: 500;
@@ -716,6 +720,14 @@ export class TesseraExplorer extends TesseraElement {
         }
         .sheet-footer .btn.primary {
           flex: 2;
+        }
+        /* Every heading and row in a sheet starts 16 px in: the In view rows' fill reaches past
+           their content, so the list is drawn out by it. */
+        [part='sheet'] tessera-artifact-list::part(items) {
+          margin: 0 -6px;
+        }
+        [part='sheet'] tessera-artifact-list::part(more) {
+          margin-left: 0;
         }
         [part='sheet']::before {
           content: '';
@@ -850,6 +862,10 @@ export class TesseraExplorer extends TesseraElement {
   private observed = new Set<Element>();
   /** A frame asked for to place the callouts after the camera moved. */
   private placing: number | null = null;
+  /** Each callout's last placement, by its key, with the point it was placed for. */
+  private placements = new Map<string, {side: Side; offset: number; world: [number, number]}>();
+  /** Set while the camera moves, and cleared {@link CALLOUT_REST_MS} after it stops. */
+  private moving: ReturnType<typeof setTimeout> | null = null;
   /** The zoom the level drawn was last worked out at, and the level that gave when none is chosen. */
   private zoomSeen: number | null = null;
   private autoSeen: number | null = null;
@@ -927,6 +943,8 @@ export class TesseraExplorer extends TesseraElement {
     this.observed.clear();
     if (this.placing !== null) cancelAnimationFrame(this.placing);
     this.placing = null;
+    if (this.moving !== null) clearTimeout(this.moving);
+    this.moving = null;
     this.hintCount.set(null, null);
     this.closeLayers();
     super.disconnectedCallback();
@@ -1077,10 +1095,12 @@ export class TesseraExplorer extends TesseraElement {
           this.sheet = this.sheet === sheet ? null : sheet;
         }}>${icon(ic, 18)}${label}</button>`;
     // The filters sheet's primary action names the number it will produce.
-    const matched = s?.get('view').matched;
-    const matchedText = matched && matched.exact && s?.get('status').status === 'shown' ? `Show ${matched.value.toLocaleString('en-GB')} matching` : 'Show';
+    const counted = s?.get('view').inView;
+    const matchedText = counted && counted.status === 'shown' && counted.matched.exact ? `Show ${counted.matched.value.toLocaleString('en-GB')} matching` : 'Show';
+    // Clear has nothing to do where no filter, highlight or cluster clause applies.
+    const applied = s ? activeCount(s.get('filters').draft) > 0 || s.get('filters').members.length > 0 : false;
     const sheetFooter = html`<div class="sheet-footer">
-      <button class="btn" type="button" @click=${() => {
+      <button class="btn" type="button" ?disabled=${!applied} @click=${() => {
         const meta = s?.get('meta');
         if (!s || !meta) return;
         s.setFilters(emptyDraft(meta.filterOperands));
@@ -1092,7 +1112,7 @@ export class TesseraExplorer extends TesseraElement {
       this.sheet === 'filters'
         ? html`${filters}${sheetFooter}`
         : this.sheet === 'layers'
-          ? html`${head}${colour}<div class="panel">${layersPanel}</div>`
+          ? html`${colour}${layersPanel}`
           : this.sheet === 'artifacts'
             ? html`${selectionPanel}${list}`
             : this.sheet === 'detail'
@@ -1107,6 +1127,7 @@ export class TesseraExplorer extends TesseraElement {
       @tessera-close=${(e: Event) => this.closeDetail(e)}>
       ${floating || narrow ? nothing : docked}
       <div class="stage">
+        ${floating && !narrow ? panel : nothing}
         <tessera-map
           exportparts=${FORWARD.map}
           colour-by=${this.colourBy || nothing}
@@ -1145,7 +1166,6 @@ export class TesseraExplorer extends TesseraElement {
           ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
         </tessera-map>
         ${narrow ? nothing : this.callouts(this.has('detail') && hasDetail ? anchor : null, detail)}
-        ${floating && !narrow ? panel : nothing}
       </div>
       ${this.sheet && sheetBody !== nothing
         ? html`<div part="sheet" id="sheet" role="dialog" aria-labelledby=${`tab-${this.sheet}`} tabindex="-1" @keydown=${this.onSheetKey}>${sheetBody}</div>`
@@ -1269,23 +1289,32 @@ export class TesseraExplorer extends TesseraElement {
    * map and of the callouts placed before it, and join it to its point. A callout whose point is off
    * the map is hidden with its leader. Reads no layout: the sizes are those {@link measure} took.
    */
-  private placeCallouts(): void {
+  private placeCallouts(firm = this.moving !== null): void {
     const m = this.map;
     if (!m) return;
     const size = this.mapSize ?? {width: m.clientWidth, height: m.clientHeight};
     const placed: Rect[] = [];
+    const keys = new Set<string>();
     for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
       const key = el.dataset.callout!;
       const card = this.cards.find((c) => c.key === key);
       const leader = this.renderRoot.querySelector<SVGGElement>(`[part="leaders"] g[data-callout="${key}"]`);
       if (!card) continue;
+      keys.add(key);
       const point = m.screenOf(card.world);
       const box = this.calloutSizes.get(key) ?? CALLOUT_SIZE;
-      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed]) : null;
+      // A card keeps its side and its place along it while the camera moves and as it grows, and
+      // at rest wherever that is still clear; a card for another point is placed afresh.
+      const last = this.placements.get(key);
+      const kept = last && last.world[0] === card.world[0] && last.world[1] === card.world[1] ? {side: last.side, offset: last.offset, firm} : null;
+      const at = size.width > 0 && size.height > 0 ? placeCallout(point, box, size, [...this.keepClear, ...placed], undefined, kept, CALLOUT_MIN_HEIGHT) : null;
       el.hidden = at === null;
       leader?.setAttribute('visibility', at === null ? 'hidden' : 'visible');
       if (!at) continue;
-      placed.push({left: at.left, top: at.top, width: box.width, height: box.height});
+      // A card shortened to fit scrolls inside, so its last row stays within reach.
+      el.style.maxHeight = `${Math.round(at.height)}px`;
+      this.placements.set(key, {side: at.side, offset: at.offset, world: card.world});
+      placed.push({left: at.left, top: at.top, width: box.width, height: at.height});
       el.style.transform = `translate(${Math.round(at.left)}px, ${Math.round(at.top)}px)`;
       el.dataset.side = at.side;
       const line = leader?.querySelector('line');
@@ -1297,6 +1326,7 @@ export class TesseraExplorer extends TesseraElement {
       dot?.setAttribute('cx', String(point[0]));
       dot?.setAttribute('cy', String(point[1]));
     }
+    for (const key of [...this.placements.keys()]) if (!keys.has(key)) this.placements.delete(key);
   }
 
   /**
@@ -1308,13 +1338,15 @@ export class TesseraExplorer extends TesseraElement {
     if (!m) return;
     this.mapSize = {width: m.clientWidth, height: m.clientHeight};
     const origin = m.getBoundingClientRect();
+    // The height the card's content wants, whatever height it is shown at.
     for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]'))) {
-      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: el.offsetHeight});
+      if (el.offsetWidth > 0) this.calloutSizes.set(el.dataset.callout!, {width: el.offsetWidth, height: Math.max(el.offsetHeight, el.scrollHeight)});
     }
     this.keepClear = this.keptClear().flatMap((el) => {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0 ? [{left: r.left - origin.left, top: r.top - origin.top, width: r.width, height: r.height}] : [];
     });
+    // A card that grew, as under Show all, keeps its side and grows down where that is clear.
     this.placeCallouts();
   }
 
@@ -1352,12 +1384,18 @@ export class TesseraExplorer extends TesseraElement {
   private stopsSeen = '';
 
   private onCamera(): void {
+    if (this.moving !== null) clearTimeout(this.moving);
+    this.moving = setTimeout(() => {
+      this.moving = null;
+      this.placeCallouts();
+    }, CALLOUT_REST_MS);
     if (this.placing !== null || typeof requestAnimationFrame === 'undefined') return;
     this.placing = requestAnimationFrame(() => {
       this.placing = null;
       this.placeCallouts();
       // The resolution stops the server can count change with the camera.
-      const stops = this.layersOpen && this.density !== 'none' ? (this.map?.densityStops().map((s) => (s.enabled ? '1' : '0')).join('') ?? '') : '';
+      // The stops and the readout's cell size change with the zoom.
+      const stops = this.layersOpen && this.density !== 'none' ? `${Math.round((this.map?.zoom ?? 0) * 8)}:${this.map?.densityStops().map((s) => `${s.depth}${s.enabled ? '+' : '-'}`).join('') ?? ''}` : '';
       if (stops !== this.stopsSeen) {
         this.stopsSeen = stops;
         this.requestUpdate();
@@ -1375,7 +1413,8 @@ export class TesseraExplorer extends TesseraElement {
    * the card is the next stop after the map; from there Tab goes on in the page's order.
    */
   private onMapKey = (e: KeyboardEvent): void => {
-    if (e.key !== 'Tab' || e.shiftKey || e.composedPath()[0] !== this.map) return;
+    const from = e.composedPath()[0];
+    if (e.key !== 'Tab' || e.shiftKey || !this.map || (from !== this.map && from !== this.map.focusTarget)) return;
     const shown = Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part~="callout"]')).filter((c) => !c.hidden);
     const card = shown.find((c) => c.dataset.callout === 'live') ?? shown[0];
     if (!card) return;
@@ -1491,8 +1530,9 @@ export class TesseraExplorer extends TesseraElement {
                     @click=${() => (this.densityColoursOpen = !this.densityColoursOpen)}><span class="bar" style=${`background:${densityGradient(colours, scheme)}`}></span>${DENSITY_COLOUR_TITLES[colours]}${icon('chev', 12, 1.4)}</button>
                   ${colourList}`
               : nothing}
-            <label for="density-strength">Strength</label><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
-              @input=${(e: Event) => change({densityStrength: number(e)})} />
+            <label for="density-strength">Strength</label>
+            <div class="with-readout"><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
+              @input=${(e: Event) => change({densityStrength: number(e)})} /><span class="readout">${Math.round(s.densityStrength * 100)}%</span></div>
           </div>`;
     return html`<div part="display" class="display">
       <div class="hd">Display</div>
@@ -1503,8 +1543,9 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       <div class="sliders">
         ${this.sizeControls(radius, !s.points)}
-        <label for="point-opacity">Opacity</label><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
-          @input=${(e: Event) => change({pointOpacity: number(e)})} />
+        <label for="point-opacity">Opacity</label>
+        <div class="with-readout"><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
+          @input=${(e: Event) => change({pointOpacity: number(e)})} /><span class="readout">${Math.round(opacity * 100)}%</span></div>
       </div>
       <div class="rule"></div>
       <div class="lead" id="density-label">Density</div>
@@ -1520,33 +1561,43 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   /**
-   * The Resolution slider: one stop per cell size, coarse to fine. The stops past the finest the
-   * map can ask for at its camera are struck through on the track. Moving the slider onto one
-   * keeps the size asked for, which the map draws once the camera lets it, and shows the slider on
-   * the finest it can draw now. The readout gives the cell size drawn.
+   * The Resolution slider, coarse to fine: one stop per depth the cell sizes ask for at the map's
+   * zoom, so sizes that would draw the same cells are one stop. The stops past the finest the map
+   * can ask for at its camera are struck through on the track. Moving the slider onto one keeps the
+   * size asked for, which the map draws once the camera lets it, and shows the slider on the finest
+   * it can draw now. The readout gives the size of the cells drawn at the stop shown.
    */
   private resolutionControl(change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
-    const last = DENSITY_CELL_SIZES.length - 1;
-    // Before the map has a camera and `meta`, every stop is offered.
-    const enabled = this.map?.densityStops().map((s) => s.enabled) ?? [];
-    const finest = enabled.length === 0 ? last : Math.max(0, enabled.lastIndexOf(true));
-    const at = Math.min(DENSITY_CELL_SIZES.indexOf(nearestStop(this.densityResolution)), finest);
-    const px = DENSITY_CELL_SIZES[at]!;
+    const zoom = this.map?.zoom ?? 0;
+    // Before the map has a camera and `meta`, every size is a stop of its own.
+    const stops = this.map?.densityStops() ?? [];
+    const levels: {px: number; depth: number; enabled: boolean}[] = [];
+    for (const stop of stops.length > 0 ? stops : DENSITY_CELL_SIZES.map((px) => ({px, depth: cellDepth(zoom, px), enabled: true}))) {
+      const prev = levels[levels.length - 1];
+      if (prev && prev.depth === stop.depth) prev.enabled ||= stop.enabled;
+      else levels.push({...stop});
+    }
+    const last = levels.length - 1;
+    const finest = Math.max(0, levels.map((l) => l.enabled).lastIndexOf(true));
+    const asked = cellDepth(zoom, nearestStop(this.densityResolution));
+    const index = levels.findIndex((l) => l.depth === asked);
+    const at = Math.min(index >= 0 ? index : asked < levels[0]!.depth ? 0 : last, finest);
+    const drawn = Math.round((WORLD_SIZE * 2 ** zoom) / 2 ** levels[at]!.depth);
     // The track runs between the thumb's centres at either end; the struck part starts half a stop past the finest.
     const past = finest < last ? html`<span class="past" style=${`left:calc(8px + (100% - 16px) * ${(finest + 0.5) / last})`}></span>` : nothing;
     const onInput = (e: Event) => {
       const input = e.target as HTMLInputElement;
       const i = Number(input.value);
       input.value = String(Math.min(i, finest));
-      change({densityResolution: DENSITY_CELL_SIZES[i]!});
+      change({densityResolution: levels[i]!.px});
     };
     return html`<label for="density-resolution">Resolution</label>
       <div class="resolution">
         <input id="density-resolution" part="density-resolution" type="range" min="0" max=${last} step="1" .value=${String(at)}
-          aria-valuetext=${`Cells about ${px} px across`} @input=${onInput} />${past}
+          aria-valuetext=${`Cells about ${drawn} px across`} @input=${onInput} />${past}
       </div>
       <span></span>
-      <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${px} px</span><span>Fine</span></div>`;
+      <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${drawn} px</span><span>Fine</span></div>`;
   }
 
   /** The Scale choice under Resolution: Linear or Log, the scale density's colours follow. */
@@ -1591,7 +1642,8 @@ export class TesseraExplorer extends TesseraElement {
     const number = (e: Event) => Number((e.target as HTMLInputElement).value);
     const {min, max, step} = SIZE_RANGE;
     const choice = html`<span id="size-by-label">Size by</span>
-      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`} ?disabled=${disabled}
+      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`}
+        ?disabled=${disabled || (sizeBy === null && this.sizeColumns.length === 0)} title=${this.sizeColumns.length === 0 ? 'No number column to size by' : nothing}
         @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)} @keydown=${this.onSizeByKey}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
     if (sizeBy === null) {
       if (this.hideSize) return choice;
@@ -1880,11 +1932,7 @@ export class TesseraExplorer extends TesseraElement {
       this.pinned = this.pinned.filter((p) => p.key !== key);
       if (key !== live) return;
     } else if (live) this.pinned = this.pinned.filter((p) => p.key !== live);
-    const m = this.map;
-    if (m) {
-      m.lastPick = null;
-      m.pickedAt = null;
-    }
+    this.map?.clearPick();
     s.clearSelection();
     this.requestUpdate();
   }

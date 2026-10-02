@@ -86,17 +86,17 @@ export const DULL_COLOUR: Record<'light' | 'dark', [number, number, number]> = {
 export const DULL_RADIUS_SCALE = 1;
 
 /** A lit mark's radius, as a multiple of the frame's mark radius. */
-export const LIT_RADIUS_SCALE = 1.4;
+export const LIT_RADIUS_SCALE = 1.25;
 
 /** The glow's radius, as a multiple of a lit mark's radius. */
-export const GLOW_RADIUS_SCALE = 4;
+export const GLOW_RADIUS_SCALE = 3.6;
 
 /**
  * The glow's alpha at its centre, as a fraction of the lit mark's. It falls linearly to nothing at
  * its edge, and follows the frame's alpha, so a dense highlight's glows overlap into a tint and do
  * not cover the map.
  */
-export const GLOW_ALPHA = 0.5;
+export const GLOW_ALPHA = 0.22;
 
 /**
  * Which marks a pass draws. With no highlight there is one pass, `'all'`.

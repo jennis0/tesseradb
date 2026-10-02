@@ -1,4 +1,4 @@
-import {Aggregates, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
+import {Aggregates, joinedAggregate, type AggregateSpec, type AggregatesProjection} from './aggregates.js';
 import {ArtifactChannel, requestLevels, servedLineage, type ArtifactChannelState, type ServedLineage} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {SessionArtifactTable, type ArtifactTable} from './artifactTable.js';
@@ -21,7 +21,8 @@ import type {PaletteKind, PaletteScheme, Rgba} from './palette.js';
 import {worldBbox} from './prefetch.js';
 import {rectContainsTile} from './rects.js';
 import {Presenter, defaultFrameScheduler, refusalOf, type FrameScheduler, type Presented, type PresentedStatus, type Refusal} from './presented.js';
-import {regionOperand, withRegion} from './region.js';
+import {insideBox, regionOperand, withRegion} from './region.js';
+import type {RegionOperand} from './types.js';
 import {DEFAULT_CACHE_BYTES, Replica, type ReplicaOptions} from './replica.js';
 import {SelectedRegion, type RegionProjection, type SelectionShape} from './selectedRegion.js';
 import {Suggestions, type SuggestState} from './suggestions.js';
@@ -273,6 +274,33 @@ export type ViewProjection = {
    * arrive. A plain mark count, not a masked count.
    */
   provisional: number;
+  /** The counts over the camera's box or the selected region; `null` before the view's first. */
+  inView: InViewCounts | null;
+};
+
+/**
+ * Counts over the camera's box, or over the selected region while one is selected, from `POST
+ * /v1/aggregate`. They are asked for once the camera has rested for 250 ms, and again when the
+ * filters, the highlight or the selection change. The frame's own counts cover whole tiles, which
+ * reach past the box by an amount that changes with the depth drawn; these count the area itself,
+ * so `visible` does not move when only a filter changes.
+ *
+ * @category Projections
+ */
+export type InViewCounts = {
+  /**
+   * `loading` while a count for the current camera, filters and selection is out, the previous
+   * figures standing until it lands; `shown` once it has; `refused` where it was refused.
+   */
+  status: 'loading' | 'shown' | 'refused';
+  /** The items this viewer can see in the area. */
+  visible: Masked;
+  /** How many of `visible` the filters admit. */
+  matched: Masked;
+  /** How many of `matched` the highlight also admits; equal to `matched` where none is set. */
+  highlighted: Masked;
+  /** The held marks of the frame's exact tiles that lie in the area. */
+  shown: number;
 };
 
 /**
@@ -300,7 +328,7 @@ export type MarksProjection = {
 export type TilesProjection = {
   /**
    * One entry per contributing tile: its address, whether it is exact, how many marks it draws and,
-   * for an exact tile, the server's counts.
+   * for an exact tile or one whose counts have landed before its points, the server's counts.
    */
   tiles: Composition['tiles'];
 };
@@ -597,16 +625,27 @@ export interface Store {
    * or `null` for uniform. Publishes `legend`. Colouring by a layer fetches its artifacts into
    * `artifacts.colourServed`, and its labels into `artifacts.attached`, without drawing them. A
    * `cluster:` layer that `meta` does not list as one that can colour is named in no request, and
-   * the points draw uniform.
+   * the points draw uniform. A `render` column is carried by the points from then on, and the held
+   * bands without it are fetched again (see {@link Store.setPointColumns}).
    */
   setColourBy(column: string | null): void;
   /**
    * Size points by a declared number column, or `null` for one size. Publishes `legend`, whose
    * `domains` and `missing` then accumulate the column from the marks drawn, and with `rank` set
-   * `samples` too, for sizing by rank. A `render` column arrives with every point, so choosing one
-   * sends no request. A column that is a category, not a number or not rendered sizes nothing.
+   * `samples` too, for sizing by rank. The column is carried by the points as the colour column is.
+   * A column that is a category, not a number or not rendered sizes nothing.
    */
   setSizeBy(column: string | null, options?: {rank?: boolean}): void;
+  /**
+   * Have each point carry the render columns `columns` names, on behalf of `id`, beside the colour
+   * and size columns; `[]` withdraws `id`'s ask. A point request names the union of every ask with
+   * the colour and size columns, and the server reads no other render column, so a column read
+   * from {@link Band.scalars} (a hover's fields, say) must be asked for here. A name that is not a
+   * render column of the current view is left out of the request. Each held band without a column
+   * newly asked for is fetched again, in view or not, and stays drawn until its replacement
+   * arrives; dropping a column sends no request. The asks hold for every view.
+   */
+  setPointColumns(id: string, columns: readonly string[]): void;
   /**
    * Colour artifacts by `kind`. Publishes `artifacts.colours` and `artifacts.palette`; the kind in
    * use does nothing.
@@ -617,6 +656,8 @@ export interface Store {
    * current camera. A value that is not a finite number above zero is ignored.
    */
   setBudget(budget: number): void;
+  /** The marks the store aims to draw: `budget` as created, else 500000, until `setBudget` changes it. */
+  readonly budget: number;
   /**
    * Make `id` the view the store answers from. An id `meta.views` does not list is ignored, as is
    * the current id. Called before `/v1/meta` arrives, it names the view to open with, in place of
@@ -696,8 +737,8 @@ export interface Store {
    * `status` as `idle`, before it returns. It then asks `authorise` for a token, reads `/v1/meta`
    * with it and asks again for the camera. A store given a fixed `token` keeps it.
    *
-   * The filters set with `setFilters`, the layers, the colouring, the current view and the camera
-   * are kept. A filter draft the store seeded from `meta` is seeded again from the next. A filter
+   * The filters set with `setFilters`, the layers, the colouring, the columns asked for with
+   * `setPointColumns`, the current view and the camera are kept. A filter draft the store seeded from `meta` is seeded again from the next. A filter
    * control, layer or colouring naming a column or layer the next `meta` does not list is dropped.
    * Where the next `meta` does not list the current view, the store opens on its first view and
    * drops the camera.
@@ -718,8 +759,11 @@ export interface Store {
 
 /** The `view` projection before a frame has been drawn in view `id`. */
 function noFrame(id: string): ViewProjection {
-  return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0};
+  return {id, composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0, inView: null};
 }
+
+/** How long the camera rests before the counts in view are asked for. */
+const IN_VIEW_REST_MS = 250;
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -806,6 +850,10 @@ export function createStore(options: StoreOptions): Store {
   );
   /** The served-set version each colour-stale band was last fetched again under. */
   const colourAsked = new Map<BandKey, number>();
+  /** The render columns each caller of {@link setPointColumns} asked for, by its id. */
+  const pointColumnAsks = new Map<string, readonly string[]>();
+  /** What the last {@link checkPointColumns} looked at, so a frame that changed none of it costs nothing. */
+  let pointColumnsChecked: {replica: Replica; version: number; columns: string} | null = null;
 
   const legend = new Legend(
     async (column, codes) => client.categories(await tokens.get(), column, {codes, view: views.id}),
@@ -846,12 +894,18 @@ export function createStore(options: StoreOptions): Store {
     trace: (kind, fields) => options.instruments?.onTrace?.(kind, fields)
   });
 
+  /** `client.aggregate`, with the requests asked for in one task over the same set joined. */
+  const aggregate = joinedAggregate(
+    (token, req, signal) => client.aggregate(token, req, signal),
+    () => meta?.selection.maxAggregateGroupings ?? 1
+  );
+
   const aggregates = new Aggregates(
     async (spec, signal) => {
       const asked = await viewed();
       const filters = aggregateFilters(spec);
       const reference = spec.reference === 'visible' ? {} : spec.reference;
-      const result = await client.aggregate(
+      const result = await aggregate(
         asked.token,
         {view: asked.view, groupings: spec.groupings, ...(filters === null ? {} : {filters}), ...(reference === undefined ? {} : {reference})},
         signal
@@ -864,6 +918,35 @@ export function createStore(options: StoreOptions): Store {
     clock,
     {...RETRY_DEFAULTS, ...options.driver}
   );
+
+  /**
+   * The counts in view: `counts` is the set under the filters against the area as its reference,
+   * `highlighted` the set under the highlight as well, registered only while one is set.
+   */
+  const inView = new Aggregates(
+    async (spec, signal) => {
+      const asked = await viewed();
+      const area = countedArea()!;
+      const box = area.selected ? null : lastView!.input.bbox;
+      const filters = withArea(aggregateFilters(spec), area);
+      const result = await aggregate(asked.token, {view: asked.view, groupings: spec.groupings, filters: filters!, reference: withArea(null, area)!}, signal);
+      if (box) boxOf.set(result, box);
+      if (result.identityKey !== '' && !admit(asked.view, result.identityKey, asked.token)) throw identityChanged();
+      return {result, view: asked.view};
+    },
+    (entries) => publishInView(entries),
+    clock,
+    {...RETRY_DEFAULTS, ...options.driver}
+  );
+  /** The pending ask after the camera moved. */
+  let inViewTimer: unknown = null;
+  /** The camera's box each count in view was taken over; a selected region's count has none. */
+  const boxOf = new WeakMap<object, [number, number, number, number]>();
+  /** The box the counts in view on show were taken over, which the shown count is taken over too. */
+  let countedBox: [number, number, number, number] | null = null;
+  /** Whether `inView` holds its two specs, and the highlighted one. */
+  let inViewRegistered = false;
+  let inViewHighlighted = false;
 
   const records = new HeldRecords((id) => tokens.get().then((t) => client.item(t, id)).then((detail) => detail.fields));
 
@@ -976,13 +1059,15 @@ export function createStore(options: StoreOptions): Store {
     const admitted = (identityKey: string, token: string): boolean => own !== null && views.holds(own) && admit(id, identityKey, token);
 
     const built = new Replica(
-      async (req, signal, background, onPart) => {
+      async (req, signal, background, onPart, onCounts) => {
         const tok = await tokens.use();
-        // The layers named put a membership column on each band. A counts-only revalidation
-        // (`k = 0`) absorbs no points, so it names none. The artifact budget and levels are the
+        // The layers named put a membership column on each band, and the columns named are the
+        // render columns it carries. A counts-only revalidation (`k = 0`) absorbs no points, so it
+        // names neither. The artifact budget and levels are the
         // channel's, so a point's membership names an artifact of the cut the panels show.
         const zoom = ownPresenter?.view?.view.zoom ?? 0;
         const layers = req.k === 0 ? [] : pointLayers();
+        const columns = req.k === 0 ? undefined : pointColumns(id);
         const response = await client.viewport(
           tok,
           {
@@ -991,16 +1076,26 @@ export function createStore(options: StoreOptions): Store {
             filters: requestFilters(),
             highlight: requestHighlight(),
             layers,
+            ...(columns === undefined ? {} : {pointRows: columns}),
             ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
-          signal,
-          background,
-          onPart &&
-            ((part) => {
-              if (!admitted(part.identityKey, tok)) throw identityChanged();
-              return onPart(part);
-            })
+          {
+            signal,
+            background,
+            onPart:
+              onPart &&
+              ((part) => {
+                if (!admitted(part.identityKey, tok)) throw identityChanged();
+                return onPart(part);
+              }),
+            onCounts:
+              onCounts &&
+              ((counts) => {
+                if (!admitted(counts.identityKey, tok)) throw identityChanged();
+                onCounts(counts);
+              })
+          }
         );
         if (!admitted(response.identityKey, tok)) throw identityChanged();
         return response;
@@ -1017,6 +1112,8 @@ export function createStore(options: StoreOptions): Store {
           // A stored slice is drawable, so the first marks arrive with the first slice.
           if (kind === 'piece' || kind === 'store') ownPresenter?.absorbed();
         },
+        // Counts are drawable as density and figures before the points that follow them.
+        onCounts: () => ownPresenter?.absorbed(),
         now: () => clock.now()
       }
     );
@@ -1026,7 +1123,9 @@ export function createStore(options: StoreOptions): Store {
       {
         kMaxMarks: m.selection.kMaxMarks,
         maxTilesPerRequest: m.maxTilesPerRequest,
-        thetaTargetMarks: m.selection.thetaTargetMarks
+        thetaTargetMarks: m.selection.thetaTargetMarks,
+        kMin: m.selection.kMin,
+        filtered: () => requestFilters() !== null
       },
       clock,
       scheduler,
@@ -1269,7 +1368,8 @@ export function createStore(options: StoreOptions): Store {
       visible += tile.counts.visible;
       matched += tile.counts.matched;
       highlighted += tile.counts.highlighted;
-      served += tile.counts.served;
+      // Marks on screen: a tile counted before its points draws none.
+      served += tile.drawn;
     }
 
     // A frame with marks means the session answered, while the request may still be streaming.
@@ -1289,7 +1389,8 @@ export function createStore(options: StoreOptions): Store {
       highlighted: {value: Number(highlighted), exact: true},
       highlighting: requestHighlight() !== null,
       served: {shown: served, total: Number(visible), exact: true},
-      provisional: frame.provisional
+      provisional: frame.provisional,
+      inView: projections.view.inView && {...projections.view.inView, shown: shownInArea(frame.exact)}
     });
     replaceProjection('marks', {
       bands: frame.exact,
@@ -1310,8 +1411,13 @@ export function createStore(options: StoreOptions): Store {
       matched: Number(matched),
       narrowed: filtersBesideRegion(projections.filters.draft) !== null
     });
+    const counted = projections.view.inView;
+    if (counted && region.selected && counted.shown !== shownInArea(frame.exact)) {
+      replaceProjection('view', {...projections.view, inView: {...counted, shown: shownInArea(frame.exact)}});
+    }
     legend.accumulate(frame, meta?.declaredScalars ?? []);
     colours.refresh();
+    checkPointColumns();
     checkColourCoverage();
 
     if (replica) {
@@ -1427,6 +1533,50 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
+  /**
+   * The render columns of `view` a point request names, in the order `meta` lists them: the colour
+   * column, the size column and those {@link setPointColumns} asked for. A name that is not a
+   * render column of the view is left out.
+   */
+  function pointColumns(view: string): string[] {
+    const wanted = new Set<string>();
+    const colourBy = legend.colourBy;
+    if (colourBy !== null && !colourBy.startsWith(CLUSTER_PREFIX)) wanted.add(colourBy);
+    if (legend.sizeBy !== null) wanted.add(legend.sizeBy);
+    for (const names of pointColumnAsks.values()) for (const name of names) wanted.add(name);
+    if (!meta || wanted.size === 0) return [];
+    const rendered = [
+      ...meta.declaredScalars.filter((c) => c.render).map((c) => c.name),
+      ...meta.scopedScalars.filter((c) => c.render && c.views.includes(view)).map((c) => c.name)
+    ];
+    return rendered.filter((name) => wanted.has(name));
+  }
+
+  /**
+   * Fetch again every band the current view holds, in view or not, that lacks a column
+   * {@link pointColumns} names and its request did not, so panning does not reveal a band without
+   * it. A band asked for every column, or for this one, is not fetched again for lacking it: the
+   * server served what there is. A band stays drawn until its replacement arrives, and is withdrawn
+   * again if the piece it came in marks it covered after. A band with no points has nothing to
+   * carry.
+   */
+  function checkPointColumns(): void {
+    const machinery = views.current;
+    // As in the colour coverage, asking while a switch settles would request a passing view.
+    if (!machinery || views.settling) return;
+    const replica = machinery.replica;
+    const columns = pointColumns(views.id);
+    const checked = {replica, version: replica.version, columns: `${views.id}\0${columns.join('\0')}`};
+    const last = pointColumnsChecked;
+    if (last && last.replica === checked.replica && last.version === checked.version && last.columns === checked.columns) return;
+    pointColumnsChecked = checked;
+    const unasked = (b: Band, c: string) => !(c in b.scalars) && b.columnsAsked != null && !b.columnsAsked.includes(c);
+    const lacking = replica
+      .heldBands()
+      .filter((b) => b.ids.length > 0 && columns.some((c) => unasked(b, c)));
+    if (replica.retract(lacking) > 0) machinery.presenter.reschedule();
+  }
+
   function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
     const m = band.membership[layer];
     if (!m) return false;
@@ -1511,6 +1661,7 @@ export function createStore(options: StoreOptions): Store {
     }
 
     aggregates.refresh(true);
+    askInView(false, true);
     onTrace('view-switch', {from, to: id, sameFrame: kept ? 1 : 0});
   }
 
@@ -1526,6 +1677,8 @@ export function createStore(options: StoreOptions): Store {
     const v = toDriverView(input);
     current.presenter.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
     current.channel.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
+    // A selected region is counted as it is wherever the camera goes.
+    if (!region.selected) askInView(true);
   }
 
   /**
@@ -1629,6 +1782,102 @@ export function createStore(options: StoreOptions): Store {
     return filters === null ? highlight : {all_of: [filters, highlight]};
   }
 
+  /**
+   * The area the counts in view are taken over: the selected region, else the camera's box. `null`
+   * before the camera has been set. The selected region is already in the filters; the box is not.
+   */
+  function countedArea(): {operand: RegionOperand; outside: boolean; selected: boolean} | null {
+    const selected = region.selected;
+    if (selected) return {operand: regionOperand(selected), outside: selected.outside ?? false, selected: true};
+    if (!lastView) return null;
+    return {operand: regionOperand({kind: 'box', bbox: lastView.input.bbox}), outside: false, selected: false};
+  }
+
+  /** `expr` joined with the area's leaf, which the selected region's filters already carry. */
+  function withArea(expr: FilterExpr | null, area: {operand: RegionOperand; outside: boolean; selected: boolean}): FilterExpr | null {
+    if (area.selected && expr !== null) return expr;
+    return withRegion(expr, area.operand, area.outside);
+  }
+
+  /** Ask for the counts in view again, now or once the camera has rested. */
+  function askInView(rest: boolean, drop = false): void {
+    if (inViewTimer !== null) clock.cancel(inViewTimer);
+    inViewTimer = null;
+    if (countedArea() === null) return;
+    if (!rest) {
+      const highlighting = requestHighlight() !== null;
+      if (highlighting !== inViewHighlighted) {
+        inViewHighlighted = highlighting;
+        inView.set('highlighted', highlighting ? {groupings: [{}], highlighted: true} : null);
+      }
+      if (!inViewRegistered) {
+        inViewRegistered = true;
+        inView.set('counts', {groupings: [{}]});
+        return;
+      }
+      inView.refresh(drop);
+      return;
+    }
+    inViewTimer = clock.after(IN_VIEW_REST_MS, () => {
+      inViewTimer = null;
+      askInView(false);
+    });
+  }
+
+  function publishInView(entries: AggregatesProjection): void {
+    const counts = entries.get('counts');
+    const lit = entries.get('highlighted');
+    const total = counts?.result?.tables[0];
+    if (counts?.status === 'refused') {
+      // The last counts stand, marked refused; with none, the frame's own figures.
+      const v = projections.view;
+      const last = v.inView ?? {visible: v.visible, matched: v.matched, highlighted: v.highlighted, shown: v.served.shown};
+      replaceProjection('view', {...v, inView: {...last, status: 'refused'}});
+      return;
+    }
+    if (!counts || !total || counts.view !== views.id) {
+      if (projections.view.inView !== null && (!counts || counts.result === null)) replaceProjection('view', {...projections.view, inView: null});
+      return;
+    }
+    countedBox = counts.result ? (boxOf.get(counts.result) ?? null) : null;
+    const exact = (counts.result?.region?.exact ?? true) && !(region.selected?.outside ?? false);
+    const masked = (value: number) => ({value, exact});
+    const visible = masked(total.referenceTotal ?? total.total);
+    const matched = masked(total.total);
+    const litTotal = lit?.result?.tables[0]?.total;
+    const highlighted = litTotal === undefined ? matched : masked(litTotal);
+    const loading = counts.status === 'loading' || counts.status === 'retrying' || lit?.status === 'loading' || lit?.status === 'retrying';
+    const status = lit?.status === 'refused' ? 'refused' : loading ? 'loading' : 'shown';
+    replaceProjection('view', {...projections.view, inView: {status, visible, matched, highlighted, shown: shownInArea(projections.marks.bands)}});
+    if (status === 'shown' && region.selected) region.counted({visible, matched, verdict: counts.result?.region ?? null});
+  }
+
+  /** The held marks of `bands` inside the area, by the server's predicate; the region's own count while one is selected. */
+  function shownInArea(bands: Composition['exact']): number {
+    const q = frameOrNull();
+    if (!q) return 0;
+    if (region.selected) return projections.region?.held.count ?? 0;
+    const counted = countedBox ?? lastView?.input.bbox;
+    if (!counted) return 0;
+    const [bx0, by0, bx1, by1] = counted;
+    const [wx0, wy0] = dataToWorldXY(bx0, by0, q);
+    const [wx1, wy1] = dataToWorldXY(bx1, by1, q);
+    const box: [number, number, number, number] = [Math.min(wx0, wx1), Math.min(wy0, wy1), Math.max(wx0, wx1), Math.max(wy0, wy1)];
+    let shown = 0;
+    for (const band of bands) {
+      const span = WORLD_SIZE / 2 ** band.depth;
+      const x0 = band.x * span;
+      const y0 = band.y * span;
+      if (x0 >= box[0] && y0 >= box[1] && x0 + span <= box[2] && y0 + span <= box[3]) {
+        shown += band.ids.length;
+        continue;
+      }
+      if (x0 > box[2] || y0 > box[3] || x0 + span < box[0] || y0 + span < box[1]) continue;
+      for (let i = 0; i < band.ids.length; i++) if (insideBox(band.positions[i * 2]!, band.positions[i * 2 + 1]!, box)) shown += 1;
+    }
+    return shown;
+  }
+
   /** `expr` with the selected region's leaf joined. */
   function withSelected(expr: FilterExpr | null): FilterExpr | null {
     const selected = region.selected;
@@ -1657,6 +1906,7 @@ export function createStore(options: StoreOptions): Store {
     // Each suggestion count is taken under the filter.
     suggestions.refresh();
     aggregates.refresh(false);
+    askInView(false);
   }
 
   async function browse(req: Omit<BrowseRequest, 'filters' | 'view'> & {filters?: FilterExpr | null; view?: string}): Promise<BrowsePage> {
@@ -1696,13 +1946,20 @@ export function createStore(options: StoreOptions): Store {
     legend.setColourBy(column);
     traceUnknownColourLayer();
     if (colourLayer() !== before) askLayers();
-    // Every declared column is in the held bands, so a column needs no refetch.
+    checkPointColumns();
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
   }
 
   function setSizeBy(column: string | null, options: {rank?: boolean} = {}): void {
     legend.setSizeBy(column, options.rank ?? false);
+    checkPointColumns();
     if (column && projections.view.composition) legend.accumulate(projections.view.composition, meta?.declaredScalars ?? []);
+  }
+
+  function setPointColumns(id: string, columns: readonly string[]): void {
+    if (columns.length === 0) pointColumnAsks.delete(id);
+    else pointColumnAsks.set(id, [...columns]);
+    checkPointColumns();
   }
 
   function setBudget(next: number): void {
@@ -1837,6 +2094,7 @@ export function createStore(options: StoreOptions): Store {
     void ready().catch(() => {});
     // Each asks under the meta and token the read above brings.
     aggregates.refresh(true);
+    askInView(false, true);
   }
 
   function refresh(): void {
@@ -1845,6 +2103,7 @@ export function createStore(options: StoreOptions): Store {
     region.loading(projections.marks);
     if (lastView) setView(lastView.input);
     aggregates.refresh(false);
+    askInView(false);
   }
 
   /** Thrown into an answer {@link admit} refused, so nothing in it is held. */
@@ -1863,6 +2122,8 @@ export function createStore(options: StoreOptions): Store {
     records.dispose();
     legend.dispose();
     aggregates.dispose();
+    inView.dispose();
+    if (inViewTimer !== null) clock.cancel(inViewTimer);
     for (const held of views.all()) {
       held.presenter.cancel();
       held.channel.cancel();
@@ -1901,8 +2162,12 @@ export function createStore(options: StoreOptions): Store {
     setLayers,
     setColourBy,
     setSizeBy,
+    setPointColumns,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
+    get budget() {
+      return budget;
+    },
     setCurrentView,
     frame: frameOrNull,
     pick,

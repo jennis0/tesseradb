@@ -60,7 +60,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const projections: Projections = {
     meta: null,
     status: {status: 'idle', sessionWarm: false, refusal: null, stale: false, expired: false, retrying: false},
-    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0},
+    view: {id: '', composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, highlighted: NO_MASKED, highlighting: false, served: NO_COUNT, provisional: 0, inView: null},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, layers: [], served: [], colourServed: [], attached: new Map(), lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
@@ -86,6 +86,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const store: FakeStore = {
     projections,
     calls,
+    budget: 500_000,
     get: (name) => projections[name],
     set(name, value) {
       projections[name] = value;
@@ -119,6 +120,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
     setSizeBy: spy('setSizeBy'),
+    setPointColumns: spy('setPointColumns'),
     setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
     setCurrentView: spy('setCurrentView'),

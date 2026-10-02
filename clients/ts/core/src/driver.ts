@@ -30,11 +30,18 @@ export type Clock = {
 /** @internal */
 export type ViewState = {target: [number, number, number]; zoom: number};
 
-/** What the driver needs to know from `/v1/meta`, injected once at session start. @internal */
+/**
+ * What the driver needs to know from `/v1/meta`, injected once at session start, and whether the
+ * requests carry a filter, which decides how the server thins a tile (see `budget.ts`). @internal
+ */
 export type DriverMeta = {
   kMaxMarks: number;
   maxTilesPerRequest: number;
   thetaTargetMarks: number;
+  /** `selection.kMin`. Unset, 0. */
+  kMin?: number;
+  /** Whether requests carry a filter. Unset, they do not. */
+  filtered?: () => boolean;
 };
 
 /** @internal */
@@ -140,6 +147,11 @@ export class Driver {
    * draws the arrival could choose a depth where nothing is held.
    */
   private counts = new Map<number, CountField>();
+  /**
+   * Per depth, the `θ` an unfiltered response showed: served over matched, summed over the tiles in
+   * view that served more than the floor and fewer than the cap and their matches.
+   */
+  private theta = new Map<number, number>();
   /** The presented-frame handle: all the driver knows of what is on screen. */
   private presented: {want: TileRect; depth: number; version: number; standInStale: boolean} | null =
     null;
@@ -246,6 +258,7 @@ export class Driver {
       mTarget: this.mTarget,
       counts: this.countsFor(worldBbox(viewport, 1)),
       k: this.meta.kMaxMarks,
+      thinning: this.meta.filtered?.() ? undefined : {target: this.meta.thetaTargetMarks, kMin: this.meta.kMin ?? 0, seen: this.theta},
       maxTiles: this.meta.maxTilesPerRequest,
       visibleInView: this.lastVisibleInView,
       velocity,
@@ -536,6 +549,7 @@ export class Driver {
     this.askedUncovered = null;
     this.seeded = false;
     this.counts.clear();
+    this.theta.clear();
   }
 
   private async anticipate(): Promise<void> {
@@ -612,7 +626,7 @@ export class Driver {
     let visible = 0;
     for (const t of tiles) {
       const {x, y} = tileXY(t.tile, depth);
-      cells.push({x, y, count: Number(t.visible)});
+      cells.push({x, y, count: Number(t.matched)});
       visible += Number(t.visible);
     }
     // Complete for the rectangle asked over: a response omits only cells whose masked count is zero.
@@ -649,6 +663,9 @@ export class Driver {
         const seeded = await this.seedCounts(view, planned, controller.signal);
         if (generation !== this.generation) return;
         if (seeded) {
+          // The depth drawn while the seed was out came from the average model, so it is no
+          // reason to hold.
+          this.holdSuspended = true;
           planned = this.planFor(view);
           choice = planned.choice;
           this.inFlightAt = {rect: planned.render, depth: choice.depth, since: this.clock.now()};
@@ -682,12 +699,21 @@ export class Driver {
       const cells: CountCell[] = [];
       let visible = 0;
       let actual = 0;
+      let thinnedServed = 0;
+      let thinnedMatched = 0;
+      const floor = Math.min(this.meta.kMin ?? 0, this.meta.kMaxMarks);
       for (const b of frame.exact) {
-        cells.push({x: b.x, y: b.y, count: Number(b.visible)});
+        const matched = Number(b.matched);
+        cells.push({x: b.x, y: b.y, count: matched});
         if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
         visible += Number(b.visible);
         actual += b.served;
+        if (b.served > floor && b.served < Math.min(this.meta.kMaxMarks, matched)) {
+          thinnedServed += b.served;
+          thinnedMatched += matched;
+        }
       }
+      if (thinnedMatched > 0 && !this.meta.filtered?.()) this.theta.set(choice.depth, thinnedServed / thinnedMatched);
 
       this.trace('arrived', {
         ms: arrivedAt - startedAt,
@@ -739,7 +765,7 @@ export class Driver {
           // The margin is ground now held at the same depth, so it widens the count field.
           this.adopt(
             choice.depth,
-            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.visible)})),
+            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.matched)})),
             planned.foreground.rect,
             planned.render
           );

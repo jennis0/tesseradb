@@ -45,14 +45,16 @@ export type RegionProjection = {
   /** The refusal while `status` is `refused`, else `null`. */
   refusal: Refusal | null;
   /**
-   * The items inside the shape that this viewer can see. `null` while a filter or a `member_of`
-   * clause in the filter position also narrows the frame, and while the region is not `shown`.
+   * The items inside the shape that this viewer can see, from the store's counts in view (see
+   * `ViewProjection.inView`). Before those land, the frame's count where no other filter narrows
+   * it, else `null`. `null` while the region is not `shown`.
    */
   visible: Masked | null;
   /**
-   * The items inside the shape that the other filters admit: the sum of the frame's `matched`
-   * counts. It is exact where the server counted the shape exactly and the frame's tiles cover the
-   * shape's extent; a complement (`outside`) is never exact. Zero while the region is not `shown`.
+   * The items inside the shape that the other filters admit, from the store's counts in view.
+   * Before those land, the sum of the frame's `matched` counts, exact where the server counted the
+   * shape exactly and the frame's tiles cover the shape's extent. A complement (`outside`) is never
+   * exact. Zero while the region is not `shown`.
    */
   matched: Masked;
   /**
@@ -103,6 +105,8 @@ export class SelectedRegion {
   private verdict: RegionVerdict | null = null;
   private selectedAt = 0;
   private region: RegionProjection | null = null;
+  /** The counts in view for the current question, once they land. */
+  private counts: {visible: Masked | null; matched: Masked} | null = null;
 
   constructor(private readonly deps: SelectedRegionDeps) {}
 
@@ -118,6 +122,7 @@ export class SelectedRegion {
     const changed = shape !== this.shape;
     this.shape = shape;
     this.verdict = null;
+    this.counts = null;
     this.selectedAt = this.deps.clock.now();
     if (!shape || (shape.kind === 'lasso' && shape.points.length < 3)) {
       this.shape = null;
@@ -132,6 +137,7 @@ export class SelectedRegion {
   loading(marks: HeldMarks): void {
     const shape = this.shape;
     if (!shape) return;
+    this.counts = null;
     const world = this.worldOf(shape);
     if (!world) {
       this.set(null);
@@ -169,17 +175,30 @@ export class SelectedRegion {
     const covered = extent !== null && this.deps.covered(extent, frame.depth);
     const exact = (this.verdict?.exact ?? false) && covered;
     const held = heldInside(world, outside, frame.marks);
+    const matched = this.counts?.matched ?? {value: frame.matched, exact};
     this.set({
       ...current,
       status: 'shown',
       refusal: null,
-      matched: {value: frame.matched, exact},
-      visible: frame.narrowed ? null : {value: frame.matched, exact},
-      served: {shown: held.count, total: frame.matched, exact: true},
+      matched,
+      visible: this.counts ? this.counts.visible : frame.narrowed ? null : {value: frame.matched, exact},
+      served: {shown: held.count, total: matched.value, exact: true},
       verdict: this.verdict,
       held
     });
     if (current.status === 'loading') this.deps.trace('region', {answerMs: this.deps.clock.now() - this.selectedAt, exact: exact ? 1 : 0, depth: this.verdict?.depth ?? -1});
+  }
+
+  /**
+   * The store's counts in view landed for the current question. A region still waiting for its
+   * frame keeps them for when it lands.
+   */
+  counted(counts: {visible: Masked | null; matched: Masked; verdict: RegionVerdict | null}): void {
+    this.counts = {visible: counts.visible, matched: counts.matched};
+    if (counts.verdict) this.verdict = counts.verdict;
+    const region = this.region;
+    if (!region || region.status !== 'shown') return;
+    this.set({...region, matched: counts.matched, visible: counts.visible, served: {...region.served, total: counts.matched.value}, verdict: this.verdict});
   }
 
   /** The request carrying the region leaf was refused, so the region's numbers are that refusal. */
@@ -193,6 +212,7 @@ export class SelectedRegion {
   drop(): void {
     this.shape = null;
     this.verdict = null;
+    this.counts = null;
     this.set(null);
   }
 

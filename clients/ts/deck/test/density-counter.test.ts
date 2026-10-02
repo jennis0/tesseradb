@@ -19,7 +19,7 @@ const HEIGHT = 800;
 const camera = (target: [number, number], zoom: number): DensityCamera => ({target, zoom, width: WIDTH, height: HEIGHT});
 
 /** A store whose `aggregate` answers each request with one cell at the asked depth, unless told to refuse. */
-async function setUp(maxAggregateCells = SELECTION.maxAggregateCells) {
+async function setUp(maxAggregateCells = SELECTION.maxAggregateCells, viewport: TesseraClient['viewport'] = async () => response(viewportResult())) {
   const asked: AggregateRequest[] = [];
   const refusals: Error[] = [];
   const aggregate = vi.fn(async (_token: string, req: AggregateRequest): Promise<AggregateResult> => {
@@ -42,12 +42,13 @@ async function setUp(maxAggregateCells = SELECTION.maxAggregateCells) {
         filterOperands: [{column: 'year', family: 'numeric', operands: ['range']}],
         selection: {...SELECTION, maxAggregateCells}
       }),
-    viewport: async () => response(viewportResult()),
+    viewport,
     aggregate,
     close: () => {}
   } as unknown as TesseraClient;
   const clock = fakeClock();
-  const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler: fakeScheduler(), prefetch: false});
+  const scheduler = fakeScheduler();
+  const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false});
   await clock.advance(1);
   await vi.advanceTimersByTimeAsync(0);
   const changes = {n: 0};
@@ -55,7 +56,7 @@ async function setUp(maxAggregateCells = SELECTION.maxAggregateCells) {
   /** Let the settle timer run and the answer land. */
   const settle = () => vi.advanceTimersByTimeAsync(DENSITY_SETTLE_MS);
   const depths = () => asked.map((r) => r.groupings[0]!.cells!.depth);
-  return {store, counter, asked, refusals, settle, depths, changes};
+  return {store, counter, asked, refusals, settle, depths, changes, clock, scheduler};
 }
 
 /** The cells at a request's depth in its area in view s0, counted as the server counts them. */
@@ -130,6 +131,47 @@ describe('DensityCounter', () => {
     await settle();
     expect(asked.length).toBe(before + 1);
     expect(asked.at(-1)!.filters).toEqual({year: {range: {gte: 2021}}});
+  });
+
+  it('draws the viewport’s tile counts before the points land, until the aggregate route answers', async () => {
+    let land: () => void = () => {};
+    // One tile at the request's depth, holding 50 visible items of which 40 match, with its one
+    // point held back until `land`.
+    const viewport = (async (_t: string, req: {zoom: number; k?: number}, {onCounts}: {onCounts?: (c: unknown) => void} = {}) => {
+      const tiles = [{tile: mortonOfTile(0, 0, req.zoom), visible: 50n, matched: 40n, highlighted: 40n, served: 1n}];
+      const answer = response(viewportResult({tiles, ids: BigUint64Array.from([1n]), codes: BigUint64Array.from([0n]), positions: Float64Array.from([1, 1]), world: Float32Array.from([0.1, 0.1])}));
+      if (!onCounts) return answer;
+      onCounts({tiles, subCells: null, identityKey: 'ik', contentKey: 'ck'});
+      await new Promise<void>((resolve) => (land = resolve));
+      return answer;
+    }) as unknown as TesseraClient['viewport'];
+    const {store, counter, settle, clock, scheduler} = await setUp(SELECTION.maxAggregateCells, viewport);
+    counter.set(ON);
+    store.setView({bbox: [0, 0, 512, 512], width: WIDTH, height: HEIGHT});
+    await clock.advance(600);
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.flush();
+
+    // No point is drawn, and density is drawn from the tile's matched count at the frame's depth.
+    expect(store.get('marks').count.shown).toBe(0);
+    const early = counter.counts()!;
+    expect(early.depth).toBe(store.get('view').depth);
+    expect(early.cells.map((c) => [c.x, c.y, c.count])).toEqual([[0, 0, 40]]);
+
+    land();
+    await clock.advance(600);
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.flush();
+    expect(counter.counts()!.cells.map((c) => c.count)).toEqual([40]);
+
+    // Once the aggregate route answers, its cells alone are drawn.
+    counter.look(camera([256, 256], 1));
+    await settle();
+    expect(counter.counts()!.cells.map((c) => c.count)).toEqual([9]);
+
+    // Off draws nothing, whatever the tiles hold.
+    counter.set({on: false, cellPx: 12});
+    expect(counter.counts()).toBeNull();
   });
 
   it('draws the last answer while the next is asked for, and the new one once it lands', async () => {

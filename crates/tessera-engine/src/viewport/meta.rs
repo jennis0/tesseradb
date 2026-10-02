@@ -84,6 +84,8 @@ pub struct EngineMeta {
     /// one entry per family, naming the group whose views it has a column per and the view ids
     /// that have one.
     pub scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
+    /// Each of `scoped_scalars`' view ids, positionally; see [`Self::scoped_family_views`].
+    scoped_views: Vec<Vec<String>>,
     /// The live category bindings, from the same generation as `declared_scalars`. Ingest
     /// resolves keys through this and never mints: two handlers racing one novel key would
     /// otherwise draw two codes for it and split its rows between them.
@@ -348,38 +350,18 @@ impl EngineMeta {
         )
     }
 
-    /// Every view id whose row space carries one column of `family`: the owning group's own ids,
-    /// and the same keys under every group declaring `members` of it. Unfiltered: the caller
-    /// applies the gate.
+    /// Every view id whose row space carries one column of `family`, as the viewport reads it
+    /// ([`crate::viewport::scoped_family_views`]): the owning group's own ids, and the same keys
+    /// under every group declaring `members` of it. Unfiltered: the caller applies the gate.
     pub fn scoped_family_views(
         &self,
         family: &tessera_store::manifest::ScopedScalar,
     ) -> Vec<String> {
-        let keys: Vec<&str> = family
-            .views
+        self.scoped_scalars
             .iter()
-            .filter_map(|id| {
-                id.strip_prefix(family.group.as_str())?
-                    .strip_prefix(tessera_store::GROUP_SEPARATOR)
-            })
-            .collect();
-        let mut out = family.views.clone();
-        for group in self
-            .groups
-            .iter()
-            .filter(|g| g.members_of.as_deref() == Some(family.group.as_str()))
-        {
-            for id in &group.views {
-                let holds = id
-                    .strip_prefix(group.name.as_str())
-                    .and_then(|rest| rest.strip_prefix(tessera_store::GROUP_SEPARATOR))
-                    .is_some_and(|key| keys.contains(&key));
-                if holds {
-                    out.push(id.clone());
-                }
-            }
-        }
-        out
+            .position(|f| f.name == family.name && f.group == family.group)
+            .map(|at| self.scoped_views[at].clone())
+            .unwrap_or_default()
     }
 
     pub fn projection_of(&self, view: &str) -> Option<Projection> {
@@ -493,6 +475,11 @@ pub(crate) fn meta_of(generation: &Generation) -> EngineMeta {
             .declared_scalars
             .iter()
             .map(|d| crate::filter::FieldHomes::of(d, &manifest.vocabularies))
+            .collect(),
+        scoped_views: manifest
+            .scoped_scalars()
+            .iter()
+            .map(|f| crate::viewport::scoped_family_views(manifest, f))
             .collect(),
         scoped_scalars: manifest.scoped_scalars(),
         vocabularies: Arc::clone(&generation.vocabularies),
