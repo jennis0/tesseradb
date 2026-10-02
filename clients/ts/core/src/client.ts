@@ -1,5 +1,7 @@
 import {
   checkTrailerCounts,
+  decodeSubCells,
+  decodeTiles,
   decodeViewport,
   parseTrailer,
   stageNsOf,
@@ -9,10 +11,10 @@ import {
 import {base64} from './control.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
-import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
+import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader, type Frame} from './frame.js';
 import {readAggregate, type PartialAggregate} from './aggregate.js';
 import {openRecords, type RecordsRead} from './records.js';
-import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, ArtifactsHead, ArtifactsRequest, BrowsePage, BrowseRequest, BrowseRow, CategoryValue, CountsSink, FilterExpr, FilterOperandSet, ItemDetail, ItemsHead, ItemsRequest, Layer, MapProjection, Meta, RegionVerdict, Session, Shape, ShapeKind, SuggestResult, TileCounts, TileScheme, ViewMetadataValue, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /**
  * Receives a streamed `/v1/viewport` response's points, one points frame at a time, as
@@ -25,6 +27,71 @@ import type {AggregateRequest, AggregateResult, ArrowType, ArtifactDetail, Artif
  * @category HTTP client
  */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
+
+/**
+ * Hands a viewport body's counts to `sink` once they are whole: at the tiles frame, or at the
+ * sub-cells frame where the request asked for an underlay, which the server sends straight after
+ * it. Returns a function to pass each frame in wire order; it returns `true` once the counts have
+ * been handed over, after which it takes no more frames.
+ */
+function countsWatch(
+  sink: CountsSink,
+  underlay: boolean,
+  keys: {identityKey: string; contentKey: string}
+): (frame: Frame) => boolean {
+  let tiles: Uint8Array | null = null;
+  let delivered = false;
+  return (frame) => {
+    if (delivered) return true;
+    if (frame.kind === FRAME_TILES) tiles = frame.payload;
+    if (tiles === null || (underlay && frame.kind !== FRAME_SUB_CELLS)) return false;
+    delivered = true;
+    sink({tiles: decodeTiles(tiles), subCells: underlay ? decodeSubCells(frame.payload) : null, ...keys});
+    return true;
+  };
+}
+
+/**
+ * Reads a whole body, passing each frame to `watch` as it completes until `watch` returns `true`.
+ * The frames are checked against the viewport grammar as they pass.
+ */
+async function readWatching(response: Response, watch: (frame: Frame) => boolean): Promise<Uint8Array> {
+  const frames = new FrameReader();
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    for (const frame of frames.push(bytes)) if (watch(frame)) break;
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let watching = true;
+  try {
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.byteLength;
+      if (!watching) continue;
+      for (const frame of frames.push(value)) {
+        if (watch(frame)) {
+          watching = false;
+          break;
+        }
+      }
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => {});
+    throw error;
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return bytes;
+}
 
 /** What either decode path hands back, before the headers are folded in around it. */
 type Decoded = {
@@ -404,6 +471,10 @@ export class TesseraClient {
    * @param onPart - Receives the points as each points frame is decoded, before the body has
    *   finished. With a sink the returned `result` carries the counts, sub-cells and artifacts and
    *   no points. Not called for `k = 0`.
+   * @param onCounts - Receives the tiles' counts, and the sub-cells where `underlayOffset` asked
+   *   for them, as soon as they land: before any artifact or point, and before the body has
+   *   finished, with or without `onPart` and at any `k`. Called at most once. The returned
+   *   `result` carries the same counts.
    * @returns The decoded result, the server's timings, the response's keys (`identityKey`,
    *   `contentKey`, `pin`, `stale`, `region`) and the body's size in `bytes`.
    * @throws {@link TesseraError} when the server refuses: `404` for an unknown view, `422` for a
@@ -416,7 +487,8 @@ export class TesseraClient {
     req: ViewportRequest,
     signal?: AbortSignal,
     background = false,
-    onPart?: PartSink
+    onPart?: PartSink,
+    onCounts?: CountsSink
   ): Promise<ViewportResponse> {
     // Each optional field is sent only when the caller set it, so an unset one takes the server's
     // default. For `layers`, `levels` and `computed` an empty array is a request for none, which
@@ -459,15 +531,12 @@ export class TesseraClient {
     // this thread rather than queueing behind a point decode in a worker lane. It has no points
     // frames to hand a part sink.
     const counts = req.k === 0;
+    const keys = {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey};
+    const watch = onCounts ? countsWatch(onCounts, Boolean(req.underlayOffset), keys) : undefined;
     const decoded =
       onPart && !counts
-        ? await this.streamed(
-            response,
-            {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey},
-            onPart,
-            background
-          )
-        : await this.whole(response, counts, background);
+        ? await this.streamed(response, keys, onPart, background, watch)
+        : await this.whole(response, counts, background, watch);
     this.opts.onDecode?.(decoded.ms, decoded.bytes, decoded.points, decoded.workerMs);
     return {
       result: decoded.result,
@@ -482,14 +551,18 @@ export class TesseraClient {
     };
   }
 
-  /** Reads the whole body, then decodes it: the path for a caller with no part sink. */
+  /**
+   * Reads the whole body, then decodes it: the path for a caller with no part sink. `watch`, where
+   * given, sees the frames as they arrive.
+   */
   private async whole(
     response: Response,
     counts: boolean,
-    background: boolean
+    background: boolean,
+    watch?: (frame: Frame) => boolean
   ): Promise<Decoded> {
     const started = performance.now();
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = watch ? await readWatching(response, watch) : new Uint8Array(await response.arrayBuffer());
     // Read before decoding: the worker path transfers the buffer, which detaches it and leaves
     // `byteLength` at 0.
     const size = bytes.byteLength;
@@ -521,13 +594,14 @@ export class TesseraClient {
     response: Response,
     coordinates: {identityKey: string; contentKey: string},
     onPart: PartSink,
-    background: boolean
+    background: boolean,
+    watch?: (frame: Frame) => boolean
   ): Promise<Decoded> {
     const started = performance.now();
     if (!response.body) {
       // A `fetch` that gives no stream, such as a polyfill or a mock. The sink gets the whole
       // result as one part.
-      const whole = await this.whole(response, false, background);
+      const whole = await this.whole(response, false, background, watch);
       await onPart({result: whole.result, ...coordinates});
       return {...whole, result: headOnly(whole.result)};
     }
@@ -595,6 +669,7 @@ export class TesseraClient {
         if (done) break;
         bytes += value.byteLength;
         for (const frame of frames.push(value)) {
+          watch?.(frame);
           switch (frame.kind) {
             case FRAME_TILES:
               head.tiles = frame.payload;

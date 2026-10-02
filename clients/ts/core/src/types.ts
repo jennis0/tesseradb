@@ -1081,6 +1081,31 @@ export type ViewportPart = {
 };
 
 /**
+ * A viewport response's counts, handed to a {@link CountsSink} once the tiles frame has landed,
+ * and the sub-cells frame where the request set `underlayOffset`. The server sends them first, so
+ * they arrive before any artifact or point.
+ *
+ * @category Requests and responses
+ */
+export type ViewportCounts = {
+  /** Every tile's counts, in the response's tile order. */
+  tiles: TileCounts[];
+  /** The density underlay, or `null` where the request asked for none. */
+  subCells: SubCell[] | null;
+  /** As {@link ViewportResponse.identityKey}. */
+  identityKey: string;
+  /** As {@link ViewportResponse.contentKey}. */
+  contentKey: string;
+};
+
+/**
+ * Receives a viewport response's counts as soon as they land; see {@link ViewportCounts}.
+ *
+ * @category Requests and responses
+ */
+export type CountsSink = (counts: ViewportCounts) => void;
+
+/**
  * A viewport response, as {@link TesseraClient.viewport} returns it.
  *
  * @category Requests and responses

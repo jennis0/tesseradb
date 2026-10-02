@@ -92,7 +92,11 @@ def split_frames(body: bytes) -> list[tuple[int, bytearray]]:
     comes last and marks the body complete, so a body cut short is refused rather than read as a
     smaller answer.
     """
-    frames = list(_frames(io.BytesIO(body)))
+    return _checked(list(_frames(io.BytesIO(body))))
+
+
+def _checked(frames: list[tuple[int, bytearray]]) -> list[tuple[int, bytearray]]:
+    """`frames` if they are a whole `/v1/viewport` body, or a refusal saying what is wrong."""
     for kind, _ in frames:
         if kind not in _KINDS:
             raise Refusal(f"viewport: unknown frame kind {kind}")
@@ -534,6 +538,7 @@ class Selection:
         point_rows: Optional[str] = None,
         underlay_offset: Optional[int] = None,
         pin: Any = None,
+        on_counts: Optional[Callable[[Any, Any], None]] = None,
     ) -> Sample:
         """The points a map of this selection draws at `zoom`, as a table.
 
@@ -559,6 +564,9 @@ class Selection:
           only, which is enough to update a highlight on points already held.
         - `pin`: the `x-tessera-pin` value from an earlier answer. The answer then says whether
           the data has changed since.
+        - `on_counts`: a function called once with the per-tile counts as a pyarrow table, and
+          the `sub_cells` table or `None`, as soon as they arrive. The server sends them before
+          the annotations and the points, so a caller can show them while the rest is read.
 
         Every option is sent only when given, so the server's own setting applies otherwise.
 
@@ -587,8 +595,17 @@ class Selection:
         ):
             if value is not None:
                 request[name] = int(value) if name in _VIEWPORT_INTEGERS else value
-        body = reader._request("POST", "/v1/viewport", request)
-        frames = split_frames(body)
+        frames = []
+        with reader._open("POST", "/v1/viewport", request) as response:
+            for kind, payload in _frames(response):
+                frames.append((kind, payload))
+                counted = kind == (FRAME_SUB_CELLS if underlay_offset else FRAME_TILES)
+                if on_counts is not None and counted and frames[0][0] == FRAME_TILES:
+                    on_counts(
+                        _tables([frames[0][1]]),
+                        _tables([payload]) if kind == FRAME_SUB_CELLS else None,
+                    )
+        frames = _checked(frames)
         artifacts = _tables([p for kind, p in frames if kind == FRAME_ARTIFACTS])
         sub_cells = _tables([p for kind, p in frames if kind == FRAME_SUB_CELLS])
         # A points frame with no rows is still the server's schema, so test for None, not falsity.

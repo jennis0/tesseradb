@@ -3,7 +3,7 @@ import {tableToIPC, Table} from 'apache-arrow';
 import {TesseraClient} from '../src/client.js';
 import {decodeViewport} from '../src/decode.js';
 import {inlineDecoder} from '../src/decoder.js';
-import type {ViewportPart} from '../src/types.js';
+import type {ViewportCounts, ViewportPart} from '../src/types.js';
 import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.js';
 
 /**
@@ -21,7 +21,7 @@ import {chunked, framed, manual, rejectsAsRefused, settle, u64} from './support.
 const SERVED = [2n, 2n, 0n, 2n, 2n, 2n, 2n];
 const PER_FRAME = [2, 2, 3]; // tiles per points frame; frames flush at whole tiles
 
-function bodyBytes(stageNs?: string): Uint8Array {
+function bodyBytes(stageNs?: string, subCells = false): Uint8Array {
   const tiles = tableToIPC(
     new Table({
       tile: u64(SERVED.map((_, i) => BigInt(i))),
@@ -54,8 +54,10 @@ function bodyBytes(stageNs?: string): Uint8Array {
       ...(stageNs === undefined ? {} : {stage_ns: stageNs})
     })
   );
+  const underlay = tableToIPC(new Table({cell: u64([3n, 9n]), count: u64([4n, 1n])}), 'stream');
   return framed([
     {kind: 1, payload: tiles},
+    ...(subCells ? [{kind: 2, payload: underlay}] : []),
     ...points.map((payload) => ({kind: 3, payload})),
     {kind: 4, payload: trailer}
   ]);
@@ -130,6 +132,41 @@ describe('a streamed viewport response', () => {
     feed.close();
     await asking;
     expect(parts.length).toBe(3);
+  });
+
+  it('hands over the counts as soon as they land, before any point, with or without a part sink', async () => {
+    for (const underlay of [false, true]) {
+      for (const onPart of [(): void => {}, undefined]) {
+        const body = bodyBytes(undefined, underlay);
+        const whole = decodeViewport(body);
+        const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+        const afterTiles = 5 + view.getUint32(1, true);
+        const afterCounts = underlay ? afterTiles + 5 + view.getUint32(afterTiles + 1, true) : afterTiles;
+
+        const feed = manual(undefined, HEADERS);
+        vi.stubGlobal('fetch', async () => feed.response);
+        const counts: ViewportCounts[] = [];
+        const req = {view: 's0', zoom: 4, k: 100, ...(underlay ? {underlayOffset: 2} : {})};
+        const asking = client().viewport('tok', req, undefined, false, onPart, (c) => counts.push(c));
+
+        feed.push(body.subarray(0, afterTiles));
+        await settle();
+        // With an underlay asked for, the counts wait for the sub-cells frame that follows.
+        expect(counts.length).toBe(underlay ? 0 : 1);
+        feed.push(body.subarray(afterTiles, afterCounts));
+        await settle();
+        expect(counts.length).toBe(1);
+        expect(counts[0]!.tiles).toEqual(whole.tiles);
+        expect(counts[0]!.subCells).toEqual(whole.subCells);
+        expect(`${counts[0]!.identityKey}/${counts[0]!.contentKey}`).toBe('i1/c1');
+
+        feed.push(body.subarray(afterCounts));
+        feed.close();
+        const response = await asking;
+        expect(counts.length).toBe(1);
+        expect(response.result.tiles).toEqual(whole.tiles);
+      }
+    }
   });
 
   it('lands nothing more once the request is aborted mid-stream', async () => {
