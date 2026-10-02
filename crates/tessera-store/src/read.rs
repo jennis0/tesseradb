@@ -148,41 +148,35 @@ pub struct SegmentData {
     /// Where each occupied leaf Morton cell's rows begin — [`CutIndex`], the run-length index of
     /// `morton`, which selection evaluates per cell instead of per row.
     pub cuts: CutIndex,
+    /// Each occupied cell's code, parallel to `cuts` ([`crate::bands`]).
+    pub cell_codes: crate::bands::CellCodes,
+    /// The identity bands and the render columns' copies beside them ([`crate::bands`]).
+    pub bands: crate::bands::Bands,
     pub columns: ColumnsRef,
     /// Where each row's entity is read ([`crate::edited`]).
     pub entities: crate::edited::RowEntities,
 }
 
 impl SegmentData {
-    /// Opens a segment's three files from its directory, its rows' entities read from
-    /// `entities`. The error names the file that failed.
+    /// Opens a segment's files from its directory, its rows' entities read from `entities`. The
+    /// error names the file that failed.
     pub fn load(
         dir: &Path,
         seg_id: &str,
         row_count: u32,
         entities: crate::edited::RowEntities,
     ) -> std::result::Result<Self, SegmentLoadError> {
+        let failed = |file: &'static str| move |source| SegmentLoadError { file, source };
+        let cuts = CutIndex::load(&dir.join(CutIndex::FILE), row_count).map_err(failed("cuts"))?;
         Ok(SegmentData {
             seg_id: seg_id.to_string(),
             row_count,
-            morton: MortonSlice::load(&dir.join("morton.u32")).map_err(|source| {
-                SegmentLoadError {
-                    file: "morton",
-                    source,
-                }
-            })?,
-            cuts: CutIndex::load(&dir.join(CutIndex::FILE), row_count).map_err(|source| {
-                SegmentLoadError {
-                    file: "cuts",
-                    source,
-                }
-            })?,
-            columns: ColumnsRef::load(&dir.join("columns.arrow")).map_err(|source| {
-                SegmentLoadError {
-                    file: "columns",
-                    source,
-                }
-            })?,
+            morton: MortonSlice::load(&dir.join("morton.u32")).map_err(failed("morton"))?,
+            cell_codes: crate::bands::CellCodes::open(dir, cuts.len())
+                .map_err(failed("cell codes"))?,
+            cuts,
+            bands: crate::bands::Bands::open(dir, row_count).map_err(failed("bands"))?,
+            columns: ColumnsRef::load(&dir.join("columns.arrow")).map_err(failed("columns"))?,
             entities,
         })
     }
@@ -798,41 +792,20 @@ fn open_prefix(
             };
 
             let seg_dir = view_dir.join("segments").join(&seg_desc.seg_id);
-            let morton_path = seg_dir.join("morton.u32");
-            let cuts_path = seg_dir.join(CutIndex::FILE);
-            let columns_path = seg_dir.join("columns.arrow");
-            let morton_rel = format!(
-                "partitions/{}/{}/segments/{}/morton.u32",
-                partition_desc.phash,
-                crate::view_rel(&seg_desc.view),
-                seg_desc.seg_id
-            );
-            let cuts_rel = format!(
-                "partitions/{}/{}/segments/{}/{}",
-                partition_desc.phash,
-                crate::view_rel(&seg_desc.view),
-                seg_desc.seg_id,
-                CutIndex::FILE
-            );
-            let columns_rel = format!(
-                "partitions/{}/{}/segments/{}/columns.arrow",
-                partition_desc.phash,
-                crate::view_rel(&seg_desc.view),
-                seg_desc.seg_id
-            );
-            ensure_verified(
-                &morton_rel,
-                &segments_manifest,
-                &manifest.files,
-                &morton_path,
-            )?;
-            ensure_verified(&cuts_rel, &segments_manifest, &manifest.files, &cuts_path)?;
-            ensure_verified(
-                &columns_rel,
-                &segments_manifest,
-                &manifest.files,
-                &columns_path,
-            )?;
+            for name in crate::SEGMENT_FILES {
+                let rel = format!(
+                    "partitions/{}/{}/segments/{}/{name}",
+                    partition_desc.phash,
+                    crate::view_rel(&seg_desc.view),
+                    seg_desc.seg_id
+                );
+                ensure_verified(
+                    &rel,
+                    &segments_manifest,
+                    &manifest.files,
+                    &seg_dir.join(name),
+                )?;
+            }
             // `ColumnsRef::load` reads every presence bitmap beside the column, so each one has to
             // pass the same membership rule the two files above do. Driven off the directory rather
             // than off the manifest because it is what the loader will *read* that must have been
@@ -1777,8 +1750,9 @@ impl MortonSlice {
 ///
 /// Cell *i* covers rows `starts[i] .. starts[i + 1]`, the last ending at the segment's
 /// `row_count`. `starts[0]` is 0 in a segment with rows. The array is therefore the run-length
-/// index of `morton.u32` and holds no code: the code is `morton[starts[i]]`, and storing it again
-/// would be a second copy that could disagree with the column it describes.
+/// index of `morton.u32`. Each cell's code, `morton[starts[i]]`, is stored beside it in
+/// `cell-codes.u32` ([`crate::bands::CellCodes`]), written by the same writer, so a tile's cells
+/// are found without reading the Morton column; `tessera verify --deep` checks the two agree.
 ///
 /// # What holds the premise, and what a broken one would cost
 ///
@@ -2108,6 +2082,16 @@ impl ColumnsRef {
     /// extent `MANIFEST.json` declares.
     pub fn residual(&self) -> &[u32] {
         downcast::<UInt32Array>(&self.batch, 1).values()
+    }
+
+    /// The declared-scalar columns' names, in the order `columns.arrow` holds them.
+    pub fn scalar_names(&self) -> impl Iterator<Item = &str> {
+        self.batch
+            .schema_ref()
+            .fields()
+            .iter()
+            .skip(FIXED_COLUMNS.len())
+            .map(|field| field.name().as_str())
     }
 
     /// A declared-scalar column by name, or `None` if `columns.arrow` has no such column.

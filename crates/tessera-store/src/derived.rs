@@ -568,6 +568,39 @@ pub fn project_row_column_pairs(
     }
 }
 
+/// What a level's column is composed as and filed under, given the layout it is served in.
+///
+/// A row-major level's column is the one it is served from. Every other level gets a label column
+/// too, wherever its memberships partition the rows, so that every such level has one label per row
+/// whatever form serves it: the band-order copies are taken from it ([`stage_band_labels`]), and the
+/// level's artifact-major form is unchanged. The build and the fold both ask here, so a level gets
+/// the same files from either.
+pub fn level_column(layout: ServingLayout) -> (ServingLayout, DerivedForm) {
+    match layout {
+        ServingLayout::ArtifactMajor => (ServingLayout::RowMajorLabel, DerivedForm::LevelLabels),
+        layout => (layout, DerivedForm::RowColumn { layout }),
+    }
+}
+
+/// Copy the label column just composed at `column` into the entry order of `bands`, the bands of
+/// the segment whose rows the column labels, and return the staged copy in `scratch`.
+///
+/// The copy is taken here, where the column is written, and nowhere else; the column and its copy
+/// are therefore always written by one publication at one level version.
+pub fn stage_band_labels(
+    column: &Path,
+    bands: &crate::bands::Bands,
+    scratch: &Path,
+) -> crate::Result<std::path::PathBuf> {
+    let labels = crate::membership::LabelColumnPack::open(column)?;
+    let path = scratch.join(format!("{}.band-labels", scratch_name()));
+    if let Err(error) = crate::bands::write_band_labels(&path, bands, &labels) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
 /// A `(row, ordinal)` record: the row first, because a partition routes on a record's first four
 /// bytes.
 const ROW_ORDINAL_RECORD: usize = 8;
@@ -1022,6 +1055,8 @@ pub struct DerivedIndex {
     row_column: usize,
     shape_rows: usize,
     shape_held: usize,
+    labels: usize,
+    band_labels: usize,
     term_images: usize,
 }
 
@@ -1098,6 +1133,8 @@ pub fn file_derived(
             DerivedForm::RowColumn { .. } => (&mut index.row_column, "tslb"),
             DerivedForm::ShapeRows { .. } => (&mut index.shape_rows, "tssr"),
             DerivedForm::ShapeHeld => (&mut index.shape_held, "tssh"),
+            DerivedForm::LevelLabels => (&mut index.labels, "tslb"),
+            DerivedForm::BandLabels { .. } => (&mut index.band_labels, "tsbl"),
         };
         // Every item spends an index, written or not, so a later call never reuses a name this
         // call's manifest entry may already carry.

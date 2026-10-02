@@ -122,6 +122,39 @@ fn a_merged_segment_is_morton_sorted() {
     assert!(codes.u32().windows(2).all(|w| w[0] <= w[1]));
 }
 
+/// A merged segment's bands and cell codes are its own rows' and cells', written by the writer the
+/// merge emits through. Enough rows that the first band holds some.
+#[test]
+fn a_merged_segment_carries_its_own_bands() {
+    let dir = tempfile::TempDir::new().unwrap();
+    build_bundle(dir.path(), 10);
+    let a = segment(dir.path(), "in-a", 100, 600, 7);
+    let b = segment(dir.path(), "in-b", 1_000, 600, 31);
+
+    merge(dir.path(), &[a, b]);
+    let merged = seg_dir(dir.path(), "merged-1");
+    let segment = tessera_store::read::SegmentData::load(
+        &merged,
+        "merged-1",
+        1_200,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .unwrap();
+    assert!(segment.bands.entries() > 0);
+    segment
+        .bands
+        .check_against(segment.morton.u32(), &segment.columns)
+        .unwrap();
+    let codes = segment.morton.u32();
+    let expected: Vec<u32> = segment
+        .cuts
+        .starts()
+        .iter()
+        .map(|&s| codes[s as usize])
+        .collect();
+    assert_eq!(segment.cell_codes.codes(), expected.as_slice());
+}
+
 /// **Byte-exact through the code, never through coordinates.** A segment stores the code and its
 /// residual, not the axes; recovering the axes as a bit permutation is what keeps a merged row's
 /// position identical to its input's. Dequantise-and-re-quantise would move points by up to a
@@ -431,7 +464,13 @@ fn a_merged_segment_directory_holds_no_spool_files() {
     names.sort();
     assert_eq!(
         names,
-        vec!["columns.arrow", "cuts.u32", "morton.u32"],
+        vec![
+            "bands.bin",
+            "cell-codes.u32",
+            "columns.arrow",
+            "cuts.u32",
+            "morton.u32"
+        ],
         "the segment directory must hold exactly what the manifest names"
     );
 }

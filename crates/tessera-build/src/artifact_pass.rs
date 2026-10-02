@@ -411,18 +411,19 @@ pub fn run(
         tile_indexes,
     ));
 
-    // ---- the row-major columns: every level that is ---------------------------------------------
+    // ---- the columns: a row-major level's, and every other level's labels --------------------
     //
     // ⊘ **An attribute level's column is not this pass's to write**, for the reason the fold gives:
     // its labels come from the value column the predicate names, and this composes from stored
     // memberships — which such a level has none of. Composing anyway would write a file of nothing
     // but holes and leave a reader adopting a column no request will claim. A spatial level's
     // column is composed from the rows resolved above.
+    //
+    // A level served artifact-major gets a label column where its memberships partition the rows
+    // (`derived::level_column`), and every label column gets its copy in the order of the
+    // segment's bands.
     let mut columns: Vec<Filed> = Vec::new();
     for (layer, level, layout) in &chosen {
-        if !layout.is_row_major() {
-            continue;
-        }
         let composable = by_layer.get(layer).is_some_and(|registered| {
             matches!(
                 registered.declaration.membership,
@@ -432,11 +433,13 @@ pub fn run(
         if !composable {
             continue;
         }
+        let (composed_as, form) = derived::level_column(*layout);
         let ordinals = store.level(layer, *level).count() as u32;
+        let level_version = store.level_version(layer, *level);
         let staged = derived::project_row_column(
             ordinals,
             space.base_rows(),
-            *layout,
+            composed_as,
             scratch_dir,
             &|visit| {
                 if let Some(rows) = resolved.get(&(layer.clone(), *level)) {
@@ -456,16 +459,37 @@ pub fn run(
                 }
             },
         );
+        let filed = |form: DerivedForm, path: std::path::PathBuf| Filed {
+            view: Some(view.to_string()),
+            incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
+            layer: layer.clone(),
+            level: *level,
+            level_version,
+            form,
+            bytes: derived::FiledBytes::Staged(path),
+        };
         match staged {
-            Ok(Some(path)) => columns.push(Filed {
-                view: Some(view.to_string()),
-                incarnation: Some(tessera_store::manifest::DECLARED_INCARNATION),
-                layer: layer.clone(),
-                level: *level,
-                level_version: store.level_version(layer, *level),
-                form: DerivedForm::RowColumn { layout: *layout },
-                bytes: derived::FiledBytes::Staged(path),
-            }),
+            Ok(Some(path)) => {
+                if composed_as == ServingLayout::RowMajorLabel {
+                    if let Some(segment) = &segment {
+                        match derived::stage_band_labels(&path, &segment.bands, scratch_dir) {
+                            Ok(copy) => columns.push(filed(
+                                DerivedForm::BandLabels {
+                                    seg_id: segment.seg_id.clone(),
+                                },
+                                copy,
+                            )),
+                            Err(error) => eprintln!(
+                                "artifact pass: {layer} level {level}'s labels would not be                                  copied into the bands' order ({error}); the level has no copy"
+                            ),
+                        }
+                    }
+                }
+                columns.push(filed(form, path));
+            }
+            // A level served artifact-major whose memberships overlap has no label column, and
+            // that is its shape rather than a fault.
+            Ok(None) if !layout.is_row_major() => {}
             // The build-time half of the refusal the declaration could not make: whether an
             // attribute is single-valued is a property of the data, and so is whether a level's
             // entries fit the `u32` the list form's offsets are. The level is served
@@ -484,8 +508,9 @@ pub fn run(
             // level composes its column on first request, which is what every request did before
             // the file existed.
             Err(error) => eprintln!(
-                "artifact pass: {layer} level {level}'s row-major column would not be composed \
-                 ({error}); that level derives it on first use"
+                "artifact pass: {layer} level {level}'s {} would not be composed ({error}); that \
+                 level derives it on first use",
+                form.dir()
             ),
         }
     }
@@ -500,9 +525,11 @@ pub fn run(
     let mut shape_rows: Vec<Filed> = Vec::new();
     if let Some(segment) = &segment {
         for ((layer, level), rows) in &resolved {
-            let has_column = columns
-                .iter()
-                .any(|e| &e.layer == layer && e.level == *level);
+            let has_column = columns.iter().any(|e| {
+                matches!(e.form, DerivedForm::RowColumn { .. })
+                    && &e.layer == layer
+                    && e.level == *level
+            });
             if has_column {
                 continue;
             }
@@ -782,10 +809,12 @@ pub fn report(pass: &ArtifactPass) {
             .count()
     };
     eprintln!(
-        "  wrote {} tile index(es), {} row-major column(s), {} shape row form(s), {} \
-         decomposition file(s)",
+        "  wrote {} tile index(es), {} row-major column(s), {} label column(s), {} band label \
+         cop(ies), {} shape row form(s), {} decomposition file(s)",
         written("tile-index"),
         written("row-column"),
+        written("labels"),
+        written("band-labels"),
         written("shape-rows"),
         written("shape-held"),
     );

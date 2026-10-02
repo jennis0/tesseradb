@@ -97,13 +97,13 @@ fn build_bundle(root: &Path) {
         .expect("write_permutation");
 
     let mut segments_files = BTreeMap::new();
-    for rel in [
-        "partitions/default/views/main/permutation.bin",
-        "partitions/default/views/main/segments/seg0/columns.arrow",
-        "partitions/default/views/main/segments/seg0/morton.u32",
-        "partitions/default/views/main/segments/seg0/cuts.u32",
-    ] {
-        segments_files.insert(rel.to_string(), file_digest(&prefix_dir.join(rel)));
+    let rels = std::iter::once("partitions/default/views/main/permutation.bin".to_string()).chain(
+        tessera_store::SEGMENT_FILES
+            .iter()
+            .map(|name| format!("partitions/default/views/main/segments/seg0/{name}")),
+    );
+    for rel in rels {
+        segments_files.insert(rel.clone(), file_digest(&prefix_dir.join(&rel)));
     }
 
     let segments_manifest = SegmentsManifest {

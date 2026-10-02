@@ -3,6 +3,7 @@
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
 pub mod access_column;
+pub mod bands;
 pub mod columns;
 pub mod coordinates;
 pub mod declaration;
@@ -33,6 +34,16 @@ pub mod utf8;
 mod view_path;
 pub mod vocabulary;
 pub mod write;
+
+/// The files every segment directory holds, whichever producer wrote it. A segment may also hold
+/// render presence bitmaps and `edited-rows.u32`, which only some segments need.
+pub const SEGMENT_FILES: [&str; 5] = [
+    "morton.u32",
+    read::CutIndex::FILE,
+    bands::CELL_CODES_FILE,
+    "columns.arrow",
+    bands::BANDS_FILE,
+];
 
 pub use entity_terms::{
     coalesce_entity_terms_extents, EntityTerms, EntityTermsExtentPaths, EntityTermsStack,

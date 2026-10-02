@@ -517,11 +517,7 @@ pub(super) fn carried_files(
             tessera_store::view_rel(&descriptor.view),
             descriptor.seg_id
         );
-        for name in [
-            "morton.u32",
-            tessera_store::read::CutIndex::FILE,
-            "columns.arrow",
-        ] {
+        for name in tessera_store::SEGMENT_FILES {
             rels.insert(format!("{segment_prefix}/{name}"));
         }
         let presence_prefix = format!("{segment_prefix}/{}/", RENDER_PRESENCE_DIR);
@@ -1976,9 +1972,11 @@ impl Executor {
         out
     }
 
-    /// Write this prefix's row-major columns, one file per `(view, layer, level)` whose chosen
-    /// layout has one. A level whose column will not compose gets no file, and is served
-    /// artifact-major instead (see `ArtifactProjections::get_or_build`).
+    /// Write this prefix's columns, one file per `(view, layer, level)`: a row-major level's column,
+    /// and for a level served artifact-major a label column where its memberships partition the
+    /// rows (`tessera_store::derived::level_column`). Every label column is copied into the order of
+    /// the fold's segment's bands beside it. A row-major level whose column will not compose gets no
+    /// file, and is served artifact-major instead (see `ArtifactProjections::get_or_build`).
     fn write_row_columns(
         &self,
         pass: &mut DerivedPass<'_>,
@@ -1993,9 +1991,8 @@ impl Executor {
         let fold_segments = &pass.segments;
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
-            .filter(|(layer, level, layout)| {
-                layout.is_row_major()
-                    && self.composes_row_structures(pending, layer, *level)
+            .filter(|(layer, level, _)| {
+                self.composes_row_structures(pending, layer, *level)
                     // An attribute level has no stored memberships to compose a column from.
                     && self
                         .live
@@ -2020,11 +2017,12 @@ impl Executor {
             String,
             u32,
             u64,
-            tessera_types::layer::ServingLayout,
+            tessera_store::manifest::DerivedForm,
             std::path::PathBuf,
         )> = self.live.with_artifacts(|store| {
             let mut out = Vec::with_capacity(wanted.len() * spaces.len());
             for (layer, level, layout) in &wanted {
+                let (composed_as, form) = tessera_store::derived::level_column(*layout);
                 let version = pending.version_after(store, layer, *level);
                 let ordinals = level_length(pending.records(store, layer, *level));
                 let spatial = self.live.registered_layer(layer).is_some_and(|registered| {
@@ -2032,14 +2030,15 @@ impl Executor {
                         == tessera_types::layer::MembershipSource::Spatial
                 });
                 for (view, space) in spaces {
+                    let segment = fold_segments
+                        .iter()
+                        .find(|(v, _)| v == view)
+                        .map(|(_, segment)| segment);
                     let composed = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece staged
                         // in `choose_layouts` is the level's membership in this view.
                         let piece = self.deps.shapes.get(view, layer, *level).and_then(|held| {
-                            fold_segments
-                                .iter()
-                                .find(|(v, _)| v == view)
-                                .and_then(|(_, segment)| held.staged(&segment.seg_id))
+                            segment.and_then(|segment| held.staged(&segment.seg_id))
                         });
                         match piece {
                             Some(piece) => {
@@ -2047,7 +2046,7 @@ impl Executor {
                                 tessera_store::derived::project_row_column(
                                     rows.len() as u32,
                                     space.base_rows(),
-                                    *layout,
+                                    composed_as,
                                     scratch,
                                     &|visit| {
                                         for (ordinal, rows) in rows.iter().enumerate() {
@@ -2064,7 +2063,7 @@ impl Executor {
                         tessera_store::derived::project_row_column(
                             ordinals,
                             space.base_rows(),
-                            *layout,
+                            composed_as,
                             scratch,
                             &|visit| {
                                 for (ordinal, record) in pending.records(store, layer, *level) {
@@ -2080,8 +2079,47 @@ impl Executor {
                     };
                     match composed {
                         Ok(Some(path)) => {
-                            out.push((view.clone(), layer.clone(), *level, version, *layout, path))
+                            let labelled = segment.filter(|_| {
+                                composed_as == tessera_types::layer::ServingLayout::RowMajorLabel
+                            });
+                            if let Some(segment) = labelled {
+                                match tessera_store::derived::stage_band_labels(
+                                    &path,
+                                    &segment.bands,
+                                    scratch,
+                                ) {
+                                    Ok(copy) => out.push((
+                                        view.clone(),
+                                        layer.clone(),
+                                        *level,
+                                        version,
+                                        tessera_store::manifest::DerivedForm::BandLabels {
+                                            seg_id: segment.seg_id.clone(),
+                                        },
+                                        copy,
+                                    )),
+                                    Err(error) => tracing::warn!(
+                                        layer = %layer,
+                                        level,
+                                        view = %view,
+                                        %error,
+                                        "a level's labels would not be copied into the order of \
+                                         its segment's bands; the level has no copy"
+                                    ),
+                                }
+                            }
+                            out.push((
+                                view.clone(),
+                                layer.clone(),
+                                *level,
+                                version,
+                                form.clone(),
+                                path,
+                            ))
                         }
+                        // A level served artifact-major whose memberships overlap has no label
+                        // column, and that is its shape rather than a fault.
+                        Ok(None) if !layout.is_row_major() => {}
                         Ok(None) => tracing::warn!(
                             layer = %layer,
                             level,
@@ -2096,7 +2134,8 @@ impl Executor {
                             level,
                             view = %view,
                             %error,
-                            "a row-major column would not be composed at the fold; that level \
+                            form = form.dir(),
+                            "a level's column would not be composed at the fold; that level \
                              derives it on first use"
                         ),
                     }
@@ -2115,7 +2154,7 @@ impl Executor {
             &mut pass.index,
             written
                 .into_iter()
-                .filter_map(|(view, layer, level, level_version, layout, path)| {
+                .filter_map(|(view, layer, level, level_version, form, path)| {
                     // No incarnation, no file: an unstamped structure would label another
                     // view's rows.
                     let Some(incarnation) = incarnations.get(&view).copied() else {
@@ -2128,7 +2167,7 @@ impl Executor {
                         layer,
                         level,
                         level_version,
-                        form: tessera_store::manifest::DerivedForm::RowColumn { layout },
+                        form,
                         bytes: tessera_store::derived::FiledBytes::Staged(path),
                     })
                 })

@@ -52,7 +52,7 @@ use tessera_engine::select::{
 };
 use tessera_lifecycle::{IngestBuffer, Overlay};
 use tessera_spatial::{fixed32, tiler::sort_batch, Bounds, TilerItem};
-use tessera_store::read::{ColumnsRef, CutIndex, MortonSlice, SegmentData};
+use tessera_store::read::SegmentData;
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::{EntityId, TermId, TesseraId};
@@ -249,14 +249,13 @@ fn segment_of(rows_per_cell: u32) -> Segment {
     let codes = sort_batch(&mut items, &mut entity_ids);
     write_segment(temp.path(), &items, &codes, &[]).unwrap();
 
-    let data = SegmentData {
-        entities: tessera_store::edited::RowEntities::Numbers,
-        seg_id: "cell-route".to_string(),
-        row_count: ROWS,
-        morton: MortonSlice::load(&temp.path().join("morton.u32")).unwrap(),
-        cuts: CutIndex::load(&temp.path().join(CutIndex::FILE), ROWS).unwrap(),
-        columns: ColumnsRef::load(&temp.path().join("columns.arrow")).unwrap(),
-    };
+    let data = SegmentData::load(
+        temp.path(),
+        "cell-route",
+        ROWS,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .unwrap();
     assert_eq!(
         data.cuts.starts().len() as u32,
         positions,

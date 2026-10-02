@@ -98,21 +98,12 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         "partitions/default/views/main/permutation.bin".to_string(),
         file_digest(&view_dir.join("permutation.bin")),
     );
-    segments_files.insert(
-        "partitions/default/views/main/segments/seg0/columns.arrow".to_string(),
-        file_digest(&seg_dir.join("columns.arrow")),
-    );
-    segments_files.insert(
-        "partitions/default/views/main/segments/seg0/morton.u32".to_string(),
-        file_digest(&seg_dir.join("morton.u32")),
-    );
-    segments_files.insert(
-        format!(
-            "partitions/default/views/main/segments/seg0/{}",
-            tessera_store::read::CutIndex::FILE
-        ),
-        file_digest(&seg_dir.join(tessera_store::read::CutIndex::FILE)),
-    );
+    for name in tessera_store::SEGMENT_FILES {
+        segments_files.insert(
+            format!("partitions/default/views/main/segments/seg0/{name}"),
+            file_digest(&seg_dir.join(name)),
+        );
+    }
 
     let segments_manifest = SegmentsManifest {
         watermark: n,

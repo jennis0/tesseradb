@@ -45,7 +45,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::buffer::Buffer;
 use clap::Parser;
 use croaring::Bitmap;
 use rand::rngs::StdRng;
@@ -59,8 +58,8 @@ use tessera_engine::select::{
     decode_tier, DecodeTier, SelectParams, Selection, SelectionPart, SelectionParts, Threshold,
 };
 use tessera_lifecycle::{IngestBuffer, Overlay};
-use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
-use tessera_store::write::{write_columns_from_parts, write_permutation};
+use tessera_store::read::SegmentData;
+use tessera_store::write::{write_permutation, SegmentRow, SegmentWriter};
 use tessera_store::{Permutation, RowSpace};
 use tessera_types::TermId;
 
@@ -370,34 +369,25 @@ fn view_space_mask(map: &Treemap, scratch: &Path) -> EffectiveMask {
 /// visible row — which is the cost this bench is measuring.
 fn synthetic_segment(rows: usize, seed: u64, scratch: &Path) -> SegmentData {
     let mut rng = SplitMix(seed);
-    let ids: Vec<u64> = (0..rows).map(|_| rng.next()).collect();
-    let residual: Vec<u32> = vec![0; rows];
-    let columns = scratch.join("columns.arrow");
-    write_columns_from_parts(
-        &columns,
-        Buffer::from_vec(ids),
-        Buffer::from_vec(residual),
-        rows,
-    )
-    .expect("write synthetic columns");
-    let mut codes: Vec<u8> = Vec::with_capacity(rows * 4);
-    let mut starts: Vec<u8> = Vec::with_capacity(rows * 4);
+    let mut writer = SegmentWriter::create(scratch, &[]).expect("a synthetic segment writer");
     for row in 0..rows as u32 {
-        codes.extend_from_slice(&row.to_le_bytes());
-        starts.extend_from_slice(&row.to_le_bytes());
+        writer
+            .append(SegmentRow {
+                tessera_id: tessera_types::TesseraId::new(rng.next()),
+                morton: row,
+                residual: 0,
+                scalars: &[],
+            })
+            .expect("a synthetic row");
     }
-    let morton = scratch.join("morton.u32");
-    std::fs::write(&morton, &codes).expect("write morton codes");
-    let cuts = scratch.join(tessera_store::read::CutIndex::FILE);
-    std::fs::write(&cuts, &starts).expect("write cell starts");
-    SegmentData {
-        entities: tessera_store::edited::RowEntities::Numbers,
-        seg_id: "epoch-shard-synthetic".into(),
-        row_count: rows as u32,
-        morton: MortonSlice::load(&morton).expect("load morton codes"),
-        cuts: tessera_store::read::CutIndex::load(&cuts, rows as u32).expect("load cell starts"),
-        columns: ColumnsRef::load(&columns).expect("load synthetic columns"),
-    }
+    writer.finish().expect("the synthetic segment is written");
+    SegmentData::load(
+        scratch,
+        "epoch-shard-synthetic",
+        rows as u32,
+        tessera_store::edited::RowEntities::Numbers,
+    )
+    .expect("the synthetic segment opens")
 }
 
 // ---------------------------------------------------------------------------------------------

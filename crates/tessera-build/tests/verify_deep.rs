@@ -44,13 +44,13 @@ fn extent() -> Bounds {
     }
 }
 
-fn write_points(path: &Path) {
+fn write_points(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ]));
-    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let ids: Vec<u64> = (0..n).collect();
     let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let batch = RecordBatch::try_new(
@@ -67,14 +67,14 @@ fn write_points(path: &Path) {
     w.close().unwrap();
 }
 
-fn write_pairs(path: &Path) {
+fn write_pairs(path: &Path, n: u64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("term_id", DataType::UInt32, false),
     ]));
     let mut entities = Vec::new();
     let mut terms = Vec::new();
-    for e in 0..N_ITEMS {
+    for e in 0..n {
         for t in [e % 5, (e * 3) % 7] {
             entities.push(e);
             terms.push(t as u32);
@@ -93,15 +93,13 @@ fn write_pairs(path: &Path) {
     w.close().unwrap();
 }
 
-/// A bundle that has flushed: build (oracle pairs on), one flush segment holding two entities, a
-/// delta tier carrying their postings, a deleted build entity's tombstone, and a
-/// complete-current-state `SEGMENTS-1.json`.
-fn flushed_bundle(root: &Path) {
+/// Build `n` items into `root/bundle`, oracle pairs on.
+fn built_bundle(root: &Path, n: u64) {
     let points = root.join("points.parquet");
     let pairs = root.join("pairs.parquet");
     let out = root.join("bundle");
-    write_points(&points);
-    write_pairs(&pairs);
+    write_points(&points, n);
+    write_pairs(&pairs, n);
     let (schema, attribute_sources) = common::id_attributes(&points);
     let args = BuildArgs {
         views: vec![tessera_build::ViewArgs {
@@ -133,6 +131,14 @@ fn flushed_bundle(root: &Path) {
         schema,
     };
     build(&args).expect("the batch build succeeds");
+}
+
+/// A bundle that has flushed: build (oracle pairs on), one flush segment holding two entities, a
+/// delta tier carrying their postings, a deleted build entity's tombstone, and a
+/// complete-current-state `SEGMENTS-1.json`.
+fn flushed_bundle(root: &Path) {
+    built_bundle(root, N_ITEMS);
+    let out = root.join("bundle");
 
     let prefix_dir = out.join("v00000");
     let manifest: tessera_store::manifest::Manifest = serde_json::from_slice(
@@ -237,16 +243,17 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 /// Re-digest `rel` (prefix-relative) into whichever manifest names it, so a damage test fails on
 /// the structural check under test rather than on the digest sweep in front of it. Rewrites
-/// `SEGMENTS-1.json` directly when that map holds the entry; otherwise `MANIFEST.json` — whose
-/// own digest then has to chase into `CURRENT`.
+/// `SEGMENTS-1.json` directly when there is one and its map holds the entry; otherwise
+/// `MANIFEST.json` — whose own digest then has to chase into `CURRENT`.
 fn refresh_digest(root: &Path, rel: &str) {
     let prefix_dir = root.join("v00000");
     let bytes = fs::read(prefix_dir.join(rel)).expect("the damaged file reads back");
     let digest = serde_json::json!({ "size": bytes.len(), "sha256": hex_sha256(&bytes) });
 
     let segments_path = prefix_dir.join("partitions/default/SEGMENTS-1.json");
-    let mut segments: serde_json::Value =
-        serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
+    let mut segments: serde_json::Value = fs::read(&segments_path)
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        .unwrap_or_default();
     if segments["files"].get(rel).is_some() {
         segments["files"][rel] = digest;
         fs::write(
@@ -723,7 +730,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
     w.write(&batch).unwrap();
     w.close().unwrap();
     let pairs = dir.join("pairs.parquet");
-    write_pairs(&pairs);
+    write_pairs(&pairs, N_ITEMS);
 
     let view = |key: &str| tessera_build::ViewArgs {
         visibility: None,
@@ -889,6 +896,58 @@ fn a_cut_index_missing_a_cell_boundary_is_refused() {
     damaged.drain(4..8);
     fs::write(&path, &damaged).unwrap();
     refresh_digest(&root, rel);
+    // The cell's code goes with it, so the two files still agree in length and the open passes
+    // them to the check under test.
+    let codes_rel = "partitions/default/views/s0/segments/seg-0/cell-codes.u32";
+    let codes_path = root.join("v00000").join(codes_rel);
+    let mut codes = fs::read(&codes_path).unwrap();
+    codes.drain(4..8);
+    fs::write(&codes_path, &codes).unwrap();
+    refresh_digest(&root, codes_rel);
 
     expect_refusal(&root, "where the Morton code changes at row");
+}
+
+/// A cell code that is not its cell's Morton code is refused.
+#[test]
+fn a_cell_code_that_is_not_its_cells_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let rel = "partitions/default/views/s0/segments/seg-0/cell-codes.u32";
+    let path = root.join("v00000").join(rel);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refusal(
+        &root,
+        "cell-codes.u32 does not hold each cell's Morton code",
+    );
+}
+
+/// A band entry whose identity is not its row's is refused. The identities are the first section
+/// of `bands.bin`, on the first page boundary past its tables. The bundle is large enough for a
+/// band to hold a row: band 6 holds about one row in 64.
+#[test]
+fn a_band_entry_that_is_not_its_row_is_refused() {
+    const ROWS: u64 = 1_000;
+    let temp = tempfile::TempDir::new().unwrap();
+    built_bundle(temp.path(), ROWS);
+    let root = bundle_root(&temp);
+    let rel = "partitions/default/views/s0/segments/seg-0/bands.bin";
+    let path = root.join("v00000").join(rel);
+    let bands = tessera_store::bands::Bands::open(path.parent().unwrap(), ROWS as u32).unwrap();
+    assert!(
+        bands.entries() > 0,
+        "the fixture's base segment has a row in a band"
+    );
+    drop(bands);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[4096] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refusal(&root, "bands.bin: band 6, entry 0");
 }

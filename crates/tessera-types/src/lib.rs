@@ -213,9 +213,11 @@ pub struct GenerationStamp {
 // 29: a build names each row's item by the identity rule over the attributes declared `unique`,
 // and numbers items in the order its files create them; a declaration has no `join_field`. A 28
 // bundle is refused.
+// 30: every segment carries `bands.bin` and `cell-codes.u32`, and a partition may carry a level's
+// label column and its band-order copy. A 29 bundle lacks the segment files and is refused.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 29;
+pub const BUNDLE_FORMAT: u32 = 30;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

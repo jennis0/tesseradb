@@ -109,32 +109,35 @@ pub fn write_segment(
     Ok(())
 }
 
-/// Writes one segment's `cuts.u32` from the Morton codes of its rows, arriving in row order.
+/// Writes one segment's `cuts.u32` and `cell-codes.u32` from the Morton codes of its rows,
+/// arriving in row order.
 ///
-/// A cell's start is written the first time a code is seen, so the file is the run-length index of
-/// `morton.u32`: `crate::read::CutIndex` describes what it is for and what it costs. Nothing is
-/// held but the previous code and a `BufWriter`.
+/// A cell's start and its code are written the first time a code is seen, so `cuts.u32` is the
+/// run-length index of `morton.u32` and `cell-codes.u32` the code of each run:
+/// `crate::read::CutIndex` and [`crate::bands`] describe what each is for. Nothing is held but the
+/// previous code and two `BufWriter`s.
 ///
-/// **One writer for both producers.** The build's bounded assembly emits `morton.u32` positionally
-/// and [`SegmentWriter`] emits it row by row, so the two paths have no code in common — but a
-/// second transcription of this layout is a second thing that can disagree with the column it
-/// indexes, and a build that indexed its segment differently from a flush would serve two
-/// different selections from one bundle (decisions 0091, 0139).
-/// **It counts nothing.** The cell count this could return is the one the build already keeps —
-/// `OccupancyRun` derives it from the same codes in the same order — and two counters of one
-/// quantity are two things that can disagree about it. A caller wanting the number reads the
-/// file's length, or asks the build's own occupancy.
+/// **One writer for every producer.** The build's bounded assembly emits `morton.u32` positionally
+/// and [`SegmentWriter`] emits it row by row, so the two paths have no code in common but this; a
+/// build that indexed its segment differently from a flush would serve two different selections
+/// from one bundle.
+///
+/// **It counts nothing.** The cell count is the length of either file, and the build's
+/// `OccupancyRun` derives the same figure from the same codes; a third counter would be a third
+/// thing that could disagree.
 pub struct CutWriter {
     out: BufWriter<File>,
+    codes: BufWriter<File>,
     last: Option<u32>,
     row: u32,
 }
 
 impl CutWriter {
-    /// Create `cuts.u32` in `dir`, which must exist.
+    /// Create `cuts.u32` and `cell-codes.u32` in `dir`, which must exist.
     pub fn create(dir: &Path) -> io::Result<Self> {
         Ok(CutWriter {
             out: BufWriter::new(File::create(dir.join(crate::read::CutIndex::FILE))?),
+            codes: BufWriter::new(File::create(dir.join(crate::bands::CELL_CODES_FILE))?),
             last: None,
             row: 0,
         })
@@ -145,15 +148,17 @@ impl CutWriter {
     pub fn push(&mut self, morton: u32) -> io::Result<()> {
         if self.last != Some(morton) {
             self.out.write_all(&self.row.to_le_bytes())?;
+            self.codes.write_all(&morton.to_le_bytes())?;
             self.last = Some(morton);
         }
         self.row += 1;
         Ok(())
     }
 
-    /// Flush the file.
+    /// Flush both files.
     pub fn finish(mut self) -> io::Result<()> {
-        self.out.flush()
+        self.out.flush()?;
+        self.codes.flush()
     }
 }
 
@@ -192,6 +197,8 @@ pub struct SegmentRow<'a> {
 pub struct SegmentWriter {
     morton: BufWriter<File>,
     cuts: CutWriter,
+    bands: crate::bands::BandWriter,
+    dir: PathBuf,
     columns_path: PathBuf,
     schema: Arc<Schema>,
     /// One spool per schema column, in schema order: `tessera_id`, `residual`, then the declared
@@ -228,6 +235,8 @@ impl SegmentWriter {
         Ok(SegmentWriter {
             morton: BufWriter::new(File::create(dir.join("morton.u32"))?),
             cuts: CutWriter::create(dir)?,
+            bands: crate::bands::BandWriter::create(dir)?,
+            dir: dir.to_path_buf(),
             columns_path: dir.join("columns.arrow"),
             schema,
             columns,
@@ -255,6 +264,8 @@ impl SegmentWriter {
 
         self.morton.write_all(&row.morton.to_le_bytes())?;
         self.cuts.push(row.morton)?;
+        self.bands
+            .push(row.tessera_id.raw(), row.morton, row.residual)?;
         self.columns[0].append_u64(row.tessera_id.raw())?;
         self.columns[1].append_u32(row.residual)?;
         for (idx, spool) in self.columns.iter_mut().enumerate().skip(FIXED_COLUMN_COUNT) {
@@ -276,7 +287,8 @@ impl SegmentWriter {
         Ok(())
     }
 
-    /// Assemble `columns.arrow` from the spools and return the row count.
+    /// Assemble `columns.arrow` from the spools, then the band file from it, and return the row
+    /// count.
     ///
     /// The spools are mapped rather than read back, so the record batch's values buffers are the
     /// files themselves; the IPC writer copies them out once. They are unlinked on the way out of
@@ -285,6 +297,8 @@ impl SegmentWriter {
         let SegmentWriter {
             mut morton,
             cuts,
+            bands,
+            dir,
             columns_path,
             schema,
             columns,
@@ -307,6 +321,7 @@ impl SegmentWriter {
         // The mappings die with the batch, before `spools` unlinks the files they cover.
         drop(batch);
         drop(spools);
+        bands.finish(&dir)?;
         Ok(rows)
     }
 }

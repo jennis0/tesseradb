@@ -101,6 +101,12 @@ pub struct VerifyDeepReport {
     /// Leaf Morton cells confirmed to begin where `cuts.u32` says and to hold ascending
     /// identities ([`check_cut_index`]), across every segment of every view.
     pub cells: u64,
+    /// Band entries confirmed to be their rows, with their copies and the cell codes beside them
+    /// ([`check_bands`]), across every segment of every view.
+    pub band_entries: u64,
+    /// Band label copies confirmed to hold their label column's label at every entry
+    /// ([`check_band_labels`]).
+    pub band_label_copies: u64,
     /// Unique index entries confirmed to agree with their column's values in both directions,
     /// at most one live entity to a key ([`check_unique_indexes`]); 0 where no column is unique.
     pub unique_entries: u64,
@@ -137,6 +143,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         record_rows: 0,
         scoped_render_lanes: 0,
         cells: 0,
+        band_entries: 0,
+        band_label_copies: 0,
         unique_entries: 0,
         edited_pairs: 0,
         edited_rows: 0,
@@ -163,6 +171,8 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
         )?;
         check_scoped_render_lanes(&bundle.manifest, phash, partition, &mut report)?;
         check_cut_index(phash, partition, &mut report)?;
+        check_bands(phash, partition, &mut report)?;
+        check_band_labels(&prefix_dir, phash, partition, &mut report)?;
         check_unique_indexes(
             root,
             &prefix_dir,
@@ -646,6 +656,124 @@ fn check_cut_index(
             }
             report.cells += cell as u64;
         }
+    }
+    Ok(())
+}
+
+/// **Every segment's bands are its rows, and its cell codes its cells.** Each band holds exactly
+/// the rows whose identity has that many leading zero bits, in row order, with the row's own
+/// identity, code and residual and a copy of each render column's value; each cell code is the
+/// Morton code of the cell's first row ([`tessera_store::bands`]).
+fn check_bands(
+    phash: &str,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    let mut views: Vec<_> = partition.views.iter().collect();
+    views.sort_by(|a, b| a.0.cmp(b.0));
+    for (view, data) in views {
+        for segment in &data.segments {
+            let at = || {
+                format!(
+                    "partition {phash}, view '{view}', segment '{}'",
+                    segment.seg_id
+                )
+            };
+            let codes = segment.morton.u32();
+            let expected: Vec<u32> = segment
+                .cuts
+                .starts()
+                .iter()
+                .map(|&start| codes[start as usize])
+                .collect();
+            if segment.cell_codes.codes() != expected.as_slice() {
+                return Err(BuildError::Invalid(format!(
+                    "cell-codes.u32 does not hold each cell's Morton code ({})",
+                    at()
+                )));
+            }
+            segment
+                .bands
+                .check_against(codes, &segment.columns)
+                .map_err(|detail| BuildError::Invalid(format!("bands.bin: {detail} ({})", at())))?;
+            report.band_entries += segment.bands.entries() as u64;
+        }
+    }
+    Ok(())
+}
+
+/// **Every band label copy holds its level's label at each entry's row.** The copy is read against
+/// the label column the manifest names for the same view, layer, level and level version, and
+/// against the bands of the segment it names.
+fn check_band_labels(
+    prefix_dir: &Path,
+    phash: &str,
+    partition: &tessera_store::read::PartitionData,
+    report: &mut VerifyDeepReport,
+) -> Result<()> {
+    use tessera_store::manifest::DerivedForm;
+    use tessera_types::layer::ServingLayout;
+    let extents = &partition.manifest.derived_extents;
+    for copy in extents {
+        let DerivedForm::BandLabels { seg_id } = &copy.form else {
+            continue;
+        };
+        let at = || {
+            format!(
+                "partition {phash}, layer '{}' level {}, view {:?}, {}",
+                copy.layer, copy.level, copy.view, copy.path
+            )
+        };
+        let column = extents
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.form,
+                    DerivedForm::LevelLabels
+                        | DerivedForm::RowColumn {
+                            layout: ServingLayout::RowMajorLabel
+                        }
+                ) && e.layer == copy.layer
+                    && e.level == copy.level
+                    && e.view == copy.view
+                    && e.level_version == copy.level_version
+            })
+            .ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "a band label copy names no label column of its level ({})",
+                    at()
+                ))
+            })?;
+        let segment = copy
+            .view
+            .as_ref()
+            .and_then(|view| partition.views.get(view))
+            .and_then(|data| data.segments.iter().find(|s| &s.seg_id == seg_id))
+            .ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "a band label copy names segment '{seg_id}', which its view does not hold ({})",
+                    at()
+                ))
+            })?;
+        let invalid = |e: tessera_store::StoreError| BuildError::Invalid(format!("{e} ({})", at()));
+        let labels =
+            tessera_store::membership::LabelColumnPack::open(&prefix_dir.join(&column.path))
+                .map_err(invalid)?;
+        let copied =
+            tessera_store::bands::BandLabels::open(&prefix_dir.join(&copy.path), &segment.bands)
+                .map_err(invalid)?;
+        for (e, &row) in segment.bands.rows().iter().enumerate() {
+            if copied.label(e) != labels.label(row as usize) {
+                return Err(BuildError::Invalid(format!(
+                    "a band label copy holds {} at entry {e} and its label column holds {} at row \
+                     {row} ({})",
+                    copied.label(e),
+                    labels.label(row as usize),
+                    at()
+                )));
+            }
+        }
+        report.band_label_copies += 1;
     }
     Ok(())
 }
