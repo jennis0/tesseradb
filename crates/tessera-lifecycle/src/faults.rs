@@ -499,7 +499,7 @@ impl FaultSwitchboard {
 #[cfg(feature = "fault-injection")]
 fn consume(counter: &AtomicUsize) -> bool {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
             if n == 0 {
                 None
             } else {
