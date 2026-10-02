@@ -193,7 +193,7 @@ def build_argv(deployment: Path, out: Path, *args: str) -> list[str]:
 def cli_build(deployment: Path, out: Path, *args: str, capture_output: bool = False) -> None:
     """Build the bundle `deployment` describes into `out`, raising `CalledProcessError` if the
     build fails. The caller runs [`ensure_cli_built`] first."""
-    subprocess.run(
+    subprocess.run(  # nosemgrep: our own binary and fixture paths, as a list, with no shell
         build_argv(deployment, out, *args),
         cwd=REPO_ROOT,
         check=True,
