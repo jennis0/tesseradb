@@ -592,7 +592,7 @@ export class ArtifactChannel {
           // Centroid and box only, as the per-view request asks; the one hull drawn is fetched by id.
           computed: ['centroid', 'box']
         },
-        signal.signal
+        {signal: signal.signal}
       );
       if (this.promoting !== signal) return;
       this.promoting = null;
@@ -675,7 +675,7 @@ export class ArtifactChannel {
           ...(filterExpr ? {filters: filterExpr} : {}),
           ...(rows ? {artifactRows: rows} : {})
         },
-        signal.signal
+        {signal: signal.signal}
       );
     try {
       const token = await this.opts.token();

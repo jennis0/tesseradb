@@ -623,7 +623,12 @@ export class BandCache {
         x,
         y,
         contentKey,
-        counts: {visible: tile.visible, matched: tile.matched, highlighted: tile.highlighted, served: Number(tile.served)}
+        counts: {
+          visible: tile.visible,
+          matched: tile.matched,
+          highlighted: tile.highlighted,
+          served: Number(tile.served)
+        }
       });
     }
     this.changes++;

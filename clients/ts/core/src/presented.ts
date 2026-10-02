@@ -100,7 +100,8 @@ export type PresenterEvents = {
 /**
  * Throws where the picture differs from what was served: where exact tiles draw a different number
  * of marks than were served, or a stand-in carries counts, since a superset read as density
- * overstates. A tile counted before its points draws nothing, and carries counts. A dropped mark discloses nothing, but it is the sign of an assembly bug.
+ * overstates. A tile counted before its points draws nothing, and carries counts. A dropped mark
+ * discloses nothing, but it is the sign of an assembly bug.
  *
  * @internal
  */
@@ -251,7 +252,12 @@ export class Presenter {
       // repairs it.
       if (held === null) return;
       frame = this.phase('refresh', () =>
-        fold(held, this.replica.exactIn(held.want, held.depth), this.replica.version, this.replica.countedIn(held.want, held.depth))
+        fold(
+          held,
+          this.replica.exactIn(held.want, held.depth),
+          this.replica.version,
+          this.replica.countedIn(held.want, held.depth)
+        )
       );
     } else {
       const fetched = verdict.frame;

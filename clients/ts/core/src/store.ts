@@ -994,18 +994,22 @@ export function createStore(options: StoreOptions): Store {
             ...(layers.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             ...(layers.length === 0 || requestLevels(m.layers, layers, zoom) === undefined ? {} : {levels: requestLevels(m.layers, layers, zoom)})
           },
-          signal,
-          background,
-          onPart &&
-            ((part) => {
-              if (!admitted(part.identityKey, tok)) throw identityChanged();
-              return onPart(part);
-            }),
-          onCounts &&
-            ((counts) => {
-              if (!admitted(counts.identityKey, tok)) throw identityChanged();
-              onCounts(counts);
-            })
+          {
+            signal,
+            background,
+            onPart:
+              onPart &&
+              ((part) => {
+                if (!admitted(part.identityKey, tok)) throw identityChanged();
+                return onPart(part);
+              }),
+            onCounts:
+              onCounts &&
+              ((counts) => {
+                if (!admitted(counts.identityKey, tok)) throw identityChanged();
+                onCounts(counts);
+              })
+          }
         );
         if (!admitted(response.identityKey, tok)) throw identityChanged();
         return response;

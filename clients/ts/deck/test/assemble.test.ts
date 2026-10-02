@@ -259,6 +259,21 @@ describe('refreshExact', () => {
     assertAssemblyMatchesServed(out);
   });
 
+  it('carries the held tiles counted before their points, until their bands arrive', () => {
+    const counts = {visible: 30n, matched: 30n, highlighted: 30n, served: 4};
+    const held = assemble({...frame(2, [band(2, 0n, 3)]), counted: [{prefix: 1n, counts}, {prefix: 2n, counts}]});
+    const counted = (out: typeof held) => out.tiles.filter((t) => !t.exact && t.drawn === 0).map((t) => t.prefix);
+    expect(counted(held)).toEqual([1n, 2n]);
+
+    // No fresh band for either: both stay counted.
+    expect(counted(refreshExact(held, [band(2, 0n, 3)], 1))).toEqual([1n, 2n]);
+    // A band for tile 1 replaces its counted entry rather than adding to it.
+    const out = refreshExact(held, [band(2, 0n, 3), band(2, 1n, 4)], 2);
+    expect(counted(out)).toEqual([2n]);
+    expect(out.tiles.filter((t) => t.prefix === 1n)).toHaveLength(1);
+    assertAssemblyMatchesServed(out);
+  });
+
   it('drops an empty band rather than counting a zero-length slot', () => {
     const held = assemble(frame(2, [band(2, 0n, 2)]));
     const out = refreshExact(held, [band(2, 0n, 0, 0), band(2, 1n, 2)], 1);

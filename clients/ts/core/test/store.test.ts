@@ -1463,7 +1463,7 @@ describe('a store serves one viewer', () => {
     const scheduler = fakeScheduler();
     const whose = (token: string): Who => (token === 't1' ? 'a' : opts.renewal);
     const viewport = vi.fn(
-      async (token: string, req: FakeRequest, _signal?: AbortSignal, _background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => {
+      async (token: string, req: FakeRequest, {onPart}: {onPart?: (part: ViewportPart) => void | Promise<void>} = {}) => {
         const answer = answerOf(whose(token), req);
         if (opts.gate && token === 't2' && (req.k ?? 1) > 0 && onPart) {
           await onPart({result: answer.result, identityKey: answer.identityKey, contentKey: answer.contentKey});
@@ -1755,8 +1755,8 @@ describe('a store serves one viewer', () => {
     let gate: Promise<void> | null = null;
     const {store, viewport, clock, scheduler} = perViewer({metaOf: () => (who === 'a' ? metas.a : metas.b)});
     const answer = (req: FakeRequest) => ({...answerOf(who, req), identityKey: `${who}:${req.view}`});
-    type Fetch = (token: string, req: FakeRequest, signal?: AbortSignal, background?: boolean, onPart?: (part: ViewportPart) => void | Promise<void>) => Promise<ViewportResponse>;
-    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, _signal, _background, onPart) => {
+    type Fetch = (token: string, req: FakeRequest, opts?: {onPart?: (part: ViewportPart) => void | Promise<void>}) => Promise<ViewportResponse>;
+    (viewport as unknown as {mockImplementation(f: Fetch): void}).mockImplementation(async (_token, req, {onPart} = {}) => {
       // One request for s0 hands over a part only once the gate opens, and never answers.
       if (gate && req.view === 's0' && (req.k ?? 1) > 0 && onPart) {
         const held = gate;
@@ -2219,7 +2219,7 @@ describe('counts before points', () => {
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck'), {clock, scheduler});
     let land: () => void = () => {};
-    viewport.mockImplementation((async (_t: string, _req: FakeRequest, _s: unknown, _b: unknown, _p: unknown, onCounts?: (c: unknown) => void) => {
+    viewport.mockImplementation((async (_t: string, _req: FakeRequest, {onCounts}: {onCounts?: (c: unknown) => void} = {}) => {
       const answer = response('ck', identityKey);
       // A count-only request takes no sink and answers at once.
       if (!onCounts) return answer;

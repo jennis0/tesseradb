@@ -69,7 +69,7 @@ const client = () =>
   new TesseraClient({viewerUrl: 'http://viewer', sessionUrl: 'http://session', decoder: inlineDecoder()});
 
 const ask = (c: TesseraClient, onPart: (p: ViewportPart) => void, signal?: AbortSignal) =>
-  c.viewport('tok', {view: 's0', zoom: 4, k: 100}, signal, false, onPart);
+  c.viewport('tok', {view: 's0', zoom: 4, k: 100}, {signal, onPart});
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -147,7 +147,7 @@ describe('a streamed viewport response', () => {
         vi.stubGlobal('fetch', async () => feed.response);
         const counts: ViewportCounts[] = [];
         const req = {view: 's0', zoom: 4, k: 100, ...(underlay ? {underlayOffset: 2} : {})};
-        const asking = client().viewport('tok', req, undefined, false, onPart, (c) => counts.push(c));
+        const asking = client().viewport('tok', req, {onPart, onCounts: (c) => counts.push(c)});
 
         feed.push(body.subarray(0, afterTiles));
         await settle();
@@ -166,6 +166,67 @@ describe('a streamed viewport response', () => {
         expect(counts.length).toBe(1);
         expect(response.result.tiles).toEqual(whole.tiles);
       }
+    }
+  });
+
+  it('hands over the counts once however the chunks split the tiles frame, without a part sink', async () => {
+    const body = bodyBytes(undefined, true);
+    const whole = decodeViewport(body);
+    // 1 and 3 split the tiles frame's five-byte header across reads; 7 splits it mid-payload too.
+    for (const size of [1, 3, 7]) {
+      vi.stubGlobal('fetch', async () => chunked(body, size, {headers: HEADERS}));
+      const counts: ViewportCounts[] = [];
+      const response = await client().viewport('tok', {view: 's0', zoom: 4, k: 100, underlayOffset: 2}, {onCounts: (c) => counts.push(c)});
+      expect(counts.length).toBe(1);
+      expect(counts[0]!.tiles).toEqual(whole.tiles);
+      expect(counts[0]!.subCells).toEqual(whole.subCells);
+      expect([...response.result.ids]).toEqual([...whole.ids]);
+    }
+  });
+
+  it('hands over the counts where the transport cannot stream, with or without a part sink', async () => {
+    const body = bodyBytes();
+    const whole = decodeViewport(body);
+    for (const onPart of [(): void => {}, undefined]) {
+      vi.stubGlobal('fetch', async () => ({
+        ok: true,
+        body: null,
+        headers: new Headers(HEADERS),
+        arrayBuffer: async () => body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+      }));
+      const counts: ViewportCounts[] = [];
+      const response = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, {onPart, onCounts: (c) => counts.push(c)});
+      expect(counts.map((c) => c.tiles)).toEqual([whole.tiles]);
+      expect(response.result.tiles).toEqual(whole.tiles);
+    }
+  });
+
+  it('keeps the counts it handed over when the request is aborted before the points', async () => {
+    const body = bodyBytes();
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const afterTiles = 5 + view.getUint32(1, true);
+    for (const withParts of [true, false]) {
+      const controller = new AbortController();
+      const feed = manual(controller.signal, HEADERS);
+      vi.stubGlobal('fetch', async () => feed.response);
+      const counts: ViewportCounts[] = [];
+      const parts: ViewportPart[] = [];
+      const asking = client().viewport('tok', {view: 's0', zoom: 4, k: 100}, {
+        signal: controller.signal,
+        onPart: withParts ? (p) => void parts.push(p) : undefined,
+        onCounts: (c) => counts.push(c)
+      });
+      feed.push(body.subarray(0, afterTiles));
+      await settle();
+      expect(counts.length).toBe(1);
+
+      controller.abort();
+      feed.push(body.subarray(afterTiles));
+      await expect(asking).rejects.toThrow();
+      await settle();
+      // No point arrived and nothing more is handed over.
+      expect(counts.length).toBe(1);
+      expect(parts.length).toBe(0);
     }
   });
 
@@ -252,10 +313,10 @@ describe('a streamed viewport response', () => {
   it('reports the trailer\'s stage timings on the streamed and the whole-body paths, and none where it has none', async () => {
     for (const onPart of [(): void => {}, undefined]) {
       vi.stubGlobal('fetch', async () => chunked(bodyBytes('10,20,30'), 64, {headers: HEADERS}));
-      const staged = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, undefined, false, onPart);
+      const staged = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, {onPart});
       expect(staged.timings.stageNs).toEqual([10, 20, 30]);
       vi.stubGlobal('fetch', async () => chunked(bodyBytes(), 64, {headers: HEADERS}));
-      const plain = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, undefined, false, onPart);
+      const plain = await client().viewport('tok', {view: 's0', zoom: 4, k: 100}, {onPart});
       expect(plain.timings.stageNs).toBeNull();
     }
   });

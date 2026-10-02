@@ -178,7 +178,8 @@ type Asked = {view: string; depth: number; area: Box; tries: number};
  *
  * A depth whose cells over the area would pass `selection.maxAggregateCells` is never asked for.
  * Where the server refuses a request with `422` anyway, the counter asks one depth coarser, up to
- * three times; after any other refusal it draws nothing and asks again at the camera's next rest.
+ * three times. After any other refusal it drops the answer it held, so density is drawn from the
+ * frame's tile counts as below, and it asks again at the camera's next rest.
  *
  * Until an answer is held for the view, density is drawn from the counts the frame's tiles carry,
  * which land with each viewport response ahead of its points. They count the same items, at the

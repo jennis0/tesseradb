@@ -137,7 +137,7 @@ describe('DensityCounter', () => {
     let land: () => void = () => {};
     // One tile at the request's depth, holding 50 visible items of which 40 match, with its one
     // point held back until `land`.
-    const viewport = (async (_t: string, req: {zoom: number; k?: number}, _s: unknown, _b: unknown, _p: unknown, onCounts?: (c: unknown) => void) => {
+    const viewport = (async (_t: string, req: {zoom: number; k?: number}, {onCounts}: {onCounts?: (c: unknown) => void} = {}) => {
       const tiles = [{tile: mortonOfTile(0, 0, req.zoom), visible: 50n, matched: 40n, highlighted: 40n, served: 1n}];
       const answer = response(viewportResult({tiles, ids: BigUint64Array.from([1n]), codes: BigUint64Array.from([0n]), positions: Float64Array.from([1, 1]), world: Float32Array.from([0.1, 0.1])}));
       if (!onCounts) return answer;

@@ -91,9 +91,7 @@ function open(opts: {
     async (
       _token: string,
       req: FakeRequest,
-      _signal?: AbortSignal,
-      _background?: boolean,
-      onPart?: (part: ViewportPart) => void | Promise<void>
+      {onPart}: {onPart?: (part: ViewportPart) => void | Promise<void>} = {}
     ) => {
       const answer = {...responseCovering(req), region: regionOf(req.filters) ? {exact: true as const, depth: null} : null};
       if (opts.streaming === req.view && onPart) {

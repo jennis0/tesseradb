@@ -105,7 +105,7 @@ const CALLS: Record<string, (c: TesseraClient, signal?: AbortSignal) => Promise<
   suggest: (c, signal) => c.suggest('tok', 'archive', 'cs', {signal}),
   suggestCategoryValuesFiltered: (c, signal) =>
     c.suggest('tok', 'archive', 'cs', {view: 's0', filters: {archive: {eq: 'cs'}}, signal}),
-  viewport: (c, signal) => c.viewport('tok', {view: 's0', zoom: 0}, signal),
+  viewport: (c, signal) => c.viewport('tok', {view: 's0', zoom: 0}, {signal}),
   item: (c, signal) => c.item('tok', 7n, signal),
   artifact: (c, signal) => c.artifact('tok', 7n, {view: 's0', signal}),
   browse: (c, signal) => c.browse('tok', {view: 's0', layer: 'l'}, signal),

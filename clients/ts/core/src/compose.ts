@@ -41,9 +41,9 @@ export type ComposedTile = {
   drawn: number;
   /**
    * The server's counts for the tile, or `null` for a stand-in. A tile counted before its points
-   * carries them with `drawn` 0. `visible` is how many items this
-   * principal may see in the tile, `matched` how many of those match the filter, `highlighted` how
-   * many of those match the highlight, and `served` how many points were sent.
+   * carries them with `drawn` 0. `visible` is how many items this principal may see in the tile,
+   * `matched` how many of those match the filter, `highlighted` how many of those match the
+   * highlight, and `served` how many points were sent.
    */
   counts: {visible: bigint; matched: bigint; highlighted: bigint; served: number} | null;
 };
@@ -117,7 +117,9 @@ function exactTileSet(exact: readonly Band[], dim: number): Set<number> {
 function countedEntries(counted: readonly CountedTile[], answered: readonly Band[], depth: number): ComposedTile[] {
   if (counted.length === 0) return [];
   const drawn = new Set(answered.map((band) => band.prefix));
-  return counted.filter((c) => !drawn.has(c.prefix)).map((c) => ({prefix: c.prefix, depth, exact: false, drawn: 0, counts: c.counts}));
+  return counted
+    .filter((c) => !drawn.has(c.prefix))
+    .map((c) => ({prefix: c.prefix, depth, exact: false, drawn: 0, counts: c.counts}));
 }
 
 /** Derives a full composition from a replica frame. The expensive path; the caller rate-limits it. @internal */
@@ -241,7 +243,11 @@ export function compose(frame: ReplicaFrame): Composition {
  * @internal
  */
 export function fold(held: Composition, exact: Band[], version: number, counted?: readonly CountedTile[]): Composition {
-  const carried = counted ?? held.tiles.filter((t) => !t.exact && t.drawn === 0 && t.counts !== null).map((t) => ({prefix: t.prefix, counts: t.counts!}));
+  const carried =
+    counted ??
+    held.tiles
+      .filter((t) => !t.exact && t.drawn === 0 && t.counts !== null)
+      .map((t) => ({prefix: t.prefix, counts: t.counts!}));
   const tiles: ComposedTile[] = [];
   const live: Band[] = [];
   const truncated: Band[] = [];

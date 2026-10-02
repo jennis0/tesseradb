@@ -16,7 +16,7 @@ import {refused, rejectsAsRefused, result} from './support.js';
 /** Answers every whole response with an empty result; these tests read the request, not the body. */
 const empty: Decoder = {
   decode: async () => result(),
-  decodeHead: () => Promise.reject(new Error('a response without a part sink decodes whole')),
+  decodeArtifacts: () => Promise.reject(new Error('a response without a part sink decodes whole')),
   decodePoints: () => Promise.reject(new Error('a response without a part sink decodes whole')),
   lastWorkerMs: null,
   close: () => {}
