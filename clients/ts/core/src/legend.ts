@@ -139,10 +139,11 @@ export class Legend {
   private scanMissing(frame: Composition, name: string): void {
     if (this.state.missing[name]) return;
     for (const band of frame.exact) {
-      if (this.scanned.has(band)) continue;
-      this.scanned.add(band);
       const values = band.scalars[name];
-      if (band.ids.length > 0 && (!values || lacksValues(values))) {
+      // A band fetched before the column was asked for is looked at once its replacement lands.
+      if (!values || this.scanned.has(band)) continue;
+      this.scanned.add(band);
+      if (band.ids.length > 0 && lacksValues(values)) {
         this.set({...this.state, missing: {...this.state.missing, [name]: true}});
         return;
       }

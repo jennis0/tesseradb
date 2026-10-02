@@ -99,8 +99,9 @@ export type DeclaredScalar = {
   /** Present for a category column; `null` for any other. */
   category: CategoryDescriptor | null;
   /**
-   * Whether the column arrives with each point in a viewport response. Only a `render` column
-   * can colour or size points. A point with no value arrives as null, except in a category, where
+   * Whether the column can arrive with each point in a viewport response: every point carries it
+   * under `pointRows: 'full'`, and under a list that names it. Only a `render` column can colour or
+   * size points. A point with no value arrives as null, except in a category, where
    * it arrives as code `0`. A column with `render: false` may still be filterable (see
    * {@link Meta.filterOperands}) and is returned by {@link TesseraClient.item}.
    */
@@ -147,8 +148,8 @@ export type ScopedScalar = {
   /** For a `text` family, the `<name>/<version>` of its analyser; `null` for every other type. */
   analyser: string | null;
   /**
-   * Whether the column arrives with each point in a viewport response under one of {@link views}.
-   * Under any other view it does not arrive.
+   * Whether the column can arrive with each point in a viewport response under one of
+   * {@link views}, as a declared `render` column does. Under any other view it does not arrive.
    */
   render: boolean;
   /** Whether a filter can be answered from the family's columns. */
@@ -713,13 +714,17 @@ export type ViewportRequest = {
    */
   highlight?: FilterExpr | null;
   /**
-   * Which columns each served point carries. `'full'`, the default, is every column.
-   * `'highlight'` is the `tessera_id` and the highlight bit only, for a client that changed only
-   * its highlight and already holds the points. The points served, and each tile's `served`
-   * count, are the same under either value. Once {@link ViewportResponse.stale} is `true`, ask
-   * again with `'full'`. Without a `highlight` the request is answered as `'full'`.
+   * Which columns each served point carries. `'full'`, the default, is every render column. A list
+   * names the render columns to carry: each point is its `tessera_id`, its position and those
+   * columns, with the highlight bit and the membership columns as under `'full'`, and the server
+   * reads no other render column. `[]` is the position alone. A name that is not a render column
+   * of the view is refused with `422`. `'highlight'` is the `tessera_id` and the highlight bit
+   * only, for a client that changed only its highlight and already holds the points; once
+   * {@link ViewportResponse.stale} is `true`, ask again with the columns. Without a `highlight`,
+   * `'highlight'` is answered as `'full'`. The points served, and each tile's `served` count, are
+   * the same under every value.
    */
-  pointRows?: 'full' | 'highlight';
+  pointRows?: 'full' | 'highlight' | readonly string[];
   /**
    * Which annotation layers to serve artifacts for. Omitted or `[]` is none; `'all'` is every
    * layer this principal reaches; an array is the named layers this principal reaches. A name it
@@ -950,7 +955,7 @@ export type ViewportResult = {
    * divided by 128. This is the space the renderer draws in.
    */
   world: Float32Array;
-  /** The `render` columns, keyed by column name. */
+  /** The `render` columns the request's `pointRows` named, keyed by column name. */
   scalars: Record<string, ScalarColumn>;
   /**
    * One column per layer that served artifacts, keyed by layer name. For point `i`, `index[i]` is

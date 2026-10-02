@@ -119,6 +119,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
     setSizeBy: spy('setSizeBy'),
+    setPointColumns: spy('setPointColumns'),
     setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
     setCurrentView: spy('setCurrentView'),

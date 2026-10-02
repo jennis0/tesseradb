@@ -260,6 +260,11 @@ export class Replica {
     return this.cache.countedIn(want, depth);
   }
 
+  /** See {@link BandCache.heldBands}. */
+  heldBands(): Band[] {
+    return this.cache.heldBands();
+  }
+
   /** See {@link BandCache.retract}; the caller schedules the refetch. */
   retract(bands: readonly Band[]): void {
     this.cache.retract(bands);
