@@ -1,5 +1,5 @@
 import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
-import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type CountField, type DepthChoice, type Thinning} from './budget.js';
+import {MIN_DEPTH, chooseDepth, marksIn, tileRectOfBbox, type CountField, type DepthChoice, type Thinning} from './budget.js';
 import {rectArea, type TileRect} from './rects.js';
 
 /**
@@ -90,17 +90,21 @@ export type Plan = {
 export const MARGIN = 1.3;
 
 /**
- * How far beyond the visible box the drawn buffer reaches.
+ * How far beyond the visible box the drawn buffer reaches, at most.
  *
- * Wider than {@link MARGIN}: fetching is bounded by the budget, drawing only by what is held.
- * Leaving the buffer costs a rebuild and an upload of every mark; staying inside costs nothing,
- * since deck.gl re-projects what is there. An aggressive pan moves a third to a half of a viewport,
- * and at 2.6 the buffer reaches 0.8 viewport widths beyond the screen. The cost is `RENDER_MARGIN²`
- * more marks per upload.
+ * Wider than {@link MARGIN}. Leaving the buffer costs a rebuild and an upload of every mark;
+ * staying inside costs nothing, since deck.gl re-projects what is there. An aggressive pan moves a
+ * third to a half of a viewport, and at 2.6 the buffer reaches 0.8 viewport widths beyond the
+ * screen. The buffer is drawn from what is held, so it costs up to `RENDER_MARGIN²` the view's
+ * marks; the budget bounds what is drawn, so the buffer narrows through {@link RENDER_MARGINS}
+ * where its predicted marks would pass it.
  *
  * @internal
  */
 export const RENDER_MARGIN = 2.6;
+
+/** The drawn buffer's reaches, widest first, the first whose predicted marks fit the budget being drawn. @internal */
+export const RENDER_MARGINS = [RENDER_MARGIN, 2, 1.6, MARGIN, 1] as const;
 /** How far the anticipatory ring reaches when the replica is nearly full; see {@link ringMargin}. @internal */
 export const RING_MARGIN = 2.2;
 
@@ -222,9 +226,23 @@ export function plan(inputs: PlannerInputs): Plan {
     choice,
     visible: visible_,
     foreground,
-    render: tileRectOfBbox(worldBbox(viewport, RENDER_MARGIN), choice.depth),
+    render: tileRectOfBbox(worldBbox(viewport, renderMargin(inputs, choice)), choice.depth),
     background
   };
+}
+
+/**
+ * How far the drawn buffer reaches at the chosen depth: the widest of {@link RENDER_MARGINS} whose
+ * box would draw at most the budget. A box the counts cover is counted; past them the view's own
+ * density is assumed. Stand-ins drawn while the depth arrives are no denser than it, so they stay
+ * within the same bound.
+ */
+function renderMargin(inputs: PlannerInputs, choice: DepthChoice): number {
+  const perTile = choice.tiles > 0 ? choice.predictedMarks / choice.tiles : inputs.mTarget;
+  for (const margin of RENDER_MARGINS) {
+    if (margin <= 1 || marksIn(inputs, worldBbox(inputs.viewport, margin), choice.depth, perTile) <= inputs.budget) return margin;
+  }
+  return 1;
 }
 
 function ringShift(viewport: Viewport, velocity: [number, number]): [number, number] {

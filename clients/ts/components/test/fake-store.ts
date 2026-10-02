@@ -86,6 +86,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
   const store: FakeStore = {
     projections,
     calls,
+    budget: 500_000,
     get: (name) => projections[name],
     set(name, value) {
       projections[name] = value;

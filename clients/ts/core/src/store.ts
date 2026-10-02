@@ -645,6 +645,8 @@ export interface Store {
    * current camera. A value that is not a finite number above zero is ignored.
    */
   setBudget(budget: number): void;
+  /** The marks the store aims to draw: `budget` as created, else 500000, until `setBudget` changes it. */
+  readonly budget: number;
   /**
    * Make `id` the view the store answers from. An id `meta.views` does not list is ignored, as is
    * the current id. Called before `/v1/meta` arrives, it names the view to open with, in place of
@@ -2064,6 +2066,9 @@ export function createStore(options: StoreOptions): Store {
     setSizeBy,
     setPalette: (kind) => colours.setPalette(kind),
     setBudget,
+    get budget() {
+      return budget;
+    },
     setCurrentView,
     frame: frameOrNull,
     pick,

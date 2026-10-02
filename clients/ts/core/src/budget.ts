@@ -280,6 +280,18 @@ function sumCells(cells: readonly CountCell[], delta: number, k: number, s: Serv
 }
 
 /**
+ * The marks a request at `depth` over `bbox` would serve: counted where the counts cover the box
+ * (see {@link countedMarks}), else `perTile` marks a tile, the density the caller knows nearby.
+ *
+ * @internal
+ */
+export function marksIn(inputs: Pick<BudgetInputs, 'counts' | 'k' | 'thinning'>, bbox: [number, number, number, number], depth: number, perTile: number): number {
+  const {counts, k, thinning} = inputs;
+  const counted = counts && k !== undefined && k > 0 ? countedMarks(counts, bbox, depth, k, thinning) : null;
+  return counted ? counted.marks : tilesInBbox(bbox, depth) * perTile;
+}
+
+/**
  * The depth to request so the view draws about `budget` marks.
  *
  * Walks up from {@link MIN_DEPTH} and stops at the first depth that misses the budget, saturates
