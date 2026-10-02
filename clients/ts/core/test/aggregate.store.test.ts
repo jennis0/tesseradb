@@ -95,6 +95,22 @@ describe('the aggregates projection', () => {
     }
   });
 
+  it('sends each joined aggregate alone where the joined request is refused, so one bad grouping refuses only its own', async () => {
+    const {store, pending} = await storeWith();
+    store.setAggregate('good', {groupings: [{}]});
+    store.setAggregate('bad', {groupings: [{by: {field: 'archive', top: 5}}]});
+    await flush();
+    expect(pending).toHaveLength(1);
+    pending[0]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    await flush();
+    expect(pending.slice(1).map((p) => p.req.groupings)).toEqual([[{}], [{by: {field: 'archive', top: 5}}]]);
+    pending[1]!.release(7);
+    pending[2]!.fail(new TesseraError(422, 'contract', 'no such field'));
+    await flush();
+    expect(store.get('aggregates').get('good')).toMatchObject({status: 'shown'});
+    expect(store.get('aggregates').get('bad')).toMatchObject({status: 'refused', refusal: {code: 'contract'}});
+  });
+
   it('joins the highlight to the filters by all_of under highlighted, and sends the filters alone without a highlight', async () => {
     const {store, pending} = await storeWith();
     store.setAggregate('lit', {groupings: [{}], highlighted: true});

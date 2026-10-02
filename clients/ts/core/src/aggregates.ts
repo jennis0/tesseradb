@@ -1,4 +1,6 @@
 import {retryDelayMs, type Clock, type RetryOptions} from './driver.js';
+import {PartialAggregate} from './aggregate.js';
+import {TesseraError} from './client.js';
 import {refusalOf, type Refusal} from './presented.js';
 import type {AggregateRequest, AggregateResult, FilterExpr, Grouping} from './types.js';
 
@@ -177,8 +179,14 @@ export class Aggregates {
   }
 }
 
-/** One caller's share of a joined request. */
-type Part = {groupings: Grouping[]; signal: AbortSignal; resolve: (result: AggregateResult) => void; reject: (error: unknown) => void};
+/** One caller's share of a joined request; `dropped` is set once the request is sent. */
+type Part = {
+  groupings: Grouping[];
+  signal: AbortSignal;
+  resolve: (result: AggregateResult) => void;
+  reject: (error: unknown) => void;
+  dropped: (() => void) | null;
+};
 
 /**
  * How many microtasks a request waits for others to join it. Elements that answer one store change
@@ -192,8 +200,10 @@ const JOIN_MICROTASKS = 64;
  * Sends aggregate requests, joining those that differ only in their groupings into one request
  * when they are asked for together. Elements that answer one store change each register their own
  * aggregate, and over the same filters they are one read of the same set. Each caller gets its own
- * tables back, numbered from 0. The joined request is aborted once every caller's signal has
- * aborted, and one whose groupings would pass `maxGroupings` is sent alone.
+ * tables back, numbered from 0. A caller whose signal aborts is refused at once, and the joined
+ * request is aborted once every caller's signal has. One whose groupings would pass `maxGroupings`
+ * is sent alone. Where the joined request is refused as a contract error or cut short, each part is
+ * sent again alone, so one caller's grouping does not refuse the others.
  *
  * @internal
  */
@@ -203,31 +213,33 @@ export function joinedAggregate(
 ): (token: string, req: AggregateRequest, signal: AbortSignal) => Promise<AggregateResult> {
   const waiting = new Map<string, {token: string; req: Omit<AggregateRequest, 'groupings'>; parts: Part[]}>();
 
-  const flush = (key: string) => {
+  // A send that throws rather than rejecting is that caller's refusal all the same.
+  const sent = (token: string, req: AggregateRequest, signal: AbortSignal): Promise<AggregateResult> => {
+    try {
+      return send(token, req, signal);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  };
+
+  const alone = (token: string, req: Omit<AggregateRequest, 'groupings'>, part: Part): void => {
+    if (!part.signal.aborted) sent(token, {...req, groupings: part.groupings}, part.signal).then(part.resolve, part.reject);
+  };
+
+  const flush = (key: string): void => {
     const batch = waiting.get(key)!;
     waiting.delete(key);
     const live = batch.parts.filter((p) => !p.signal.aborted);
     if (live.length === 0) return;
+    if (live.length === 1) return alone(batch.token, batch.req, live[0]!);
     const controller = new AbortController();
     let open = live.length;
     for (const part of live) {
-      part.signal.addEventListener(
-        'abort',
-        () => {
-          part.reject(part.signal.reason);
-          if (--open === 0) controller.abort();
-        },
-        {once: true}
-      );
+      part.dropped = () => {
+        if (--open === 0) controller.abort();
+      };
     }
-    // A send that throws rather than rejecting is that caller's refusal all the same.
-    let sent: Promise<AggregateResult>;
-    try {
-      sent = send(batch.token, {...batch.req, groupings: live.flatMap((p) => p.groupings)}, controller.signal);
-    } catch (error) {
-      sent = Promise.reject(error);
-    }
-    sent.then(
+    sent(batch.token, {...batch.req, groupings: live.flatMap((p) => p.groupings)}, controller.signal).then(
       (result) => {
         let from = 0;
         for (const part of live) {
@@ -238,21 +250,31 @@ export function joinedAggregate(
         }
       },
       (error: unknown) => {
-        for (const part of live) part.reject(error);
+        const separately = error instanceof PartialAggregate || (error instanceof TesseraError && error.status === 422);
+        for (const part of live) {
+          if (separately) alone(batch.token, batch.req, part);
+          else part.reject(error);
+        }
       }
     );
   };
 
   return (token, req, signal) =>
     new Promise<AggregateResult>((resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason);
       const {groupings, ...rest} = req;
+      const part: Part = {groupings, signal, resolve, reject, dropped: null};
+      signal.addEventListener(
+        'abort',
+        () => {
+          reject(signal.reason);
+          part.dropped?.();
+        },
+        {once: true}
+      );
       const key = JSON.stringify([token, rest], (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
       const batch = waiting.get(key);
-      if (batch && batch.parts.reduce((n, p) => n + p.groupings.length, 0) + groupings.length > maxGroupings()) {
-        send(token, req, signal).then(resolve, reject);
-        return;
-      }
-      const part = {groupings, signal, resolve, reject};
+      if (batch && batch.parts.reduce((n, p) => n + p.groupings.length, 0) + groupings.length > maxGroupings()) return alone(token, rest, part);
       if (batch) {
         batch.parts.push(part);
         return;
