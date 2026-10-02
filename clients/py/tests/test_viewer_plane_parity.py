@@ -12,13 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from tesseradb import Selection, Viewer
+import tesseradb
+from tesseradb import Control, Selection, Viewer
 
 CONTRACT = Path(__file__).resolve().parents[3] / "docs" / "openapi" / "tessera.yaml"
 
 
-def viewer_operations(contract: Path) -> set[str]:
-    """Every `operationId` the contract tags `viewer`."""
+def tagged_operations(contract: Path, tag: str) -> set[str]:
+    """Every `operationId` the contract tags `tag`."""
     operations = set()
     tagged = False
     for line in contract.read_text(encoding="utf-8").splitlines():
@@ -26,10 +27,15 @@ def viewer_operations(contract: Path) -> set[str]:
             tagged = False
         stripped = line.strip()
         if stripped.startswith("tags:"):
-            tagged = "viewer" in stripped
+            tagged = re.search(rf"(^|[\[ \"]){re.escape(tag)}([\]\",]|$)", stripped[5:]) is not None
         elif stripped.startswith("operationId:") and tagged:
             operations.add(stripped.split(":", 1)[1].strip())
     return operations
+
+
+def viewer_operations(contract: Path) -> set[str]:
+    """Every `operationId` the contract tags `viewer`."""
+    return tagged_operations(contract, "viewer")
 
 
 #: The operations Python reaches under another name: a selection's count and sample are the
@@ -38,6 +44,8 @@ REACHED_AS = {
     "viewport": [(Selection, "count"), (Selection, "sample")],
     "suggestCategoryValues": [(Viewer, "categories")],
     "suggestCategoryValuesFiltered": [(Viewer, "categories")],
+    "login": [(tesseradb, "login")],
+    "logout": [(tesseradb, "logout")],
 }
 
 
@@ -66,5 +74,26 @@ def test_every_viewer_plane_operation_is_reached_from_python():
         if not callable(getattr(owner, name, None))
     )
     assert not missing, "the viewer plane serves these and Python has no method for them: " + (
+        ", ".join(missing)
+    )
+
+
+def snake(operation: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", operation).lower()
+
+
+def test_every_session_plane_and_catalogue_operation_is_reached_from_python():
+    """Minting and revoking a session for another principal are the package's own functions, and
+    each catalogue route is the snake-case `Control` method of its `operationId`."""
+    if not CONTRACT.exists():
+        pytest.skip(f"{CONTRACT} is not in this checkout")
+    session = tagged_operations(CONTRACT, "session")
+    identity = tagged_operations(CONTRACT, "control: identity")
+    assert session and identity
+    missing = sorted(
+        [op for op in session if not callable(getattr(tesseradb, op, None))]
+        + [op for op in identity if not callable(getattr(Control, snake(op), None))]
+    )
+    assert not missing, "the contract serves these and Python has no function for them: " + (
         ", ".join(missing)
     )

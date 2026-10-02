@@ -10,8 +10,8 @@ pub use dict::{
     MAX_KEYS_PER_ITEM, PUBLIC_LABEL, PUBLIC_TERM,
 };
 pub use fragment::{
-    build_fragment, build_fragment_with_deltas, delta_entities, residual_fragment, FragmentCache,
-    FragmentCacheError, FrozenFragment,
+    build_fragment, build_fragment_with_deltas, build_grant_with_deltas, delta_entities,
+    residual_fragment, FragmentCache, FragmentCacheError, FrozenFragment, Grant,
 };
 pub use label::{index_keys, Label, LabelError, LabelIndex, Labels, Shape, DEFAULT_MAX_NODES};
 pub use postings::{

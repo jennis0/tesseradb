@@ -34,7 +34,7 @@ use tessera_engine::{
     Engine, IngestRequest, ItemsRequest, PageEnd, RecordsHead, RecordsLimits, RecordsSink,
     Session, SinkResult,
 };
-use tessera_lifecycle::IngestRow;
+use tessera_lifecycle::{ChangeOp, IngestRow};
 use tessera_types::TesseraId;
 use tessera_build::config::{AccessInput, AccessSource};
 use tessera_build::{build, BuildArgs};
@@ -440,8 +440,8 @@ impl RecordsSink for Pages {
     }
 }
 
-/// The `labels` column a bulk read of `s0` serves `session` for the item `id`.
-fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<String> {
+/// Every row a bulk read of `s0` serves `session`: its `tessera_id` and its `labels` column.
+fn rows(engine: &Engine, session: &Session) -> Vec<(TesseraId, Vec<String>)> {
     let system = ["labels".to_string()];
     let mut pages = Pages::default();
     engine
@@ -469,19 +469,29 @@ fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<Strin
             &mut pages,
         )
         .expect("the read is served");
+    let mut rows = Vec::new();
     for batch in &pages.0 {
         let ids = batch.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
         let labels = batch
             .column_by_name("tessera:labels")
             .and_then(|c| c.as_any().downcast_ref::<ListArray>())
             .expect("a labels column");
-        if let Some(row) = ids.values().iter().position(|&t| t == id.raw()) {
+        for (row, &id) in ids.values().iter().enumerate() {
             let row = labels.value(row);
             let row = row.as_any().downcast_ref::<StringArray>().unwrap();
-            return row.iter().map(|l| l.unwrap().to_string()).collect();
+            let labels = row.iter().map(|l| l.unwrap().to_string()).collect();
+            rows.push((TesseraId::new(id), labels));
         }
     }
-    panic!("the read serves no row for {id:?}");
+    rows
+}
+
+/// The `labels` column a bulk read of `s0` serves `session` for the item `id`.
+fn labels_column(engine: &Engine, session: &Session, id: TesseraId) -> Vec<String> {
+    rows(engine, session)
+        .into_iter()
+        .find_map(|(served, labels)| (served == id).then_some(labels))
+        .unwrap_or_else(|| panic!("the read serves no row for {id:?}"))
 }
 
 /// One batch of rows creating items at `positions`, each with its labels.
@@ -605,4 +615,95 @@ fn an_ingested_conjunction_is_served_as_a_built_one_and_survives_a_restart() {
     drop(engine);
     let reopened = open_engine(&bundle, &dir.path().join("cache"), &dir.path().join("wal.log"));
     check(&reopened);
+}
+
+/// A bundle of [`expressions_of`]'s points, served by an engine that publishes flushes.
+fn expressions_engine() -> (tempfile::TempDir, Engine) {
+    let dir = tempfile::tempdir().unwrap();
+    write_points(&dir.path().join("points.parquet"), expressions_of);
+    let bundle = dir.path().join("bundle");
+    build(&args(&dir.path().join("points.parquet"), &bundle, None)).expect("it builds");
+    let engine =
+        open_engine_publishing(&bundle, &dir.path().join("cache"), &dir.path().join("wal.log"));
+    (dir, engine)
+}
+
+/// **A `read-all` session sees an item placed after it authorised**, under a term and under a
+/// label holding a conjunction that no item carried before, once a flush publishes it, and it is
+/// never reported behind. Its item card and `labels` column name what a session holding every
+/// term is shown.
+#[test]
+fn a_read_all_session_sees_items_under_keys_promoted_after_it_authorised() {
+    let (_dir, engine) = expressions_engine();
+    let all = engine.authorise_all().unwrap();
+    assert_eq!(rows(&engine, &all).len(), N as usize, "every built item");
+
+    let ids = create(
+        &engine,
+        "promoted",
+        &[
+            (&["ir:brand-new"], (10.0, 10.0)),
+            (&["ir:fresh&ir:other"], (20.0, 20.0)),
+            (&["eu&(ir:legal|ir:new)", "ir:new|ir:secret"], (30.0, 30.0)),
+        ],
+    );
+    engine.request_flush();
+    wait_until("the flush to publish", std::time::Duration::from_secs(30), || {
+        engine.write_executor_stats().flushes >= 1
+    });
+    wait_until("the session to see the new items", std::time::Duration::from_secs(30), || {
+        rows(&engine, &all).len() == N as usize + ids.len()
+    });
+    assert!(!all.is_stale(&engine.generation()));
+
+    let every = engine
+        .authorise(&credential(&[
+            "eu", "ir:analyst", "ir:audit", "ir:brand-new", "ir:fresh", "ir:legal", "ir:new",
+            "ir:other", "ir:secret",
+        ]))
+        .unwrap();
+    for &id in &ids {
+        let card = engine.item(&all, id).unwrap().expect("read-all sees it").labels;
+        assert_eq!(card, engine.item(&every, id).unwrap().unwrap().labels);
+        assert_eq!(labels_column(&engine, &all, id), card);
+    }
+    let card = |id| engine.item(&all, id).unwrap().unwrap().labels;
+    assert_eq!(card(ids[0]), ["ir:brand-new"]);
+    assert_eq!(card(ids[1]), ["ir:fresh&ir:other"]);
+    assert_eq!(card(ids[2]), ["eu&ir:legal", "ir:new", "ir:secret"]);
+}
+
+/// **A deletion and a suppression hide an item from a `read-all` session** from its next request,
+/// as from any session, and from a `read-all` session authorised after them.
+#[test]
+fn deletions_and_suppressions_hide_items_from_a_read_all_session() {
+    let (_dir, engine) = expressions_engine();
+    let all = engine.authorise_all().unwrap();
+    let served = rows(&engine, &all);
+    assert_eq!(served.len(), N as usize);
+    let (deleted, suppressed) = (served[0].0, served[1].0);
+    for (id, op) in [(deleted, ChangeOp::Delete), (suppressed, ChangeOp::Suppress)] {
+        let entity = engine.resolve_tessera_ids(&[id]).unwrap()[0].expect("a built item");
+        engine.accept_change(entity, op).unwrap();
+    }
+
+    for session in [&all, &engine.authorise_all().unwrap()] {
+        let left: Vec<TesseraId> = rows(&engine, session).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(left.len(), N as usize - 2);
+        assert!(!left.contains(&deleted) && !left.contains(&suppressed));
+        assert!(engine.item(session, deleted).unwrap().is_none());
+        assert!(engine.item(session, suppressed).unwrap().is_none());
+    }
+}
+
+/// **Every `read-all` session at one watermark is served one fragment**, built once.
+#[test]
+fn read_all_sessions_share_one_fragment() {
+    let (_dir, engine) = expressions_engine();
+    let _first = engine.authorise_all().unwrap();
+    let before = engine.generation_status();
+    let _second = engine.authorise_all().unwrap();
+    let after = engine.generation_status();
+    assert_eq!(after.fragment_cache_rebuilds, before.fragment_cache_rebuilds);
+    assert_eq!(after.fragment_cache.entries, before.fragment_cache.entries);
 }

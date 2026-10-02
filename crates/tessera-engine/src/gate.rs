@@ -76,8 +76,8 @@ impl VisibleViews {
     }
 }
 
-/// Evaluate every view of every group against the terms a principal's credential holds
-/// (`views.md` §6).
+/// Evaluate every view of every group against the terms a principal's credential holds, which
+/// `held` answers for one term at a time (`views.md` §6).
 ///
 /// **Every view is evaluated whatever the outcome**, which is what makes the answer a set rather
 /// than a decision procedure: the cost is paid once, at authorise, in exchange for a request path
@@ -85,16 +85,16 @@ impl VisibleViews {
 /// admits nobody.
 pub(crate) fn resolve<'m>(
     manifest: &'m Manifest,
-    credentials: &FxHashSet<Vec<u8>>,
+    held: &dyn Fn(&str) -> bool,
 ) -> VisibleViews {
     // One evaluation per **distinct gate**, not per view: a group of forty quarters under one
     // gate asks once. The memo is scoped to this resolution, so nothing survives into the session.
     let mut memo: HashMap<&'m [String], bool> = HashMap::new();
     let mut passes = |labels: Option<&'m [String]>| -> bool {
         let Some(labels) = labels else { return true };
-        *memo.entry(labels).or_insert_with(|| {
-            tessera_types::label::admits(labels, &|term| credentials.contains(term.as_bytes()))
-        })
+        *memo
+            .entry(labels)
+            .or_insert_with(|| tessera_types::label::admits(labels, &held))
     };
 
     let mut groups: FxHashSet<String> = FxHashSet::default();

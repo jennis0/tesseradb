@@ -37,7 +37,7 @@ function recording(...replies: Reply[]): Sent[] {
   return sent;
 }
 
-const control = new Control({controlUrl: 'http://control/', operatorCredential: 'op-cred'});
+const control = new Control({controlUrl: 'http://control/', credential: 'op-cred'});
 const rows = new Uint8Array([1, 2, 3, 4]);
 
 afterEach(() => {
@@ -149,7 +149,7 @@ describe('each route', () => {
       sent.push(headersOf(init));
       return new Response('{}', {status: 200});
     };
-    const c = new Control({controlUrl: 'http://control', operatorCredential: 'op-cred', fetch: hosted as typeof fetch, headers: {'X-Host': 'script', Authorization: 'Bearer host'}});
+    const c = new Control({controlUrl: 'http://control', credential: 'op-cred', fetch: hosted as typeof fetch, headers: {'X-Host': 'script', Authorization: 'Bearer host'}});
     const calls = [...cases.map((k) => k.call), ...writes.map((w) => (c: Control) => w.call(c, {})), (c: Control) => c.grow('l', rows)];
     for (const call of calls) {
       sent.length = 0;

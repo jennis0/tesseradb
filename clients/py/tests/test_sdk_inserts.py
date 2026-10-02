@@ -396,8 +396,8 @@ def test_a_committed_database_reopens_and_takes_the_next_commit(tmp_path):
 def test_a_padded_label_serves_trimmed_and_a_conjunction_needs_both_terms_at_each_commit(served):
     """The server reads the labels the SDK sends: surrounding spaces are trimmed, an empty label is
     no label, and a label holding a conjunction is satisfied by a reader holding both of its terms,
-    on the build and on a later commit alike. The default reader holds every term the labels
-    name."""
+    on the build and on a later commit alike. The operator's reader, which holds `read-all`, sees
+    every item."""
 
     def labelled(first: int) -> pa.Table:
         ids = [f"p{i}" for i in range(first, first + 3)]
@@ -427,5 +427,4 @@ def test_a_padded_label_serves_trimmed_and_a_conjunction_needs_both_terms_at_eac
     report = db.commit()
     assert report.ok, report
     assert counts() == {"red": 2, "both": 4, "sealed": 2}
-    assert {"red", "blue", "sealed"} <= set(db.terms)
-    assert not {" red ", "", "  ", "red&blue"} & set(db.terms)
+    assert db.viewer().view("map").count() == 6

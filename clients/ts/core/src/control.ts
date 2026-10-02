@@ -404,6 +404,196 @@ export type MembershipsGrown = PublicationAck & {
 };
 
 /**
+ * What a principal may do: authorise a session for itself and read with it; write; authorise a
+ * session for another principal; and change the catalogue.
+ *
+ * @category Control plane
+ */
+export type Permission = 'read' | 'write' | 'authorise-as' | 'admin' | 'read-all' | 'write-all';
+
+/**
+ * The answer of every catalogue change.
+ *
+ * @category Control plane
+ */
+export type CatalogueChange = {
+  /** How many live sessions the change ended. */
+  sessions_ended: number;
+};
+
+/**
+ * A local principal, as the catalogue holds it. No password or key secret is ever answered.
+ *
+ * @category Control plane
+ */
+export type PrincipalRecord = {
+  /** The principal's name, which every other verb takes. */
+  name: string;
+  /** A person or a service. */
+  kind: 'person' | 'service';
+  /** Whether its credentials are refused. */
+  disabled: boolean;
+  /** Whether a password is set. */
+  has_password: boolean;
+  /** The terms granted to the principal directly. */
+  terms: string[];
+  /** The permissions granted to the principal directly. */
+  permissions: Permission[];
+  /** The groups it is a member of. */
+  groups: string[];
+};
+
+/**
+ * What `changePrincipal` changes.
+ *
+ * @category Control plane
+ */
+export type PrincipalChange = {
+  /** `true` ends the principal's sessions and refuses each of its credentials. */
+  disabled: boolean;
+};
+
+/**
+ * What `createKey` sends.
+ *
+ * @category Control plane
+ */
+export type KeyCreate = {
+  /** When the key, and every session authorised with it, ends, in seconds since the Unix epoch. Absent, it does not expire. */
+  expires_at?: number;
+  /** The key's own permissions, narrower than its principal's. Absent, it holds its principal's. */
+  permissions?: Permission[];
+};
+
+/**
+ * An API key as `createKey` issues it.
+ *
+ * @category Control plane
+ */
+export type IssuedKey = {
+  /** The key's public identity, which listing and revoking use. */
+  prefix: string;
+  /** The whole key, `tsk_<prefix>_<secret>`. It is answered here once. */
+  key: string;
+};
+
+/**
+ * An API key as `listKeys` lists it, without its secret.
+ *
+ * @category Control plane
+ */
+export type KeyRecord = {
+  /** The key's public identity, which revoking takes. */
+  prefix: string;
+  /** The principal it authenticates. */
+  principal: string;
+  /** When it was issued, in seconds since the Unix epoch. */
+  created_at: number;
+  /** When it stops being accepted, in seconds since the Unix epoch, or `null` for never. */
+  expires_at: number | null;
+  /** Its own permissions, narrower than its principal's, or `null` where it holds its principal's. */
+  permissions: Permission[] | null;
+};
+
+/**
+ * A local group.
+ *
+ * @category Control plane
+ */
+export type GroupRecord = {
+  /** The group's name. */
+  name: string;
+  /** The terms granted to the group, which each member holds. */
+  terms: string[];
+  /** The permissions granted to the group, which each member holds. */
+  permissions: Permission[];
+  /** The principals in the group. */
+  members: string[];
+};
+
+/**
+ * One grant or revocation: to exactly one of `principal` and `group`, of exactly one of `term`,
+ * `terms` and `permission`.
+ *
+ * @category Control plane
+ */
+export type Grant = {
+  /** The local principal the grant is made to. */
+  principal?: string;
+  /** The group the grant is made to. */
+  group?: string;
+  /** One term, which says what the grantee may see. `public` and an empty term are refused. */
+  term?: string;
+  /** Many terms, granted or revoked as one change. One refused term refuses them all. */
+  terms?: string[];
+  /** A permission, which says what the grantee may do. */
+  permission?: Permission;
+};
+
+/**
+ * An OIDC provider as `putProvider` declares it.
+ *
+ * @category Control plane
+ */
+export type ProviderDeclaration = {
+  /** The `iss` its tokens carry. */
+  issuer: string;
+  /** The `aud` its tokens must hold. */
+  audience: string;
+  /** Where its signing keys are published: `https`, or `http` to a loopback address. */
+  jwks_url: string;
+  /** Each turns a claim's values into terms, such as `{claim: 'groups[*]', template: '{value}'}`. */
+  claim_rules?: {claim: string; template: string}[];
+  /** Each gives an identity whose claim holds `value` exactly the local group's terms and permissions. */
+  role_mappings?: {claim: string; value: string; group: string}[];
+};
+
+/**
+ * An OIDC provider as the catalogue lists it.
+ *
+ * @category Control plane
+ */
+export type ProviderRecord = Required<ProviderDeclaration> & {
+  /** The provider's name. */
+  name: string;
+  /** Declared in `tessera.toml`, so the API cannot change or remove it. */
+  read_only: boolean;
+};
+
+/**
+ * A live session.
+ *
+ * @category Control plane
+ */
+export type SessionRecord = {
+  /** The session's handle, which ending it takes. It is not a credential. */
+  token_id: number;
+  /** The local principal, or `null` for an OIDC identity. */
+  principal: string | null;
+  /** The provider an OIDC identity was accepted by, or `null`. */
+  provider: string | null;
+  /** The OIDC identity's `sub`, or `null`. */
+  subject: string | null;
+  /** The prefix of the API key it was authorised with, or `null`. */
+  api_key: string | null;
+  /** The principal that minted it through `authorise-as`, or `null`. */
+  minted_by: string | null;
+  /** What the session may do: `read`, and `write` where its principal holds it. */
+  permissions: Permission[];
+  /** When it was minted, in seconds since the Unix epoch. */
+  created_at: number;
+  /** When it ends at the latest, in seconds since the Unix epoch. */
+  expires_at: number;
+};
+
+/**
+ * Which sessions `endSessions` ends: exactly one of the three.
+ *
+ * @category Control plane
+ */
+export type SessionsToEnd = {token_id: number} | {principal: string} | {provider: string};
+
+/**
  * Where a {@link Control} sends its requests, and how.
  *
  * @category Control plane
@@ -411,8 +601,12 @@ export type MembershipsGrown = PublicationAck & {
 export type ControlOptions = {
   /** The control listener's base URL. Trailing slashes are removed. */
   controlUrl: string;
-  /** The operator credential, sent as the bearer token on every request. */
-  operatorCredential: string;
+  /**
+   * The credential sent as the bearer token on every request: the operator credential, an API key
+   * or an OIDC access token. Writes, flush and compaction need `write`; status and the catalogue's
+   * verbs need `admin`.
+   */
+  credential: string;
   /** Used for every request in place of the global `fetch`. */
   fetch?: typeof fetch;
   /**
@@ -482,16 +676,6 @@ export type RowOptions = StrictOptions & {
   view?: string;
 };
 
-/** Base64 of bytes. `btoa` takes one byte per character, so text is encoded to UTF-8 before this. */
-export function base64(bytes: Uint8Array): string {
-  let binary = '';
-  // Chunked, because spreading one argument per byte overflows the stack on a large array.
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
-}
-
 /** A fresh batch id: 128 random bits in hex. */
 function freshBatch(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -546,10 +730,10 @@ function pause(seconds: number, signal: AbortSignal | undefined): Promise<void> 
 }
 
 /**
- * The control plane of one served database, called with the operator credential: one method per
- * route. It keeps no record of what it sent, so what a database holds is asked of the database.
- * A body is sent as the caller gave it: Arrow IPC stream bytes on `ingest`, JSON on
- * declarations, publications and changes, and either on `grow`. A JSON body is serialised once per
+ * The control plane of one served database, called with one credential: one method per route. It
+ * keeps no record of what it sent, so what a database holds is asked of the database. A body is
+ * sent as the caller gave it, in the route's own field names: Arrow IPC stream bytes on `ingest`,
+ * JSON on declarations, publications, changes and the catalogue's verbs, and either on `grow`. A JSON body is serialised once per
  * call, so every attempt of one call sends the same bytes.
  *
  * A `429` is backpressure. The call waits the `Retry-After` it carries, between 1
@@ -574,7 +758,7 @@ export class Control {
 
   constructor(options: ControlOptions) {
     this.base = options.controlUrl.replace(/\/+$/, '');
-    this.credential = options.operatorCredential;
+    this.credential = options.credential;
     this.fetch = options.fetch;
     this.headers = options.headers;
   }
@@ -815,5 +999,134 @@ export class Control {
    */
   flush(options: WriteOptions = {}): Promise<Answer> {
     return this.send('POST', withQuery('/control/flush', waiting(options)), options, '');
+  }
+
+  // The catalogue's verbs. Each needs `admin`. A change answers how many live sessions it ended:
+  // every session of every principal, key or provider whose terms or permissions it could change.
+
+  /** `GET /control/principals`: every local principal, in `body.principals`. */
+  listPrincipals(options: CallOptions = {}): Promise<Answer<{principals: PrincipalRecord[]}>> {
+    return this.send('GET', '/control/principals', options) as Promise<Answer<{principals: PrincipalRecord[]}>>;
+  }
+
+  /** `GET /control/principals/{name}`: one principal, or `404`. */
+  showPrincipal(name: string, options: CallOptions = {}): Promise<Answer<PrincipalRecord>> {
+    return this.send('GET', `/control/principals/${segment(name)}`, options) as Promise<Answer<PrincipalRecord>>;
+  }
+
+  /** `POST /control/principals`: creates a principal holding no password, key, term or permission. A name in use is `409`. */
+  createPrincipal(name: string, kind: 'person' | 'service', options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('POST', '/control/principals', {name, kind}, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `PATCH /control/principals/{name}`: disables or enables a principal. */
+  changePrincipal(name: string, change: PrincipalChange, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('PATCH', `/control/principals/${segment(name)}`, change, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `DELETE /control/principals/{name}`: deletes a principal with its password, keys, grants and memberships. */
+  deletePrincipal(name: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/principals/${segment(name)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `PUT /control/principals/{name}/password`: sets a principal's password. One shorter than the configured minimum is `422`. */
+  setPassword(name: string, password: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('PUT', `/control/principals/${segment(name)}/password`, {password}, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `DELETE /control/principals/{name}/password`: removes a principal's password. */
+  clearPassword(name: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/principals/${segment(name)}/password`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `GET /control/principals/{name}/keys`: a principal's API keys, without their secrets, in `body.keys`. */
+  listKeys(principal: string, options: CallOptions = {}): Promise<Answer<{keys: KeyRecord[]}>> {
+    return this.send('GET', `/control/principals/${segment(principal)}/keys`, options) as Promise<Answer<{keys: KeyRecord[]}>>;
+  }
+
+  /** `POST /control/principals/{name}/keys`: issues an API key. The whole key is answered once, here. */
+  createKey(principal: string, body: KeyCreate = {}, options: CallOptions = {}): Promise<Answer<IssuedKey>> {
+    return this.sendJson('POST', `/control/principals/${segment(principal)}/keys`, body, options) as Promise<Answer<IssuedKey>>;
+  }
+
+  /** `DELETE /control/keys/{prefix}`: revokes an API key. Every session authorised or minted with it ends. */
+  revokeKey(prefix: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/keys/${segment(prefix)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `GET /control/groups`: every local group, in `body.groups`. */
+  listGroups(options: CallOptions = {}): Promise<Answer<{groups: GroupRecord[]}>> {
+    return this.send('GET', '/control/groups', options) as Promise<Answer<{groups: GroupRecord[]}>>;
+  }
+
+  /** `GET /control/groups/{name}`: one group, or `404`. */
+  showGroup(name: string, options: CallOptions = {}): Promise<Answer<GroupRecord>> {
+    return this.send('GET', `/control/groups/${segment(name)}`, options) as Promise<Answer<GroupRecord>>;
+  }
+
+  /** `POST /control/groups`: creates a group. A name in use is `409`. */
+  createGroup(name: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('POST', '/control/groups', {name}, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `DELETE /control/groups/{name}`: deletes a group with its grants and memberships. */
+  deleteGroup(name: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/groups/${segment(name)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `PUT /control/groups/{name}/members/{principal}`: adds a principal to a group. */
+  addMember(group: string, principal: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('PUT', `/control/groups/${segment(group)}/members/${segment(principal)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `DELETE /control/groups/{name}/members/{principal}`: removes a principal from a group. */
+  removeMember(group: string, principal: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/groups/${segment(group)}/members/${segment(principal)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `POST /control/grants`: grants terms or a permission to a principal or a group. A grant already held changes nothing. */
+  grant(grant: Grant, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('POST', '/control/grants', grant, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `POST /control/grants/revoke`: revokes terms or a permission. A grant not held changes nothing. */
+  revokeGrant(grant: Grant, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('POST', '/control/grants/revoke', grant, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `GET /control/providers`: every OIDC provider, declared through the API or in `tessera.toml`, in `body.providers`. */
+  listProviders(options: CallOptions = {}): Promise<Answer<{providers: ProviderRecord[]}>> {
+    return this.send('GET', '/control/providers', options) as Promise<Answer<{providers: ProviderRecord[]}>>;
+  }
+
+  /** `GET /control/providers/{name}`: one provider, or `404`. */
+  showProvider(name: string, options: CallOptions = {}): Promise<Answer<ProviderRecord>> {
+    return this.send('GET', `/control/providers/${segment(name)}`, options) as Promise<Answer<ProviderRecord>>;
+  }
+
+  /**
+   * `PUT /control/providers/{name}`: declares a provider, or replaces one whole. Every session
+   * authorised through a provider it replaces ends. One declared in `tessera.toml` is `409`.
+   */
+  putProvider(name: string, declaration: ProviderDeclaration, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('PUT', `/control/providers/${segment(name)}`, declaration, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /** `DELETE /control/providers/{name}`: removes a provider. Every session authorised through it ends. */
+  dropProvider(name: string, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.send('DELETE', `/control/providers/${segment(name)}`, options) as Promise<Answer<CatalogueChange>>;
+  }
+
+  /**
+   * `GET /control/sessions`: live sessions, in `body.sessions`: all of them, or a local principal's
+   * (including those minted for it), or those authorised through a provider.
+   */
+  listSessions(which: {principal?: string; provider?: string} = {}, options: CallOptions = {}): Promise<Answer<{sessions: SessionRecord[]}>> {
+    return this.send('GET', withQuery('/control/sessions', which), options) as Promise<Answer<{sessions: SessionRecord[]}>>;
+  }
+
+  /** `POST /control/sessions/end`: ends one session by `token_id`, or every session of a principal or a provider. */
+  endSessions(which: SessionsToEnd, options: CallOptions = {}): Promise<Answer<CatalogueChange>> {
+    return this.sendJson('POST', '/control/sessions/end', which, options) as Promise<Answer<CatalogueChange>>;
   }
 }

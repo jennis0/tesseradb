@@ -30,8 +30,7 @@ PROBE_SAMPLE_ROWS = 200_000
 
 def census(
     viewer: str,
-    session_base: str,
-    cred: str,
+    sessions: serve_battery.Sessions,
     view: str,
     quant: dict,
     ladder: Sequence[dict],
@@ -52,7 +51,7 @@ def census(
     probed = {max(targets), min(targets)} if targets else set()
     out: dict = {}
     for rung in ladder:
-        token, _ = serve_battery.authorise(session_base, cred, rung["terms"])
+        token, _ = sessions.authorise(rung["terms"])
         incomplete: list[str] = []
         whole = layered(viewer, token, view, 0, full, "zoom 0 over the whole extent", incomplete)
         row = {

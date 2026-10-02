@@ -2,7 +2,7 @@
 // Register an annotation layer and publish a synthetic clustering into it, so the viewer has
 // something to draw.
 //
-//   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/publish-clusters.mjs \
+//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/publish-clusters.mjs \
 //     --presets tessera-demo/presets/2m4.json --clusters 24 [--min-visible 400]
 //
 // The clustering is k-means over a sample of the corpus's points, to show masking: two principals
@@ -21,7 +21,7 @@ import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
-import {accepted, clusterLayerDeclaration, labelLayerDeclaration} from './operator.ts';
+import {accepted, clusterLayerDeclaration, labelLayerDeclaration, authorise as mint} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -30,11 +30,9 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
-const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 
 const CLUSTERS = Number(args.clusters ?? 24);
 const SAMPLE_DEPTH = Number(args['sample-depth'] ?? 7);
@@ -67,13 +65,7 @@ if (labelLayer && !labelTerm) {
 }
 
 async function authorise(terms) {
-  const r = await fetch(`${session}/session/authorise`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${sessionCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
-  });
-  if (!r.ok) throw new Error(`authorise: ${r.status} ${await r.text()}`);
-  return (await r.json()).token;
+  return (await mint(session, operatorCred, {terms})).token;
 }
 
 /**

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
-use common::{build_fixture, wait_for, N_ITEMS, OPERATOR_CREDENTIAL, SESSION_CREDENTIAL};
+use common::{build_fixture, wait_for, N_ITEMS, OPERATOR_CREDENTIAL};
 
 /// The announce stream, readable from the test while the server holds it.
 #[derive(Clone)]
@@ -47,9 +47,7 @@ impl Write for SharedStream {
 /// A deployment over a fixture bundle, with the three planes as `control` names them.
 fn write_deployment(tmp: &Path, control: &str) -> std::path::PathBuf {
     let bundle_root = build_fixture(tmp, N_ITEMS);
-    let session_credential = tmp.join("session.cred");
     let operator_credential = tmp.join("operator.cred");
-    std::fs::write(&session_credential, SESSION_CREDENTIAL).unwrap();
     std::fs::write(&operator_credential, OPERATOR_CREDENTIAL).unwrap();
 
     let text = format!(
@@ -66,13 +64,14 @@ fn write_deployment(tmp: &Path, control: &str) -> std::path::PathBuf {
         viewer = "127.0.0.1:0"
         session = "127.0.0.1:0"
         control = "{control}"
-        session_credential_file = "{session_cred}"
         operator_credential_file = "{operator_cred}"
+        [catalogue]
+        dir = "{catalogue}"
         "#,
         bundle = bundle_root.display(),
         cache = tmp.join("cache").display(),
         wal = tmp.join("wal.log").display(),
-        session_cred = session_credential.display(),
+        catalogue = tmp.join("catalogue").display(),
         operator_cred = operator_credential.display(),
     );
     let path = tmp.join("tessera.toml");

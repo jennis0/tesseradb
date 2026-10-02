@@ -2,7 +2,7 @@
 // Checks, against a running deployment, which label description each principal is served and
 // that a label does not outlive the cluster it labels.
 //
-//   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
+//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/check-labels.mjs \
 //     --presets ../../tessera-demo/presets/stage3.json --clusters centroids/kmeans-2026-08 \
 //     --labels topics/ctfidf-2026-08 --term 46
 //
@@ -18,7 +18,7 @@ import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
-import {accepted} from './operator.ts';
+import {accepted, authorise as mint} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -27,11 +27,9 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
-const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 const clusterLayer = args.clusters ?? 'centroids/kmeans-2026-08';
 const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
@@ -46,13 +44,7 @@ async function metaOf(token) {
 const viewOf = async (token) => (await metaOf(token)).views[0].id;
 
 async function authorise(terms) {
-  const r = await fetch(`${session}/session/authorise`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${sessionCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
-  });
-  if (!r.ok) throw new Error(`authorise: ${r.status} ${await r.text()}`);
-  return (await r.json()).token;
+  return (await mint(session, operatorCred, {terms})).token;
 }
 
 function frames(buf) {

@@ -14,7 +14,6 @@
 
 mod common;
 
-use base64::Engine as _;
 use tempfile::TempDir;
 
 use common::*;
@@ -187,7 +186,7 @@ async fn revoke_prunes_the_token() {
     let resp = server
         .client
         .post(server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
+        .bearer_auth(&server.integrator_key)
         .json(&serde_json::json!({ "token_id": doomed["token_id"].as_u64().unwrap() }))
         .send()
         .await
@@ -222,42 +221,101 @@ async fn revoke_prunes_the_token() {
     );
 }
 
-/// `check_bearer` no longer short-circuits on a prefix or on length.
-///
-/// This cannot observe timing, and does not pretend to — what it pins is the *behaviour* the
-/// rewrite had to preserve while removing the early exit: a prefix of the credential, an extension
-/// of it, and the empty string are all rejected, and the exact credential is still accepted. A
-/// rewrite that hashed only one side, or compared digests of different lengths, breaks one of these
-/// four.
+/// Logout, a catalogue change and ending a session on the control plane each prune the ended
+/// session's projections before they answer, as revoke does.
 #[tokio::test]
-async fn check_bearer_rejects_prefixes_extensions_and_the_empty_string() {
+async fn every_way_a_session_ends_prunes_its_projections() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let entries = || server.state.engine.row_projection_cache_stats().entries;
+
+    let sessions = [
+        authorise(&server, &["0"]).await,
+        authorise(&server, &["1"]).await,
+        authorise(&server, &["0", "1"]).await,
+    ];
+    for session in &sessions {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(session["token"].as_str().unwrap())
+            .json(&serde_json::json!({
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    assert_eq!(entries(), 3);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/logout"))
+        .bearer_auth(sessions[0]["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(entries(), 2, "logout must prune the session it ends");
+
+    let control = |path: &str, body: serde_json::Value| {
+        server
+            .client
+            .post(server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let principal = principal_for(&server, &["1"]);
+    let resp = control(
+        "/control/grants",
+        serde_json::json!({ "principal": principal, "term": "2" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        entries(),
+        1,
+        "a catalogue change must prune the sessions it ends"
+    );
+
+    let token_id = sessions[2]["token_id"].as_u64().unwrap();
+    let resp = control(
+        "/control/sessions/end",
+        serde_json::json!({ "token_id": token_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(entries(), 0, "ending a session on the control plane must prune it");
+}
+
+/// The operator credential is compared whole: a prefix of it, an extension of it, the empty
+/// string and a case change are each refused, and the exact credential is accepted.
+#[tokio::test]
+async fn the_operator_credential_refuses_prefixes_extensions_and_the_empty_string() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let auth_data = base64::engine::general_purpose::STANDARD
-        .encode(serde_json::json!({ "terms": ["0"] }).to_string());
-
-    let prefix = &SESSION_CREDENTIAL[..SESSION_CREDENTIAL.len() - 1];
-    let extension = format!("{SESSION_CREDENTIAL}x");
-    for wrong in [prefix, extension.as_str(), "", "session-secreT"] {
+    let prefix = &OPERATOR_CREDENTIAL[..OPERATOR_CREDENTIAL.len() - 1];
+    let extension = format!("{OPERATOR_CREDENTIAL}x");
+    for wrong in [prefix, extension.as_str(), "", "operator-secreT"] {
         let resp = server
             .client
-            .post(server.session_url("/session/authorise"))
+            .get(server.control_url("/control/status"))
             .bearer_auth(wrong)
-            .json(&serde_json::json!({ "auth_data": auth_data }))
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 401, "credential {wrong:?} must be rejected");
     }
 
-    // The positive control: the real credential still works, so the four refusals above are not
-    // "check_bearer rejects everything" — which is the shape a broken rewrite most easily takes.
     let resp = server
         .client
-        .post(server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&serde_json::json!({ "auth_data": auth_data }))
+        .get(server.control_url("/control/status"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
         .send()
         .await
         .unwrap();
@@ -477,7 +535,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
     let resp = server
         .client
         .post(server.session_url("/session/revoke"))
-        .bearer_auth(SESSION_CREDENTIAL)
+        .bearer_auth(&server.integrator_key)
         .json(&serde_json::json!({ "token_id": doomed["token_id"].as_u64().unwrap() }))
         .send()
         .await
@@ -494,7 +552,7 @@ async fn revocation_takes_effect_without_waiting_for_a_sweep() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "a revoked session is unusable at once");
+    assert_eq!(resp.status(), 403, "a revoked session is unusable at once");
 
     // The positive control, for the symmetric failure: a revoke that emptied the registry would
     // satisfy the assertion above just as well.

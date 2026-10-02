@@ -9,25 +9,61 @@ A viewer holds a valid session token and can make as many requests with it as th
 the adversary the properties below are built against: a legitimate user with any grant, who can
 ask anything and read every response, but cannot forge a credential or bypass authorisation.
 
-A viewer's token is worth exactly the terms its credential names. `POST /session/authorise`
-takes a credential and returns a token, and an operator's own credential gates who may call that
-route at all. The credential is a bare claim, trusted as presented, so the session credential is
-the only thing standing between an untrusted caller and read access to everything a term can
-name. The terms a session holds, and the access labels they satisfy, are what every later check in
-this chapter tests against. **Not built yet:** principals and credentials that Tessera stores and
-checks itself ([users and access](../users-and-access.md)).
+A viewer's token is worth exactly the terms its principal resolved to when the session was minted.
+The identity catalogue decides them: a local principal holds the terms granted to it and to its
+groups, and an OIDC identity the terms its provider's claim rules produce from a token whose
+signature, issuer, audience and lifetime the server has checked. A session is minted at
+`POST /v1/login` from a password, an API key or an access token, or at `POST /session/authorise`
+by an API key whose principal holds `authorise-as`, which acts as any principal. That key belongs
+to an integrator's backend; whoever holds it reads everything any principal may. A session minted
+through `authorise-as` carries the target's terms and its `read` and `write`, and never its
+`read-all`, so the key reads what each principal's terms admit and no more. The catalogue and
+the server's credential checks are inside the trusted computing base. The terms they resolve, and
+the access labels those terms satisfy, are what every later check in this chapter tests against.
 
-A token reflects the credential presented at authorisation and nothing later. If a viewer's grant
-changes, an open token keeps its old terms until the viewer re-authorises; the only bound on how
-long that can take is the deployment's configured token lifetime, or an explicit
-`POST /session/revoke`.
+A principal holding `read-all`, granted directly, through a group or through an OIDC role
+mapping, authorises a session for itself that satisfies every index key, including one promoted
+after the session was authorised. Its authorised set is every item listed under any key at the
+corpus's current watermark, rebuilt at each publication, so it is every item the corpus holds, and
+an item a flush places joins it when that publication reaches the session. The overlay is
+subtracted from it at every request, so a deletion or suppression applies to it. It satisfies
+every view's, group's, layer's and artifact's own label and every layer's default label, and an
+artifact's membership requirement still applies to it. The operator credential mints such a
+session for the superuser on the session plane, and may also mint one holding a set of terms it
+names.
+
+A session holds the terms resolved when it was minted. A catalogue change that could change them,
+or the principal's permissions, ends the session: a grant, a membership, a disabled or deleted
+principal, a password set or cleared, a revoked key, or a changed provider. A session also ends at
+its key's expiry, its access token's `exp`, the deployment's configured token lifetime, a logout or
+a revocation. An OIDC identity's claims are trusted as its provider asserts them; a change at the
+provider reaches a session only when the session's token expires.
 
 A bundle holder holds the built artifact on disk: the manifest with the bundle's identity key, the
 full term index and the geometry. Nothing here defends against this party.
 
-An operator drives the control plane: ingest, deletion, suppression and compaction. The design
-treats this party as trusted, and every route on the control plane, without exception, requires
-the operator's own credential.
+An operator drives the control plane: ingest, deletion, suppression, compaction and the catalogue.
+Every route on the control plane, without exception, requires a credential: the operator
+credential, which authenticates a built-in superuser holding every permission, an API key, or an
+OIDC access token. Writes, flush and compaction need `write`. Status and the catalogue need
+`admin`. **Not built yet:** writes masked by the writer's own terms
+([users and access](../users-and-access.md#writes)). Until they are built, every principal with
+`write` writes against the whole corpus, with or without `write-all`, and is trusted with every
+item, as the operator is: a write can change or name an item the writer cannot see. A principal
+with `write` can upsert an item it cannot see, by its unique value, and change its label, so
+granting `write` grants what `read-all` grants wherever a view has a unique field.
+
+`admin` can grant any permission to any principal, itself included. A principal holding `admin`
+can therefore give itself `read-all` and `write-all` and read and write every item, so `admin` is
+trusted as the operator is. A role mapping that gives an OIDC identity a group holding `admin`
+extends that trust to whoever the identity provider says is in the mapped claim.
+
+The operator credential is refused at startup when it is empty, since an empty bearer would
+authenticate as the superuser. A password is checked over whatever transport reaches the viewer
+listener, which serves plain HTTP, so a deployment that takes passwords terminates TLS in front of
+it. Failed password attempts are limited per name, so anyone who knows a principal's name can
+lock it out of password login with ten wrong attempts every fifteen minutes; its API keys and
+sessions are unaffected.
 
 Every cache that holds a viewer's visible set is keyed to one session and is never read by
 another session.
@@ -45,13 +81,14 @@ flowchart LR
   end
 
   subgraph trusted["inside the boundary"]
-    session["session plane<br/>turns a credential into a token<br/>that names the viewer's terms"]
+    session["login and session plane<br/>turn a credential into a token<br/>holding the principal's terms"]
     serve["tessera serve<br/>composes the visible set every request,<br/>answers only from inside it"]
-    control["control plane<br/>operator: ingest, delete,<br/>suppress, compact"]
+    control["control plane<br/>write: ingest, delete, suppress,<br/>flush, compact;<br/>admin: catalogue, status"]
     bundle["bundle and log on disc<br/>everything, including the<br/>identifier key"]
   end
 
-  issuer["the integrating application"] -- "session credential" --> session
+  issuer["the integrating application"] -- "authorise-as key" --> session
+  client -- "password, API key<br/>or access token" --> session
   session -- "token" --> client
   client -- "token + query" --> serve
   serve -- "counts, samples, labels:<br/>from the visible set only" --> client
@@ -61,8 +98,8 @@ flowchart LR
   holder["a bundle holder"] -. "has everything;<br/>no property below holds against them" .-> bundle
 ```
 
-*What crosses each boundary. A viewer receives responses computed inside its own visible set; an
-operator's writes are trusted; a bundle holder already has everything the server has.*
+*What crosses each boundary. A viewer receives responses computed inside its own visible set; a
+writer is trusted; a bundle holder already has everything the server has.*
 
 ## Every quantity is computed from the viewer's own visible set
 
@@ -161,8 +198,8 @@ may not see gives the same answer, with the same status and the same shape, as a
 holds. The item card route does the same for a `tessera_id`: an item the viewer may not see and an
 identifier naming nothing both answer `404 unknown`.
 
-The control plane answers differently, because its caller is the operator, who is trusted with
-every item. An ingest row carrying a unique value names the item that holds it, whether or not any
+The control plane answers differently, because its caller is a writer, who is trusted with every
+item until writes are masked. An ingest row carrying a unique value names the item that holds it, whether or not any
 viewer can see that item, and the receipt answers its `tessera_id`. An ingest row whose values name
 two items, as one setting a unique value another item holds does, is refused and listed by its
 position and reason; in a strict batch the batch is refused with `409`, naming the values and the

@@ -1,5 +1,8 @@
-/** One term set the viewer offers as a principal, with the visible-set size measured for it. */
-export type Preset = {label: string; terms: string[]; visible: number};
+/**
+ * One principal the viewer offers, by its name in the dataset's catalogue, with the terms it holds
+ * and the visible-set size measured for it.
+ */
+export type Preset = {label: string; principal: string; terms: string[]; visible: number};
 
 /**
  * One servable bundle: where it is, and enough about it to label the choice. Presets belong to the
@@ -15,6 +18,8 @@ export type Dataset = {
   titleField?: string;
   viewerUrl: string;
   sessionUrl: string;
+  /** An API key whose principal holds `authorise-as` on this dataset's server, which mints each preset's session. */
+  apiKey: string;
   presets: Preset[];
 };
 
@@ -24,7 +29,6 @@ export type ViewerConfig = {
    * built from the environment. Not empty.
    */
   datasets: Dataset[];
-  sessionCredential: string;
   /**
    * Bytes look-ahead may fetch per pause (`?ring=`, in MB). Its cost is decode-worker time on a
    * local server, and bandwidth and server CPU over a network, which the client cannot see.
@@ -38,18 +42,17 @@ export type ViewerConfig = {
 };
 
 /**
- * Read from Vite env. `VITE_TESSERA_SESSION_CREDENTIAL` puts the session credential into the
- * browser bundle, which is for development only, as is the server's `serve.dev_cors_origins`
- * that lets this page call it. Neither belongs in an integration.
+ * Read from the address. A dataset's `apiKey`, from the dataset document or
+ * `VITE_TESSERA_API_KEY`, puts a key that can mint a session for any principal into the browser,
+ * which is for development only, as is the server's `serve.dev_cors_origins` that lets this page
+ * call it. Neither belongs in an integration.
  */
 export function readConfig(): ViewerConfig {
-  const env = import.meta.env;
   const query = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
   return {
     ringBytes: (Number(query?.get('ring') ?? '') || 8) * 1_000_000,
     prefetchLayers: query?.has('layers') ? Math.max(0, Number(query.get('layers')) || 0) : 1,
-    datasets: [],
-    sessionCredential: env.VITE_TESSERA_SESSION_CREDENTIAL ?? ''
+    datasets: []
   };
 }
 
@@ -68,6 +71,7 @@ export async function loadDatasets(): Promise<Dataset[]> {
     prose: [],
     viewerUrl: env.VITE_TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
     sessionUrl: env.VITE_TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
+    apiKey: env.VITE_TESSERA_API_KEY ?? '',
     presets: []
   };
   // `?datasets=` on the address, else the document named in the environment.

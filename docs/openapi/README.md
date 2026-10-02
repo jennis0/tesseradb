@@ -15,8 +15,7 @@ control plane's answers built with `json!`, and the Arrow-facing structs carry a
 every closed DTO is declared `additionalProperties: false`, and a field added to a response and
 not to the file fails the test rather than surfacing on a stranger's screen.
 
-What it can say only in prose: `auth_data` is base64 of the JSON naming a viewer's terms, and
-the description says exactly that; the `/v1/viewport` body is not JSON and is declared as
+What it can say only in prose: the `/v1/viewport` body is not JSON and is declared as
 `application/octet-stream` with the framing described beside it; and a `membership` or
 `arrow_type` value is engine-derived, so the description names its type and says the set is not
 enumerated there.

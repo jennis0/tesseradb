@@ -308,10 +308,13 @@ db.unsuppress(frame[["entity_id"]])
 
 The binary is `TESSERA_BIN` when set, else the first `tessera` on `PATH`, else a checkout's target
 directory, release before debug; `create()` names the one it found. The database directory keeps
-its own session credential and operator credential under `.tessera/`, each file owner-only.
-`commit()` starts `tessera serve` as a child process on loopback at port 0 and reads the three
-bound addresses from the JSON line the child prints once all three planes are listening;
-`db.viewer_url`, `db.session_url` and `db.session_credential` are what a token is minted against.
+its own operator credential under `.tessera/`, owner-only, and its catalogue of principals,
+credentials and grants under `.tessera/catalogue`. The operator credential authenticates the
+server's superuser, and the database uses it for every write and to mint every token, so nobody
+has to set up principals to read their own data. `commit()` starts `tessera serve` as a child
+process on loopback at port 0 and reads the three bound addresses from the JSON line the child
+prints once all three planes are listening; `db.viewer_url`, `db.session_url` and
+`db.operator_credential` are what a token is minted against.
 The child is killed by its pid at `close()` and at interpreter exit. A database `create()` made
 with no path is removed at both, after its child has stopped; a directory the user named, through
 `create(path)`, `open(path)` or `save(path)`, is never removed.
@@ -519,7 +522,8 @@ and `artifact()` one annotation's record; each takes a view. Every count on them
 
 `db.close()` stops the server. A token the database made stays valid until it expires, within
 the hour. `db.revoke(token)` ends one sooner; only the token's id is sent, and an id that names
-no live token is accepted without comment.
+no live token is accepted without comment. No catalogue change ends a token the database made
+for a set of terms, since it is made for no principal of the catalogue.
 
 ## The operator's verbs
 
@@ -529,6 +533,18 @@ db.compact()                                   # ask for the fold that removes a
 db.drop_layer("clusters/kmeans")               # the inverse of declare_layer
 db.drop_view("slices", "a")                    # the inverse of create_view
 ```
+
+`db.control` is the control plane's client, with one method per route, each returning an
+`Answer` with the status and the body. Besides writes, it manages the catalogue: principals
+(`list_principals`, `show_principal`, `create_principal`, `change_principal`,
+`delete_principal`), passwords (`set_password`, `clear_password`), API keys (`list_keys`,
+`create_key`, `revoke_key`), groups (`list_groups`, `show_group`, `create_group`,
+`delete_group`, `add_member`, `remove_member`), grants of terms and permissions (`grant`,
+`revoke_grant`), OIDC providers (`list_providers`, `show_provider`, `put_provider`,
+`drop_provider`) and sessions (`list_sessions`, `end_sessions`). A change answers how many live
+sessions it ended. A database you read alone needs none of it. `tesseradb.Control(url,
+credential)` is the same client for a database somebody else runs, with the operator credential,
+an API key or an OIDC access token.
 
 `remove()` puts a deletion in the overlay, and the compaction that removes its rows is what ends
 it; `compact()` is how one is asked for, and it is accepted rather than finished when the call
@@ -542,11 +558,16 @@ it leaves in no view, as `remove()` deletes one, and the answer's `deleted` says
 v = tesseradb.connect("https://tessera.example/viewer", token=my_token)
 v.map(colour_by="cluster:clusters/kmeans")
 v.view("s0").count()
+
+token = tesseradb.login("https://tessera.example/viewer", principal="ann", password=password)
+token = tesseradb.login("https://tessera.example/viewer", api_key=my_key)
+tesseradb.logout("https://tessera.example/viewer", token)
 ```
 
-`token` is a string, a `Token` or a function returning either, as `Map` takes one. A reader from
-`connect` has `view()`, `map()` and the other queries. It cannot write, and it cannot read as
-anyone else, since both need credentials only the operator holds.
+`token` is a string, a `Token` or a function returning either, as `Map` takes one. `login` makes
+one from exactly one credential: a principal's name and password, an API key, or an OIDC access
+token, and its `renew()` logs in again. A reader from `connect` has `view()`, `map()` and the
+other queries, and reads what its token's terms admit.
 
 ## The widget, and the entry point being a token
 
@@ -565,11 +586,13 @@ counts, `m.bbox` where the camera settled; setting `m.filters`, `m.layers`, `m.c
 `m.bbox` redraws. Ids are decimal strings (a `tessera_id` is a `u64`). Marimo users: the widget's
 `.value` re-runs a cell at every settle; `m.observe(fn, names="selected")` reacts to a pick alone.
 
-`tesseradb.authorise(session_url, credential, terms)` is **operator-only**: the session credential
-mints any principal, and a notebook that holds it is the pooled-service-token
-anti-pattern in a cell. It is for the local single-principal case and for the demo, where
-operator and analyst are one person. The credential stays in the kernel; the token it mints is
-what the page gets.
+`tesseradb.authorise(session_url, credential, ...)` mints on the session plane: with an API key
+holding `authorise-as`, for a `principal` or an OIDC `access_token`, as an integrator's backend
+does; with the operator credential, for those or for `terms`. Either credential mints a token that
+reads as anyone, and a notebook that holds it is the pooled-service-token anti-pattern in a cell.
+It is for the local case, where `db.token(terms)` and `db.viewer(terms)` call it with the
+database's own operator credential, and for the demo, where operator and analyst are one person.
+The credential stays in the kernel; the token it mints is what the page gets.
 
 ## The token never leaves the kernel as state
 
@@ -592,9 +615,9 @@ reach Tessera, which a remote JupyterHub often cannot.
 **⊘ The proxy arm — documented, not built.** The widget's `url` becomes a path on the notebook
 server (`/tessera/<name>/`), and a small Jupyter server extension answers it:
 
-- it holds the session credential (or a per-principal token store) on the server, never in the
-  kernel or the page;
-- per notebook user it calls `/session/authorise` with that user's terms, caches the token, and
+- it holds an API key with `authorise-as` (or a per-principal token store) on the server, never
+  in the kernel or the page;
+- per notebook user it calls `/session/authorise` naming that user's principal, caches the token, and
   renews it before expiry — which is more than `jupyter-server-proxy`'s static header injection,
   so it is an extension of it rather than a configuration of it;
 - it forwards `/v1/*` to the viewer plane with the user's token in `authorization`, streaming

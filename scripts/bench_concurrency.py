@@ -120,17 +120,8 @@ def sample_cpu_mean(pid: int, stop: threading.Event, samples: list) -> float:
 
 
 def authorise(srv, terms: list[str]) -> str:
-    import base64
-
-    auth = json.dumps({"terms": terms}).encode()
-    resp = requests.post(
-        f"{srv.session_base}/session/authorise",
-        headers={"Authorization": f"Bearer {harness.SESSION_CREDENTIAL}"},
-        json={"auth_data": base64.b64encode(auth).decode()},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["token"]
+    """A session for a principal holding `terms`, as the oracle harness mints one."""
+    return srv.authorise(terms)["token"]
 
 
 def build_tokens(srv, descriptors: list[str], n: int, distinct: bool, w: int, seed: int) -> list[str]:

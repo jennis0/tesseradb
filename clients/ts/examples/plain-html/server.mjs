@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// The app server beside the plain-HTML page, and the only holder of the session credential. The
-// page asks it for a viewer token for the signed-in user, and it calls `POST /session/authorise`
-// on the user's behalf. Node's `http`, no framework.
+// The app server beside the plain-HTML page, and the only holder of an API key that may authorise
+// as other principals. The page asks it for a viewer token for the signed-in user, and it calls
+// `POST /session/authorise` on the user's behalf. Node's `http`, no framework.
 //
 //   node server.mjs            # http://localhost:5180, against the demo's servers
 //
@@ -16,18 +16,19 @@ import {fileURLToPath} from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Mint a viewer token for `terms`. Under `builtin:passthrough` the server takes the claims as
- * given, so this function is what asserts what its user may see.
+ * Mint a viewer token for `principal`, with an API key whose principal holds `authorise-as`. The
+ * session carries the terms the deployment's catalogue grants `principal`, so this function decides
+ * which principal its user reads as, and the catalogue decides what that principal may see.
  *
- * @param {{sessionUrl: string, credential: string}} cfg
- * @param {string[]} terms  the signed-in user's claims, from the app's own session
+ * @param {{sessionUrl: string, apiKey: string}} cfg
+ * @param {string} principal  the Tessera principal the signed-in user reads as
  * @returns {Promise<{token: string, expiresAt: number}>}
  */
-export async function authorise({sessionUrl, credential}, terms) {
+export async function authorise({sessionUrl, apiKey}, principal) {
   const response = await fetch(`${sessionUrl}/session/authorise`, {
     method: 'POST',
-    headers: {authorization: `Bearer ${credential}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
+    headers: {authorization: `Bearer ${apiKey}`, 'content-type': 'application/json'},
+    body: JSON.stringify({principal})
   });
   if (!response.ok) throw new Error(`authorise: ${response.status} ${await response.text()}`);
   const {token, expires_at} = await response.json();
@@ -65,7 +66,7 @@ export async function proxy(viewerUrl, req, res) {
 /**
  * The request handler, built once from its configuration so a test can drive it without a port.
  *
- * @param {{sessionUrl: string, viewerUrl: string, credential: string, users: Record<string, {label: string, terms: string[]}>, bundleDir: string}} cfg
+ * @param {{sessionUrl: string, viewerUrl: string, apiKey: string, users: Record<string, {label: string, principal: string}>, bundleDir: string}} cfg
  */
 export function createHandler(cfg) {
   /** The bundle's file, read on each request, or `null` where it has not been built. @param {string} name */
@@ -93,7 +94,7 @@ export function createHandler(cfg) {
         // its own session.
         const user = cfg.users[url.searchParams.get('user') ?? ''];
         if (!user) return json(res, 404, {error: 'unknown user'});
-        return json(res, 200, await authorise(cfg, user.terms));
+        return json(res, 200, await authorise(cfg, user.principal));
       }
       if (url.pathname === '/tessera-components.js') {
         const bundle = await built('tessera-components.js');
@@ -125,10 +126,12 @@ function json(res, status, body) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const users = JSON.parse(await readFile(join(here, 'users.json'), 'utf8'));
+  const apiKey = process.env.TESSERA_API_KEY;
+  if (!apiKey) throw new Error('set TESSERA_API_KEY to an API key whose principal holds authorise-as');
   const handler = createHandler({
     sessionUrl: process.env.TESSERA_SESSION_URL ?? 'http://127.0.0.1:49303',
     viewerUrl: process.env.TESSERA_VIEWER_URL ?? 'http://127.0.0.1:37585',
-    credential: process.env.TESSERA_SESSION_CRED ?? 'dev-session-credential',
+    apiKey,
     users,
     bundleDir: join(here, '..', '..', 'components', 'dist')
   });

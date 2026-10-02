@@ -1,7 +1,9 @@
 """Tessera's Python package: read a Tessera database, map it in a notebook, and make one.
 
-`connect` reads a database someone else runs. `create` makes one in a directory from data frames
-and files, and `open` reopens one. Every table the package returns is a pyarrow table, whose
+`connect` reads a database someone else runs, with a token from `login`, from `authorise`, or
+from its operator. `Control` writes to one and manages its principals, credentials, groups,
+grants, OIDC providers and sessions. `create` makes one in a directory from data frames and
+files, and `open` reopens one. Every table the package returns is a pyarrow table, whose
 `.to_pandas()` gives a pandas DataFrame where pandas is installed. `pip install tesseradb[widget]`
 adds the notebook map, `Map`.
 
@@ -11,12 +13,15 @@ without anywidget or pyarrow.
 
 from __future__ import annotations
 
-from ._auth import Token, authorise, revoke
+from ._auth import Token, authorise, login, logout, revoke
+from ._control import Answer, Control
 from ._refusal import Refusal
 from ._viewer import Batches, PartialRead, Sample, Selection, Viewer, connect
 
 __all__ = [
+    "Answer",
     "Batches",
+    "Control",
     "Database",
     "Map",
     "PartialRead",
@@ -28,6 +33,8 @@ __all__ = [
     "authorise",
     "connect",
     "create",
+    "login",
+    "logout",
     "open",
     "revoke",
     "__version__",

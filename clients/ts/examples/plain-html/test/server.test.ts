@@ -6,8 +6,8 @@ import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {createHandler} from '../server.mjs';
 
 /**
- * The app server against a fake session plane and a fake viewer plane: the credential goes
- * upstream and never to the page, the claims are the user's, and the proxy forwards the six
+ * The app server against a fake session plane and a fake viewer plane: the API key goes upstream
+ * and never to the page, the principal is the user's, and the proxy forwards the six
  * headers a replica is keyed by (client-obligations rule 10) along with a streamed body.
  */
 const SIX = ['etag', 'x-tessera-identity-key', 'x-tessera-pin', 'x-tessera-stale', 'x-tessera-server-us', 'x-tessera-admission-us'];
@@ -43,8 +43,8 @@ beforeAll(async () => {
   const handler = createHandler({
     sessionUrl: `http://127.0.0.1:${port}`,
     viewerUrl: `http://127.0.0.1:${port}`,
-    credential: 'the-secret',
-    users: {reader: {label: 'reader', terms: ['14', '15']}},
+    apiKey: 'the-secret',
+    users: {reader: {label: 'reader', principal: 'holding-14-15'}},
     bundleDir: dist
   });
   app = createServer((req, res) => void handler(req, res));
@@ -56,14 +56,14 @@ afterAll(() => {
 });
 
 describe('server.mjs', () => {
-  it('mints a token for a known user with the credential upstream and never in the answer', async () => {
+  it('mints a token for a known user with the key upstream and never in the answer', async () => {
     const r = await fetch(`${base}/token?user=reader`, {method: 'POST'});
     expect(r.status).toBe(200);
     const body = await r.json();
     expect(body).toEqual({token: 'tok-1', expiresAt: 99});
     const call = seen.find((s) => s.path === '/session/authorise')!;
     expect(call.auth).toBe('Bearer the-secret');
-    expect(JSON.parse(Buffer.from(JSON.parse(call.body).auth_data, 'base64').toString())).toEqual({terms: ['14', '15']});
+    expect(JSON.parse(call.body)).toEqual({principal: 'holding-14-15'});
     expect(JSON.stringify(body)).not.toContain('the-secret');
   });
 
@@ -96,7 +96,7 @@ describe('server.mjs', () => {
     const handler = createHandler({
       sessionUrl: 'http://127.0.0.1:1',
       viewerUrl: 'http://127.0.0.1:1',
-      credential: 'the-secret',
+      apiKey: 'the-secret',
       users: {},
       bundleDir: join(tmpdir(), 'tessera-plain-absent')
     });

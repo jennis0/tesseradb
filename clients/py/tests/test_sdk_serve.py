@@ -132,7 +132,7 @@ def test_the_deployment_file_names_three_loopback_planes_at_port_zero(tmp_path):
 def test_the_secrets_are_generated_once_and_owner_only(tmp_path):
     _instance.secrets_for(tmp_path)
     written = {
-        name: (tmp_path / ".tessera" / name).read_text() for name in ("session.cred", "operator.cred")
+        name: (tmp_path / ".tessera" / name).read_text() for name in ("operator.cred",)
     }
     for name in written:
         assert oct((tmp_path / ".tessera" / name).stat().st_mode)[-3:] == "600"

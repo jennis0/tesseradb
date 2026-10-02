@@ -1,5 +1,6 @@
-//! The four permissions over the whole database. Each is granted on its own: `admin` implies
-//! neither `read` nor `write`, so an account that manages users can be one that sees nothing.
+//! The six permissions over the whole database. Each is granted on its own: `admin` implies
+//! neither `read` nor `write`, so an account that manages users can be one that sees nothing, and
+//! `read-all` and `write-all` widen `read` and `write` without implying them.
 
 use std::fmt;
 
@@ -16,14 +17,21 @@ pub enum Permission {
     AuthoriseAs,
     /// Every change to the catalogue.
     Admin,
+    /// With `read`, a session whose authorised set is the whole corpus and which satisfies every
+    /// label gate.
+    ReadAll,
+    /// With `write`, writes against the whole corpus, and flush and compaction.
+    WriteAll,
 }
 
 impl Permission {
-    pub const ALL: [Permission; 4] = [
+    pub const ALL: [Permission; 6] = [
         Permission::Read,
         Permission::Write,
         Permission::AuthoriseAs,
         Permission::Admin,
+        Permission::ReadAll,
+        Permission::WriteAll,
     ];
 
     /// The name used on every surface.
@@ -33,6 +41,8 @@ impl Permission {
             Permission::Write => "write",
             Permission::AuthoriseAs => "authorise-as",
             Permission::Admin => "admin",
+            Permission::ReadAll => "read-all",
+            Permission::WriteAll => "write-all",
         }
     }
 
@@ -44,7 +54,8 @@ impl Permission {
             .find(|p| p.as_str() == name)
             .ok_or_else(|| {
                 Error::Invalid(format!(
-                    "`{name}` is not a permission; write one of read, write, authorise-as, admin"
+                    "`{name}` is not a permission; write one of read, write, authorise-as, \
+                     admin, read-all, write-all"
                 ))
             })
     }
@@ -130,7 +141,8 @@ mod tests {
             assert_eq!(Permission::parse(p.as_str()).unwrap(), p);
             assert_eq!(Permission::parse(&format!("  {p} ")).unwrap(), p);
         }
-        for bad in ["", "Read", "authorise_as", "superuser", "bypass"] {
+        let refused = ["", "Read", "authorise_as", "superuser", "bypass", "read_all", "all"];
+        for bad in refused {
             assert!(Permission::parse(bad).is_err(), "{bad:?} parsed");
         }
     }

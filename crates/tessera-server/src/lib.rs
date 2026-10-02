@@ -7,13 +7,17 @@
 
 mod address;
 mod aggregate;
+pub mod auth;
 pub mod control;
 pub mod cors;
 mod decode;
 pub mod error;
 mod filter_dto;
 pub mod health;
+pub mod identity;
+mod login;
 pub mod memory;
+pub mod oidc;
 mod records;
 pub mod session;
 pub mod state;
@@ -50,8 +54,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 
     // Read here rather than at parse, since a build reads the same file and needs no credential,
     // and before the bundle opens, so a missing credential refuses before the WAL is touched.
-    let session_credential = config.session_credential.resolve("session")?;
     let operator_credential = config.operator_credential.resolve("operator")?;
+    let catalogue = open_catalogue(&config)?;
 
     // `[serve]` is optional because a build reads this file too, but a server needs all three
     // addresses and gets no default. Port 0 is allowed; the announce line reports the real port.
@@ -144,11 +148,16 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
+        password_gate: ComputeGate::for_passwords(
+            config.password_admission,
+            config.admission_timeout_ms,
+        ),
         // `POST /v1/items` and `POST /v1/artifacts` only.
         bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.
         ingest_admission: state::IngestAdmission::new(config.ingest_admission),
-        session_credential,
+        catalogue,
+        oidc: oidc::Verifier::new(),
         operator_credential,
         #[cfg(feature = "fault-injection")]
         faults,
@@ -165,13 +174,13 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         "bulk reads may hold this much memory at once, within the process's memory cap"
     );
 
-    // At `warn`, because this lets a page from another origin present the session credential.
+    // At `warn`, because this lets a page from another origin present an `authorise-as` key.
     // `serve.cors_origins` names pages that may present tokens and gets no warning.
     if !config.dev_cors_origins.is_empty() {
         tracing::warn!(
             origins = ?config.dev_cors_origins,
             "serve.dev_cors_origins is set: these browser origins may present session tokens and \
-             the session credential to this process. This is a DEVELOPMENT affordance — do not \
+             API keys to the session plane of this process. This is a DEVELOPMENT affordance — do not \
              enable it in a deployment."
         );
     }
@@ -186,6 +195,55 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     }
 
     Ok(Prepared { state, config })
+}
+
+/// The environment variable that accepts a provider's `http://` JWKS URL to a host other than a
+/// loopback address, when set to `1`.
+pub const ALLOW_INSECURE_JWKS: &str = "TESSERA_ALLOW_INSECURE_JWKS";
+
+/// Opens the catalogue `[catalogue]` names, with the providers it declares. Refuses when the file
+/// names no directory, or the catalogue refuses to open.
+fn open_catalogue(config: &Config) -> Result<tessera_catalogue::Catalogue, BoxError> {
+    let dir = config.catalogue_dir.as_ref().ok_or(
+        "this deployment declares no catalogue; add `dir` under `[catalogue]`, such as \
+         `dir = \"catalogue\"`",
+    )?;
+    let options = tessera_catalogue::Options {
+        failed_attempt_limit: config.failed_attempt_limit,
+        failed_attempt_window: std::time::Duration::from_secs(config.failed_attempt_window_secs),
+        min_password_length: config.min_password_length,
+        allow_insecure_jwks: std::env::var(ALLOW_INSECURE_JWKS).is_ok_and(|v| v == "1"),
+        config_providers: config
+            .oidc_providers
+            .iter()
+            .map(|p| tessera_catalogue::Provider {
+                name: p.name.clone(),
+                issuer: p.issuer.clone(),
+                audience: p.audience.clone(),
+                jwks_url: p.jwks_url.clone(),
+                rules: p
+                    .claim_rules
+                    .iter()
+                    .map(|(claim, template)| tessera_catalogue::ClaimRule {
+                        claim: claim.clone(),
+                        template: template.clone(),
+                    })
+                    .collect(),
+                role_mappings: p
+                    .role_mappings
+                    .iter()
+                    .map(|(claim, value, group)| tessera_catalogue::RoleMapping {
+                        claim: claim.clone(),
+                        value: value.clone(),
+                        group: group.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        ..tessera_catalogue::Options::default()
+    };
+    tessera_catalogue::Catalogue::open(dir, options)
+        .map_err(|e| format!("the catalogue in {} cannot be opened: {e}", dir.display()).into())
 }
 
 /// The one line `run` writes to stdout once all three planes are listening. A declared port 0

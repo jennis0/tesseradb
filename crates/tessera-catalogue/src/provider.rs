@@ -45,9 +45,8 @@ pub struct ClaimRule {
 }
 
 /// An identity whose claim at the path `claim` holds exactly `value` receives the terms and
-/// permissions granted to the local group `group`. It never receives `bypass`. The claim is
-/// read as a claim rule reads it and each value there is trimmed; a value of the same text in
-/// another claim does not match.
+/// permissions granted to the local group `group`. The claim is read as a claim rule reads it
+/// and each value there is trimmed; a value of the same text in another claim does not match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleMapping {
     pub claim: String,

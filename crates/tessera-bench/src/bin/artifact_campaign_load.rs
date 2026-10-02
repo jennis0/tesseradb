@@ -16,12 +16,16 @@
 //!
 //! Sessions do not share masks: each is authorised on its own grant, which is the target scenario
 //! the campaign was set (one shared bundle, many principals, each with its own `M_auth`).
+//!
+//! Each rung's grant is held by a local principal of the server's catalogue, `campaign-<rung>`,
+//! created on the control plane with the operator credential and granted the rung's terms in one
+//! request, and each session is minted for it on the session plane by the service principal
+//! `campaign-load`, which holds `authorise-as`. The setup is not in `authorise_seconds`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use clap::Parser;
 use rand::{Rng, SeedableRng};
 
@@ -46,8 +50,12 @@ struct Args {
     viewer: String,
     #[arg(long)]
     session: String,
+    /// The control plane, where the principals the sessions are minted for are created.
     #[arg(long)]
-    session_credential: String,
+    control: String,
+    /// The operator credential, which creates them.
+    #[arg(long)]
+    operator_credential: String,
     /// The `fixture.json` `artifact_campaign_fixture` wrote — the principal ladder's grants.
     #[arg(long)]
     fixture_json: std::path::PathBuf,
@@ -128,21 +136,75 @@ async fn main() {
         .build()
         .expect("an http client");
 
+    // ---- a principal per rung, and the key that mints their sessions ------------------------
+    let control = |path: &str, body: serde_json::Value| {
+        client
+            .post(format!("{}{path}", args.control))
+            .bearer_auth(&args.operator_credential)
+            .json(&body)
+            .send()
+    };
+    let created = |status: u16, what: &str| {
+        assert!(status == 200 || status == 409, "creating {what} was refused: {status}");
+    };
+    let integrator = "campaign-load";
+    let response = control(
+        "/control/principals",
+        serde_json::json!({ "name": integrator, "kind": "service" }),
+    )
+    .await
+    .expect("create the integrator");
+    created(response.status().as_u16(), integrator);
+    let response = control(
+        "/control/grants",
+        serde_json::json!({ "principal": integrator, "permission": "authorise-as" }),
+    )
+    .await
+    .expect("grant authorise-as");
+    assert_eq!(response.status().as_u16(), 200, "granting authorise-as was refused");
+    let response = control(
+        &format!("/control/principals/{integrator}/keys"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("create a key");
+    assert_eq!(response.status().as_u16(), 200, "creating a key was refused");
+    let issued: serde_json::Value = response.json().await.expect("the key");
+    let api_key = issued["key"].as_str().expect("a key").to_string();
+    let mut principals: std::collections::HashMap<String, String> = Default::default();
+    for (rung, _) in &args.mix {
+        let grant = grants
+            .get(rung)
+            .unwrap_or_else(|| panic!("the ladder has no rung '{rung}'"));
+        let terms: Vec<&str> = grant.split(',').filter(|t| !t.trim().is_empty()).collect();
+        let name = format!("campaign-{rung}");
+        let response = control(
+            "/control/principals",
+            serde_json::json!({ "name": name, "kind": "person" }),
+        )
+        .await
+        .expect("create a principal");
+        created(response.status().as_u16(), &name);
+        for body in [
+            serde_json::json!({ "principal": name, "permission": "read" }),
+            serde_json::json!({ "principal": name, "terms": terms }),
+        ] {
+            let response = control("/control/grants", body).await.expect("grant");
+            assert_eq!(response.status().as_u16(), 200, "a grant to {name} was refused");
+        }
+        principals.insert(rung.clone(), name);
+    }
+
     // ---- establish every session, and time it ------------------------------------------------
     let mut tokens: Vec<(String, String)> = Vec::new();
     let authorise_began = Instant::now();
     for (rung, count) in &args.mix {
-        let grant = grants
-            .get(rung)
-            .unwrap_or_else(|| panic!("the ladder has no rung '{rung}'"));
-        let terms: Vec<&str> = grant.split(',').collect();
+        let principal = &principals[rung];
         for _ in 0..*count {
-            let payload = base64::engine::general_purpose::STANDARD
-                .encode(serde_json::json!({ "terms": terms }).to_string());
             let response = client
                 .post(format!("{}/session/authorise", args.session))
-                .bearer_auth(&args.session_credential)
-                .json(&serde_json::json!({ "auth_data": payload }))
+                .bearer_auth(&api_key)
+                .json(&serde_json::json!({ "principal": principal }))
                 .send()
                 .await
                 .expect("authorise");

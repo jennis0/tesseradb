@@ -8,6 +8,9 @@ it. It assumes an install from [the systemd guide](systemd.md), with the viewer 
 Only the viewer address goes behind the proxy. The session and control addresses stay private, as
 [Addresses and credentials](operating.md#addresses-and-credentials) explains.
 
+The viewer address also takes passwords, at `POST /v1/login`, and Tessera accepts them over plain
+HTTP. A deployment whose users log in with a password needs this proxy for that reason alone.
+
 ## Configure nginx
 
 This configuration serves your application at `maps.example.org` and passes `/v1/` to Tessera:
@@ -71,9 +74,9 @@ through the proxy:
 
 ```console
 tessera$ TOKEN=$(curl -sS http://127.0.0.1:9152/session/authorise \
-  -H "authorization: Bearer $(cat secrets/session.secret)" \
+  -H "authorization: Bearer $(cat secrets/operator.secret)" \
   -H 'content-type: application/json' \
-  -d "{\"auth_data\": \"$(printf '{"terms": ["public"]}' | base64 -w0)\"}" | jq -r .token)
+  -d '{"terms": ["public"]}' | jq -r .token)
 tessera$ curl -sS -o /dev/null -D - https://maps.example.org/v1/viewport \
   -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' \

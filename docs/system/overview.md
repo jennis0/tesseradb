@@ -54,11 +54,12 @@ We know of no system that does all of these at once.
 ## How it works
 
 An operator declares an access label on each item: an expression over terms, such as
-`secret&(team_a|team_b)`. A viewer authenticates by presenting a credential once, to a plane
-separate from the one serving requests, and receives a token that names the terms the credential
-holds. An item is visible to a viewer whose terms satisfy its label, and that visible set is
-computed once per session, from a term index and a shared graph of the labels that need more than
-one term.
+`secret&(team_a|team_b)`. A viewer is a principal in Tessera's identity catalogue, or an identity
+from an OIDC provider. It authenticates once, with a password, an API key or an OIDC access token,
+or an integrator's backend authorises a session on its behalf, and it receives a token holding the
+terms granted to it. An item is visible to a viewer whose terms satisfy its label, and that
+visible set is computed once per session, from a term index and a shared graph of the labels that
+need more than one term.
 
 Geometry is stored so that a screen tile at any zoom level is one contiguous range of rows, using
 Morton order, a row order in which every map tile falls in a single run. A viewer's visible set is

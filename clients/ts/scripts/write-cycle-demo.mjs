@@ -2,7 +2,7 @@
 // A write cycle on a running deployment: what happens to a label when a document it was written
 // from is deleted.
 //
-//   TESSERA_SESSION_CRED=… TESSERA_OPERATOR_CRED=… node clients/ts/scripts/write-cycle-demo.mjs
+//   TESSERA_OPERATOR_CRED=… node clients/ts/scripts/write-cycle-demo.mjs
 //
 // A client cannot see a label's generating set, so the script publishes its own small cluster and
 // one label over documents it chose, then deletes one of them. The steps:
@@ -21,7 +21,7 @@ import {Buffer} from 'node:buffer';
 import {tableFromIPC} from 'apache-arrow';
 // Loading a `.ts` module needs Node 22.18 or later, which strips its types.
 import {Control} from '../core/src/control.ts';
-import {accepted, clusterLayerDeclaration, labelLayerDeclaration} from './operator.ts';
+import {accepted, clusterLayerDeclaration, labelLayerDeclaration, authorise as mint} from './operator.ts';
 
 const args = Object.fromEntries(
   process.argv
@@ -30,24 +30,16 @@ const args = Object.fromEntries(
 );
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
-const sessionCred = process.env.TESSERA_SESSION_CRED;
 const operatorCred = process.env.TESSERA_OPERATOR_CRED;
-if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
-const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', operatorCredential: operatorCred});
+const control = new Control({controlUrl: args.control ?? 'http://127.0.0.1:45721', credential: operatorCred});
 
 const dryRun = 'dry-run' in args;
 
 // The same request and decoding shapes as `check-labels.mjs`.
 
 async function authorise(terms) {
-  const r = await fetch(`${session}/session/authorise`, {
-    method: 'POST',
-    headers: {authorization: `Bearer ${sessionCred}`, 'content-type': 'application/json'},
-    body: JSON.stringify({auth_data: Buffer.from(JSON.stringify({terms})).toString('base64')})
-  });
-  if (!r.ok) throw new Error(`authorise: ${r.status} ${await r.text()}`);
-  return (await r.json()).token;
+  return (await mint(session, operatorCred, {terms})).token;
 }
 
 async function metaOf(token) {

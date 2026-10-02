@@ -553,12 +553,14 @@ module = "builtin:passthrough"
 [disclosure]
 token_max_lifetime = 3600
 
+[catalogue]
+dir = ".tessera/catalogue"
+
 [serve]
 viewer  = "127.0.0.1:8081"
 session = "127.0.0.1:8082"
 control = "127.0.0.1:8083"
 max_k   = 200
-session_credential_env  = "TESSERA_GEONAMES_SESSION_CRED"
 operator_credential_env = "TESSERA_GEONAMES_OPERATOR_CRED"
 # Development only — the origins the demo viewer is served from, so a browser on this machine
 # can talk to this process (client-interaction §7). The list is enumerated: a wildcard is refused.

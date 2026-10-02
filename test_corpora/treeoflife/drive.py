@@ -16,7 +16,7 @@ sequence runs uncapped and under a cgroup cap and the two are comparable request
 
     python3 test_corpora/treeoflife/drive.py \\
         --viewer http://127.0.0.1:8141 --session http://127.0.0.1:8142 \\
-        --session-cred "$TESSERA_TREEOFLIFE_SESSION_CRED" \\
+        --control http://127.0.0.1:8143 --operator-cred "$TESSERA_TREEOFLIFE_OPERATOR_CRED" \\
         --principals '{"none": [], "iNaturalist": ["iNaturalist"], "all": [...]}' \\
         --match-field common_name --match-token butterfly --out results-nocap.json
 
@@ -30,13 +30,15 @@ response is decoded and summed, and a comparison across runs is over those sums.
 artifact step below additionally drills into a few ids through `POST /v1/artifacts/{id}`.
 """
 import argparse
-import base64
 import json
-import statistics
 import sys
 import time
+from pathlib import Path
 
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from test_corpora.common.serve_battery import Sessions
 from pyarrow import ipc
 import io
 
@@ -66,18 +68,6 @@ def tile_counts(content: bytes):
 #: every row carries a term, so a principal holding none sees **nothing** — which is the ladder's
 #: first rung and the ruling's whole point. Overridden by `--principals`.
 DEFAULT_PRINCIPALS = {"none": [], "unpublished": ["unpublished"]}
-
-
-def authorise(session_base, cred, terms):
-    auth_data = base64.b64encode(json.dumps({"terms": terms}).encode()).decode()
-    r = requests.post(
-        f"{session_base}/session/authorise",
-        headers={"Authorization": f"Bearer {cred}"},
-        json={"auth_data": auth_data},
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()["token"]
 
 
 def meta(viewer_base, token):
@@ -154,7 +144,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--viewer", required=True)
     ap.add_argument("--session", required=True)
-    ap.add_argument("--session-cred", required=True)
+    ap.add_argument("--control", required=True)
+    ap.add_argument("--operator-cred", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--principals", default=None,
                     help='JSON object of label -> access terms; default '
@@ -166,6 +157,7 @@ def main():
     ap.add_argument("--match-token", default="butterfly",
                     help="a token expected to be common in that column")
     args = ap.parse_args()
+    sessions = Sessions(args.session, args.control, args.operator_cred)
 
     principals = json.loads(args.principals) if args.principals else dict(DEFAULT_PRINCIPALS)
     order = list(principals)
@@ -196,7 +188,7 @@ def main():
 
     tokens = {}
     for label, terms in principals.items():
-        tokens[label] = authorise(args.session, args.session_cred, terms)
+        tokens[label] = sessions.authorise(terms)[0]
     results["principals"] = dict(principals)
 
     m = meta(args.viewer, tokens[order[-1]])

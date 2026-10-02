@@ -14,7 +14,6 @@ build is via the CLI subprocess, same as before).
 
 from __future__ import annotations
 
-import base64
 import functools
 import hashlib
 import json
@@ -32,7 +31,6 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_BIN = REPO_ROOT / "target" / "release" / "tessera"
 
-SESSION_CREDENTIAL = "reference-oracle-session-secret"
 OPERATOR_CREDENTIAL = "reference-oracle-operator-secret"
 
 DEFAULT_POINTS = "data/scaled/geometry.parquet"
@@ -521,22 +519,22 @@ class Server:
         viewer_port: int,
         session_port: int,
         control_port: int,
-        session_credential: str = SESSION_CREDENTIAL,
         operator_credential: str = OPERATOR_CREDENTIAL,
     ):
         self.viewer_base = f"http://127.0.0.1:{viewer_port}"
         self.session_base = f"http://127.0.0.1:{session_port}"
         self.control_base = f"http://127.0.0.1:{control_port}"
-        self.session_credential = session_credential
         self.operator_credential = operator_credential
 
     def authorise(self, terms: list[str]) -> dict:
-        auth_data = base64.b64encode(json.dumps({"terms": terms}).encode()).decode()
+        """A session holding exactly `terms` and `read`, minted with the operator credential. The
+        server holds a term trimmed, and drops one that is empty, holds a control character or is
+        `public`."""
         resp = requests.post(
             f"{self.session_base}/session/authorise",
-            headers={"Authorization": f"Bearer {self.session_credential}"},
-            json={"auth_data": auth_data},
-            timeout=10,
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json={"terms": terms},
+            timeout=60,
         )
         resp.raise_for_status()
         return resp.json()
@@ -865,7 +863,6 @@ token_max_lifetime = 3600
 viewer = "127.0.0.1:{viewer_port}"
 session = "127.0.0.1:{session_port}"
 control = "127.0.0.1:{control_port}"
-session_credential_env = "TESSERA_REFERENCE_SESSION_CRED"
 operator_credential_env = "TESSERA_REFERENCE_OPERATOR_CRED"
 max_k = {max_k}
 k_min = {k_min}
@@ -876,6 +873,7 @@ theta_target_marks = {theta_target_marks}
         config_text += f"max_underlay_cells = {max_underlay_cells}\n"
     if serve_extra:
         config_text += serve_extra.rstrip() + "\n"
+    config_text += f'\n[catalogue]\ndir = "{tmp_dir / "catalogue"}"\n'
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -931,7 +929,6 @@ def spawn_server(
     )
 
     env = os.environ.copy()
-    env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
     env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
     if env_extra:
         env.update(env_extra)

@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
-use tessera_authz::{FragmentCacheError, FrozenFragment};
+use tessera_authz::{FragmentCacheError, FrozenFragment, Grant};
 use tessera_types::TermId;
 
 #[cfg(doc)]
@@ -22,8 +22,54 @@ use crate::engine::{hex_encode, Engine};
 use crate::error::{EngineError, Result};
 use crate::Generation;
 
-/// One authorised viewer session: the credential's granted term set and the mask fragment it
-/// unions to, computed once here and reused rather than recomputed per viewport.
+/// The index keys a session satisfies: those it resolved at authorise, or every key the
+/// dictionary carries now or later.
+#[derive(Clone)]
+pub enum Satisfied {
+    /// These keys, and no other.
+    Keys(FxHashSet<TermId>),
+    /// Every key, whenever it was promoted: a `read-all` session.
+    Every,
+}
+
+/// A set of index keys, asked one key at a time. [`Satisfied`] is a session's; a plain set of
+/// keys answers as [`Satisfied::Keys`] does.
+pub trait SatisfiedKeys {
+    /// Whether `key` is in the set.
+    fn holds_key(&self, key: TermId) -> bool;
+}
+
+impl SatisfiedKeys for Satisfied {
+    fn holds_key(&self, key: TermId) -> bool {
+        match self {
+            Satisfied::Keys(keys) => keys.contains(&key),
+            Satisfied::Every => true,
+        }
+    }
+}
+
+impl SatisfiedKeys for FxHashSet<TermId> {
+    fn holds_key(&self, key: TermId) -> bool {
+        self.contains(&key)
+    }
+}
+
+/// What a session authorised for a set of terms holds. A `read-all` session has none of this: it
+/// holds every term.
+struct HeldTerms {
+    /// The term the credential presented for each satisfied term ordinal, and `public`. A label
+    /// key has no entry: the item card names it by a witness drawn from [`Self::credentials`].
+    descriptors: FxHashMap<TermId, Vec<u8>>,
+    /// Every term the credential holds, whether or not the dictionary carries it, and `public`.
+    /// What a view's, a layer's or an artifact's own label is evaluated against, so a label no
+    /// item carries is still one a credential can satisfy. The item card's witness names only
+    /// terms from this set.
+    credentials: FxHashSet<Vec<u8>>,
+}
+
+/// One authorised viewer session: the index keys it satisfies and the mask fragment they union
+/// to, computed once here and brought forward by the background refresh rather than recomputed
+/// per viewport.
 ///
 /// Holds no entity-id → wire-handle table: that state lives in `tessera-server`, alongside this
 /// struct rather than inside it, so this crate never depends on `tessera-wire`'s handle type.
@@ -33,31 +79,24 @@ pub struct Session {
     /// A process-local identity for this session, distinct from `token`: part of the
     /// row-projection cache key, so the cache never hashes or compares the full token string.
     token_id: u64,
-    /// The index keys the credential satisfies, as bundle-relative `TermId`s: each term it holds
-    /// that the dictionary carries, `public`, and the key of each label holding a conjunction
-    /// that its terms satisfy. A term the dictionary does not carry is absent here, never an
-    /// error. Resolved once, at authorise, and never re-resolved in place: see
-    /// [`Session::is_stale`]. A key promoted after authorise is not added; the remedy is a new
-    /// session.
-    satisfied: FxHashSet<TermId>,
-    /// The materialised mask fragment: the union of every satisfied term's postings, over the base
-    /// and every delta tier live when this session authorised. Goes stale as flushes publish delta
-    /// tiers and move the watermark: a flushed entity is invisible to a viewer served this
-    /// fragment until it is rebuilt. [`Engine::fragment_for`] is what brings it forward, and is the
-    /// only reader of this field outside a test hook.
+    /// The index keys the session satisfies. For a session authorised for terms, as
+    /// bundle-relative `TermId`s: each term it holds that the dictionary carries, `public`, and
+    /// the key of each label holding a conjunction that its terms satisfy. A term the dictionary
+    /// does not carry is absent, never an error. Resolved once, at authorise, and never
+    /// re-resolved in place: see [`Session::is_stale`]. For a `read-all` session, every key.
+    satisfied: Satisfied,
+    /// What the fragment is the union of, and the [`tessera_authz::FragmentCache`] key component:
+    /// `satisfied`'s keys sorted, or every key. A `read-all` session's fragment is keyed by the
+    /// watermark alone, so every such session at one watermark shares it.
+    grant: Grant,
+    /// The materialised mask fragment: the union of `grant`'s postings, over the base and every
+    /// delta tier live when this session authorised. Goes stale as flushes publish delta tiers and
+    /// move the watermark: a flushed entity is invisible to a viewer served this fragment until it
+    /// is rebuilt. [`Engine::fragment_for`] is what brings it forward, and is the only reader of
+    /// this field outside a test hook.
     fragment: Arc<FrozenFragment>,
-    /// `satisfied`, sorted: the [`tessera_authz::FragmentCache`] key component, kept rather than
-    /// re-sorted per request. `Arc` so the row-projection cache can carry it for the background
-    /// refresh, which has no session registry to look it up in.
-    satisfied_sorted: Arc<Vec<TermId>>,
-    /// The term the credential presented for each satisfied term ordinal, and `public`. A label
-    /// key has no entry: the item card names it by a witness drawn from [`Self::credentials`].
-    satisfied_descriptors: Arc<FxHashMap<TermId, Vec<u8>>>,
-    /// Every term the credential holds, whether or not the dictionary carries it, and `public`.
-    /// What a view's, a layer's or an artifact's own label is evaluated against, so a label no
-    /// item carries is still one a credential can satisfy. The item card's witness names only
-    /// terms from this set.
-    credentials: Arc<FxHashSet<Vec<u8>>>,
+    /// The terms the session holds, or `None` for a `read-all` session.
+    held: Option<HeldTerms>,
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
     /// costs the same lookup as a name nobody declared, and a view created after authorise is a
@@ -94,27 +133,39 @@ impl Session {
         &self.visible_views
     }
 
-    /// The credential's granted terms. Term ids are internal and never reach a client.
-    pub(crate) fn satisfied(&self) -> &FxHashSet<TermId> {
+    /// The index keys the session satisfies. Term ids are internal and never reach a client.
+    pub(crate) fn satisfied(&self) -> &Satisfied {
         &self.satisfied
     }
 
-    /// [`Self::satisfied`] sorted, the fragment-cache key component.
-    pub(crate) fn satisfied_sorted(&self) -> &Arc<Vec<TermId>> {
-        &self.satisfied_sorted
+    /// What the session's fragment is the union of.
+    pub(crate) fn grant(&self) -> &Grant {
+        &self.grant
     }
 
-    /// The descriptor the credential presented for each satisfied term.
-    pub(crate) fn satisfied_descriptors(&self) -> &Arc<FxHashMap<TermId, Vec<u8>>> {
-        &self.satisfied_descriptors
+    /// The term the session's item card names for the index key `key`, where `key` is a term the
+    /// session holds. A label's own key names none: the card writes a clause of the label. A
+    /// `read-all` session holds every term, so every term key is named from `dict`.
+    pub(crate) fn term_of<'a>(
+        &'a self,
+        key: TermId,
+        dict: &'a tessera_authz::Dict,
+    ) -> Option<&'a [u8]> {
+        match &self.held {
+            Some(held) => held.descriptors.get(&key).map(Vec::as_slice),
+            None if dict.labels().is_label_key(key) => None,
+            None => dict.descriptor(key),
+        }
     }
 
-    /// Whether the credential holds the term `term`.
+    /// Whether the session holds the term `term`. A `read-all` session holds every term.
     pub(crate) fn holds(&self, term: &str) -> bool {
-        self.credentials.contains(term.as_bytes())
+        self.held
+            .as_ref()
+            .is_none_or(|held| held.credentials.contains(term.as_bytes()))
     }
 
-    /// Whether the credential satisfies any of the stored `labels`.
+    /// Whether the session satisfies any of the stored `labels`.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
         tessera_types::label::admits(labels, &|term| self.holds(term))
     }
@@ -124,16 +175,19 @@ impl Session {
         self.auth_data_hash
     }
 
-
     /// Whether this session's mask is behind the corpus: true iff a key promoted since authorise
-    /// is a term the credential holds, or a label holding a conjunction that its terms satisfy. A
+    /// is a term the session holds, or a label holding a conjunction that its terms satisfy. A
     /// stale session sees fewer items than its principal is entitled to, never more. It is a
     /// hint, not a revocation; the only remedy is a new session, since `satisfied` is never
-    /// re-resolved in place.
+    /// re-resolved in place. A `read-all` session is never behind: its fragment is built from
+    /// every key at each refresh.
     ///
     /// A compaction that renumbers the dictionary must not reduce its length, or must keep a
     /// counter that never decreases: this predicate rests on that length being monotone.
     pub fn is_stale(&self, generation: &Generation) -> bool {
+        let Some(held) = &self.held else {
+            return false;
+        };
         let labels = generation.dict.labels();
         (self.dict_len_at_authorise..generation.dict.len())
             .map(TermId::new)
@@ -142,10 +196,14 @@ impl Session {
                 false => generation
                     .dict
                     .descriptor(key)
-                    .is_some_and(|term| self.credentials.contains(term)),
+                    .is_some_and(|term| held.credentials.contains(term)),
             })
     }
 }
+
+/// The authorisation data [`Engine::authorise_all`] hashes into its sessions' cursors. A
+/// credential is JSON, which cannot begin with a NUL byte.
+const AUTH_DATA_EVERY_ITEM: &[u8] = b"\0every item";
 
 impl Engine {
     /// Authorise a credential: its terms → dictionary lookup (an unknown term drops out, never an
@@ -166,7 +224,7 @@ impl Engine {
             auth_terms.iter().map(|t| t.as_bytes().to_vec()).collect();
         credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
         let mut satisfied: FxHashSet<TermId> = FxHashSet::default();
-        let mut satisfied_descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
+        let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let labels = generation.dict.labels();
         for term in &auth_terms {
             // A held term never names a label's own key, which starts with a control character
@@ -175,7 +233,7 @@ impl Engine {
             if let Some(id) = generation.dict.lookup(term.as_bytes()) {
                 if !labels.is_label_key(id) {
                     satisfied.insert(id);
-                    satisfied_descriptors.insert(id, term.as_bytes().to_vec());
+                    descriptors.insert(id, term.as_bytes().to_vec());
                 }
             }
         }
@@ -194,35 +252,71 @@ impl Engine {
                 "`public` is reserved at term 0 by every build"
             );
             satisfied.insert(term);
-            satisfied_descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
+            descriptors.insert(term, tessera_authz::PUBLIC_LABEL.to_vec());
         }
 
+        let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
+        sorted.sort_unstable();
+        let held = HeldTerms {
+            descriptors,
+            credentials,
+        };
+        self.mint(
+            &generation,
+            auth_data,
+            Satisfied::Keys(satisfied),
+            Grant::Keys(Arc::new(sorted)),
+            Some(held),
+        )
+    }
+
+    /// Authorise a session that satisfies every index key, whenever it was promoted, and so every
+    /// view's, layer's and artifact's label. Its fragment is the union of every posting at the
+    /// watermark it is built for, under one cache entry that every such session shares, and the
+    /// background refresh rebuilds it at each publication, so an item a flush places under a new
+    /// term or a new label joins it. Deletions and suppressions are removed from it when the
+    /// visible set is composed, as from any session's.
+    pub fn authorise_all(&self) -> Result<Session> {
+        let generation = self.generation.load();
+        self.mint(
+            &generation,
+            AUTH_DATA_EVERY_ITEM,
+            Satisfied::Every,
+            Grant::Every,
+            None,
+        )
+    }
+
+    /// A session for `satisfied`, whose fragment is `grant`'s union at `generation`'s watermark.
+    fn mint(
+        &self,
+        generation: &Generation,
+        auth_data: &[u8],
+        satisfied: Satisfied,
+        grant: Grant,
+        held: Option<HeldTerms>,
+    ) -> Result<Session> {
         let visible_views = Arc::new(crate::gate::resolve(
             &generation.bundle.manifest,
-            &credentials,
+            &|term| {
+                held.as_ref()
+                    .is_none_or(|held| held.credentials.contains(term.as_bytes()))
+            },
         ));
 
-        let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
-        satisfied_sorted.sort_unstable();
-        let satisfied_sorted = Arc::new(satisfied_sorted);
-
-        // Must be a function of the exact `auth_data` that produced `satisfied` above.
+        // Must be a function of the exact `auth_data` that produced `satisfied`.
         let auth_data_hash: [u8; 32] = Sha256::digest(auth_data).into();
 
         let fragment = generation
             .fragments
-            .get_or_build_waiting(
-                &satisfied_sorted,
+            .get_or_build_grant_waiting(
+                &grant,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
                 &tessera_cache::NeverCancelled,
             )
-            .map_err(|e| match e {
-                FragmentCacheError::Building => EngineError::FragmentBuilding,
-                FragmentCacheError::Cancelled => EngineError::Cancelled,
-                FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
-            })?;
+            .map_err(fragment_error)?;
 
         let mut token_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut token_bytes);
@@ -240,10 +334,9 @@ impl Engine {
             token,
             token_id,
             satisfied,
+            grant,
             fragment,
-            satisfied_sorted,
-            satisfied_descriptors: Arc::new(satisfied_descriptors),
-            credentials: Arc::new(credentials),
+            held,
             visible_views,
             auth_data_hash,
             expires_at,
@@ -315,18 +408,14 @@ impl Engine {
         }
         generation
             .fragments
-            .get_or_build_waiting(
-                &session.satisfied_sorted,
+            .get_or_build_grant_waiting(
+                &session.grant,
                 &generation.postings,
                 &generation.delta_postings,
                 generation.watermark,
                 &tessera_cache::NeverCancelled,
             )
-            .map_err(|e| match e {
-                FragmentCacheError::Building => EngineError::FragmentBuilding,
-                FragmentCacheError::Cancelled => EngineError::Cancelled,
-                FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
-            })
+            .map_err(fragment_error)
     }
 
     /// Which layers this principal may know exist. A layer's label is evaluated against the
@@ -354,7 +443,10 @@ impl Engine {
                 MemberDefault::Inherited => true,
                 MemberDefault::Label(label) => session.admits(&[label]),
             };
-        crate::artifacts::LabelGate::new(&session.credentials, unlabelled)
+        match &session.held {
+            Some(held) => crate::artifacts::LabelGate::new(&held.credentials, unlabelled),
+            None => crate::artifacts::LabelGate::every_term(unlabelled),
+        }
     }
 
     /// Which layers this principal may know exist, and which of those are currently served.
@@ -377,6 +469,14 @@ impl Engine {
                     && !generation.overlay.is_suppressed(layer.entity)
             })
             .collect()
+    }
+}
+
+fn fragment_error(e: FragmentCacheError) -> EngineError {
+    match e {
+        FragmentCacheError::Building => EngineError::FragmentBuilding,
+        FragmentCacheError::Cancelled => EngineError::Cancelled,
+        FragmentCacheError::Io(io_err) => EngineError::Io(io_err),
     }
 }
 
@@ -414,10 +514,14 @@ impl Session {
         &self.fragment
     }
 
-    /// The term set resolved at authorise.
+    /// The keys resolved at authorise, and an empty set for a `read-all` session.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]
     pub fn satisfied_for_test(&self) -> &FxHashSet<TermId> {
-        &self.satisfied
+        static NONE: std::sync::OnceLock<FxHashSet<TermId>> = std::sync::OnceLock::new();
+        match &self.satisfied {
+            Satisfied::Keys(keys) => keys,
+            Satisfied::Every => NONE.get_or_init(FxHashSet::default),
+        }
     }
 }

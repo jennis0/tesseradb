@@ -5,8 +5,8 @@ import type {Store} from './store.js';
 
 /**
  * A function the store calls for a viewer token, and calls again to renew it. It resolves to the
- * token and `expiresAt`, in seconds since the Unix epoch, as `/session/authorise` reports
- * `expires_at`; `Infinity` is a token that does not expire.
+ * token and `expiresAt`, in seconds since the Unix epoch, as {@link TesseraClient.login} and
+ * {@link TesseraClient.authorise} report it; `Infinity` is a token that does not expire.
  *
  * The store renews 30 seconds before expiry, or halfway through a lifetime shorter than a minute,
  * and calls again before a request where the token has 5 seconds or less left. Concurrent requests

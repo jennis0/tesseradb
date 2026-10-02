@@ -72,13 +72,25 @@ impl ArtifactVerdict {
 /// credential and nothing a request can narrow, so a filter never moves it.
 #[derive(Clone, Copy)]
 pub struct LabelGate<'a> {
-    held: &'a FxHashSet<Vec<u8>>,
+    /// The terms the viewer holds, or `None` for a viewer holding every term.
+    held: Option<&'a FxHashSet<Vec<u8>>>,
     unlabelled: bool,
 }
 
 impl<'a> LabelGate<'a> {
     pub fn new(held: &'a FxHashSet<Vec<u8>>, unlabelled: bool) -> Self {
-        LabelGate { held, unlabelled }
+        LabelGate {
+            held: Some(held),
+            unlabelled,
+        }
+    }
+
+    /// The gate of a viewer holding every term, which satisfies every label that parses.
+    pub fn every_term(unlabelled: bool) -> Self {
+        LabelGate {
+            held: None,
+            unlabelled,
+        }
     }
 
     /// Whether an artifact carrying `access` is admitted. A label that did not parse admits
@@ -87,7 +99,7 @@ impl<'a> LabelGate<'a> {
         if access.is_empty() {
             return self.unlabelled;
         }
-        let held = |term: &str| self.held.contains(term.as_bytes());
+        let held = |term: &str| self.held.is_none_or(|held| held.contains(term.as_bytes()));
         access
             .iter()
             .flatten()
