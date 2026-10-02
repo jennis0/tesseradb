@@ -2,7 +2,7 @@
 
 use super::*;
 use super::out::flat_families;
-use tessera_store::bands::{CopyType, CopyValue};
+use tessera_store::bands::{page_size, CopyType, CopyValue};
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
 /// the deliberately huge value that means "one flush per response". The wire's frame length is a
@@ -352,13 +352,16 @@ pub(super) fn tile_sweep<'a>(
             rows,
             entries,
             entries_read,
+            widened,
         } => {
             stats.count(|t| &mut t.tiles_from_bands, 1);
+            stats.count(|t| &mut t.tiles_bands_widened, u64::from(widened));
             stats.count(|t| &mut t.select_rows_visited, entries_read);
             (rows, Some(entries))
         }
         declined => {
-            if matches!(declined, crate::bands::BandAnswer::Sparse) {
+            if let crate::bands::BandAnswer::Sparse { read } = declined {
+                stats.count(|t| &mut t.tiles_sparse_after_read, u64::from(read));
                 will_need_visible_identities(mask, &part_list);
             }
             let selected = Selection::of(mask, &parts, params, matched);
@@ -929,12 +932,6 @@ fn element<T>(slice: &[T], i: usize) -> usize {
     slice.as_ptr() as usize + std::mem::size_of::<T>() * i
 }
 
-fn page_size() -> usize {
-    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    // SAFETY: `sysconf` reads a constant of the running system.
-    *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize)
-}
-
 /// `MADV_WILLNEED` over every page in `pages`, one call per run of adjacent pages. The pages are
 /// read in the background, so the gather's faults that follow find them in the page cache, and
 /// the kernel's read-ahead around a fault, sized for a sequential reader, is not triggered.
@@ -968,7 +965,7 @@ fn will_need_visible_identities(mask: &EffectiveMask, parts: &[SelectionPart<'_>
     for part in parts {
         let ids = part.segment.columns.tessera_id();
         let base = part.row_base;
-        mask.for_each_visible_run(base + part.range.start..base + part.range.end, |run| {
+        mask.for_each_run_holding_visible(base + part.range.start..base + part.range.end, |run| {
             let last = element(ids, (run.end - 1 - base) as usize);
             let mut at = element(ids, (run.start - base) as usize) & !(page - 1);
             while at <= last {

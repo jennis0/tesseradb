@@ -2422,7 +2422,8 @@ fn invalid_columns(path: &Path, detail: &str) -> StoreError {
 }
 
 /// The row range `tile` occupies within `seg`'s Morton order (contracts §2.5), found by binary
-/// search over the segment's cell codes: a tile holds whole leaf cells, so its rows begin at its
+/// search over the segment's cell codes, which open refuses unless they ascend strictly: a tile
+/// holds whole leaf cells, so its rows begin at its
 /// first cell's start and end at the first start past it. Callers must treat a tile as resolving
 /// to a **set** of ranges — one per segment sharing the tile's view — even though a build writes
 /// exactly one segment per view; the engine-level signature is `Vec<Range<u32>>` accordingly.
@@ -2525,16 +2526,15 @@ fn gallop(codes: &[u32], from: usize, target: u64) -> usize {
 /// `log2(distance from the previous tile)`.
 ///
 /// The sweep runs over the cell codes rather than the Morton column: one code per occupied cell
-/// rather than per row, so at 83 rows a cell (GBIF) it searches a fortieth of the bytes, and a
-/// cold request faults that much less. A tile holds whole cells, so the cell found maps back to
-/// the row it begins at.
+/// rather than per row. A tile holds whole cells, so the cell found maps back to the row it
+/// begins at.
 ///
 /// # Why it is correct
 ///
 /// One lemma carries the whole thing: `partition_point(|c| c < t)` over an ascending column is
 /// **non-decreasing in `t`** — a larger threshold can only admit more codes. The cell codes
-/// ascend strictly, because they are the Morton column's distinct values in row order, and
-/// `tessera verify --deep` checks that they are.
+/// ascend strictly: [`crate::bands::CellCodes::open`] refuses a file whose codes do not, and
+/// `tessera verify --deep` checks that each is its cell's Morton code.
 ///
 /// [`gallop`]'s contract holds for any `from`, and equals the full-column search exactly when
 /// `from` is at or below the answer. This sweep establishes that in both places it calls it:

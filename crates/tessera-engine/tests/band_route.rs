@@ -21,6 +21,7 @@ use parquet::arrow::ArrowWriter;
 use common::*;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::bands::BANDS_BELOW_ZOOM;
+use tessera_engine::filter::{Endpoint, FilterExpr, FilterOperand, Scalar};
 use tessera_engine::viewport::{PointRows, ViewportRequest};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
@@ -132,10 +133,10 @@ fn build_fixture(root: &Path) {
     w.close().unwrap();
 
     let mut schema = id_schema();
-    for (name, ty) in [
-        ("score", ScalarType::I32),
-        ("flag", ScalarType::Bool),
-        ("weight", ScalarType::F64),
+    for (name, ty, index) in [
+        ("score", ScalarType::I32, true),
+        ("flag", ScalarType::Bool, false),
+        ("weight", ScalarType::F64, true),
     ] {
         schema.attributes.push(tessera_build::config::Attribute {
             field: None,
@@ -145,7 +146,7 @@ fn build_fixture(root: &Path) {
             analyser: None,
             vocabulary: None,
             value_set: None,
-            index: false,
+            index,
             render: true,
             unique: false,
         });
@@ -212,13 +213,33 @@ fn credential(term: &str) -> Vec<u8> {
 }
 
 /// What one principal was served over every zoom and request shape: how many non-empty tiles, how
-/// many of them the bands answered, and how many points.
+/// many of them the bands answered, how many a wider band answered, how many fell to the column
+/// after the bands were read, and how many points.
 #[derive(Default, Debug)]
 struct Served {
     tiles: u64,
     from_bands: u64,
+    widened: u64,
+    sparse_after_read: u64,
     points: usize,
 }
+
+/// `field < bound`, as a filter or a highlight.
+fn below(field: &str, bound: f64) -> FilterExpr {
+    FilterExpr::Leaf {
+        column: field.into(),
+        operand: FilterOperand::Range {
+            lo: None,
+            hi: Some(Endpoint {
+                value: Scalar::Float(bound),
+                inclusive: false,
+            }),
+        },
+    }
+}
+
+/// The request shapes each principal is checked under.
+const SHAPES: usize = 5;
 
 /// Every request shape for `term`'s principal, answered from the bands and by the scan, compared.
 fn check(engine: &Engine, term: &str) -> Served {
@@ -226,15 +247,21 @@ fn check(engine: &Engine, term: &str) -> Served {
     let mut served = Served::default();
     let columns = ["flag".to_string()];
     for zoom in ZOOMS {
-        for (k, point_rows, underlay) in [
-            (200, PointRows::Full, None),
-            (3, PointRows::Full, None),
-            (200, PointRows::Columns(&columns), (zoom <= 4).then_some(2)),
+        // The filter keeps every item below source 32,000, the lone one among them; the highlight
+        // marks the negative scores.
+        for (k, point_rows, underlay, filter, highlight) in [
+            (200, PointRows::Full, None, None, None),
+            (3, PointRows::Full, None, None, None),
+            (200, PointRows::Columns(&columns), (zoom <= 4).then_some(2), None, None),
+            (200, PointRows::Full, None, None, Some(below("score", 0.0))),
+            (200, PointRows::Full, None, Some(below("weight", 4_000.0)), None),
         ] {
             let request = || {
                 let mut req = ViewportRequest::new("s0", zoom, WHOLE_MAP, k);
                 req.point_rows = point_rows;
                 req.underlay_offset = underlay;
+                req.filter = filter.clone();
+                req.highlight = highlight.clone();
                 req
             };
             engine.set_bands_below_zoom_for_test(17);
@@ -252,6 +279,8 @@ fn check(engine: &Engine, term: &str) -> Served {
             );
             served.tiles += bands.timings.tiles_nonempty;
             served.from_bands += bands.timings.tiles_from_bands;
+            served.widened += bands.timings.tiles_bands_widened;
+            served.sparse_after_read += bands.timings.tiles_sparse_after_read;
             served.points += bands.points.tessera_ids.len();
         }
     }
@@ -268,13 +297,22 @@ fn check_all(engine: &Engine) {
     for (who, s) in [("broad", &broad), ("medium", &medium)] {
         assert!(s.from_bands > 0, "{who}: the bands answered no tile: {s:?}");
     }
+    let all = [&broad, &medium, &narrow, &lone];
+    assert!(
+        all.iter().any(|s| s.widened > 0),
+        "some tile was answered by a wider band than the first: {all:?}"
+    );
+    assert!(
+        all.iter().any(|s| s.sparse_after_read > 0),
+        "some tile fell to the column after its bands were read: {all:?}"
+    );
     assert!(
         narrow.from_bands < narrow.tiles,
         "narrow: some tile fell to the column: {narrow:?}"
     );
     assert_eq!(
         lone.points,
-        ZOOMS.count() * 3,
+        ZOOMS.count() * SHAPES,
         "the one visible item is served in every request: {lone:?}"
     );
 }

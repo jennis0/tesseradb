@@ -25,38 +25,35 @@ use crate::compose::EffectiveMask;
 use crate::error::{EngineError, Result};
 use crate::select::{served_count, SelectParams, SelectionPart, Threshold};
 
-/// The band route answers requests at zooms below this; the scan answers the rest.
-///
-/// Measured 2026-10-02 on GeoNames (13.5 million rows) and the 64-partition GBIF slice (25.8
-/// million), with whole-map requests at zooms 0 to 9 and 289-tile windows at zooms 8 to 14, for
-/// principals seeing 1% to 100%, warm and cold. Wherever the bands answered tiles the request took
-/// the same time or less and served the same bytes: the 100% principal on the GBIF slice took
-/// 144 ms by the scan and 3 ms by the bands at zoom 5, and the 85% one 116 ms and 61 ms at zoom 9.
-/// Where the threshold is wider than the widest band the route declines each tile and costs what
-/// the scan costs. On those corpora no tile deeper than zoom 9 was answered from the bands, so the
-/// deeper zooms keep the scan until a larger corpus measures them.
+/// The band route answers requests at zooms below this; the scan answers the rest. Where the
+/// threshold is wider than the widest band the route declines each tile, at any zoom.
 pub const BANDS_BELOW_ZOOM: u8 = 10;
 
 /// What the bands answer for one tile.
-pub(crate) enum BandAnswer {
+#[derive(Debug, PartialEq, Eq)]
+pub enum BandAnswer {
     /// The tile's served rows, in view row space and ascending by `tessera_id`, and each one's
-    /// entry in its segment's bands.
+    /// entry in its segment's bands. `widened` where the band first read held fewer than `m`
+    /// visible entries and a wider one answered.
     Served {
         rows: Vec<u32>,
         entries: Vec<u32>,
         entries_read: u64,
+        widened: bool,
     },
     /// The widest band holds fewer than `m` of the tile's visible rows: its few visible rows are
-    /// read from the identity column.
-    Sparse,
+    /// read from the identity column. `read` where the bands were read before that was known,
+    /// rather than expected from the tile's visible count.
+    Sparse { read: bool },
     /// No band holds every row below the threshold (a saturated or wide threshold), or the
     /// request serves no point: the shipped scan answers.
     Declined,
 }
 
 /// The tile `parts` under `mask`, answered from the bands where they can answer it. `matched` is
-/// the tile's count in the set selection draws from, `Σ part.visible`.
-pub(crate) fn select(
+/// the tile's count in the set selection draws from, `Σ part.visible`, and each part's `visible`
+/// its own count, as [`crate::select::Selection::of`] takes them.
+pub fn select(
     mask: &EffectiveMask,
     parts: &[SelectionPart<'_>],
     params: &SelectParams,
@@ -79,11 +76,11 @@ pub(crate) fn select(
     let expected_m = served_count(expected_below, params, matched).max(1) as u64;
     let ratio = matched / expected_m;
     if ratio == 0 {
-        return Ok(BandAnswer::Sparse);
+        return Ok(BandAnswer::Sparse { read: false });
     }
     let start = holding.min(63 - ratio.leading_zeros());
     if start < FIRST_BAND {
-        return Ok(BandAnswer::Sparse);
+        return Ok(BandAnswer::Sparse { read: false });
     }
 
     let mut candidates: Vec<(u64, u32, u32)> = Vec::new();
@@ -132,8 +129,9 @@ pub(crate) fn select(
                 rows: candidates.iter().map(|&(_, row, _)| row).collect(),
                 entries: candidates.iter().map(|&(_, _, e)| e).collect(),
                 entries_read,
+                widened: band < start,
             });
         }
     }
-    Ok(BandAnswer::Sparse)
+    Ok(BandAnswer::Sparse { read: true })
 }

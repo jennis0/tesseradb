@@ -429,6 +429,19 @@ impl EffectiveMask {
         }
     }
 
+    /// Visit runs of `r` holding every visible row and possibly some rows the diffs or a filter
+    /// remove: the projection's runs, then each row the diffs add. Nothing is materialised, so
+    /// read advice taken from these costs no second composition of the mask; a page too many is
+    /// read for nothing, and none the visible rows sit on is missed.
+    pub fn for_each_run_holding_visible(&self, r: Range<u32>, mut f: impl FnMut(Range<u32>)) {
+        for_each_run_in(self.base.bitmap(), r.clone(), &mut f);
+        let mut added = self.plus.iter();
+        added.reset_at_or_after(r.start);
+        for row in added.take_while(|&row| row < r.end) {
+            f(row..row + 1);
+        }
+    }
+
     /// The bitmap a caller-driven, per-value decode of `r` should walk, for callers whose hot
     /// loop cannot afford a closure boundary (the tier gate lives at
     /// `select.rs::RUN_DECODE_MIN_DENSITY_PCT`). Same route structure as

@@ -92,6 +92,13 @@ const SECTION_ALIGN: usize = 4096;
 /// `(id u64, row u32, code u32, residual u32)` in the spool [`BandWriter`] streams through.
 const SPOOL_RECORD_BYTES: usize = 20;
 
+/// The system's page size, which read advice is given in.
+pub fn page_size() -> usize {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: `sysconf` reads a constant of the running system.
+    *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize)
+}
+
 /// The band a row falls in at most: its identity's leading zero bits.
 pub fn band_of(tessera_id: u64) -> u32 {
     tessera_id.leading_zeros()
@@ -527,6 +534,7 @@ pub struct Bands {
     layout: Layout,
     /// Set once a request has asked for its reads to be advised as random.
     advised: std::sync::Once,
+    path: PathBuf,
 }
 
 impl Bands {
@@ -605,6 +613,13 @@ impl Bands {
                 ),
             ));
         }
+        // An entry's index is carried as a `u32` beside the row it names.
+        if entries > u64::from(u32::MAX) {
+            return Err(malformed(
+                &path,
+                format!("{entries} entries, more than a u32 indexes"),
+            ));
+        }
         let entries = usize::try_from(entries).map_err(|_| malformed(&path, "too many entries"))?;
         let mut copies = Vec::with_capacity(copy_count.min(4096));
         let mut lens = Vec::with_capacity(copy_count);
@@ -649,6 +664,7 @@ impl Bands {
             copies,
             layout,
             advised: std::sync::Once::new(),
+            path,
         })
     }
 
@@ -668,11 +684,11 @@ impl Bands {
     /// the background, so the reads that follow find them in the page cache. A range within one
     /// page is not asked for: its one fault reads no more than the advice would.
     pub fn will_need<T>(&self, slice: &[T], range: std::ops::Range<usize>) {
-        const PAGE: usize = 4096;
+        let page = page_size();
         let size = std::mem::size_of::<T>();
         let at = slice.as_ptr() as usize + range.start * size - self.map.as_ptr() as usize;
         let len = range.len() * size;
-        if len == 0 || at / PAGE == (at + len - 1) / PAGE {
+        if len == 0 || at / page == (at + len - 1) / page {
             return;
         }
         debug_assert!(at + len <= self.map.len(), "a range outside the band file");
@@ -902,7 +918,16 @@ impl CellCodes {
                 format!("{} bytes for {cells} cells", map.len()),
             ));
         }
-        Ok(CellCodes { map })
+        let codes = CellCodes { map };
+        // Tile ranges and occupancy binary-search the codes, so codes out of order would give a
+        // wrong range rather than an error.
+        if !codes.codes().windows(2).all(|w| w[0] < w[1]) {
+            return Err(malformed(
+                &path,
+                "cell codes are not strictly ascending; rebuild the bundle",
+            ));
+        }
+        Ok(codes)
     }
 
     /// Each occupied cell's Morton code, in the order `cuts.u32` lists the cells.
@@ -952,10 +977,13 @@ pub fn write_band_labels(
     header[16..20].copy_from_slice(&bands.row_count().to_le_bytes());
     header[20..24].copy_from_slice(&labels.ordinals().to_le_bytes());
     out.write_all(&header).map_err(io)?;
-    // Every entry's row is read in order, and a mapping a request has advised as random has no
-    // read-ahead of its own.
-    bands.will_need(bands.rows(), 0..bands.entries());
-    for &row in bands.rows() {
+    // Every entry's row is read in order, from a mapping of its own: the one requests read is
+    // advised as random and has no read-ahead.
+    let own = map_file(&bands.path)?;
+    let _ = own.advise(memmap2::Advice::Sequential);
+    let rows = &own[bands.layout.rows..bands.layout.rows + bands.entries() * 4];
+    for row in rows.as_chunks::<4>().0 {
+        let row = u32::from_le_bytes(*row);
         let label = labels.label(row as usize);
         let bytes = label.to_le_bytes();
         out.write_all(&bytes[..usize::from(width)]).map_err(io)?;
@@ -1153,6 +1181,18 @@ mod tests {
             .collect();
         assert_eq!(cells.codes(), expected.as_slice());
         assert!(CellCodes::open(dir.path(), cuts.len() + 1).is_err());
+        drop(cells);
+
+        // Two codes out of order are refused at open, since every tile range searches them.
+        let path = dir.path().join(CELL_CODES_FILE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (a, b) = bytes.split_at_mut(4);
+        a.swap_with_slice(&mut b[..4]);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            CellCodes::open(dir.path(), cuts.len()),
+            Err(StoreError::MalformedBundle { .. })
+        ));
     }
 
     #[test]

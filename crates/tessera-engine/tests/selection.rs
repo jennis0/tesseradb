@@ -1911,3 +1911,87 @@ fn per_cell_selection_spans_segments_at_a_row_base() {
         "the per-cell route never read fewer rows than the scan across segments"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The band route
+// ---------------------------------------------------------------------------------------------
+
+/// One tile of 2,000 visible rows and 40 hidden ones, every hidden one below the cut, the visible
+/// ones placed by band: `below_cut` under `2^54`, `band_7` in `[2^54, 2^57)`, `band_6` in
+/// `[2^57, 2^58)`, and the rest above `2^60`, in no band. Under a cut of `2^54`, a floor of 8 and
+/// 2,000 visible rows the route starts at band 7, and `m` is 8 wherever fewer than 8 visible rows
+/// lie below the cut.
+fn banded_tile(below_cut: u64, band_7: u64, band_6: u64) -> (Segment, Vec<u64>) {
+    const VISIBLE: u64 = 2_000;
+    let mut visible = Vec::new();
+    visible.extend((0..below_cut).map(|i| 1_000 + i));
+    visible.extend((0..band_7).map(|i| (1u64 << 54) + i * 7_919));
+    visible.extend((0..band_6).map(|i| (1u64 << 57) + i * 7_919));
+    let rest = VISIBLE - visible.len() as u64;
+    visible.extend((0..rest).map(|i| (1u64 << 60) + i * 104_729));
+    let hidden: Vec<u64> = (0..40).map(|i| 10 + i).collect();
+    let mut rng = StdRng::seed_from_u64(91);
+    let points: Vec<(f32, f32, u64)> = visible
+        .iter()
+        .chain(&hidden)
+        .map(|&id| (rng.gen_range(0.0..1024.0), rng.gen_range(0.0..1024.0), id))
+        .collect();
+    (segment_of(&points), visible)
+}
+
+/// The band route against a reference sort of the visible identities, and against the scan, where
+/// the first band answers with exactly `m` entries, where a wider band answers, and where the
+/// bands are read and fall short.
+#[test]
+fn the_band_route_widens_and_falls_through_as_the_definition_requires() {
+    use tessera_engine::bands::{select, BandAnswer};
+    let p = params(8, 100, Threshold::Cut(1u64 << 54));
+    for (below_cut, band_7, band_6, expect) in [
+        (1, 7, 20, "exact"),
+        (1, 2, 20, "widened"),
+        (1, 2, 2, "sparse"),
+    ] {
+        let (seg, visible) = banded_tile(below_cut, band_7, band_6);
+        let visible_rows: Vec<u32> = (0..seg.row_count())
+            .filter(|&r| visible.contains(&seg.id_at(r)))
+            .collect();
+        let (_t, mask) = mask_over(&visible_rows, seg.row_count());
+        let range = 0..seg.row_count();
+        let matched = mask.count_range(range.clone());
+        assert_eq!(matched, visible.len() as u64);
+        let parts = [SelectionPart::base(&seg.data, range, matched)];
+
+        let mut reference = visible.clone();
+        reference.sort_unstable();
+        let m = tessera_engine::select::served_count(below_cut, &p, matched);
+        assert_eq!(m, 8, "{expect}: the floor sets m");
+        reference.truncate(m);
+        let scan: Vec<u64> = Selection::of(&mask, &SelectionParts::new(&parts), &p, matched)
+            .rows
+            .into_iter()
+            .map(|row| seg.id_at(row))
+            .collect();
+        assert_eq!(scan, reference, "{expect}: the scan is the definition");
+
+        match (select(&mask, &parts, &p, matched).unwrap(), expect) {
+            (
+                BandAnswer::Served {
+                    rows,
+                    entries,
+                    widened,
+                    ..
+                },
+                "exact" | "widened",
+            ) => {
+                assert_eq!(widened, expect == "widened", "{expect}");
+                let ids: Vec<u64> = rows.iter().map(|&row| seg.id_at(row)).collect();
+                assert_eq!(ids, reference, "{expect}: the bands serve the m smallest");
+                for (&row, &e) in rows.iter().zip(&entries) {
+                    assert_eq!(seg.data.bands.ids()[e as usize], seg.id_at(row));
+                }
+            }
+            (BandAnswer::Sparse { read: true }, "sparse") => {}
+            (other, _) => panic!("{expect}: the bands answered {other:?}"),
+        }
+    }
+}
