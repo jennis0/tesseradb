@@ -118,9 +118,13 @@ describe('<tessera-artifact-list>', () => {
     // The counts are the aggregate's, under the store's filters, over the artifacts listed.
     expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('');
     expect([...registered(store).values()]).toEqual([{groupings: [{by: {layer: 'clusters', artifacts: [2n, 3n, 4n]}}]}]);
-    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 1}]}]));
+    // Not coloured by the layer listed, so the rows carry no swatch.
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(0);
+    answerAggregate(store, 'in-view', aggregateEntry([{rows: [{key: 3n, count: 6}, {key: 2n, count: 9}, {key: 4n, count: 0}]}]));
     await settle(host);
     expect(deepText(deep(host, '[part="item"][data-id="3"] [part="count"]')).trim()).toBe('6');
+    // A cluster none of whose members pass the filters is greyed.
+    expect(deepAll(host, '[part="item"][data-empty]').map((r) => r.getAttribute('data-id'))).toEqual(['4']);
     // Largest first by the exact counts.
     expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['2', '3', '4']);
     const fits: unknown[] = [];
@@ -162,6 +166,7 @@ describe('<tessera-artifact-list>', () => {
     (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
     await settle(host);
     expect(deepAll(host, '[part="item"]').map((r) => r.getAttribute('data-id'))).toEqual(['7']);
+    expect(deepAll(host, '[part="swatch"]')).toHaveLength(1);
   });
 
   it('puts a member_of clause on a row’s artifact from its Highlight and Filter buttons, named by the row, without fitting', async () => {
