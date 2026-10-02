@@ -1281,6 +1281,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
             getPosition: (d: DensityCell) => d.position,
             gpuAggregation: false,
             getColorValue: held.value,
+            // deck takes a new accessor but recomputes the bins' values only on a changed trigger.
+            updateTriggers: {getColorValue: `${scale}|${max}`},
             colorScaleType: 'quantize',
             colorDomain: [0, 1],
             colorRange: Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]),
