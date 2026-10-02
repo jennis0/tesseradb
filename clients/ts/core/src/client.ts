@@ -644,10 +644,14 @@ export class TesseraClient {
     let abandoned = false;
 
     // Called at the first points frame or the trailer, either of which completes the counts, since
-    // the grammar puts the tiles frame first.
+    // the grammar puts the tiles frame first. The artifacts frame follows every points frame, so a
+    // head started at the first points frame holds none, and the result takes them at the end.
+    let headArtifacts: Uint8Array | null = null;
     const startHead = () => {
       const whole = counts!;
-      decodingHead ??= this.decoder!.decodeArtifacts(artifactsFrame, background).then((a) => ({...whole, ...a}));
+      if (decodingHead) return;
+      headArtifacts = artifactsFrame;
+      decodingHead = this.decoder!.decodeArtifacts(artifactsFrame, background).then((a) => ({...whole, ...a}));
     };
     const deliver = (decoding: Promise<PointsPart>) => {
       delivering = delivering.then(async () => {
@@ -669,8 +673,8 @@ export class TesseraClient {
             ...part,
             pointsProjection: part.projection,
             subCells: null,
-            // Every part carries the response's artifacts, since a point's membership column
-            // names its artifacts through them.
+            // The artifacts that arrived before the part: none where the frame follows the
+            // points, and the table learns them from the result or from the artifact channel.
             artifacts: decodedHead.artifacts,
             artifactsIdentity: decodedHead.artifactsIdentity
           },
@@ -722,7 +726,9 @@ export class TesseraClient {
     await delivering;
     // Throws on a body that stopped inside a frame or without its trailer.
     frames.end();
-    const decodedHead = await decodingHead!;
+    const head = await decodingHead!;
+    const decodedHead =
+      artifactsFrame === headArtifacts ? head : {...head, ...(await this.decoder!.decodeArtifacts(artifactsFrame, background))};
     const trailer = parseTrailer(trailerBytes!);
     checkTrailerCounts(trailer, flushes, points);
     // Every tile the server served points for has had them.

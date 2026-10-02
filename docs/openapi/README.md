@@ -34,8 +34,8 @@ is JSON. A reader dispatches on `kind` without parsing any Arrow metadata.
 ```
 kind 1  tiles      exactly one, first        (tile: u64, visible: u64, matched: u64, served: u64)
 kind 2  sub-cells  exactly one iff requested (cell: u64, count: u64)
-kind 5  artifacts  at most one, before points; absent — never empty — when nothing is served
 kind 3  points     zero or more, whole tiles per frame; the frames concatenate
+kind 5  artifacts  at most one, after points; absent — never empty — when nothing is served
 kind 4  trailer    exactly one, last; JSON with exactly {stream_us, arrow_serialise_ns, points, flushes}
 ```
 

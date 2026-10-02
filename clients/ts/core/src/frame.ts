@@ -9,7 +9,7 @@
  *   the request asked for an underlay, and schema-only where it asked and no cell had a count.
  * - Kind 5, artifacts: an Arrow IPC stream with one row per served artifact, in the full
  *   projection or the five-column identity projection. At most one, after the tiles frame and
- *   before any points frame. Absent where the response serves no artifact.
+ *   every points frame. Absent where the response serves no artifact.
  * - Kind 3, points: an Arrow IPC stream of `tessera_id` and `code`, both `uint64`, then the
  *   rendered columns, a `highlighted` column where the request carried a highlight, and a
  *   `membership:<layer>` column per layer the response names; a request for the highlight
@@ -186,13 +186,13 @@ export class FrameReader {
         break;
       case FRAME_ARTIFACTS:
         if (this.sawArtifacts) throw new Error('more than one artifacts frame');
-        if (this.sawPoints) throw new Error('the artifacts frame must precede every points frame');
         this.sawArtifacts = true;
         break;
       case FRAME_POINTS:
         // Checked here and not only at the end, since a streaming reader decodes this frame now
         // and needs the tiles frame to attribute its points.
         if (!this.sawTiles) throw new Error('a points frame before the tiles frame');
+        if (this.sawArtifacts) throw new Error('a points frame after the artifacts frame');
         this.sawPoints = true;
         break;
       case FRAME_TRAILER:

@@ -13,9 +13,9 @@ Every Arrow payload is a complete IPC stream, decodable alone; the trailer is JS
 
     1  tiles       exactly one, first          (tile, visible, matched, served)
     2  sub-cells   exactly one iff requested   (cell, count)
-    5  artifacts   at most one, before points  (layer, tessera_id, key, masked_count, ...,
-                                                rung, matched)
     3  points      zero or more                (tessera_id, code, ...render columns)
+    5  artifacts   at most one, after points   (layer, tessera_id, key, masked_count, ...,
+                                                rung, matched)
     4  trailer     exactly one, last           JSON — its presence marks the response complete
 
 The artifacts frame's `layer` is dictionary-encoded (u16 keys over utf8 values), which `pyarrow`

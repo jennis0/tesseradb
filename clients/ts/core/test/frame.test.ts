@@ -65,8 +65,8 @@ describe('splitFramedStreams', () => {
     const ok = splitFramedStreams(
       cat(
         frame(FRAME_TILES, body),
-        frame(FRAME_ARTIFACTS, body),
         frame(FRAME_POINTS, body),
+        frame(FRAME_ARTIFACTS, body),
         frame(FRAME_TRAILER, body)
       )
     );
@@ -84,13 +84,14 @@ describe('splitFramedStreams', () => {
       )
     );
 
-    // After the points it would arrive too late for a reader that draws as it decodes.
+    // The points come first, so no point waits on the artifacts; a points frame after them is
+    // out of order.
     refused(() =>
       splitFramedStreams(
         cat(
           frame(FRAME_TILES, body),
-          frame(FRAME_POINTS, body),
           frame(FRAME_ARTIFACTS, body),
+          frame(FRAME_POINTS, body),
           frame(FRAME_TRAILER, body)
         )
       )

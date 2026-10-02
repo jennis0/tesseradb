@@ -521,9 +521,9 @@ paths:
 
         - `1` tiles: exactly one, first.
         - `2` sub-cells: exactly one when `underlay_offset` is present and not zero.
-        - `5` artifacts: at most one, after the tiles and before any points. Absent, not empty,
-          when no artifact is served.
         - `3` points: zero or more, each holding whole tiles.
+        - `5` artifacts: at most one, after the tiles and every points frame. Absent, not empty,
+          when no artifact is served.
         - `4` trailer: exactly one, last.
 
         A body without a trailer is incomplete, whatever the transport said. An unknown kind is a
