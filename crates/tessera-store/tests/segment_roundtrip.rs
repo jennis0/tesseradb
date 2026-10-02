@@ -509,114 +509,6 @@ fn a_view_without_a_quantisation_extent_is_a_typed_error() {
     );
 }
 
-/// Write `bytes` to `path`, mmap it, and wrap the mapping as an arrow `Buffer` without copying
-/// — the exact handover shape `write_columns_from_parts` exists for (a file-backed column the
-/// build pipeline spilled, mapped page-aligned at offset 0).
-fn mmap_buffer(path: &std::path::Path, bytes: &[u8]) -> arrow::buffer::Buffer {
-    fs::write(path, bytes).expect("write scratch column file");
-    let file = fs::File::open(path).expect("open scratch column file");
-    // SAFETY: the mapping is read-only and lives inside the Arc the Buffer captures as its
-    // allocation, so it outlives every view of it; nothing writes the file after this.
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.expect("mmap scratch column file");
-    let len = mmap.len();
-    let arc = Arc::new(mmap);
-    let ptr = std::ptr::NonNull::new(arc.as_ptr() as *mut u8).expect("mmap base is non-null");
-    unsafe { arrow::buffer::Buffer::from_custom_allocation(ptr, len, arc) }
-}
-
-#[test]
-fn write_columns_from_parts_matches_write_columns_byte_for_byte() {
-    use arrow::buffer::Buffer;
-    use tessera_store::write::{write_columns, write_columns_from_parts};
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    for rows in [0usize, 1, 1000] {
-        let tessera: Vec<u64> = (0..rows as u64)
-            .map(|i| synthetic_tessera_id(i).raw())
-            .collect();
-        let residual: Vec<u32> = (0..rows)
-            .map(|i| (i as u32).wrapping_mul(2_654_435_761))
-            .collect();
-
-        let via_vecs = dir.path().join(format!("vecs-{rows}.arrow"));
-        // No scalar tail: this test is about the two *fixed*-column paths agreeing, and
-        // `write_columns` delegates to `write_columns_from_parts` in exactly that case.
-        write_columns(&via_vecs, tessera.clone(), residual.clone(), Vec::new())
-            .expect("write_columns");
-        let vec_bytes = fs::read(&via_vecs).expect("read write_columns output");
-
-        // Heap-backed buffers through the from-parts door.
-        let via_parts = dir.path().join(format!("parts-{rows}.arrow"));
-        write_columns_from_parts(
-            &via_parts,
-            Buffer::from_vec(tessera.clone()),
-            Buffer::from_vec(residual.clone()),
-            rows,
-        )
-        .expect("write_columns_from_parts (heap buffers)");
-        assert_eq!(
-            fs::read(&via_parts).expect("read from_parts output"),
-            vec_bytes,
-            "{rows} rows: heap-buffer from_parts output must be byte-identical"
-        );
-
-        // Mmap-backed buffers — the 48 GB-avoidance case this function exists for. (Skipped
-        // at zero rows: Linux refuses to mmap an empty file, and an empty column has nothing
-        // to spill anyway — the heap-buffer case above covers rows == 0.)
-        if rows > 0 {
-            let t_bytes: Vec<u8> = tessera.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let r_bytes: Vec<u8> = residual.iter().flat_map(|v| v.to_le_bytes()).collect();
-            let via_mmap = dir.path().join(format!("mmap-{rows}.arrow"));
-            write_columns_from_parts(
-                &via_mmap,
-                mmap_buffer(&dir.path().join(format!("t-{rows}.bin")), &t_bytes),
-                mmap_buffer(&dir.path().join(format!("r-{rows}.bin")), &r_bytes),
-                rows,
-            )
-            .expect("write_columns_from_parts (mmap buffers)");
-            assert_eq!(
-                fs::read(&via_mmap).expect("read mmap-backed output"),
-                vec_bytes,
-                "{rows} rows: mmap-backed from_parts output must be byte-identical"
-            );
-        }
-
-        // And the strict reader (one batch, uncompressed, aligned, fixed schema, no nulls)
-        // accepts it. (No `priority` column — decision 0046.)
-        let cols = ColumnsRef::load(&via_parts).expect("ColumnsRef must load from_parts output");
-        assert_eq!(cols.row_count() as usize, rows);
-        assert_eq!(cols.tessera_id(), &tessera[..]);
-        assert_eq!(cols.residual(), &residual[..]);
-    }
-}
-
-#[test]
-fn write_columns_from_parts_rejects_short_and_misaligned_buffers_without_panicking() {
-    use arrow::buffer::Buffer;
-    use tessera_store::write::write_columns_from_parts;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("never-written.arrow");
-    let residual = Buffer::from_vec(vec![0u32; 4]);
-
-    // Too short: 3 u64s cannot back 4 rows.
-    let err = write_columns_from_parts(&path, Buffer::from_vec(vec![0u64; 3]), residual.clone(), 4)
-        .expect_err("a buffer shorter than `rows` values must be a typed error");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-
-    // Misaligned: slicing a u64 buffer at byte 4 moves it off 8-byte alignment. Arrow's own
-    // ScalarBuffer conversion would panic here; the writer must fail closed with an error
-    // instead.
-    let misaligned = Buffer::from_vec(vec![0u64; 5]).slice(4);
-    let err = write_columns_from_parts(&path, misaligned, residual, 4)
-        .expect_err("a misaligned buffer must be a typed error, not an arrow panic");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        err.to_string().contains("aligned"),
-        "error should name the alignment failure: {err}"
-    );
-}
-
 /// **Scatter order is free, and it produces exactly the bytes the sequential path does.**
 ///
 /// This is the property compaction's pass 1 needs and the old writer could not offer: the fold
@@ -834,18 +726,18 @@ fn every_declared_width_round_trips_including_a_packed_bool() {
     );
 }
 
-/// **The in-place route writes the bytes the whole-column route writes.** This is the assertion
+/// **The in-place route writes the bytes the segment writer writes.** This is the assertion
 /// `tessera_store::columns` exists under: the build lays `columns.arrow` out before its first row
-/// and fills it from Morton buckets, and a file that differed from the one `write_columns`
+/// and fills it from Morton buckets, and a file that differed from the one [`SegmentWriter`]
 /// produces for the same rows would be a format two writers disagree about.
 ///
 /// Over every declarable render width, including the bit-packed `bool` whose buffer is not a flat
 /// array of itself; over the two-column case a schema-less build writes; and over no rows at all.
 #[test]
 fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
-    use tessera_spatial::tiler::ScalarType;
+    use tessera_spatial::tiler::{ScalarType, ScalarValue};
     use tessera_store::columns::{ColumnsFile, ColumnsPlan};
-    use tessera_store::write::{write_columns, ScalarColumn};
+    use tessera_store::write::{SegmentRow, SegmentWriter};
 
     let widths = [
         ("flag", ScalarType::Bool),
@@ -857,62 +749,92 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
         ("weight", ScalarType::F64),
         ("seen_at", ScalarType::TimestampUs),
     ];
+    // One deterministic value per row and column.
+    let value = |index: usize, ty: ScalarType, row: usize| -> ScalarValue {
+        let n = (row as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(index as u64 * 7);
+        match ty {
+            ScalarType::Bool => ScalarValue::Bool(n >> 63 == 1),
+            ScalarType::U8 => ScalarValue::U8(n as u8),
+            ScalarType::I16 => ScalarValue::I16(n as i16),
+            ScalarType::U32 => ScalarValue::U32(n as u32),
+            ScalarType::I64 => ScalarValue::I64(n as i64),
+            ScalarType::F32 => ScalarValue::F32((n >> 40) as f32),
+            ScalarType::F64 => ScalarValue::F64(n as f64),
+            ScalarType::TimestampUs => ScalarValue::TimestampUs(n as i64),
+            other => unreachable!("{other:?} is not a declared width here"),
+        }
+    };
+    // A column's values buffer as the in-place route is handed it: `rows` bits for a `bool`,
+    // packed least significant first, and `rows` little-endian values for every other width.
+    let column_bytes = |values: &[ScalarValue]| -> Vec<u8> {
+        if let Some(ScalarValue::Bool(_)) = values.first() {
+            let mut bits = vec![0u8; values.len().div_ceil(8)];
+            for (row, v) in values.iter().enumerate() {
+                if let ScalarValue::Bool(true) = v {
+                    bits[row / 8] |= 1 << (row % 8);
+                }
+            }
+            return bits;
+        }
+        values
+            .iter()
+            .flat_map(|v| match v {
+                ScalarValue::U8(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::I16(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::U32(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::I64(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::F32(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::F64(x) => x.to_le_bytes().to_vec(),
+                ScalarValue::TimestampUs(x) => x.to_le_bytes().to_vec(),
+                other => unreachable!("{other:?} is not a declared width here"),
+            })
+            .collect()
+    };
+
     let dir = tempfile::tempdir().expect("tempdir");
     for scalars in [&widths[..], &[][..]] {
         // 600,000 rows puts the all-ones validity bitmap arrow writes for each non-nullable
         // column past the size the plan keeps a write's bytes at, which is the case the
         // 25,846,007-row `gbif-64p` fixture found and the smaller row counts here do not.
         for rows in [0usize, 1, 7, 1000, 600_000] {
-            let tessera: Vec<u64> = (0..rows as u64)
+            // Ascending, so the rows arrive in the `(morton, tessera_id)` order the writer takes
+            // with every row in one cell.
+            let mut tessera: Vec<u64> = (0..rows as u64)
                 .map(|i| synthetic_tessera_id(i).raw())
                 .collect();
+            tessera.sort_unstable();
             let residual: Vec<u32> = (0..rows)
                 .map(|i| (i as u32).wrapping_mul(2_654_435_761))
                 .collect();
-            // One deterministic byte pattern per column, at that column's width — a `bool`'s
-            // buffer is `rows` bits, every other is `rows` values.
-            let bytes_of = |index: usize, ty: ScalarType| -> Vec<u8> {
-                let width = match ty {
-                    ScalarType::Bool => return (0..rows.div_ceil(8))
-                        .map(|b| (b as u8).wrapping_mul(37).wrapping_add(index as u8))
-                        .collect(),
-                    ScalarType::U8 | ScalarType::I8 => 1,
-                    ScalarType::U16 | ScalarType::I16 => 2,
-                    ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
-                    _ => 8,
-                };
-                (0..rows * width)
-                    .map(|b| (b as u8).wrapping_mul(31).wrapping_add(index as u8 * 7))
-                    .collect()
-            };
-
-            let whole = dir.path().join(format!("whole-{}-{rows}.arrow", scalars.len()));
-            write_columns(
-                &whole,
-                tessera.clone(),
-                residual.clone(),
-                scalars
-                    .iter()
-                    .enumerate()
-                    .map(|(index, (name, ty))| {
-                        (
-                            (*name).to_string(),
-                            ScalarColumn::of(
-                                *ty,
-                                rows,
-                                arrow::buffer::Buffer::from_vec(bytes_of(index, *ty)),
-                            )
-                            .expect("scalar column"),
-                        )
-                    })
-                    .collect(),
-            )
-            .expect("write_columns");
-
+            let columns: Vec<Vec<ScalarValue>> = scalars
+                .iter()
+                .enumerate()
+                .map(|(index, (_, ty))| (0..rows).map(|row| value(index, *ty, row)).collect())
+                .collect();
             let declared: Vec<(String, ScalarType)> = scalars
                 .iter()
                 .map(|(name, ty)| ((*name).to_string(), *ty))
                 .collect();
+
+            let whole = dir.path().join(format!("whole-{}-{rows}", scalars.len()));
+            fs::create_dir(&whole).expect("segment dir");
+            let mut writer = SegmentWriter::create(&whole, &declared).expect("create");
+            for row in 0..rows {
+                let values: Vec<ScalarValue> =
+                    columns.iter().map(|column| column[row].clone()).collect();
+                writer
+                    .append(SegmentRow {
+                        tessera_id: TesseraId::new(tessera[row]),
+                        morton: 0,
+                        residual: residual[row],
+                        scalars: &values,
+                    })
+                    .expect("append");
+            }
+            writer.finish().expect("finish");
+
             let in_place = dir
                 .path()
                 .join(format!("in-place-{}-{rows}.arrow", scalars.len()));
@@ -928,14 +850,14 @@ fn a_column_file_filled_in_place_is_byte_identical_to_one_written_whole() {
                 file.put(1, row as u64 * 4, &value.to_le_bytes())
                     .expect("put");
             }
-            for (index, (_, ty)) in scalars.iter().enumerate() {
-                file.put(index + 2, 0, &bytes_of(index, *ty)).expect("put");
+            for (index, column) in columns.iter().enumerate() {
+                file.put(index + 2, 0, &column_bytes(column)).expect("put");
             }
             file.finish().expect("finish");
 
             assert_eq!(
                 fs::read(&in_place).expect("read in-place"),
-                fs::read(&whole).expect("read whole"),
+                fs::read(whole.join("columns.arrow")).expect("read whole"),
                 "{rows} rows, {} declared columns: the in-place file must be byte-identical",
                 scalars.len()
             );

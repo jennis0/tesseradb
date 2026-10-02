@@ -19,13 +19,9 @@
 //! then produce byte-identical files for equal rows by construction rather than by argument
 //! (`merge_execution::the_k_way_merge_emits_exactly_what_a_concatenate_and_sort_would`).
 //!
-//! **What knows the layout is [`fixed_fields`] and [`write_single_batch`], and there is a third
-//! caller of them.** [`write_columns_from_parts`] is the batch build's own two-column path, which
-//! hands over file-backed `Buffer`s it has already assembled and has no row-at-a-time shape to
-//! offer. It is not a second writer in the sense the rule forbids — it emits the same schema
-//! through the same IPC invocation, which is what
-//! `segment_roundtrip::write_columns_from_parts_matches_write_columns_byte_for_byte` pins — but it
-//! is a second *assembler*, and a change to the column set has to reach both.
+//! The batch build lays `columns.arrow` out in place instead ([`crate::columns`]), and its bytes
+//! are held equal to this writer's for the same rows
+//! (`segment_roundtrip::a_column_file_filled_in_place_is_byte_identical_to_one_written_whole`).
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -616,8 +612,7 @@ impl ColumnSpool {
     }
 }
 
-/// The fixed, non-nullable fields of `columns.arrow` (contracts §2.6), in column order. One
-/// definition, so the writers below cannot drift apart in name, type or nullability — the reader
+/// The fixed, non-nullable fields of `columns.arrow` (contracts §2.6), in column order. The reader
 /// (`read::validate_schema`) checks each per column.
 ///
 /// `residual` is the *low* half of the point's 64-bit interleaved position; the high half is
@@ -684,295 +679,6 @@ pub(crate) fn arrow_type_of(ty: ScalarType) -> DataType {
     }
 }
 
-/// Write `morton.u32` (contracts §2.6: raw little-endian `u32` codes, no header) from an
-/// iterator of codes in row order.
-///
-/// Streaming, so the codes need never exist as one slice: the batch build holds its row order in
-/// a packed record array and would otherwise have to materialise a second copy alongside the
-/// segment columns, which are already the largest thing it allocates.
-pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) -> io::Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for code in codes {
-        writer.write_all(&code.to_le_bytes())?;
-    }
-    writer.flush()
-}
-
-/// Write `columns.arrow` from columns that are already in row order — the fixed two columns of
-/// contracts §2.6, no declared scalars.
-///
-/// Takes each column **by value** so its bytes become the Arrow buffers with no copy. This
-/// record batch is the largest single structure the batch build materialises (at 10^9 rows,
-/// 8+4 bytes per row), so a copy here would be another twelve gigabytes. Produces
-/// byte-for-byte what [`write_segment`] writes for the same rows and no scalars. Since the
-/// 2026-07-31 rework this function is a thin wrapper over [`write_columns_from_parts`]; there
-/// is one code path.
-pub fn write_columns(
-    path: &Path,
-    tessera_id: Vec<u64>,
-    residual: Vec<u32>,
-    scalars: Vec<(String, ScalarColumn)>,
-) -> io::Result<()> {
-    let rows = tessera_id.len();
-    if residual.len() != rows {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "write_columns: column 'residual' has {} rows, tessera_id has {rows}",
-                residual.len()
-            ),
-        ));
-    }
-    for (name, column) in &scalars {
-        if column.rows() != rows {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_columns: declared scalar '{name}' has {} rows, tessera_id has {rows}. \
-                     A short column is not a partial write — arrow refuses the batch, and a long \
-                     one would put values under the wrong identities",
-                    column.rows()
-                ),
-            ));
-        }
-    }
-
-    // **The no-scalar case delegates, and must keep doing so.** `write_columns_from_parts` builds
-    // the identical two-column record batch through the same `write_single_batch` path, so a
-    // bundle whose schema declares nothing gets byte-for-byte the file it got before this
-    // parameter existed — which is what `tessera-cli`'s identity test and the build-equivalence
-    // oracle both assert.
-    if scalars.is_empty() {
-        return write_columns_from_parts(
-            path,
-            Buffer::from_vec(tessera_id),
-            Buffer::from_vec(residual),
-            rows,
-        );
-    }
-
-    let mut fields = fixed_fields();
-    let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(UInt64Array::new(
-            typed_column("tessera_id", Buffer::from_vec(tessera_id), rows)?,
-            None,
-        )),
-        Arc::new(UInt32Array::new(
-            typed_column("residual", Buffer::from_vec(residual), rows)?,
-            None,
-        )),
-    ];
-    for (name, column) in scalars {
-        fields.push(Field::new(&name, column.arrow_type(), false));
-        columns.push(column.into_array(&name)?);
-    }
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    write_single_batch(path, &schema, &batch)
-}
-
-/// One declared scalar's values, column-major, already in row order, and already laid out as the
-/// **Arrow values buffer they will become** — taken without copying.
-///
-/// **The column-major counterpart to [`SegmentRow`]'s row-major `scalars`**, and both exist
-/// because the two producers genuinely hold their data differently: a merge or a flush walks rows
-/// and has one row's values at a time, while the batch build permutes whole columns and would have
-/// to transpose 10⁹ rows into per-row vectors to use the other shape.
-///
-/// **Bytes rather than a `Vec` per column, because the build's are a file.** This was
-/// `ScalarColumnData`, a `Vec` per declared type filled by `push`: at 7.4×10⁷ rows and eight render
-/// columns that is ~2.4 GB of anonymous memory allocated immediately after the build moved its
-/// entity-order columns off the heap. The build fills a mapped file under `.build-tmp/` and hands
-/// the mapping over ([`crate::write::ScalarColumn::of`]); the buffer *becomes* the record batch's
-/// values buffer, so the record batch costs address space rather than memory, and a conversion
-/// here would give the memory back at exactly the wrong moment.
-///
-/// **Every member is fixed-width, because every render column is.** `render` is refused at the
-/// declaration for `keyword` and for `text`, and `utf8` is not a declarable type at all — the hot
-/// column is a fixed-width slot in every row and prose is not one (per-point-attributes §4.3). So
-/// the string family is not a variant here with an unreachable arm behind it; it is refused by
-/// [`Self::of`], which is the one place a caller could name it.
-#[derive(Debug)]
-pub struct ScalarColumn {
-    rows: usize,
-    values: ScalarColumnValues,
-}
-
-/// The declared width behind a [`ScalarColumn`], and what each buffer holds.
-#[derive(Debug)]
-enum ScalarColumnValues {
-    /// **Bit-packed**, `rows` bits from the buffer's first byte, least significant bit first —
-    /// Arrow's own boolean layout, and the one member that is not a flat array of itself.
-    Bool(Buffer),
-    U8(Buffer),
-    U16(Buffer),
-    U32(Buffer),
-    U64(Buffer),
-    I8(Buffer),
-    I16(Buffer),
-    I32(Buffer),
-    I64(Buffer),
-    F32(Buffer),
-    F64(Buffer),
-    TimestampUs(Buffer),
-}
-
-/// The fixed-width members, each with its variant, Arrow array type and Arrow type.
-///
-/// **Generated rather than written out, because there are eleven of them and three methods.** The
-/// hand-written form was thirty near-identical arms whose only failure mode is a type appearing in
-/// ten of them — a column silently taking another's width or another's values, which is a defect
-/// no aggregate check sees. `Bool` is excluded and written by hand: it is not a flat slice of
-/// itself, which is exactly what the uniform arms assume.
-macro_rules! fixed_width_columns {
-    ($mac:ident) => {
-        $mac! {
-            (U8, UInt8Array, DataType::UInt8),
-            (U16, UInt16Array, DataType::UInt16),
-            (U32, UInt32Array, DataType::UInt32),
-            (U64, UInt64Array, DataType::UInt64),
-            (I8, Int8Array, DataType::Int8),
-            (I16, Int16Array, DataType::Int16),
-            (I32, Int32Array, DataType::Int32),
-            (I64, Int64Array, DataType::Int64),
-            (F32, Float32Array, DataType::Float32),
-            (F64, Float64Array, DataType::Float64),
-            (TimestampUs, TimestampMicrosecondArray,
-             DataType::Timestamp(TimeUnit::Microsecond, None)),
-        }
-    };
-}
-
-impl ScalarColumn {
-    /// A column of `rows` values of `ty`, over bytes already in Arrow's layout for it: `rows`
-    /// little-endian values for a fixed-width type, `rows` bits for a `bool`.
-    ///
-    /// **Refuses the string family**, which is the only way a caller could ask for a column the
-    /// hot column cannot hold — see the type docs. The length and alignment are checked where the
-    /// array is built ([`typed_column`]), not here, so one place decides what a buffer must be.
-    pub fn of(ty: ScalarType, rows: usize, values: Buffer) -> io::Result<Self> {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match ty {
-                    $(ScalarType::$v => ScalarColumnValues::$v(values),)*
-                    ScalarType::Bool => ScalarColumnValues::Bool(values),
-                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "write_columns: a render column is a fixed-width slot in every \
-                                 row and {ty:?} is not one. `render` is refused at the \
-                                 declaration for every string type (per-point-attributes §4.3), \
-                                 so reaching here is a build defect and not a declaration"
-                            ),
-                        ))
-                    }
-                }
-            };
-        }
-        Ok(ScalarColumn {
-            rows,
-            values: fixed_width_columns!(arms),
-        })
-    }
-
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows == 0
-    }
-
-    fn arrow_type(&self) -> DataType {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match &self.values {
-                    $(ScalarColumnValues::$v(_) => $dt,)*
-                    ScalarColumnValues::Bool(_) => DataType::Boolean,
-                }
-            };
-        }
-        fixed_width_columns!(arms)
-    }
-
-    fn into_array(self, name: &str) -> io::Result<ArrayRef> {
-        let rows = self.rows;
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self.values {
-                    $(ScalarColumnValues::$v(values) => Arc::new($arr::new(
-                        typed_column(name, values, rows)?,
-                        None,
-                    )) as ArrayRef,)*
-                    // The bit-packed member: a boolean array's values buffer is `rows` bits, so
-                    // the length check the others get from `typed_column` is made here against
-                    // the same rule — a short buffer is an `InvalidInput` error, never a panic
-                    // from inside arrow.
-                    ScalarColumnValues::Bool(bits) => {
-                        let needed = rows.div_ceil(8);
-                        if bits.len() < needed {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "write_columns: column '{name}' has {} bytes, {rows} rows of \
-                                     packed bits need {needed}",
-                                    bits.len()
-                                ),
-                            ));
-                        }
-                        Arc::new(BooleanArray::new(
-                            arrow::buffer::BooleanBuffer::new(bits, 0, rows),
-                            None,
-                        ))
-                    }
-                }
-            };
-        }
-        Ok(fixed_width_columns!(arms))
-    }
-}
-
-/// [`write_columns`], but from raw column bytes instead of `Vec`s: `tessera_id` as `rows`
-/// little-endian `u64`s and `residual` as `rows` little-endian `u32`s, taken **without
-/// copying** — each `Buffer` *becomes* the record batch's values buffer. This is the batch
-/// build's handover point for file-backed columns: at 3×10⁹ rows the two `Vec`s of
-/// [`write_columns`] are 36 GB of anonymous memory, whereas mmap-backed `Buffer`s
-/// (`Buffer::from_custom_allocation` over a scratch file) cost address space only.
-///
-/// **Alignment**: Arrow requires each values buffer to be aligned to its element type —
-/// 8 bytes for `tessera_id`, 4 for `residual` (`ScalarBuffer` refuses less). An mmap is
-/// page-aligned, so a buffer covering a mapping from offset 0 always qualifies; only a caller
-/// slicing a buffer at an offset that is not a multiple of the element size can violate it,
-/// and that (like a buffer shorter than `rows` elements) is rejected here as an
-/// `InvalidInput` error — fail closed, never a panic from inside arrow.
-///
-/// Output is byte-identical to [`write_columns`] over the same values: same schema
-/// ([`fixed_fields`]), same null-free primitive arrays (no validity buffers — every column is
-/// contractually non-nullable, R4), same single-batch writer ([`write_single_batch`]).
-pub fn write_columns_from_parts(
-    path: &Path,
-    tessera_id: Buffer,
-    residual: Buffer,
-    rows: usize,
-) -> io::Result<()> {
-    let tessera_id: ScalarBuffer<u64> = typed_column("tessera_id", tessera_id, rows)?;
-    let residual: ScalarBuffer<u32> = typed_column("residual", residual, rows)?;
-
-    let tessera_id = UInt64Array::new(tessera_id, None);
-
-    let schema = Arc::new(Schema::new(fixed_fields()));
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(tessera_id),
-        Arc::new(UInt32Array::new(residual, None)),
-    ];
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-    write_single_batch(path, &schema, &batch)
-}
-
 /// Check `buffer` can back `rows` values of `T` — long enough, and aligned to `T` (arrow's
 /// `ScalarBuffer` conversion *panics* on misalignment; this turns both failure modes into
 /// typed `InvalidInput` errors first). A buffer longer than `rows` values is fine — the tail
@@ -986,34 +692,25 @@ fn typed_column<T: ArrowNativeType>(
     let needed = rows.checked_mul(width).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("write_columns_from_parts: {rows} rows of '{name}' overflow usize"),
+            format!("columns.arrow: {rows} rows of '{name}' overflow usize"),
         )
     })?;
     if buffer.len() < needed {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "write_columns_from_parts: column '{name}' has {} bytes, {rows} rows of \
+                "columns.arrow: column '{name}' has {} bytes, {rows} rows of \
                  {width}-byte values need {needed}",
                 buffer.len()
             ),
         ));
-    }
-    // **No rows, no elements to align.** A zero-row column's values buffer legitimately has no
-    // allocation behind it — an empty `Buffer`, or a mapping of a file with nothing in it — and its
-    // pointer is then dangling rather than aligned. There is nothing to address, so the buffer is
-    // replaced with an empty one of the right type: the array is the same array either way, and the
-    // record batch it goes into is byte-identical to the one `write_columns` writes for an empty
-    // `Vec`. A build over no points (decision 0091) writes every declared column this way.
-    if rows == 0 {
-        return Ok(ScalarBuffer::from(Vec::<T>::new()));
     }
     let align = std::mem::align_of::<T>();
     if buffer.as_ptr().align_offset(align) != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "write_columns_from_parts: column '{name}' buffer is not {align}-byte aligned \
+                "columns.arrow: column '{name}' buffer is not {align}-byte aligned \
                  (arrow requires element alignment; page-aligned mmaps always satisfy this)"
             ),
         ));

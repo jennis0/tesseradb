@@ -140,7 +140,7 @@ extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 
 # Rendered as well as indexed, so the zero-row case reaches the *segment* write and not only the
-# filter emit: a render column's values buffer is what `write_columns` builds an array over, and an
+# filter emit: a render column's values buffer is what `columns.arrow` builds an array over, and an
 # empty one has no allocation behind it to be aligned.
 [[attribute]]
 name = "published"
