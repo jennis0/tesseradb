@@ -1,5 +1,5 @@
 import {MAX_DEPTH, WORLD_SIZE} from './coords.js';
-import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type CountField, type DepthChoice} from './budget.js';
+import {MIN_DEPTH, chooseDepth, tileRectOfBbox, type CountField, type DepthChoice, type Thinning} from './budget.js';
 import {rectArea, type TileRect} from './rects.js';
 
 /**
@@ -37,8 +37,10 @@ export type PlannerInputs = {
   mTarget: number;
   /** Per-cell masked counts known to cover the view; see `budget.ts`. */
   counts?: CountField;
-  /** The cap in force, `min(k, k_max_marks)`: the `k` of `Σ min(k, count)`. */
+  /** The cap in force, `min(k, k_max_marks)`. */
   k?: number;
+  /** How the server thins an unfiltered tile; absent under a filter. See `budget.ts`. */
+  thinning?: Thinning;
   maxTiles: number;
   /** The previous response's visible count, the saturation term for depth choice. */
   visibleInView?: number;
@@ -158,10 +160,10 @@ export function worldBbox(
  * @internal
  */
 export function plan(inputs: PlannerInputs): Plan {
-  const {viewport, budget, mTarget, maxTiles, counts, k, visibleInView, velocity, holdDepth} = inputs;
+  const {viewport, budget, mTarget, maxTiles, counts, k, thinning, visibleInView, velocity, holdDepth} = inputs;
 
   const visible = worldBbox(viewport, 1);
-  const ask = {budget, mTarget, worldBbox: visible, maxTiles, counts, k, visibleInView};
+  const ask = {budget, mTarget, worldBbox: visible, maxTiles, counts, k, thinning, visibleInView};
   let choice = chooseDepth(ask);
   // A one-step disagreement defers to the depth drawn. The visible count changes with the ground
   // under the view, so panning across a density boundary would flip the choice between neighbouring

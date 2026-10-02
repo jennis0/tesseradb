@@ -5,9 +5,17 @@ import {rectContains, type TileRect} from './rects.js';
  * Which depth to request, so the number of marks on screen stays near a budget at every zoom.
  *
  * Every response's tile list carries the per-tile masked count at the depth asked for, so after one
- * response the client knows what the ground under the view holds. A depth costs `Σ min(k, count)`
- * over the cells a request would address, which is the server's own cap, and the depth asked for is
- * the deepest whose figure fits the budget ({@link countedMarks}, {@link chooseDepth}).
+ * response the client knows what the ground under the view holds. A depth costs what the server
+ * serves over the cells a request would address, and the depth asked for is the deepest whose
+ * figure fits the budget ({@link countedMarks}, {@link chooseDepth}).
+ *
+ * What a tile of `n` matching items serves depends on the request. Under a filter it serves every
+ * match up to the cap, `min(k, n)`. Without one the server thins it: a tile at depth `d` serves
+ * about `θ_d · n`, at least `min(k_min, k)` and at most `k`, where
+ * `θ_d = θ_target · N_occ(d) / V_total` over the viewer's whole visible set, so the average occupied
+ * tile serves `θ_target` marks at every depth ({@link Thinning}). `θ_d` grows with depth, and a
+ * tile is served whole only once it reaches 1, so on a corpus far below the cap a deeper request
+ * still draws more.
  *
  * Where no counts cover the view (the first request of a session, or ground the replica has not
  * covered) an average model answers: `m_target` marks per tile. It assumes tiles are evenly
@@ -22,8 +30,27 @@ import {rectContains, type TileRect} from './rects.js';
 /** The shallowest depth requested; see {@link chooseDepth}. @internal */
 export const MIN_DEPTH = 3;
 
-/** One cell's masked count, as the tile list reported it. @internal */
+/** One cell's count of items a request may serve (its matched count), as the tile list reported it. @internal */
 export type CountCell = {x: number; y: number; count: number};
+
+/**
+ * How an unfiltered request thins a tile. The server's `θ_d` needs the occupied tiles and the
+ * visible total over the viewer's whole set, which the client does not hold. A count field gives
+ * both over the ground it covers, so `θ_d` is estimated as `target · occupied(d) / total` over the
+ * field, which is exact where the field covers the whole map. Where a response has shown `θ` at
+ * some depth, that figure is used and carried to other depths in proportion to the field's
+ * occupied cells.
+ *
+ * @internal
+ */
+export type Thinning = {
+  /** `selection.thetaTargetMarks`. */
+  target: number;
+  /** `selection.kMin`: the fewest marks a tile serves while it has that many. */
+  kMin: number;
+  /** `θ` per depth, as responses showed it: served over matched in tiles the threshold decided. */
+  seen: ReadonlyMap<number, number>;
+};
 
 /**
  * Per-cell masked counts at one depth, and the rectangle they are complete for.
@@ -50,8 +77,10 @@ export type BudgetInputs = {
   maxTiles: number;
   /** The counts to predict from, where any cover the view. Absent, the average model answers. */
   counts?: CountField;
-  /** The cap in force, `min(k, k_max_marks)`: the `k` of `Σ min(k, count)`. Required to use counts. */
+  /** The cap in force, `min(k, k_max_marks)`. Required to use counts. */
   k?: number;
+  /** How the server thins an unfiltered tile. Absent, every match up to `k` is served, as under a filter. */
+  thinning?: Thinning;
   /**
    * The principal's visible count over the view, from the previous response. It bounds the average
    * model, which otherwise predicts millions of marks for a principal who can see a thousand. A
@@ -70,12 +99,11 @@ export type DepthChoice = {
   /**
    * Where {@link predictedMarks} came from.
    *
-   * - `counts`: `Σ min(k, count)` at the depth the counts are held at. Exact where the cap is what
-   *   limits a tile, which is the dense case the budget exists for; an overestimate where the
-   *   server serves fewer than the cap.
-   * - `bound`: the counts are held at another depth. An upper bound going deeper (a cell of `count`
-   *   members yields at most `min(count, k · 4^Δ)` marks), a lower bound going shallower (an
-   *   ancestor tile reaches beyond the view, and the counts describe only the part inside).
+   * - `counts`: what the cells serve at the depth the counts are held at (see
+   *   {@link countedMarks}). Exact under a filter; under thinning as exact as the estimate of `θ`.
+   * - `bound`: the counts are held at another depth. An upper bound going deeper, a lower bound
+   *   going shallower (an ancestor tile reaches beyond the view, and the counts describe only the
+   *   part inside).
    * - `average`: no counts cover the view; `m_target × tiles`, corrected by {@link calibrate}.
    */
   source: 'counts' | 'bound' | 'average';
@@ -111,18 +139,20 @@ export function tileRectOfBbox(
 }
 
 /**
- * The marks a request at `depth` costs, from counts held at `field.depth`: `Σ min(k, count)` over
- * the view's cells. At `field.depth` this is the figure itself. At another depth:
+ * The marks a request at `depth` costs, from counts held at `field.depth`: the sum over the view's
+ * cells of what each serves (see the module comment), `min(k, count)` without `thinning`. At
+ * `field.depth` this is the figure itself. At another depth:
  *
- * - Deeper (`Δ > 0`): a cell of `count` members yields at most `count` marks, and at most `k` in
- *   each of its `4^Δ` descendants, so `min(count, k · 4^Δ)` is an upper bound. Erring high declines
- *   a depth that might have fitted rather than accepting one that will not.
- * - Shallower (`Δ < 0`): cells fold into their ancestor, which serves `min(k, Σ children)` of the
- *   part in view. The ancestor also reaches outside the view, so this is a lower bound. The error is
+ * - Deeper (`Δ > 0`): a cell of `count` members yields at most `count` marks, at most `k` in each of
+ *   its `4^Δ` descendants, and under thinning at most `θ · count` plus each descendant's floor, so
+ *   the least of those is an upper bound. Erring high declines a depth that might have fitted
+ *   rather than accepting one that will not.
+ * - Shallower (`Δ < 0`): cells fold into their ancestor, which serves its share of the part in
+ *   view. The ancestor also reaches outside the view, so this is a lower bound. The error is
  *   confined to ancestors on the view's edge.
  *
- * `capped` is whether any cell reached the cap. Nothing capped means every member in view is served,
- * so a deeper request returns the same marks over four times the tiles.
+ * `thinned` is whether any cell serves fewer than its members. Nothing thinned means every member
+ * in view is served, so a deeper request returns the same marks over four times the tiles.
  *
  * `null` where the view is not inside `field.covers`.
  *
@@ -132,11 +162,12 @@ export function countedMarks(
   field: CountField,
   bbox: [number, number, number, number],
   depth: number,
-  k: number
-): {marks: number; capped: boolean; exact: boolean} | null {
+  k: number,
+  thinning?: Thinning
+): {marks: number; thinned: boolean; exact: boolean} | null {
   const view = tileRange(bbox, field.depth);
   if (!rectContains(field.covers, view)) return null;
-  return sumCells(cellsIn(field, view), depth - field.depth, k);
+  return sumCells(cellsIn(field, view), depth - field.depth, k, serving(field, depth, k, thinning));
 }
 
 /** The field's cells inside a tile rectangle at its own depth. */
@@ -149,20 +180,89 @@ function cellsIn(field: CountField, view: TileRect): CountCell[] {
   return inside;
 }
 
-/** {@link countedMarks}' arithmetic, over cells already restricted to the view. */
-function sumCells(cells: readonly CountCell[], delta: number, k: number) {
-  if (delta >= 0) {
-    const cap = k * 4 ** delta;
-    let marks = 0;
-    let capped = false;
-    for (const cell of cells) {
-      if (cell.count >= cap) capped = true;
-      marks += Math.min(cap, cell.count);
-    }
-    return {marks, capped, exact: delta === 0};
+/** What a tile at the depth asked about serves: `θ` and the floor, both 1 and 0 without thinning. */
+type Serving = {theta: number; floor: number};
+
+function serving(field: CountField, depth: number, k: number, thinning: Thinning | undefined): Serving {
+  if (!thinning) return {theta: 1, floor: 0};
+  return {theta: thetaAt(field, depth, thinning), floor: Math.min(thinning.kMin, k)};
+}
+
+/** `θ` at `depth`: as seen there, else carried from the nearest depth seen, else the field's estimate. */
+function thetaAt(field: CountField, depth: number, t: Thinning): number {
+  const seen = t.seen.get(depth);
+  if (seen !== undefined) return seen;
+  let near: number | undefined;
+  for (const d of t.seen.keys()) if (near === undefined || Math.abs(d - depth) < Math.abs(near - depth)) near = d;
+  const occupied = occupiedAt(field, depth);
+  if (near !== undefined) return Math.min(1, (t.seen.get(near)! * occupied) / Math.max(1, occupiedAt(field, near)));
+  const total = totalOf(field);
+  return total > 0 ? Math.min(1, (t.target * occupied) / total) : 1;
+}
+
+const occupancy = new WeakMap<CountField, Map<number, number>>();
+const totals = new WeakMap<CountField, number>();
+
+function totalOf(field: CountField): number {
+  let total = totals.get(field);
+  if (total === undefined) {
+    total = 0;
+    for (const cell of field.cells) total += cell.count;
+    totals.set(field, total);
   }
-  // Coarser than the counts: each cell's members land in one ancestor, which serves `min(k, ·)` of
-  // them. Keyed on the ancestor's tile index, under 2^16 on both axes.
+  return total;
+}
+
+/**
+ * The field's occupied cells at `depth`: its cells folded to their ancestors at a shallower depth,
+ * and at a deeper one at most four children each and never more than the members they hold.
+ */
+function occupiedAt(field: CountField, depth: number): number {
+  if (depth >= field.depth) return Math.min(totalOf(field), field.cells.length * 4 ** (depth - field.depth));
+  let byDepth = occupancy.get(field);
+  if (!byDepth) occupancy.set(field, (byDepth = new Map()));
+  let n = byDepth.get(depth);
+  if (n === undefined) {
+    const shift = field.depth - depth;
+    const ancestors = new Set<number>();
+    for (const cell of field.cells) ancestors.add((cell.x >> shift) * 65_536 + (cell.y >> shift));
+    n = ancestors.size;
+    byDepth.set(depth, n);
+  }
+  return n;
+}
+
+/** What a tile of `n` members serves: about `θ · n`, at least the floor, at most `k` and `n`. */
+function served(n: number, k: number, s: Serving): number {
+  return Math.min(n, k, Math.max(Math.min(s.floor, n), s.theta * n));
+}
+
+/** {@link countedMarks}' arithmetic, over cells already restricted to the view. */
+function sumCells(cells: readonly CountCell[], delta: number, k: number, s: Serving) {
+  if (delta > 0) {
+    const children = 4 ** delta;
+    let marks = 0;
+    let thinned = false;
+    for (const cell of cells) {
+      const n = cell.count;
+      const bound = Math.min(n, k * children, s.theta * n + s.floor * Math.min(children, n));
+      if (bound < n) thinned = true;
+      marks += bound;
+    }
+    return {marks, thinned, exact: false};
+  }
+  if (delta === 0) {
+    let marks = 0;
+    let thinned = false;
+    for (const cell of cells) {
+      const m = served(cell.count, k, s);
+      if (m < cell.count) thinned = true;
+      marks += m;
+    }
+    return {marks, thinned, exact: true};
+  }
+  // Coarser than the counts: each cell's members land in one ancestor. Keyed on the ancestor's tile
+  // index, under 2^16 on both axes.
   const shift = -delta;
   const ancestors = new Map<number, number>();
   for (const cell of cells) {
@@ -170,20 +270,21 @@ function sumCells(cells: readonly CountCell[], delta: number, k: number) {
     ancestors.set(key, (ancestors.get(key) ?? 0) + cell.count);
   }
   let marks = 0;
-  let capped = false;
+  let thinned = false;
   for (const count of ancestors.values()) {
-    if (count >= k) capped = true;
-    marks += Math.min(k, count);
+    const m = served(count, k, s);
+    if (m < count) thinned = true;
+    marks += m;
   }
-  return {marks, capped, exact: false};
+  return {marks, thinned, exact: false};
 }
 
 /**
  * The depth to request so the view draws about `budget` marks.
  *
  * Walks up from {@link MIN_DEPTH} and stops at the first depth that misses the budget, saturates
- * the ground under the view, exceeds `maxTiles` or reaches the grid's depth. With counts,
- * `Σ min(k, count)` does not decrease with depth, so the first depth to miss the budget follows the
+ * the ground under the view, exceeds `maxTiles` or reaches the grid's depth. With counts, the
+ * marks served do not decrease with depth, so the first depth to miss the budget follows the
  * last to fit. Without counts the average model asks for about `budget / m_target` tiles and stops
  * once the principal's whole visible set is drawn.
  *
@@ -193,7 +294,7 @@ function sumCells(cells: readonly CountCell[], delta: number, k: number) {
  * @internal
  */
 export function chooseDepth(inputs: BudgetInputs): DepthChoice {
-  const {budget, mTarget, worldBbox, maxTiles, counts, k, visibleInView, force} = inputs;
+  const {budget, mTarget, worldBbox, maxTiles, counts, k, visibleInView, force, thinning} = inputs;
   const wantedTiles = Math.max(1, budget / Math.max(1, mTarget));
 
   // Whether the counts cover the view depends on the view and the field alone, so it is settled once,
@@ -201,7 +302,7 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
   const view = counts ? tileRange(worldBbox, counts.depth) : null;
   const usable = counts !== undefined && k !== undefined && k > 0 && rectContains(counts.covers, view!);
   const inView = usable ? cellsIn(counts!, view!) : null;
-  const predict = (depth: number) => sumCells(inView!, depth - counts!.depth, k!);
+  const predict = (depth: number) => sumCells(inView!, depth - counts!.depth, k!, serving(counts!, depth, k!, thinning));
 
   const answer = (depth: number, limitedBy: DepthChoice['limitedBy']): DepthChoice => {
     const tiles = tilesInBbox(worldBbox, depth);
@@ -242,7 +343,7 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
       }
       depth = d;
       fitting.push({depth: d, marks: counted.marks});
-      if (!counted.capped) {
+      if (!counted.thinned) {
         // Every member in view is served here. Deeper is four times the tiles for the same marks.
         limitedBy = 'saturated';
         break;
