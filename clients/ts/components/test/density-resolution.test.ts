@@ -77,22 +77,40 @@ describe('density resolution', () => {
     const slider = () => shadow.querySelector<HTMLInputElement>('[part="density-resolution"]')!;
     // The default, 12 px, is past the limit, so the slider shows the finest it can count.
     expect(slider().value).toBe('1');
-    expect(shadow.querySelector('.ends .readout')!.textContent).toBe('cells ≈ 24 px');
     slider().value = '0';
     slider().dispatchEvent(new Event('input'));
     await settle(host);
     expect(el.densityResolution).toBe(32);
     expect(map.densityResolution).toBe(32);
+    // A stop past the limit is kept as asked, and the slider shows the finest the map can draw.
     slider().value = '6';
     slider().dispatchEvent(new Event('input'));
     await settle(host);
     expect(slider().value).toBe('1');
-    expect(map.densityResolution).toBe(24);
-    expect(seen.map((d) => d.densityResolution)).toEqual([32, 24]);
+    expect(map.densityResolution).toBe(4);
+    expect(seen.map((d) => d.densityResolution)).toEqual([32, 4]);
 
     vi.advanceTimersByTime(DENSITY_SETTLE_MS);
     expect(depthsAsked(store).every((d) => d <= 5)).toBe(true);
     expect(depthsAsked(store).length).toBeGreaterThan(0);
+  });
+
+  it('counts over the highlight, and a new highlight sends no request of the map’s own', async () => {
+    const host = await mount('<tessera-map density="hex"></tessera-map>');
+    const map = host.querySelector('tessera-map') as TesseraMap;
+    const store = fakeStore({meta: meta(), status: status({})});
+    map.store = store;
+    await settle(host);
+    sized(map);
+    vi.advanceTimersByTime(DENSITY_SETTLE_MS);
+    const specs = () => store.calls.filter((c) => c.name === 'setAggregate' && String(c.args[0]).startsWith('density#')).map((c) => c.args[1] as AggregateSpec | null);
+    expect(specs().map((s) => s?.highlighted)).toEqual([true]);
+    // The store asks again for the registration it holds when the highlight changes.
+    store.set('view', {...store.get('view'), highlighting: true});
+    store.set('filters', {...store.get('filters'), highlight: {archive: {in: ['cs']}}});
+    await settle(host);
+    vi.advanceTimersByTime(DENSITY_SETTLE_MS);
+    expect(specs()).toHaveLength(1);
   });
 
   it('shows the slider for every mode but None', async () => {

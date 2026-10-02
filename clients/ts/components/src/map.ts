@@ -11,7 +11,7 @@ import {
   type SelectionShape
 } from '@tesseradb/client';
 import {assertCompositionMatchesServed, hasValue} from '@tesseradb/client/internal';
-import {DEFAULT_DENSITY_CELL_PX, DensityCounter, TesseraLayer, nearestStop, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
+import {DEFAULT_DENSITY_CELL_PX, DensityCounter, TesseraLayer, resolvePick, viewInputOf, type Picked, type ResolutionStop} from '@tesseradb/deck';
 import {DENSITY_COLOUR_TITLES, MarkSlab, artifactOfMark, clusterLayerOf, contourShapes, densityStops, encodingOf, encodingSignature, hoverAt, type ContourShape} from '@tesseradb/deck/internal';
 import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme, Quantisation} from '@tesseradb/client';
@@ -21,7 +21,6 @@ import {renderState, stateOf, type PanelState} from './states.js';
 import {icon} from './icons.js';
 import {sameFrame} from './view-switch.js';
 import {chrome, tokens} from './tokens.js';
-import {densityChannel} from './density.js';
 import './count.js';
 import {colouringOf, setColouring, setSizing, sizingOf, watchChoices} from './colouring.js';
 
@@ -673,12 +672,9 @@ export class TesseraMap extends TesseraElement {
   /** Keeps the counts density is drawn from, over the store adopted last. */
   private densityCounter: DensityCounter | null = null;
 
-  /** Tell the density counter what to draw: whether, at which cell size, and over the highlight. */
+  /** Tell the density counter what to draw: whether, and at which cell size. */
   private pushDensity(): void {
-    const s = this.resolvedStore;
-    if (!this.densityCounter || !s) return;
-    const highlighted = densityChannel(s.get('filters'), s.get('view'), s.get('region')) === 'highlighted';
-    this.densityCounter.set({on: this.density !== 'none', cellPx: nearestStop(this.densityResolution), highlighted});
+    this.densityCounter?.set({on: this.density !== 'none', cellPx: this.densityResolution});
   }
 
   /**
@@ -828,12 +824,7 @@ export class TesseraMap extends TesseraElement {
       this.paintedOpened = opened;
       this.paint();
     }
-    // Likewise for `highlighting`; density's counts follow the highlight.
-    const channel = densityChannel(s.get('filters'), view, region);
-    if (channel !== this.pushedChannel) {
-      this.pushedChannel = channel;
-      this.pushDensity();
-    }
+    // Likewise for `highlighting`.
     if (view.highlighting !== this.paintedHighlighting) {
       this.paintedHighlighting = view.highlighting;
       this.paint();
@@ -847,8 +838,6 @@ export class TesseraMap extends TesseraElement {
   private paintedOpened: bigint | null = null;
   /** What the last paint told the layer about the highlight. */
   private paintedHighlighting = false;
-  /** The count density was last told to read. */
-  private pushedChannel: ReturnType<typeof densityChannel> | null = null;
   private regionShape: SelectionShape | null = null;
 
   /** What `measure` adds on a store change: the composition check and the cluster sample. */
@@ -969,7 +958,7 @@ export class TesseraMap extends TesseraElement {
           radius: this.radius,
           pointOpacity: this.pointOpacity,
           density: this.density,
-          densityCounts: this.densityCounter?.counts() ?? null,
+          densityCounter: this.densityCounter,
           densityColours: this.densityColours || null,
           densityStrength: this.densityStrength,
           colouring: colouringOf(s),

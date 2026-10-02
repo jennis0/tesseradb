@@ -1509,8 +1509,9 @@ export class TesseraExplorer extends TesseraElement {
 
   /**
    * The Resolution slider: one stop per cell size, coarse to fine. The stops past the finest the
-   * map can ask for at its camera are struck through on the track, and moving the slider onto one
-   * leaves it on the finest that can. The readout gives the cell size drawn.
+   * map can ask for at its camera are struck through on the track. Moving the slider onto one
+   * keeps the size asked for, which the map draws once the camera lets it, and shows the slider on
+   * the finest it can draw now. The readout gives the cell size drawn.
    */
   private resolutionControl(change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
     const last = DENSITY_CELL_SIZES.length - 1;
@@ -1523,8 +1524,8 @@ export class TesseraExplorer extends TesseraElement {
     const past = finest < last ? html`<span class="past" style=${`left:calc(8px + (100% - 16px) * ${(finest + 0.5) / last})`}></span>` : nothing;
     const onInput = (e: Event) => {
       const input = e.target as HTMLInputElement;
-      const i = Math.min(Number(input.value), finest);
-      input.value = String(i);
+      const i = Number(input.value);
+      input.value = String(Math.min(i, finest));
       change({densityResolution: DENSITY_CELL_SIZES[i]!});
     };
     return html`<label for="density-resolution">Resolution</label>
