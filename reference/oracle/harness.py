@@ -747,6 +747,17 @@ class Server:
         resp.raise_for_status()
         return resp.json()
 
+    def refreshed(self, timeout: float = 60.0) -> None:
+        """Wait until no session refresh is running. A publication arms the refresh of every
+        resident session as it lands, and until that refresh reaches a session its reads serve the
+        previous generation's rows beside the current generation's deletions."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.status()["write_executor"]["flush"]["refresh_in_flight"]:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"a session refresh was still running after {timeout}s")
+
     def flush(self, timeout: float = 60.0) -> None:
         """Ask for a flush and **wait for one to complete** (contracts §3.4).
 
