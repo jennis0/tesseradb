@@ -71,21 +71,36 @@ impl ArtifactVerdict {
 /// and nothing a request can narrow, so a filter never moves it.
 #[derive(Clone, Copy)]
 pub struct LabelGate<'a> {
-    held: &'a FxHashSet<Vec<u8>>,
+    /// `None` admits every artifact.
+    held: Option<&'a FxHashSet<Vec<u8>>>,
     unlabelled: bool,
 }
 
 impl<'a> LabelGate<'a> {
     pub fn new(held: &'a FxHashSet<Vec<u8>>, unlabelled: bool) -> Self {
-        LabelGate { held, unlabelled }
+        LabelGate {
+            held: Some(held),
+            unlabelled,
+        }
+    }
+
+    /// The gate of a session authorised for every item, which admits every artifact.
+    pub fn every_label() -> Self {
+        LabelGate {
+            held: None,
+            unlabelled: true,
+        }
     }
 
     /// Whether an artifact carrying `access` is admitted.
     pub fn admits(&self, access: &[Vec<u8>]) -> bool {
+        let Some(held) = self.held else {
+            return true;
+        };
         if access.is_empty() {
             return self.unlabelled;
         }
-        access.iter().any(|d| self.held.contains(d))
+        access.iter().any(|d| held.contains(d))
     }
 }
 

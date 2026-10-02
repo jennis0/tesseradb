@@ -94,7 +94,7 @@ impl VisibleViews {
 /// where refusing the credential would deny a corpus its principal is otherwise entitled to.
 pub(crate) fn resolve(
     manifest: &Manifest,
-    credentials: &FxHashSet<Vec<u8>>,
+    credentials: Option<&FxHashSet<Vec<u8>>>,
     plugin: &dyn Plugin,
 ) -> VisibleViews {
     // One plugin call per **distinct gate**, not per view: a group of forty quarters under one
@@ -164,10 +164,14 @@ pub(crate) fn resolve(
 fn passes<'a>(
     memo: &mut HashMap<&'a [String], bool>,
     labels: Option<&'a [String]>,
-    credentials: &FxHashSet<Vec<u8>>,
+    credentials: Option<&FxHashSet<Vec<u8>>>,
     plugin: &dyn Plugin,
 ) -> bool {
     let Some(labels) = labels else { return true };
+    // `None` is a session authorised for every item, which every gate admits.
+    let Some(credentials) = credentials else {
+        return true;
+    };
     if let Some(&known) = memo.get(labels) {
         return known;
     }

@@ -59,6 +59,9 @@ pub struct Session {
     /// `public`. What a layer's or an artifact's own label is tested against: those labels are
     /// compared as descriptors, so a label no item carries is still one a credential can hold.
     credentials: Arc<FxHashSet<Vec<u8>>>,
+    /// Authorised by [`Engine::authorise_all`]: every label gate admits the session, whatever
+    /// `credentials` holds.
+    every_label: bool,
     /// Every view of every group this principal may reach, resolved once at authorise and fixed
     /// for the session's life. Every view is evaluated whatever the outcome, so a gate-failed name
     /// costs the same lookup as a name nobody declared, and a view created after authorise is a
@@ -116,7 +119,7 @@ impl Session {
 
     /// Whether the credential holds any of `descriptors`.
     pub(crate) fn holds_any(&self, descriptors: &[Vec<u8>]) -> bool {
-        descriptors.iter().any(|d| self.credentials.contains(d))
+        self.every_label || descriptors.iter().any(|d| self.credentials.contains(d))
     }
 
     /// `sha256(auth_data)`.
@@ -138,6 +141,10 @@ impl Session {
     }
 }
 
+/// The authorisation data [`Engine::authorise_all`] hashes into its sessions' cursors. A plugin's
+/// authorisation data is JSON, which cannot begin with a NUL byte.
+const AUTH_DATA_EVERY_ITEM: &[u8] = b"\0every item";
+
 impl Engine {
     /// Authorise a credential: `plugin.terms_of_auth` → dictionary lookup (an unknown descriptor
     /// drops out, never an error) → `FragmentCache::get_or_build`. A zero-term credential, or one
@@ -149,11 +156,35 @@ impl Engine {
             .plugin
             .terms_of_auth(auth_data)
             .map_err(EngineError::Plugin)?;
+        self.authorise_terms(auth_data, Some(auth_terms))
+    }
 
+    /// Authorise a session whose authorised set is every item: it holds every term the
+    /// dictionary carries, and its fragment is built as any session's is, so deletions and
+    /// suppressions are removed from it when the visible set is composed. It satisfies every
+    /// view's, layer's and artifact's label. A term promoted after authorise is not added, and
+    /// [`Session::is_stale`] reports the session once the dictionary grows.
+    pub fn authorise_all(&self) -> Result<Session> {
+        self.authorise_terms(AUTH_DATA_EVERY_ITEM, None)
+    }
+
+    /// `authorise`'s body, for `auth_terms`, or for every term of the dictionary when `None`.
+    fn authorise_terms(
+        &self,
+        auth_data: &[u8],
+        auth_terms: Option<Vec<Vec<u8>>>,
+    ) -> Result<Session> {
         // Loaded once and used for both the dictionary and the watermark below: resolving them
         // against different generations could pair `satisfied` with a dictionary a later flush
         // published while building a fragment against the watermark that preceded it.
         let generation = self.generation.load();
+        let every_label = auth_terms.is_none();
+        let auth_terms = auth_terms.unwrap_or_else(|| {
+            (0..generation.dict.len())
+                .filter_map(|id| generation.dict.descriptor(TermId::new(id)))
+                .map(<[u8]>::to_vec)
+                .collect()
+        });
 
         let mut credentials: FxHashSet<Vec<u8>> = auth_terms.iter().cloned().collect();
         credentials.insert(tessera_authz::PUBLIC_LABEL.to_vec());
@@ -187,7 +218,7 @@ impl Engine {
 
         let visible_views = Arc::new(crate::gate::resolve(
             &generation.bundle.manifest,
-            &credentials,
+            (!every_label).then_some(&credentials),
             self.plugin.as_ref(),
         ));
 
@@ -233,10 +264,12 @@ impl Engine {
             satisfied_sorted,
             satisfied_descriptors: Arc::new(satisfied_descriptors),
             credentials: Arc::new(credentials),
+            every_label,
             visible_views,
             auth_data_hash,
             expires_at,
-            unresolved_count,
+            // A session holding every term is behind as soon as the dictionary grows.
+            unresolved_count: unresolved_count + usize::from(every_label),
             dict_len_at_authorise: generation.dict.len(),
         })
     }
@@ -352,6 +385,9 @@ impl Engine {
                 MemberDefault::Inherited => true,
                 MemberDefault::Label(label) => self.holds_label(session, label),
             };
+        if session.every_label {
+            return crate::artifacts::LabelGate::every_label();
+        }
         crate::artifacts::LabelGate::new(&session.credentials, unlabelled)
     }
 
