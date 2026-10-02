@@ -19,7 +19,7 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
-import {drawnDensityColours, type TesseraMap} from './map.js';
+import {drawnDensityColours, drawnDensityScale, type TesseraMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -1450,7 +1450,7 @@ export class TesseraExplorer extends TesseraElement {
       densityColours: this.densityColours || null,
       densityStrength: this.densityStrength,
       densityResolution: this.densityResolution,
-      densityScale: this.densityScale
+      densityScale: drawnDensityScale(this.densityScale)
     };
   }
 
@@ -1550,7 +1550,8 @@ export class TesseraExplorer extends TesseraElement {
   }
 
   /** The Scale choice under Resolution: Linear or Log, the scale density's colours follow. */
-  private densityScaleControl(scale: DensityScale, change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
+  private densityScaleControl(set: string, change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
+    const scale = drawnDensityScale(set);
     const at = DENSITY_SCALES.findIndex((x) => x.scale === scale);
     return html`<span id="density-scale-label">Scale</span>
       <div part="density-scale" class="seg" role="radiogroup" aria-labelledby="density-scale-label">

@@ -31,23 +31,54 @@ describe('density scale', () => {
     expect(set!.densityScale).toBe('linear');
   });
 
-  it('keys the counts drawn from 0 to the largest, with the count at the middle of the scale in force', async () => {
-    const host = await mount('<tessera-map density="grid" no-points></tessera-map>');
+  /** A map drawing a grid without points, its counter answered with `counts` once the camera has rested. */
+  async function keyed(counts: number[], scale = '') {
+    const host = await mount(`<tessera-map density="grid" no-points ${scale ? `density-scale="${scale}"` : ''}></tessera-map>`);
     const map = host.querySelector('tessera-map') as TesseraMap;
     const store = fakeStore({meta: meta(), status: status({})});
     map.store = store;
     await settle(host);
     sized(map);
     vi.advanceTimersByTime(DENSITY_SETTLE_MS);
-    // Before any counts arrive the key has no figures.
-    expect(keyFigures(map)).toEqual(['Fewer', '', 'More items']);
-    answerAggregate(store, 'density#', aggregateEntry([{rows: [{cell: 0n, count: 1}, {cell: 1n, count: 99}]}], store.get('view').id));
+    const before = keyFigures(map);
+    answerAggregate(store, 'density#', aggregateEntry([{rows: counts.map((count, i) => ({cell: BigInt(i), count}))}], store.get('view').id));
     await settle(host);
+    return {host, map, before};
+  }
+
+  it('keys the counts drawn from 0 to the largest, with the count at the middle of the scale in force', async () => {
+    const {host, map, before} = await keyed([1, 99]);
+    // Before any counts arrive the key has no figures.
+    expect(before).toEqual(['Fewer', '', 'More items']);
     // log1p(9) is half of log1p(99).
     expect(keyFigures(map)).toEqual(['0', '9', '99']);
+    expect(map.shadowRoot!.querySelector('[part="density-key"] .ends > :last-child')!.getAttribute('title')).toBe('The densest cell in view and around it');
     map.densityScale = 'linear';
     await settle(host);
     expect(keyFigures(map)).toEqual(['0', '50', '99']);
+  });
+
+  it('shows the middle in whole items, and none where it is under one item or at the largest', async () => {
+    expect(keyFigures((await keyed([1, 3], 'linear')).map)).toEqual(['0', '2', '3']);
+    expect(keyFigures((await keyed([1, 3], 'log')).map)).toEqual(['0', '1', '3']);
+    expect(keyFigures((await keyed([1], 'linear')).map)).toEqual(['0', '', '1']);
+    expect(keyFigures((await keyed([1], 'log')).map)).toEqual(['0', '', '1']);
+  });
+
+  it('takes an unknown scale as log, in the key and in the explorer’s choice', async () => {
+    expect(keyFigures((await keyed([1, 99], 'cubic')).map)).toEqual(['0', '9', '99']);
+    const host = await mount('<tessera-explorer density="grid" density-scale="cubic"></tessera-explorer>');
+    const el = host.querySelector('tessera-explorer') as HTMLElement & {store: unknown};
+    el.store = fakeStore({meta: meta(), status: status({})});
+    await settle(host);
+    const shadow = el.shadowRoot!;
+    shadow.querySelector<HTMLButtonElement>('[part="layers-toggle"]')!.click();
+    await settle(host);
+    const radios = [...shadow.querySelectorAll('[part="density-scale"] [role="radio"]')];
+    expect(radios.map((b) => [b.getAttribute('data-scale'), b.getAttribute('aria-checked'), b.getAttribute('tabindex')])).toEqual([
+      ['linear', 'false', '-1'],
+      ['log', 'true', '0']
+    ]);
   });
 
   it('sets the scale from the Scale choice under Resolution, passes it to the map and reports it', async () => {

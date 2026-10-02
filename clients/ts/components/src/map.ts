@@ -432,8 +432,11 @@ export class TesseraMap extends TesseraElement {
   /**
    * How a cell's count is placed between no items and the largest count drawn, which picks its
    * colour: `linear`, in proportion to the count, or `log`, in proportion to `log(1 + count)`,
-   * which spreads counts that span several orders of magnitude. The hexagons and contours take the
-   * largest count among the cells they merge to.
+   * which spreads counts that span several orders of magnitude. Log is the default because counts
+   * are skewed on most maps, and under linear only the densest few cells stand out from the rest.
+   * The largest count is that of the densest cell in the area counted, which is the view and a
+   * margin around it; the hexagons and contours take it among the cells they merge to, and a
+   * hexagon is coloured by the densest cell inside it. Any other value is taken as `log`.
    */
   @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
   /**
@@ -974,7 +977,7 @@ export class TesseraMap extends TesseraElement {
           densityCounter: this.densityCounter,
           densityColours: this.densityColours || null,
           densityStrength: this.densityStrength,
-          densityScale: this.densityScale,
+          densityScale: drawnDensityScale(this.densityScale),
           colouring: colouringOf(s),
           sizing: sizingOf(s),
           scheme: this.scheme(),
@@ -1404,7 +1407,8 @@ export class TesseraMap extends TesseraElement {
   /**
    * What density's colours mean, while density is drawn in a ramp or without the points: items per
    * cell at either end of the ramp, 0 and the largest count drawn, and the count at its middle on
-   * the scale in force. The warm-grey wash under the points is context and has no key.
+   * the scale in force, rounded to whole items and left out where it is below one item or not
+   * below the largest. The warm-grey wash under the points is context and has no key.
    */
   private densityKey(): TemplateResult | typeof nothing {
     if (this.density !== 'smooth' && this.density !== 'hex' && this.density !== 'grid') return nothing;
@@ -1413,13 +1417,17 @@ export class TesseraMap extends TesseraElement {
     const stops = densityStops(colours, this.scheme()).map(([r, g, b]) => `rgb(${r}, ${g}, ${b})`);
     const counts = this.densityCounter?.counts();
     const max = counts ? maxCount(drawnCells(counts, this.density).cells) : 0;
-    const scale = this.densityScale === 'linear' ? 'linear' : 'log';
-    const figures = max > 0 ? [0, densityCountAt(0.5, max, scale), max].map(countText) : null;
-    const label = `Density in ${DENSITY_COLOUR_TITLES[colours]}, ${figures ? `from 0 to ${figures[2]} items per cell on a ${scale} scale` : 'from fewer items to more'}`;
+    const scale = drawnDensityScale(this.densityScale);
+    const middle = Math.round(densityCountAt(0.5, max, scale));
+    const label = `Density in ${DENSITY_COLOUR_TITLES[colours]}, ${max > 0 ? `from 0 to ${countText(max)} items per cell on a ${scale} scale` : 'from fewer items to more'}`;
     return html`<div part="density-key" role="img" aria-label=${label}>
-      <span class="caption">${figures ? 'Items per cell' : 'Density'}</span>
+      <span class="caption">${max > 0 ? 'Items per cell' : 'Density'}</span>
       <span class="ramp" style=${`background:linear-gradient(to right, ${stops.join(', ')})`}></span>
-      <span class="ends">${figures ? figures.map((f) => html`<span>${f}</span>`) : html`<span>Fewer</span><span></span><span>More items</span>`}</span>
+      <span class="ends"
+        >${max > 0
+          ? html`<span>0</span><span>${middle >= 1 && middle < max ? countText(middle) : ''}</span><span title="The densest cell in view and around it">${countText(max)}</span>`
+          : html`<span>Fewer</span><span></span><span>More items</span>`}</span
+      >
     </div>`;
   }
 
@@ -1477,9 +1485,14 @@ export class TesseraMap extends TesseraElement {
   }
 }
 
-/** A count as the density key shows it: whole above 10, to one decimal place below. */
+/** A count as the density key shows it. */
 function countText(n: number): string {
-  return n.toLocaleString('en-GB', {maximumFractionDigits: n < 10 ? 1 : 0});
+  return n.toLocaleString('en-GB', {maximumFractionDigits: 0});
+}
+
+/** The density scale drawn: `linear` where set, else `log`. */
+export function drawnDensityScale(scale: string): DensityScale {
+  return scale === 'linear' ? 'linear' : 'log';
 }
 
 /** The density colours drawn: those chosen, else warm grey for a wash under the points, else Viridis. */
