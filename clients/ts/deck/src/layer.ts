@@ -22,7 +22,7 @@ import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {binDensity, coarsened, contourThresholds, densityPaint, densityStops, filterDensity, gridImage, type DensityCell, type DensityColours, type DensityCounts, type DensityMode} from './density.js';
+import {DEFAULT_DENSITY_SCALE, binDensity, contourThresholds, densityPaint, densityPosition, densityStops, drawnCells, filterDensity, gridImage, maxCount, type DensityCell, type DensityColours, type DensityCounts, type DensityMode, type DensityScale} from './density.js';
 import {DEFAULT_DENSITY_CELL_PX, DensityCounter} from './density-counter.js';
 import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {importAggregation} from './aggregation-loader.js';
@@ -170,6 +170,11 @@ export type TesseraLayerProps = CompositeLayerProps & {
   densityColours?: DensityColours | null;
   /** How strongly density is drawn, from 0 (not at all) to 1 (fully). Defaults to 1. */
   densityStrength?: number;
+  /**
+   * How a cell's count is placed between no items and the largest count drawn, which picks its
+   * colour, its alpha in the wash and the contour levels: `linear` or `log`. Defaults to `log`.
+   */
+  densityScale?: DensityScale;
   /**
    * The palette, ramp and chosen value colours column colour uses. Defaults to
    * {@link DEFAULT_COLOURING}.
@@ -350,8 +355,8 @@ const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array
 const heldStandInSizes = new WeakMap<object, {key: string; sizes: Float32Array}>();
 /** `marks` objects whose slab-residency check has run. */
 const checkedMarks = new WeakSet<object>();
-/** What a density image is built for: one set of counts, drawn as a wash or a grid, in one set of colours on one ground. */
-type WashKey = {counts: DensityCounts; kind: 'smooth' | 'grid'; scheme: 'light' | 'dark'; colours: DensityColours};
+/** What a density image is built for: one set of counts, drawn as a wash or a grid on one scale, in one set of colours on one ground. */
+type WashKey = {counts: DensityCounts; kind: 'smooth' | 'grid'; scheme: 'light' | 'dark'; colours: DensityColours; scale: DensityScale};
 /**
  * One layer's wash: the last image built, drawn until the next is ready, and the build waiting to
  * run. Held in the layer's state, so two maps on one page keep separate washes.
@@ -361,15 +366,8 @@ type WashState = {
   pending: WashKey | null;
   timer: ReturnType<typeof setTimeout> | null;
 };
-const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.counts === b.counts && a.kind === b.kind && a.scheme === b.scheme && a.colours === b.colours;
-/**
- * The most cells the hexagons and the contours aggregate. deck aggregates them in the render, so
- * finer counts are merged to a coarser depth first ({@link coarsened}). The figures hold one answer
- * under 50 ms of main thread at 1920 × 1080 in headless Chromium's software GL; the contours'
- * cost per cell is the higher.
- */
-const AGGREGATED_CELLS = {hex: 10_000, contours: 2_000};
-/** The colours a hexagon or grid cell takes, sparse to dense: a quantile scale's steps. */
+const sameWash = (a: WashKey | null, b: WashKey) => a !== null && a.counts === b.counts && a.kind === b.kind && a.scheme === b.scheme && a.colours === b.colours && a.scale === b.scale;
+/** The colours a hexagon or grid cell takes, sparse to dense, in equal steps of the scale. */
 const DENSITY_STEPS = 8;
 /** The share of a hexagon drawn, so neighbouring hexagons show a hairline gap. */
 const DENSITY_COVERAGE = 0.94;
@@ -774,6 +772,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     densityResolution: DEFAULT_DENSITY_CELL_PX,
     densityColours: null,
     densityStrength: 1,
+    densityScale: DEFAULT_DENSITY_SCALE,
     colouring: DEFAULT_COLOURING,
     sizing: DEFAULT_SIZING,
     pickable: true,
@@ -793,11 +792,13 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     ownCounter: DensityCounter | null;
     /** The store the layer's own counter is over. */
     ownCounted: Store | null;
+    /** The hexagons' colour value, kept while the scale and its top count stand, since deck re-aggregates on a new one. */
+    hexColour: {scale: DensityScale; max: number; value: (cells: DensityCell[]) => number} | null;
   };
 
   /** @internal */
   override initializeState(): void {
-    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}, ownCounter: null, ownCounted: null};
+    this.state = {tick: 0, unsubscribe: null, subscribed: null, zoomBucket: NaN, ownSlab: null, ownLut: null, wash: {built: null, pending: null, timer: null}, ownCounter: null, ownCounted: null, hexColour: null};
     this.follow(this.props.store ?? null);
   }
 
@@ -1223,13 +1224,13 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
    * never from the marks. The wash's layer is always present, hidden unless `smooth` is drawn, so
    * its program links at the first paint.
    *
-   * The grid is one image, a square per cell, coloured by the rank of the cell's count among the
-   * distinct counts drawn. The hexagons colour each bin by the mean count of the cells whose
-   * centres fall in it, on a quantile scale, so a bin that happens to hold two cell centres does
-   * not read as twice as dense. The contours are drawn at the counts {@link contourThresholds}
-   * picks, in the label ink. The hexagons and contours aggregate at most {@link AGGREGATED_CELLS}
-   * cells each, and come from `@deck.gl/aggregation-layers`, loaded the first time one is asked for
-   * ({@link loadAggregationLayers}); nothing of theirs is drawn until it has loaded.
+   * Every mode places counts on `densityScale` up to the largest count among the cells it draws
+   * ({@link drawnCells}). The grid is one image, a square per cell in the colour of its count's
+   * position. The hexagons colour each bin by the position of the mean count of the cells whose
+   * centres fall in it, so a bin that happens to hold two cell centres does not read as twice as
+   * dense. The contours are drawn at the counts {@link contourThresholds} picks, in the label ink.
+   * The hexagons and contours come from `@deck.gl/aggregation-layers`, loaded the first time one
+   * is asked for ({@link loadAggregationLayers}); nothing of theirs is drawn until it has loaded.
    */
   private densityLayers(timings: {densityMs: number}): Layer[] {
     const started = performance.now();
@@ -1237,17 +1238,18 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
     const scheme = this.props.scheme ?? 'dark';
     const colours = this.densityColours(mode);
     const strength = Math.min(1, Math.max(0, this.props.densityStrength ?? 1));
+    const scale = this.props.densityScale ?? DEFAULT_DENSITY_SCALE;
     const counts = mode === 'none' ? null : this.densityCounts();
-    const layers: Layer[] = [this.washLayer(mode === 'smooth' || mode === 'grid' ? counts : null, mode === 'grid' ? 'grid' : 'smooth', colours, strength)];
+    const layers: Layer[] = [this.washLayer(mode === 'smooth' || mode === 'grid' ? counts : null, mode === 'grid' ? 'grid' : 'smooth', colours, strength, scale)];
     if ((mode === 'hex' || mode === 'contours') && counts) {
-      const aggregated = coarsened(counts, AGGREGATED_CELLS[mode]);
+      const aggregated = drawnCells(counts, mode);
       const span = WORLD_SIZE / 2 ** aggregated.depth;
       const stops = densityStops(colours, scheme);
       const common = {opacity: strength, pickable: false, parameters: {depthCompare: 'always' as const}};
       if (!aggregation) {
         void loadAggregationLayers().then(() => this.redrawLater());
       } else if (mode === 'contours') {
-        const thresholds = contourThresholds(aggregated.cells);
+        const thresholds = contourThresholds(aggregated.cells, scale);
         const ink = INK[scheme];
         layers.push(
           new aggregation.ContourLayer(this.getSubLayerProps({id: 'density-contours'}), {
@@ -1266,15 +1268,21 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
           } as never)
         );
       } else {
+        const max = maxCount(aggregated.cells);
+        let held = this.state.hexColour;
+        if (!held || held.scale !== scale || held.max !== max) {
+          held = {scale, max, value: (cells) => densityPosition(cells.reduce((n, c) => n + c.count, 0) / cells.length, max, scale)};
+          this.state.hexColour = held;
+        }
         layers.push(
           new aggregation.HexagonLayer(this.getSubLayerProps({id: 'density-hex'}), {
             ...common,
             data: aggregated.cells,
             getPosition: (d: DensityCell) => d.position,
             gpuAggregation: false,
-            getColorWeight: (d: DensityCell) => d.count,
-            colorAggregation: 'MEAN',
-            colorScaleType: 'quantile',
+            getColorValue: held.value,
+            colorScaleType: 'quantize',
+            colorDomain: [0, 1],
             colorRange: Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]),
             coverage: DENSITY_COVERAGE,
             extruded: false,
@@ -1303,11 +1311,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
    * cells do not show, and the grid by nearest texel so they do. `counts` null draws the empty wash
    * so its program links at the first paint.
    */
-  private washLayer(counts: DensityCounts | null, kind: 'smooth' | 'grid' = 'smooth', colours: DensityColours = 'warm-grey', strength = 1): Layer {
+  private washLayer(counts: DensityCounts | null, kind: 'smooth' | 'grid' = 'smooth', colours: DensityColours = 'warm-grey', strength = 1, scale: DensityScale = DEFAULT_DENSITY_SCALE): Layer {
     let image: ImageData | null = null;
     let bounds: [number, number, number, number] = [0, 0, 1, 1];
     if (counts) {
-      const want: WashKey = {counts, kind, scheme: this.props.scheme ?? 'dark', colours};
+      const want: WashKey = {counts, kind, scheme: this.props.scheme ?? 'dark', colours, scale};
       const wash = this.state.wash;
       if (!sameWash(wash.built, want) && !sameWash(wash.pending, want)) {
         wash.pending = want;
@@ -1315,9 +1323,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerInternalProps> {
           wash.timer = null;
           wash.pending = null;
           let built;
-          if (want.kind === 'grid') built = gridImage(want.counts, densityStops(want.colours, want.scheme), DENSITY_STEPS);
+          if (want.kind === 'grid') built = gridImage(want.counts, densityStops(want.colours, want.scheme), DENSITY_STEPS, want.scale);
           else {
-            const binned = binDensity(want.counts);
+            const binned = binDensity(want.counts, want.scale);
             built = binned ? filterDensity(binned, want.counts.depth, densityPaint(want.colours, want.scheme)) : null;
           }
           wash.built = {

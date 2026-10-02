@@ -3,7 +3,7 @@ import {LayerManager, type Layer} from '@deck.gl/core';
 import {WORLD_SIZE, type ArtifactsProjection, type MarksProjection} from '@tesseradb/client';
 import {SessionArtifactTable, mortonOfTile, servedLineage} from '@tesseradb/client/internal';
 import {band} from '../../core/test/support.js';
-import {contourThresholds, densityStops, type DensityCell, type DensityCounts, type DensityMode} from '../src/density.js';
+import {contourThresholds, densityPosition, densityStops, type DensityCell, type DensityCounts, type DensityMode} from '../src/density.js';
 import {TesseraLayer, loadAggregationLayers, type TesseraLayerInternalProps} from '../src/layer.js';
 import {fakeDevice} from './fake-device.js';
 
@@ -90,12 +90,20 @@ function host() {
       const i = (py * width + px) * 4;
       return [...data.slice(i, i + 4)];
     },
-    /** What an aggregation sublayer was given: each cell's position and the weight its accessor reads. */
+    /**
+     * What an aggregation sublayer was given: each cell's position and its count, as the contours'
+     * weight accessor reads it or as the hexagons' cells carry it.
+     */
     aggregated: (id: string): {position: [number, number]; weight: number}[] | null => {
-      const props = sublayer(id)?.props as {data: Cell[]; getPosition: (d: Cell) => [number, number]; getColorWeight?: (d: Cell) => number; getWeight?: (d: Cell) => number} | undefined;
+      const props = sublayer(id)?.props as {data: Cell[]; getPosition: (d: Cell) => [number, number]; getWeight?: (d: Cell) => number} | undefined;
       if (!props) return null;
-      const weight = props.getColorWeight ?? props.getWeight!;
+      const weight = props.getWeight ?? ((d: Cell) => d.count);
       return props.data.map((d) => ({position: props.getPosition(d), weight: weight(d)}));
+    },
+    /** The hexagons' colour value for a bin holding `cells`, and the domain it is scaled over. */
+    hexColour: (cells: Cell[]): {value: number; domain: unknown; type: unknown} => {
+      const props = sublayer('density-hex')!.props as unknown as {getColorValue: (cells: Cell[]) => number; colorDomain: unknown; colorScaleType: unknown};
+      return {value: props.getColorValue(cells), domain: props.colorDomain, type: props.colorScaleType};
     }
   };
 }
@@ -175,11 +183,52 @@ describe('density modes', () => {
     expect(h.gridAt(centre(1, 1))).toBeNull();
   });
 
-  it('draws contours at counts taken from the cells', () => {
+  it.each(['linear', 'log'] as const)('draws contours at evenly spaced positions of the %s scale over the cells', (densityScale) => {
+    const h = host();
+    h.draw({density: 'contours', densityScale});
+    const contours = h.props<{contours: {threshold: number}[]}>('density-contours').contours;
+    expect(contours.map((c) => c.threshold)).toEqual(contourThresholds(counts.cells, densityScale));
+    expect(contours.map((c) => densityPosition(c.threshold, 80_000, densityScale))).toEqual([0.2, 0.4, 0.6, 0.8].map((p) => expect.closeTo(p, 9)));
+  });
+
+  it('draws contours on the log scale where none is set', () => {
     const h = host();
     h.draw({density: 'contours'});
-    const contours = h.props<{contours: {threshold: number}[]}>('density-contours').contours;
-    expect(contours.map((c) => c.threshold)).toEqual(contourThresholds(counts.cells));
+    expect(h.props<{contours: {threshold: number}[]}>('density-contours').contours.map((c) => c.threshold)).toEqual(contourThresholds(counts.cells, 'log'));
+  });
+
+  it.each(['linear', 'log'] as const)('colours a hexagon by the %s position of its cells’ mean count, up to the largest count drawn', (densityScale) => {
+    const h = host();
+    h.draw({density: 'hex', densityScale});
+    const hex = h.hexColour([cell(4, 4, 80_000)]);
+    expect(hex.domain).toEqual([0, 1]);
+    expect(hex.type).toBe('quantize');
+    expect(hex.value).toBe(1);
+    expect(h.hexColour([cell(8, 4, 300)]).value).toBe(densityPosition(300, 80_000, densityScale));
+    // Two cells in one bin read as their mean, not their sum.
+    expect(h.hexColour([cell(8, 4, 300), cell(9, 4, 100)]).value).toBe(densityPosition(200, 80_000, densityScale));
+  });
+
+  it('keeps the hexagons’ colour value across repaints until the scale changes', () => {
+    const h = host();
+    h.draw({density: 'hex', densityScale: 'log'});
+    const colourValue = () => h.props<{getColorValue: unknown}>('density-hex').getColorValue;
+    const first = colourValue();
+    h.draw({density: 'hex', densityScale: 'log'});
+    expect(colourValue()).toBe(first);
+    h.draw({density: 'hex', densityScale: 'linear'});
+    expect(colourValue()).not.toBe(first);
+  });
+
+  it('colours the grid by each cell’s position on the scale asked for', () => {
+    const h = host();
+    const lum = (c: number[]) => c[0]! + c[1]! + c[2]!;
+    h.draw({density: 'grid', densityColours: 'greys', scheme: 'light', densityScale: 'linear'});
+    const linear = lum(h.gridAt(centre(8, 4))!);
+    h.draw({density: 'grid', densityColours: 'greys', scheme: 'light', densityScale: 'log'});
+    const log = lum(h.gridAt(centre(8, 4))!);
+    // 300 of 80,000 is near the sparse, light end on a linear scale and past the middle on a log one.
+    expect(log).toBeLessThan(linear);
   });
 
   it('draws no aggregation layer under none or smooth, and the wash only under smooth', () => {
