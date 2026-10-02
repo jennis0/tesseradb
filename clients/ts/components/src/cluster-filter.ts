@@ -387,16 +387,23 @@ export class TesseraClusterFilter extends TesseraElement {
 
   /** How many of each offer's parents its path names, where all of them do not fit; by `tessera_id`. */
   private pathFits = new Map<bigint, number>();
+  /** The rows and width {@link fitPaths} last measured. */
+  private pathsMeasured = '';
 
   /**
    * Name as many of each listed path's nearest parents as fit its line, dropping whole names from
    * the left. Measured with the line's own font, after the list is placed.
    */
   private fitPaths(): void {
+    // Only while the list shows, and only when its rows or its width changed since last measured.
+    const shown = this.listOpen ? Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part="path"][data-id]')) : [];
+    const key = `${shown[0]?.clientWidth ?? 0}|${shown.map((el) => `${el.dataset.id}:${el.title}`).join(',')}`;
+    if (shown.length === 0 || key === this.pathsMeasured) return;
+    this.pathsMeasured = key;
     const context = typeof document === 'undefined' ? null : document.createElement('canvas').getContext('2d');
     if (!context) return;
     let changed = false;
-    for (const el of Array.from(this.renderRoot.querySelectorAll<HTMLElement>('[part="path"][data-id]'))) {
+    for (const el of shown) {
       const id = BigInt(el.dataset.id!);
       const o = this.listed()?.find((x) => x.row.tesseraId === id);
       if (!o?.path || el.clientWidth === 0) continue;

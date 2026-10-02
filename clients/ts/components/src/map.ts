@@ -114,9 +114,10 @@ const VIEW = new OrthographicView({id: 'ortho', flipY: true});
  * map focused: the arrow keys pan, `+` and `-` zoom, and Escape cancels a shape being drawn, else
  * clears the selected region, else drops the picked point or artifact and its ring. A press hides
  * the hover tooltip until the pointer is released. The canvas is one tab stop, after the toolbar
- * and before the content of the other corners: it carries `role="application"`, the host's
- * `tabindex` where the host set one, else 0, and the host's `aria-label` where the host set one,
- * else one naming the keys. `focus()` focuses it.
+ * and before the content of the other corners: it carries `role="application"`, the `tabindex`
+ * the host set on the map, else 0, and the host's `aria-label` where the host set one, else one
+ * naming the keys. A `tabindex` the host sets moves to the canvas, leaving -1 on the map, so the
+ * map is never a second stop. `focus()` focuses the canvas.
  *
  * The host element is `display: block`; its height comes from `--tessera-map-height`. A map that
  * is disconnected and not reconnected releases its GPU resources a quarter of a second later.
@@ -570,6 +571,31 @@ export class TesseraMap extends TesseraElement {
   private frameLoop: number | null = null;
   private lastFrameAt = 0;
 
+  static override get observedAttributes(): string[] {
+    return [...super.observedAttributes, 'tabindex', 'aria-label'];
+  }
+
+  /** The tab index the canvas takes: the one the host set on the map, else 0. */
+  private canvasTab = '0';
+  /** Set while the map writes its own `tabindex`, so the write is not read as the host's. */
+  private movingTab = false;
+
+  /**
+   * A `tabindex` the host sets on the map moves to the canvas, and the map keeps -1 so it is not a
+   * second stop; an `aria-label` names the canvas.
+   */
+  override attributeChangedCallback(name: string, old: string | null, value: string | null): void {
+    super.attributeChangedCallback(name, old, value);
+    if (name === 'tabindex' && !this.movingTab && value !== null) {
+      this.canvasTab = value;
+      this.movingTab = true;
+      this.setAttribute('tabindex', '-1');
+      this.movingTab = false;
+      this.requestUpdate();
+    }
+    if (name === 'aria-label') this.requestUpdate();
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
     if (this.finalizeTimer) {
@@ -720,6 +746,8 @@ export class TesseraMap extends TesseraElement {
       : null;
     this.slab.clear();
     this.metaSeen = false;
+    // A new store's view starts on its whole extent, as the first did.
+    this.cameraSet = false;
     this.selectedWorldXY = null;
     this.pickedAt = null;
     this.regionWorld = null;
@@ -1515,7 +1543,7 @@ export class TesseraMap extends TesseraElement {
     // so Tab reaches the tools, then the map, then what the host put in the other corners.
     return html`${corner(this.controlsCorner)}<div
         part="canvas"
-        tabindex=${this.getAttribute('tabindex') ?? '0'}
+        tabindex=${this.canvasTab}
         role="application"
         aria-label=${this.getAttribute('aria-label') ?? 'map: arrow keys pan, + and - zoom'}
         @keydown=${this.onKey}

@@ -222,7 +222,9 @@ export const chrome = css`
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
+  /* A card's title is text a reader may copy, wherever the card's chrome takes no selection. */
   .card-title {
+    user-select: text;
     font-size: var(--_tessera-title-size, 15px);
     font-weight: 600;
     line-height: 1.3;

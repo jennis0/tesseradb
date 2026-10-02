@@ -169,6 +169,21 @@ describe('the map in the tab order', () => {
     (el as unknown as HTMLElement).focus();
     expect(root.activeElement?.getAttribute('part')).toBe('canvas');
   });
+
+  it('moves a tabindex the host sets to the canvas, and names the canvas by the host’s aria-label', async () => {
+    const {el} = await map([]);
+    const host = el as unknown as HTMLElement;
+    host.setAttribute('tabindex', '-1');
+    host.setAttribute('aria-label', 'Papers');
+    await (el as unknown as {updateComplete: Promise<unknown>}).updateComplete;
+    const canvas = host.shadowRoot!.querySelector<HTMLElement>('[part="canvas"]')!;
+    expect(canvas.tabIndex).toBe(-1);
+    expect(canvas.getAttribute('aria-label')).toBe('Papers');
+    host.setAttribute('tabindex', '2');
+    await (el as unknown as {updateComplete: Promise<unknown>}).updateComplete;
+    expect(canvas.tabIndex).toBe(2);
+    expect(host.getAttribute('tabindex')).toBe('-1');
+  });
 });
 
 describe('the tooltip through a press', () => {
