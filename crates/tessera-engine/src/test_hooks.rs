@@ -261,6 +261,14 @@ impl Engine {
             .store(value, Ordering::Relaxed);
     }
 
+    /// Answer map requests from the identity bands below `zoom`, and by the shipped scan from it:
+    /// 0 serves every request by the scan, the reference the band route is tested against.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn set_bands_below_zoom_for_test(&self, zoom: u8) {
+        self.switches.bands_below_zoom.store(zoom, Ordering::Relaxed);
+    }
+
     /// Publish a new prefix this process just wrote: open it, rotate the term index, the bundle
     /// identity and the fragment cache onto it, retire `retired`, and swap.
     ///

@@ -2,6 +2,7 @@
 
 use super::*;
 use super::out::flat_families;
+use tessera_store::bands::{page_size, CopyType, CopyValue};
 
 /// The emit pass's hard per-frame accumulation cap, applied under any `flush_bytes` — including
 /// the deliberately huge value that means "one flush per response". The wire's frame length is a
@@ -273,6 +274,9 @@ pub(super) fn tile_ranges(
 /// count row, no selection work. `Err` carries [`EngineError::Cancelled`] from the cancellation
 /// checkpoint below, checked first so a flip observed here costs only one atomic read, never any
 /// of this tile's own work.
+///
+/// `bands` says whether the request is answered from the identity bands ([`crate::bands`]) where
+/// they can answer a tile; the rest are read as the shipped scan reads them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tile_sweep<'a>(
     tile: &Tile,
@@ -282,6 +286,7 @@ pub(super) fn tile_sweep<'a>(
     params: &SelectParams,
     zoom: u8,
     underlay_offset: Option<u8>,
+    bands: bool,
     cancel: &Option<CancelToken>,
 ) -> Result<Option<TileSweepOut<'a>>> {
     check_cancelled(cancel)?;
@@ -337,11 +342,36 @@ pub(super) fn tile_sweep<'a>(
     // Anchored on `matched`, not `visible`: selection's cap and tier decisions are about the set
     // it draws from. θ's threshold anchor stays unfiltered and, on a filtered request, arrives
     // saturated, so `served = min(matched, cap)` there.
-    let selected = Selection::of(mask, &parts, params, matched);
+    let answer = if bands {
+        crate::bands::select(mask, &part_list, params, matched)?
+    } else {
+        crate::bands::BandAnswer::Declined
+    };
+    let (rows, entries) = match answer {
+        crate::bands::BandAnswer::Served {
+            rows,
+            entries,
+            entries_read,
+            widened,
+        } => {
+            stats.count(|t| &mut t.tiles_from_bands, 1);
+            stats.count(|t| &mut t.tiles_bands_widened, u64::from(widened));
+            stats.count(|t| &mut t.select_rows_visited, entries_read);
+            (rows, Some(entries))
+        }
+        declined => {
+            if let crate::bands::BandAnswer::Sparse { read } = declined {
+                stats.count(|t| &mut t.tiles_sparse_after_read, u64::from(read));
+                will_need_visible_identities(mask, &part_list);
+            }
+            let selected = Selection::of(mask, &parts, params, matched);
+            // Counted by `Selection::of` itself, inside the loops that do the reading — not from
+            // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
+            stats.count(|t| &mut t.select_rows_visited, selected.rows_visited);
+            (selected.rows, None)
+        }
+    };
     stats.lap(|t| &mut t.select_ns);
-    // Counted by `Selection::of` itself, inside the loops that do the reading — not from
-    // `visible`, which would make the `visited == sigma_visible` cross-check a tautology.
-    stats.count(|t| &mut t.select_rows_visited, selected.rows_visited);
 
     let count = TileCount {
         tile: tile.prefix,
@@ -350,7 +380,7 @@ pub(super) fn tile_sweep<'a>(
         visible,
         // How many of those the filter admits. Equal to `visible` on an unfiltered request.
         matched,
-        served: selected.rows.len() as u64,
+        served: rows.len() as u64,
         // Of `matched`, how many also satisfy the highlight — one `and_cardinality` per segment
         // range, the operation `matched` already is. Equal to `matched` with no highlight.
         highlighted: tile_parts
@@ -388,7 +418,8 @@ pub(super) fn tile_sweep<'a>(
 
     Ok(Some(TileSweepOut {
         count,
-        rows: selected.rows,
+        rows,
+        entries,
         tile_parts,
         sub_cells,
         stats: stats.t,
@@ -404,6 +435,9 @@ pub(super) fn tile_sweep<'a>(
 pub(super) struct TileSweepOut<'a> {
     pub(super) count: TileCount,
     pub(super) rows: Vec<u32>,
+    /// Where the tile was answered from the bands, each row's entry in its segment's bands, which
+    /// the gather reads its position and copies from.
+    pub(super) entries: Option<Vec<u32>>,
     /// The tiling's entry for this tile: each segment the tile spans, by its position in the
     /// view's segment list, and the tile's rows in it.
     pub(super) tile_parts: &'a [(usize, Range<u32>)],
@@ -444,6 +478,7 @@ impl Engine {
         // has at most one tile of wasted work in flight at cancellation, where the parallel
         // fan-out has at most `compute_threads` tiles, since every tile already past the
         // checkpoint runs to completion.
+        let bands = req.zoom < self.switches.bands_below_zoom.load(Ordering::Relaxed);
         let run = |tile: &Tile, tile_parts: &'a [(usize, Range<u32>)]| {
             tile_sweep(
                 tile,
@@ -453,6 +488,7 @@ impl Engine {
                 params,
                 req.zoom,
                 tiling.underlay_offset,
+                bands,
                 &req.cancel,
             )
         };
@@ -735,18 +771,18 @@ impl<'a> RowPresence<'a> {
     }
 }
 
-/// One column's values at `placed`, each read by `value(segment, local)`, and which of them carry
-/// a value. `presence` is `None` where every row the tile spans carries one, and then no row is
-/// tested.
+/// One column's values at `placed`, each read by `value(point, segment, local)`, and which of them
+/// carry a value. `presence` is `None` where every row the tile spans carries one, and then no row
+/// is tested.
 #[inline]
 fn gather_column<T>(
     placed: &[(u32, u32)],
     presence: Option<&[RowPresence<'_>]>,
-    value: impl Fn(usize, usize) -> T,
+    value: impl Fn(usize, usize, usize) -> T,
 ) -> (Vec<T>, Option<Vec<bool>>) {
     let mut out = Vec::with_capacity(placed.len());
-    for &(segment, local) in placed {
-        out.push(value(segment as usize, local as usize));
+    for (point, &(segment, local)) in placed.iter().enumerate() {
+        out.push(value(point, segment as usize, local as usize));
     }
     let Some(presence) = presence else {
         return (out, None);
@@ -759,21 +795,32 @@ fn gather_column<T>(
     (out, (!every).then_some(present))
 }
 
-/// One segment's identity and position columns, empty for a segment no tile touches.
+/// One segment's identity and position columns, and the same fields of its band entries, empty
+/// for a segment no tile touches.
 #[derive(Default)]
 struct SegmentRows<'a> {
     tessera_id: &'a [u64],
     morton: &'a [u32],
     residual: &'a [u32],
+    band_ids: &'a [u64],
+    band_codes: &'a [u32],
+    band_residuals: &'a [u32],
 }
 
 macro_rules! column_slices {
     ($(($v:ident, $t:ty)),* $(,)?) => {
-        /// One render column's typed values in each segment of the view, `None` where the
-        /// segment's schema lacks the column or no tile of the request touches the segment.
+        /// One render column's typed values in each segment of the view, and its band copy in
+        /// each, `None` where the segment's schema lacks the column or no tile of the request
+        /// touches the segment. A string is not copied.
         enum ColumnSlices<'a> {
-            $($v(Vec<Option<&'a [$t]>>),)*
-            Bool(Vec<Option<&'a arrow::array::BooleanArray>>),
+            $($v {
+                values: Vec<Option<&'a [$t]>>,
+                copies: Vec<Option<&'a [$t]>>,
+            },)*
+            Bool {
+                values: Vec<Option<&'a arrow::array::BooleanArray>>,
+                copies: Vec<Option<&'a [u8]>>,
+            },
             Utf8(Vec<Option<&'a arrow::array::StringArray>>),
         }
     };
@@ -813,10 +860,32 @@ fn per_segment<'a, T>(
         .collect()
 }
 
+/// Column `ci`'s band copy in each touched segment that holds the column, `None` elsewhere.
+fn band_copies<'a, T: CopyValue>(
+    touched: &[Option<&'a SegmentData>],
+    resolved: &[Option<ResolvedScalars<'a>>],
+    ci: usize,
+    d: &DeclaredScalar,
+    ty: CopyType,
+) -> Vec<Option<&'a [T]>> {
+    touched
+        .iter()
+        .zip(resolved)
+        .map(|(segment, r)| match (segment, r) {
+            (Some(segment), Some(r)) if r[ci].is_some() => segment.bands.copy_values(&d.name, ty),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The emit pass's reader. Every segment a swept tile touches has its identity and position
-/// columns and each declared render column's typed values and presence resolved once for the
-/// request, indexed by the segment's position in the view's segment list. A tile then narrows
-/// presence to its rows in each segment and runs the row loops.
+/// columns, its band entries, and each declared render column's typed values, band copy and
+/// presence resolved once for the request, indexed by the segment's position in the view's segment
+/// list. A tile then narrows presence to its rows in each segment and runs the row loops.
+///
+/// A tile answered from the bands reads each point's identity, position and render values from its
+/// band entry, and a string, or a column the segment's bands hold no copy of, from the column at
+/// the entry's row. A tile answered by the scan reads every field from the columns.
 ///
 /// A segment holding a declared column at another type is refused. A segment whose schema lacks a
 /// declared column reads as absent on every row, as a group-scoped family's lane does in a segment
@@ -848,7 +917,12 @@ const PREFETCH_POINTS: usize = 16_384;
 /// and the calls cost more than they save.
 const SPARSE_ROWS_PER_POINT: u64 = 64;
 
-fn is_sparse(ts: &TileSweepOut<'_>) -> bool {
+/// Whether a tile's pages are asked for ahead of the gather: always for one answered from the
+/// bands, whose file is read without read-ahead, and for a sparse one answered by the scan.
+fn is_scattered(ts: &TileSweepOut<'_>) -> bool {
+    if ts.entries.is_some() {
+        return true;
+    }
     let spanned: u64 = ts.tile_parts.iter().map(|(_, r)| (r.end - r.start) as u64).sum();
     spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
 }
@@ -862,9 +936,7 @@ fn element<T>(slice: &[T], i: usize) -> usize {
 /// read in the background, so the gather's faults that follow find them in the page cache, and
 /// the kernel's read-ahead around a fault, sized for a sequential reader, is not triggered.
 fn will_need(pages: &mut [usize]) {
-    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    // SAFETY: `sysconf` reads a constant of the running system.
-    let page = *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize);
+    let page = page_size();
     for at in pages.iter_mut() {
         *at &= !(page - 1);
     }
@@ -882,6 +954,27 @@ fn will_need(pages: &mut [usize]) {
         // holds a column the gather is about to read.
         unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_WILLNEED) };
     }
+}
+
+/// Ask for the identity column's pages under a tile's visible rows, before the scan reads them:
+/// a tile the bands could not answer holds few visible rows, scattered over its range, and one
+/// request for all of their pages costs less than a fault for each.
+fn will_need_visible_identities(mask: &EffectiveMask, parts: &[SelectionPart<'_>]) {
+    let page = page_size();
+    let mut pages = Vec::new();
+    for part in parts {
+        let ids = part.segment.columns.tessera_id();
+        let base = part.row_base;
+        mask.for_each_run_holding_visible(base + part.range.start..base + part.range.end, |run| {
+            let last = element(ids, (run.end - 1 - base) as usize);
+            let mut at = element(ids, (run.start - base) as usize) & !(page - 1);
+            while at <= last {
+                pages.push(at);
+                at += page;
+            }
+        });
+    }
+    will_need(&mut pages);
 }
 
 impl<'a> Gather<'a> {
@@ -919,18 +1012,20 @@ impl<'a> Gather<'a> {
             macro_rules! typed {
                 ($(($v:ident, $t:ty)),* $(,)?) => {
                     match d.arrow_type {
-                        $(ScalarType::$v => ColumnSlices::$v(per_segment(&resolved, ci, d, |s| {
-                            match s {
+                        $(ScalarType::$v => ColumnSlices::$v {
+                            values: per_segment(&resolved, ci, d, |s| match s {
                                 ScalarSlice::$v(x) => Some(*x),
                                 _ => None,
-                            }
-                        })?),)*
-                        ScalarType::Bool => ColumnSlices::Bool(per_segment(&resolved, ci, d, |s| {
-                            match s {
+                            })?,
+                            copies: band_copies(&touched, &resolved, ci, d, CopyType::$v),
+                        },)*
+                        ScalarType::Bool => ColumnSlices::Bool {
+                            values: per_segment(&resolved, ci, d, |s| match s {
                                 ScalarSlice::Bool(a) => Some(*a),
                                 _ => None,
-                            }
-                        })?),
+                            })?,
+                            copies: band_copies(&touched, &resolved, ci, d, CopyType::Bool),
+                        },
                         // A keyword shares this arm: rendered, it is its bytes.
                         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
                             ColumnSlices::Utf8(per_segment(&resolved, ci, d, |s| match s {
@@ -954,6 +1049,9 @@ impl<'a> Gather<'a> {
                         tessera_id: segment.columns.tessera_id(),
                         morton: segment.morton.u32(),
                         residual: segment.columns.residual(),
+                        band_ids: segment.bands.ids(),
+                        band_codes: segment.bands.codes(),
+                        band_residuals: segment.bands.residuals(),
                     })
                 })
                 .collect(),
@@ -966,36 +1064,54 @@ impl<'a> Gather<'a> {
         })
     }
 
-    /// Ask for the pages of the sparse tiles not yet asked for, until [`PREFETCH_POINTS`] points
-    /// lie ahead of the tile being gathered.
+    /// Ask for the pages of the scattered tiles not yet asked for, until [`PREFETCH_POINTS`]
+    /// points lie ahead of the tile being gathered.
     fn prefetch(&mut self, swept: &[TileSweepOut<'_>]) {
         while self.ahead < swept.len() && self.ahead_points < PREFETCH_POINTS {
             let ts = &swept[self.ahead];
             self.ahead += 1;
             self.ahead_points += ts.rows.len();
-            if !is_sparse(ts) {
+            if !is_scattered(ts) {
                 continue;
             }
             self.pages.clear();
-            for &row in &ts.rows {
+            for (point, &row) in ts.rows.iter().enumerate() {
                 let (segment, local) = segment_holding(self.view, row)
                     .expect("a selected row lies in the view's row space");
                 let rows = &self.segments[segment];
                 let local = local as usize;
-                self.pages.push(element(rows.tessera_id, local));
-                self.pages.push(element(rows.morton, local));
-                self.pages.push(element(rows.residual, local));
+                let entry = ts.entries.as_ref().map(|entries| entries[point] as usize);
+                match entry {
+                    Some(e) => {
+                        self.pages.push(element(rows.band_ids, e));
+                        self.pages.push(element(rows.band_codes, e));
+                        self.pages.push(element(rows.band_residuals, e));
+                    }
+                    None => {
+                        self.pages.push(element(rows.tessera_id, local));
+                        self.pages.push(element(rows.morton, local));
+                        self.pages.push(element(rows.residual, local));
+                    }
+                }
                 for column in &self.columns {
                     macro_rules! page {
                         ($(($v:ident, $t:ty)),* $(,)?) => {
                             match &column.values {
-                                $(ColumnSlices::$v(slices) => {
-                                    slices[segment].map(|v: &[$t]| element(v, local))
+                                $(ColumnSlices::$v { values, copies } => {
+                                    match (entry, copies[segment]) {
+                                        (Some(e), Some(copy)) => Some(element(copy, e)),
+                                        _ => values[segment].map(|v: &[$t]| element(v, local)),
+                                    }
                                 })*
-                                ColumnSlices::Bool(arrays) => arrays[segment].map(|a| {
-                                    let bits = a.values();
-                                    element(bits.values(), (bits.offset() + local) / 8)
-                                }),
+                                ColumnSlices::Bool { values, copies } => {
+                                    match (entry, copies[segment]) {
+                                        (Some(e), Some(copy)) => Some(element(copy, e)),
+                                        _ => values[segment].map(|a| {
+                                            let bits = a.values();
+                                            element(bits.values(), (bits.offset() + local) / 8)
+                                        }),
+                                    }
+                                }
                                 // The offsets only: the value bytes' place is read from them, so
                                 // asking for it would fault the offsets now. Those pages fault
                                 // as the gather reads them.
@@ -1017,7 +1133,7 @@ impl<'a> Gather<'a> {
     /// are placed as `(segment, local)` once, and every column then walks that placement, leaving
     /// the inner loop a bounds-checked index into a typed slice.
     ///
-    /// `swept[at]` is the tile; the tiles are gathered in order, and the pages of sparse tiles
+    /// `swept[at]` is the tile; the tiles are gathered in order, and the pages of scattered tiles
     /// ahead are asked for first.
     pub(super) fn tile(&mut self, swept: &[TileSweepOut<'_>], at: usize) -> PointColumns {
         self.prefetch(swept);
@@ -1031,14 +1147,27 @@ impl<'a> Gather<'a> {
             (segment as u32, local)
         }));
         let placed = &self.placed;
+        let entries = ts.entries.as_deref();
 
         let mut tessera_ids = Vec::with_capacity(placed.len());
         let mut codes = Vec::with_capacity(placed.len());
-        for &(segment, local) in placed {
-            let rows = &self.segments[segment as usize];
-            let idx = local as usize;
-            tessera_ids.push(rows.tessera_id[idx]);
-            codes.push(((rows.morton[idx] as u64) << 32) | rows.residual[idx] as u64);
+        match entries {
+            Some(entries) => {
+                for (&(segment, _), &e) in placed.iter().zip(entries) {
+                    let rows = &self.segments[segment as usize];
+                    let e = e as usize;
+                    tessera_ids.push(rows.band_ids[e]);
+                    codes.push(((rows.band_codes[e] as u64) << 32) | rows.band_residuals[e] as u64);
+                }
+            }
+            None => {
+                for &(segment, local) in placed {
+                    let rows = &self.segments[segment as usize];
+                    let idx = local as usize;
+                    tessera_ids.push(rows.tessera_id[idx]);
+                    codes.push(((rows.morton[idx] as u64) << 32) | rows.residual[idx] as u64);
+                }
+            }
         }
 
         let mut scalars = Vec::with_capacity(self.columns.len());
@@ -1050,29 +1179,49 @@ impl<'a> Gather<'a> {
                 self.presence[*s] = within;
             }
             let presence = (!every).then_some(self.presence.as_slice());
+            // A tile answered from the bands reads each value from its entry's copy where the
+            // segment holds one; a tile answered by the scan reads every value from the column.
             macro_rules! gather {
                 ($(($v:ident, $t:ty)),* $(,)?) => {
                     match &column.values {
-                        $(ColumnSlices::$v(slices) => {
-                            let (out, present) = gather_column(placed, presence, |s, local| {
-                                match slices[s] {
-                                    Some(v) => v[local],
-                                    None => <$t>::default(),
-                                }
-                            });
+                        $(ColumnSlices::$v { values, copies } => {
+                            let (out, present) = match entries {
+                                Some(entries) => gather_column(placed, presence, |point, s, local| {
+                                    match (copies[s], values[s]) {
+                                        (Some(copy), _) => copy[entries[point] as usize],
+                                        (None, Some(v)) => v[local],
+                                        (None, None) => <$t>::default(),
+                                    }
+                                }),
+                                None => gather_column(placed, presence, |_, s, local| {
+                                    match values[s] {
+                                        Some(v) => v[local],
+                                        None => <$t>::default(),
+                                    }
+                                }),
+                            };
                             (ColumnBuf::$v(out), present)
                         })*
-                        ColumnSlices::Bool(arrays) => {
-                            let (out, present) = gather_column(placed, presence, |s, local| {
-                                match arrays[s] {
-                                    Some(a) => a.value(local),
-                                    None => false,
-                                }
-                            });
+                        ColumnSlices::Bool { values, copies } => {
+                            let (out, present) = match entries {
+                                Some(entries) => gather_column(placed, presence, |point, s, local| {
+                                    match (copies[s], values[s]) {
+                                        (Some(copy), _) => copy[entries[point] as usize] != 0,
+                                        (None, Some(a)) => a.value(local),
+                                        (None, None) => false,
+                                    }
+                                }),
+                                None => gather_column(placed, presence, |_, s, local| {
+                                    match values[s] {
+                                        Some(a) => a.value(local),
+                                        None => false,
+                                    }
+                                }),
+                            };
                             (ColumnBuf::Bool(out), present)
                         }
                         ColumnSlices::Utf8(arrays) => {
-                            let (out, present) = gather_column(placed, presence, |s, local| {
+                            let (out, present) = gather_column(placed, presence, |_, s, local| {
                                 match arrays[s] {
                                     Some(a) => a.value(local).to_string(),
                                     None => String::new(),

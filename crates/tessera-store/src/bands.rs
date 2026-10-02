@@ -92,6 +92,13 @@ const SECTION_ALIGN: usize = 4096;
 /// `(id u64, row u32, code u32, residual u32)` in the spool [`BandWriter`] streams through.
 const SPOOL_RECORD_BYTES: usize = 20;
 
+/// The system's page size, which read advice is given in.
+pub fn page_size() -> usize {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: `sysconf` reads a constant of the running system.
+    *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize)
+}
+
 /// The band a row falls in at most: its identity's leading zero bits.
 pub fn band_of(tessera_id: u64) -> u32 {
     tessera_id.leading_zeros()
@@ -494,13 +501,29 @@ impl BandCopy<'_> {
     }
 }
 
+/// A primitive a copy's values are read as in place: every [`CopyType`] but `Bool`, which is read
+/// as its `u8`.
+pub trait CopyValue: Copy + private::Sealed {}
+
+mod private {
+    pub trait Sealed {}
+}
+
+macro_rules! copy_values {
+    ($($t:ty),*) => {
+        $(impl private::Sealed for $t {}
+        impl CopyValue for $t {})*
+    };
+}
+copy_values!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
 /// A segment's `bands.bin`, mapped and framed.
 ///
 /// [`Bands::open`] checks what the header and the length can answer, so every slice below is in
 /// bounds. It does not check that an entry's row is in the segment, or is the row its identity
-/// came from: a reader that indexes a column by an entry's row trusts the digest the bundle open
-/// checked and the writer that produced it, and `tessera verify --deep` checks them. Whether the entries are the segment's rows is [`Bands::check_against`]'s question, which
-/// reads every entry and is `tessera verify --deep`'s to ask.
+/// came from: a reader that indexes a column by an entry's row checks the row against the
+/// segment first. Whether the entries are the segment's rows is [`Bands::check_against`]'s
+/// question, which reads every entry and is `tessera verify --deep`'s to ask.
 #[derive(Debug)]
 pub struct Bands {
     map: Mmap,
@@ -509,6 +532,9 @@ pub struct Bands {
     starts: Vec<u64>,
     copies: Vec<(String, CopyType)>,
     layout: Layout,
+    /// Set once a request has asked for its reads to be advised as random.
+    advised: std::sync::Once,
+    path: PathBuf,
 }
 
 impl Bands {
@@ -587,6 +613,13 @@ impl Bands {
                 ),
             ));
         }
+        // An entry's index is carried as a `u32` beside the row it names.
+        if entries > u64::from(u32::MAX) {
+            return Err(malformed(
+                &path,
+                format!("{entries} entries, more than a u32 indexes"),
+            ));
+        }
         let entries = usize::try_from(entries).map_err(|_| malformed(&path, "too many entries"))?;
         let mut copies = Vec::with_capacity(copy_count.min(4096));
         let mut lens = Vec::with_capacity(copy_count);
@@ -630,7 +663,37 @@ impl Bands {
             starts,
             copies,
             layout,
+            advised: std::sync::Once::new(),
+            path,
         })
+    }
+
+    /// Advise the kernel that this file is read at scattered pages, once for the mapping: a
+    /// request reads a tile's run of a band and a few entries' copies, and read-ahead around each
+    /// fault would bring in pages of other tiles. A reader asks for the pages it is about to read
+    /// with [`Bands::will_need`] instead. The advice is the mapping's alone; the columns the shipped
+    /// sweep reads in order keep the kernel's default.
+    pub fn advise_random(&self) {
+        self.advised.call_once(|| {
+            // Advice only: a failure leaves the default read-ahead, which reads more but the same.
+            let _ = self.map.advise(memmap2::Advice::Random);
+        });
+    }
+
+    /// Ask for the pages holding `range` of `slice`, a section of this file, to be read now and in
+    /// the background, so the reads that follow find them in the page cache. A range within one
+    /// page is not asked for: its one fault reads no more than the advice would.
+    pub fn will_need<T>(&self, slice: &[T], range: std::ops::Range<usize>) {
+        let page = page_size();
+        let size = std::mem::size_of::<T>();
+        let at = slice.as_ptr() as usize + range.start * size - self.map.as_ptr() as usize;
+        let len = range.len() * size;
+        if len == 0 || at / page == (at + len - 1) / page {
+            return;
+        }
+        debug_assert!(at + len <= self.map.len(), "a range outside the band file");
+        // Advice only, as above.
+        let _ = self.map.advise_range(memmap2::Advice::WillNeed, at, len);
     }
 
     /// The segment's row count the file was written for.
@@ -694,6 +757,24 @@ impl Bands {
         let k = self.copies.iter().position(|(held, _)| held == name)?;
         let at = self.layout.copies[k];
         Some(at..at + self.entries() * self.copies[k].1.width())
+    }
+
+    /// One copied column's values in entry order, read in place as `T`, or `None` where the
+    /// segment has no copy of that name stored as `ty`, or `T` is not `ty`'s width.
+    pub fn copy_values<T: CopyValue>(&self, name: &str, ty: CopyType) -> Option<&[T]> {
+        let k = self.copies.iter().position(|(held, _)| held == name)?;
+        if self.copies[k].1 != ty || ty.width() != std::mem::size_of::<T>() {
+            return None;
+        }
+        // SAFETY: `open` checked the file is exactly the layout's length, so the copy's
+        // `entries * width` bytes are in bounds; the section begins on a page boundary, so it is
+        // aligned for `T`, and every bit pattern is a valid `T`.
+        Some(unsafe {
+            std::slice::from_raw_parts(
+                self.map.as_ptr().add(self.layout.copies[k]) as *const T,
+                self.entries(),
+            )
+        })
     }
 
     /// One copied column, or `None` where the segment has no column of that name.
@@ -837,7 +918,16 @@ impl CellCodes {
                 format!("{} bytes for {cells} cells", map.len()),
             ));
         }
-        Ok(CellCodes { map })
+        let codes = CellCodes { map };
+        // Tile ranges and occupancy binary-search the codes, so codes out of order would give a
+        // wrong range rather than an error.
+        if !codes.codes().windows(2).all(|w| w[0] < w[1]) {
+            return Err(malformed(
+                &path,
+                "cell codes are not strictly ascending; rebuild the bundle",
+            ));
+        }
+        Ok(codes)
     }
 
     /// Each occupied cell's Morton code, in the order `cuts.u32` lists the cells.
@@ -887,7 +977,13 @@ pub fn write_band_labels(
     header[16..20].copy_from_slice(&bands.row_count().to_le_bytes());
     header[20..24].copy_from_slice(&labels.ordinals().to_le_bytes());
     out.write_all(&header).map_err(io)?;
-    for &row in bands.rows() {
+    // Every entry's row is read in order, from a mapping of its own: the one requests read is
+    // advised as random and has no read-ahead.
+    let own = map_file(&bands.path)?;
+    let _ = own.advise(memmap2::Advice::Sequential);
+    let rows = &own[bands.layout.rows..bands.layout.rows + bands.entries() * 4];
+    for row in rows.as_chunks::<4>().0 {
+        let row = u32::from_le_bytes(*row);
         let label = labels.label(row as usize);
         let bytes = label.to_le_bytes();
         out.write_all(&bytes[..usize::from(width)]).map_err(io)?;
@@ -1085,6 +1181,18 @@ mod tests {
             .collect();
         assert_eq!(cells.codes(), expected.as_slice());
         assert!(CellCodes::open(dir.path(), cuts.len() + 1).is_err());
+        drop(cells);
+
+        // Two codes out of order are refused at open, since every tile range searches them.
+        let path = dir.path().join(CELL_CODES_FILE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (a, b) = bytes.split_at_mut(4);
+        a.swap_with_slice(&mut b[..4]);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            CellCodes::open(dir.path(), cuts.len()),
+            Err(StoreError::MalformedBundle { .. })
+        ));
     }
 
     #[test]

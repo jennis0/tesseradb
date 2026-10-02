@@ -994,12 +994,13 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
 // -------------------------------------------------------------------------------------------
 // `tile_ranges_all` equivalence.
 //
-// `tile_ranges_all` replaces N per-tile full-column binary searches with one monotone galloping
-// sweep in Morton order. Its entire safety argument is that it computes the *same answer* as
-// `tile_ranges` at every index — so nothing below re-derives an expected range from a model of
-// the sweep. Everything compares against `tile_ranges` itself, which is untouched and remains
-// the definition. (The gallop primitive underneath has its own unit test against
-// `partition_point`, in `tessera_store::read`.)
+// `tile_ranges_all` replaces N per-tile binary searches with one monotone galloping sweep over
+// the cell codes, in Morton order. Its entire safety argument is that it computes the *same
+// answer* as a search of the Morton column at every index — so nothing below re-derives an
+// expected range from a model of the sweep. Everything compares against `tile_ranges_within`
+// over the whole segment, which searches the Morton column itself, and against `tile_ranges`.
+// (The gallop primitive underneath has its own unit test against `partition_point`, in
+// `tessera_store::read`.)
 //
 // Two things a plausible-looking sweep gets wrong, both tested for here:
 //
@@ -1011,17 +1012,19 @@ fn open_bundle_rejects_a_path_traversing_segment_id() {
 //      feeds it mixed depths, duplicates and shuffled orders.
 // -------------------------------------------------------------------------------------------
 
-/// `out[i] == tile_ranges(seg, &tiles[i])` for every `i`, or a failure naming the index.
+/// `out[i]` is the Morton column's range for `tiles[i]`, and `tile_ranges`'s, for every `i`, or a
+/// failure naming the index.
 fn assert_matches_per_tile_search(seg: &tessera_store::SegmentData, tiles: &[Tile], what: &str) {
     let swept = tessera_store::tile_ranges_all(seg, tiles);
     assert_eq!(swept.len(), tiles.len(), "{what}: one range per tile");
     for (i, tile) in tiles.iter().enumerate() {
+        let column = tessera_store::read::tile_ranges_within(seg, tile, 0..seg.row_count);
         assert_eq!(
-            swept[i],
-            tile_ranges(seg, tile),
+            swept[i], column,
             "{what}: tile {i} ({tile:?}) — the sweep must agree with the full-column search \
              AT ITS OWN INDEX"
         );
+        assert_eq!(tile_ranges(seg, tile), column, "{what}: tile {i} ({tile:?})");
     }
 }
 
