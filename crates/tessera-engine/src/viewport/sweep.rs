@@ -818,22 +818,19 @@ pub(super) struct Gather<'a> {
 /// How many points ahead of the gather a sparse tile's pages are asked for.
 const PREFETCH_POINTS: usize = 16_384;
 
-/// A tile is sparse, and its pages asked for ahead, where its points are this many rows apart on
-/// average: a page of `tessera_id`, the widest column every point reads. Closer, consecutive points
-/// share pages and the kernel's own read-ahead serves them; asking for each page costs more.
-const SPARSE_ROWS_PER_POINT: u64 = 4096 / 8;
-
-/// Runs of pages this close are asked for in one call.
-const PREFETCH_JOIN_PAGES: usize = 16;
+/// A tile is sparse, and its pages asked for ahead, where its points are at least this many rows
+/// apart on average. Denser, consecutive points share pages the kernel's read-ahead already serves,
+/// and the calls cost more than they save.
+const SPARSE_ROWS_PER_POINT: u64 = 64;
 
 fn is_sparse(ts: &TileSweepOut<'_>) -> bool {
     let spanned: u64 = ts.tile_parts.iter().map(|(_, r)| (r.end - r.start) as u64).sum();
     spanned >= ts.rows.len() as u64 * SPARSE_ROWS_PER_POINT
 }
 
-/// `MADV_WILLNEED` over every page in `pages`, joining near runs. The pages are read in the
-/// background, so the gather's faults that follow find them in the page cache, and the kernel's
-/// read-ahead around a fault, sized for a sequential reader, is not triggered.
+/// `MADV_WILLNEED` over every page in `pages`, one call per run of adjacent pages. The pages are
+/// read in the background, so the gather's faults that follow find them in the page cache, and
+/// the kernel's read-ahead around a fault, sized for a sequential reader, is not triggered.
 fn will_need(pages: &mut [usize]) {
     const PAGE: usize = 4096;
     for page in pages.iter_mut() {
@@ -845,13 +842,12 @@ fn will_need(pages: &mut [usize]) {
         let start = pages[i];
         let mut end = start + PAGE;
         i += 1;
-        while i < pages.len() && pages[i] <= end + PREFETCH_JOIN_PAGES * PAGE {
+        while i < pages.len() && pages[i] <= end {
             end = end.max(pages[i] + PAGE);
             i += 1;
         }
         // SAFETY: advice only; `MADV_WILLNEED` changes no mapping and no byte. Every page named
-        // holds a column the gather is about to read, and a joined run's gap that is not mapped
-        // makes the call return `ENOMEM` having advised the mapped parts, which is all it is for.
+        // holds a column the gather is about to read.
         unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_WILLNEED) };
     }
 }
