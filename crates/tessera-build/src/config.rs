@@ -176,7 +176,7 @@ pub fn declaration_error(detail: impl Into<String>) -> BuildError {
 /// first value.
 pub const ABSENT_CODE: u32 = 0;
 
-use tessera_types::label::{is_inherited, INHERITED};
+use tessera_access::{is_inherited, INHERITED};
 
 // ---------------------------------------------------------------------------------------------
 // The file, as written
@@ -3749,11 +3749,11 @@ fn check_view_name(object: &str, name: &str) -> Result<()> {
 ///
 /// **Any other list is read label by label as access expressions** and stored as their canonical
 /// text, by the rule a running service applies to a view it creates
-/// ([`tessera_types::label::declared_visibility`]). A label that does not parse is refused here,
+/// ([`tessera_access::declared_visibility`]). A label that does not parse is refused here,
 /// where an author fixes it, rather than stored as a gate nobody satisfies. An empty list, and an
 /// empty element, are refused for the same reason.
 fn compile_view_gate(object: &str, declared: Option<&[String]>) -> Result<Option<Vec<String>>> {
-    tessera_types::label::declared_visibility(declared)
+    tessera_access::declared_visibility(declared)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))
 }
 
@@ -4092,7 +4092,7 @@ fn compile_point_visibility(
             default: None,
         });
     };
-    let default = tessera_types::label::point_default(default)
+    let default = tessera_access::point_default(default)
         .map_err(|detail| declaration_error(format!("{object}: {detail}")))?;
     Ok(PointVisibility {
         field: point.field.clone(),

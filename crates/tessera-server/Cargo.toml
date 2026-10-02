@@ -21,6 +21,7 @@ fault-injection = ["tessera-engine/fault-injection", "tessera-lifecycle/fault-in
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+tessera-access = { path = "../tessera-access" }
 tessera-config = { path = "../tessera-config" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-wire = { path = "../tessera-wire" }

@@ -121,9 +121,11 @@ neither. Beyond those, three checks apply:
    ([resolving a batch](#resolving-a-batch)).
 
 A row that carries access labels has each read as an access expression by the parser a build
-reads its access column with, and the item is indexed under the keys its labels give it: each term
-of a label that is a disjunction of terms, and one key of its own for each label holding a
-conjunction ([access control](access-control.md#how-labels-are-indexed)). A label that is not an
+reads its access column with, and the item is indexed under the keys its labels give it: the
+labels are read as one disjunction, and each term among its operands is a key, and each
+conjunction among them is one key of its own
+([access control](access-control.md#how-labels-are-indexed)). A build applies the same rule to a
+row of its access column. A label that is not an
 expression refuses the request with `422`, naming the row. An item indexed under more than 4,096
 keys is indexed anyway, and reported, because refusing it would look like an authorisation
 decision and a resource limit must not produce one.
@@ -256,7 +258,7 @@ the executor rather than per request.
 Within one window, entity ids are assigned in order of each item's signature, its sorted,
 deduplicated list of index keys, and among items with one signature in the order the window
 received them. Two items share a signature exactly when their labels index them under the same
-keys, so a label holding a conjunction groups its items as a term does. This groups the items
+keys, so a conjunction groups its items as a term does. This groups the items
 carrying a key into
 contiguous runs of ids, which the term index stores far more compactly than scattered ids. Nothing
 repairs this ordering later: a wider window produces longer runs, and a narrower one does not. Ids

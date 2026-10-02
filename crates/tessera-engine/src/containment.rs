@@ -55,9 +55,9 @@
 //!
 //! The expression is over **term signatures**: an entity's set of index keys. Authorisation is
 //! signature-shaped, since an entity is visible iff its keys meet the principal's satisfied set,
-//! and `build_fragment` unions postings over that set and does nothing else. A label holding a
-//! conjunction is one key of its own, which the satisfied set holds exactly when the principal
-//! satisfies the label ([`tessera_authz::LabelIndex`]).
+//! and `build_fragment` unions postings over that set and does nothing else. Each conjunction an item's
+//! labels hold at the top level is one key of its own, which the satisfied set holds exactly when
+//! the principal satisfies the conjunction ([`tessera_authz::LabelIndex`]).
 //!
 //! # What is canonical, and what is not
 //!

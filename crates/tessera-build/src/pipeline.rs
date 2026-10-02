@@ -105,12 +105,14 @@
 //! mutation implausible, and an adversary who can rewrite build inputs mid-run is outside this
 //! defence's scope.)
 //!
-//! **An item's index keys are the union of its labels' keys.** [`build_dictionary`] relies on a
-//! source term being one dictionary key, derived from the source term alone, so the whole item
-//! never has to be assembled. [`crate::plan_access`] makes it one: each distinct label is read once
-//! into the keys it is indexed under ([`tessera_authz::index_keys`]), and the scan visits a row's
-//! keys in place of its labels. A label holding a conjunction is one key of its own, so no label
-//! is ever split across keys that a principal could satisfy separately.
+//! **An item's index keys are those of its row's labels read together.** [`build_dictionary`]
+//! relies on a source term being one dictionary key, derived from the source term alone, so the
+//! whole item never has to be assembled. [`crate::plan_access`] makes it one: each distinct label is
+//! read once into the keys it is indexed under ([`tessera_authz::index_keys`]), and the scan visits
+//! a row's keys in place of its labels. A row whose labels are several and name a conjunction is
+//! read again as one disjunction, because a conjunction one label names may be absorbed by another.
+//! Each key is a term or a conjunction, and a principal satisfies the item exactly when it holds or
+//! satisfies one of them.
 //!
 //! ## Byte-for-byte identity is the correctness condition
 //!

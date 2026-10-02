@@ -44,7 +44,7 @@ whole label, and admits every viewer. A term that equals `public` or `inherited`
 holds a control character, is refused. An item, a view or an artifact may carry a list of labels,
 and admits a viewer who satisfies any one of them.
 
-One parser in `tessera-types` reads every label: an item's access column at a build, the `access`
+One parser in `tessera-access` reads every label: an item's access column at a build, the `access`
 of an ingest row, a view's, a group's or a layer's `visibility`, an artifact's own label, and a
 default. The build and a running service call it below both paths, so a label one accepts the
 other accepts, and each stores the label's canonical text: nested operators flattened, operands
@@ -58,40 +58,48 @@ control character or is `public` in any case is dropped. Every session holds `pu
 
 ### How labels are indexed
 
-The term index maps each index key to the items that carry it. Which keys an item is indexed under
-depends on the shape of each of its labels.
+The term index maps each index key to the items that carry it. An item's labels other than
+`public` are read as one disjunction and normalised as a single label is, so a conjunction that
+another operand absorbs is dropped. Each operand of that disjunction is then indexed on its own.
 
-| Label | Indexed under | Satisfied by a session when |
+| Operand | Indexed under | Satisfied by a session when |
 |---|---|---|
 | `public` | the term `public`, term 0 in every bundle | always |
-| A term, or a disjunction of terms, such as `user:ann\|user:bob` | each of its terms | it holds one of them |
-| Any label holding a conjunction | one key of its own: a byte no term can hold, then the label's canonical text | its terms satisfy the label |
+| A term | the term | it holds the term |
+| A conjunction, such as `secret&(team_a\|team_b)` | one key of its own: a byte no term can hold, then the conjunction's canonical text | its terms satisfy the conjunction |
 
-The items listed under the keys a session satisfies are therefore exactly the items whose labels
-it satisfies. Per-document sharing, where nearly every item has a label of its own,
-produces disjunctions of terms, which never enter the expression graph below.
+The label `a|(b&c)` is indexed under `a` and under the key of `b&c`. An item carrying the list
+`a` and `b&c` is indexed under the same two keys, and so is one carrying `a` and `a&d` and `b&c`,
+since `a` absorbs `a&d`. A disjunction inside a conjunction is not expanded, so
+`secret&(team_a|team_b)` is one key. The items listed under the keys a session satisfies are
+therefore exactly the items whose labels it satisfies. Per-document sharing, where nearly every
+item has a label of its own, produces disjunctions of terms, which never enter the expression
+graph below.
 
-Every label holding a conjunction is compiled into one shared directed acyclic graph. A leaf is a
+Every conjunction indexed under a key of its own is compiled into one shared directed acyclic
+graph. A leaf is a
 term and an inner node is an AND or an OR over its children. Structurally identical
-subexpressions are one node, so `secret` appears once however many labels mention it. The graph is
-derived from the dictionary: it is rebuilt from the label keys when a bundle opens, and extended
+subexpressions are one node, so `secret` appears once however many conjunctions mention it. The
+graph is derived from the dictionary: it is rebuilt from the conjunctions' keys when a bundle
+opens, and extended
 when a flush promotes new keys, so nothing beside the dictionary stores it. A label holding a
 conjunction is refused when it holds more than 1,024 nodes. A disjunction of terms has no limit.
 
 At authorise, the service looks each of the credential's terms up in the dictionary, marks the
 graph's leaves for those terms true and propagates upwards: an OR node becomes true with its first
 true child, and an AND node when every child has. The authorised set is every item listed under
-the credential's terms, under `public`, or under the key of a label whose root became true: one
-bitmap over item identity, the whole of what that credential grants, independent of any later
-request. The pass visits only the nodes reachable from the credential's terms. A label's own key
+the credential's terms, under `public`, or under the key of a conjunction whose root became true:
+one bitmap over item identity, the whole of what that credential grants, independent of any later
+request. The pass visits only the nodes reachable from the credential's terms. A conjunction's key
 starts with a control character, which a credential's terms cannot hold, so no credential names
 one directly.
 
 A probe of the two layouts measured authorise on 9.3 million per-document labels at 100 to 800 ms
 through the graph and 1.4 to 95 ms through each term's item list, and on 500,000 compartmented
 labels at 20 to 95 ms through the graph, which term lists cannot express
-(`probes/2026-09-30-label-dag-authorise/results.md`). Indexing each label by its shape
-takes the faster figure for each. Authorise runs once per session, so these figures are paid at
+(`probes/2026-09-30-label-dag-authorise/results.md`). Indexing terms in term lists and only
+conjunctions through the graph takes the faster figure for each. The probe indexed whole labels;
+the per-operand rule has not been measured separately. Authorise runs once per session, so these figures are paid at
 session start and never by a map request.
 
 A view's, a group's, a layer's and an artifact's own labels are evaluated against the credential's
@@ -158,8 +166,8 @@ watermark shares one copy. The overlay is subtracted from it at each request as 
 a suppression applies to it. It satisfies every view's, group's, layer's and artifact's own label
 and every layer's default label, as a session holding every term would. An artifact's membership
 requirement still applies, and its members and counts are computed from the visible set. The item
-card and the `labels` column name, for each of an item's labels, what a session holding every term
-is shown: each term of a disjunction, and one clause of a label holding a conjunction.
+card and the `labels` column name what a session holding every term is shown: each term among
+the operands of the item's labels, and one clause of each conjunction among them.
 
 A token is a bearer string: unguessable, random, valid until its session ends. It carries no
 claims of its own and nothing that would let a holder work out its terms without asking the
@@ -233,7 +241,7 @@ difference rather than rebuilding either from scratch.
 | A grant, membership, password, key or provider behind the session changes | The session ends, and its next request is answered `403 expired-token` | There is no partial update to the authorised set. The catalogue reports which principals, keys and providers a change affects, and the server ends their sessions; a new token picks up the change |
 
 **Not built yet:** adding to an open session a term it holds that the dictionary did not carry
-at authorise, or a label holding a conjunction that a flush promoted after it and that the
+at authorise, or a conjunction that a flush promoted after it and that the
 session's terms satisfy. The session sees fewer items than its terms admit until it authorises
 again, never more. A `read-all` session is the exception: it satisfies every key, whenever the key
 was promoted. The engine can tell whether a session is behind in this way, from the keys
@@ -256,9 +264,10 @@ from the old bundle reads its items again, by a unique field's values or afresh.
 
 ## Where this is tested and where it lives
 
-The grammar, normalisation and the rules for a declared or a held label live in
-`tessera-types` (`label`). The index keys an item's labels give it, the expression graph, the term
-index, authorised-set construction and the on-disk cache live in `tessera-authz`. Session composition
+The grammar, normalisation, the rules for a declared or a held label and the expression graph
+live in `tessera-access`, which depends on no other crate of the workspace. The index keys an
+item's labels give it, the term index, authorised-set construction and the on-disk cache live in
+`tessera-authz`. Session composition
 against the overlay, the row-space projection it feeds, and the background refresh that keeps a
 resident projection current live in `tessera-engine`. The catalogue lives in `tessera-catalogue`.
 Login, the session plane, OIDC token checks, the session registry that ends sessions on a
@@ -270,7 +279,7 @@ catalogue change, and the catalogue's verbs on the control plane live in `tesser
 §2.2, §4.2, §4.3; `docs/design/concurrency-lifecycle.md` §1.1, §2.4, §3.3;
 `docs/design/core-access-expressions.md`; `docs/system/write-path.md`; `docs/system/security.md`;
 `docs/system/data-model.md`; `docs/system/queries.md`; decisions 0005, 0014, 0020, 0025, 0027,
-0102; `docs/users-and-access.md`; `crates/tessera-types/src/label/mod.rs`;
+0102; `docs/users-and-access.md`; `crates/tessera-access/src/lib.rs`;
 `crates/tessera-authz/src/label/index.rs`; `crates/tessera-authz/src/fragment.rs`;
 `crates/tessera-engine/src/session.rs`; `crates/tessera-engine/src/compose.rs`;
 `crates/tessera-engine/src/refresh.rs`; `crates/tessera-server/src/session.rs`;

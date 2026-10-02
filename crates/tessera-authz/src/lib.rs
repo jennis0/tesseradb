@@ -13,7 +13,7 @@ pub use fragment::{
     build_fragment, build_fragment_with_deltas, build_grant_with_deltas, delta_entities,
     residual_fragment, FragmentCache, FragmentCacheError, FrozenFragment, Grant,
 };
-pub use label::{index_keys, Label, LabelError, LabelIndex, Labels, Shape, DEFAULT_MAX_NODES};
+pub use label::{index_keys, LabelIndex};
 pub use postings::{
     decode_single_batch, encode_posting, encode_posting_bitmap, write_posting_records,
     write_postings, PostingRef, PostingsReader, PostingsSpool,

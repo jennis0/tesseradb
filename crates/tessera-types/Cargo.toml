@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true, optional = true }
+# A layer declaration's labels are read by the one label rule.
+tessera-access = { path = "../tessera-access" }
 # `IdentityKey::generate`: the operating system's random source, for the key every new bundle gets.
 getrandom = "0.2"
 

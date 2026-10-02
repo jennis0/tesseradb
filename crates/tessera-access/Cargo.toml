@@ -1,0 +1,12 @@
+[package]
+name = "tessera-access"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+# No crate of the workspace: `scripts/check-layers.sh` keeps this one at the bottom.
+[dependencies]
+rustc-hash = "1"
+
+[dev-dependencies]
+rand = { workspace = true }

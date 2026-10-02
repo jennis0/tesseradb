@@ -81,7 +81,7 @@ pub struct Session {
     token_id: u64,
     /// The index keys the session satisfies. For a session authorised for terms, as
     /// bundle-relative `TermId`s: each term it holds that the dictionary carries, `public`, and
-    /// the key of each label holding a conjunction that its terms satisfy. A term the dictionary
+    /// the key of each conjunction that its terms satisfy. A term the dictionary
     /// does not carry is absent, never an error. Resolved once, at authorise, and never
     /// re-resolved in place: see [`Session::is_stale`]. For a `read-all` session, every key.
     satisfied: Satisfied,
@@ -144,7 +144,7 @@ impl Session {
     }
 
     /// The term the session's item card names for the index key `key`, where `key` is a term the
-    /// session holds. A label's own key names none: the card writes a clause of the label. A
+    /// session holds. A conjunction's key names none: the card writes a clause of it. A
     /// `read-all` session holds every term, so every term key is named from `dict`.
     pub(crate) fn term_of<'a>(
         &'a self,
@@ -153,7 +153,7 @@ impl Session {
     ) -> Option<&'a [u8]> {
         match &self.held {
             Some(held) => held.descriptors.get(&key).map(Vec::as_slice),
-            None if dict.labels().is_label_key(key) => None,
+            None if dict.labels().is_conjunction_key(key) => None,
             None => dict.descriptor(key),
         }
     }
@@ -167,7 +167,7 @@ impl Session {
 
     /// Whether the session satisfies any of the stored `labels`.
     pub(crate) fn admits<S: AsRef<str>>(&self, labels: &[S]) -> bool {
-        tessera_types::label::admits(labels, &|term| self.holds(term))
+        tessera_access::admits(labels, &|term| self.holds(term))
     }
 
     /// `sha256(auth_data)`.
@@ -176,7 +176,7 @@ impl Session {
     }
 
     /// Whether this session's mask is behind the corpus: true iff a key promoted since authorise
-    /// is a term the session holds, or a label holding a conjunction that its terms satisfy. A
+    /// is a term the session holds, or a conjunction that its terms satisfy. A
     /// stale session sees fewer items than its principal is entitled to, never more. It is a
     /// hint, not a revocation; the only remedy is a new session, since `satisfied` is never
     /// re-resolved in place. A `read-all` session is never behind: its fragment is built from
@@ -191,7 +191,7 @@ impl Session {
         let labels = generation.dict.labels();
         (self.dict_len_at_authorise..generation.dict.len())
             .map(TermId::new)
-            .any(|key| match labels.is_label_key(key) {
+            .any(|key| match labels.is_conjunction_key(key) {
                 true => labels.satisfied(key, &|term| self.holds(term)),
                 false => generation
                     .dict
@@ -207,7 +207,7 @@ const AUTH_DATA_EVERY_ITEM: &[u8] = b"\0every item";
 
 impl Engine {
     /// Authorise a credential: its terms → dictionary lookup (an unknown term drops out, never an
-    /// error), and the labels holding a conjunction that those terms satisfy, from the DAG → the
+    /// error), and the conjunctions that those terms satisfy, from the DAG → the
     /// union of every satisfied key's postings, through `FragmentCache::get_or_build`. A zero-term
     /// credential, or one whose every term is unknown, is a valid, zero-visibility session, not an
     /// error. A concurrent in-flight build on the same key surfaces here as
@@ -227,11 +227,11 @@ impl Engine {
         let mut descriptors: FxHashMap<TermId, Vec<u8>> = FxHashMap::default();
         let labels = generation.dict.labels();
         for term in &auth_terms {
-            // A held term never names a label's own key, which starts with a control character
+            // A held term never names a conjunction's key, which starts with a control character
             // `credential_terms` drops; the test keeps a key out of `satisfied` whatever a
             // credential presents. An unknown term is unsatisfied, never an error.
             if let Some(id) = generation.dict.lookup(term.as_bytes()) {
-                if !labels.is_label_key(id) {
+                if !labels.is_conjunction_key(id) {
                     satisfied.insert(id);
                     descriptors.insert(id, term.as_bytes().to_vec());
                 }
@@ -481,7 +481,7 @@ fn fragment_error(e: FragmentCacheError) -> EngineError {
 }
 
 /// The terms a credential presents. `auth_data` is the JSON `{"terms": ["<term>", ...]}`; each
-/// term is held as [`tessera_types::label::held_term`] says, and one it refuses is dropped. A
+/// term is held as [`tessera_access::held_term`] says, and one it refuses is dropped. A
 /// credential that parses to no terms is valid, and its session sees what `public` admits.
 fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let refused = || {
@@ -497,7 +497,7 @@ fn credential_terms(auth_data: &[u8]) -> Result<Vec<String>> {
     let mut held = Vec::with_capacity(terms.len());
     for term in terms {
         let term = term.as_str().ok_or_else(refused)?;
-        held.extend(tessera_types::label::held_term(term).map(str::to_owned));
+        held.extend(tessera_access::held_term(term).map(str::to_owned));
     }
     held.sort_unstable();
     held.dedup();

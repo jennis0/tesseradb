@@ -1394,11 +1394,11 @@ impl LayerDeclaration {
             return refuse("`artifact_visibility.field`");
         }
         let label = |key: &str, word: &str| {
-            crate::label::declared_label(key, word).map_err(DeclarationError::Label)
+            tessera_access::declared_label(key, word).map_err(DeclarationError::Label)
         };
         if let Some(visibility) = &self.visibility {
             let visibility = label("visibility", visibility)?;
-            self.visibility = (!crate::label::is_public(&visibility)).then_some(visibility);
+            self.visibility = (!tessera_access::is_public(&visibility)).then_some(visibility);
         }
         if let MemberDefault::Label(default) = &self.artifact_visibility.default {
             self.artifact_visibility.default =

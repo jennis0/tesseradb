@@ -3215,6 +3215,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-access"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.7",
+ "rustc-hash 1.1.0",
+]
+
+[[package]]
 name = "tessera-analyse"
 version = "0.1.0"
 dependencies = [
@@ -3238,6 +3246,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "sha2",
  "tempfile",
+ "tessera-access",
  "tessera-cache",
  "tessera-types",
 ]
@@ -3296,6 +3305,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tessera-access",
  "tessera-analyse",
  "tessera-authz",
  "tessera-docgen",
@@ -3328,6 +3338,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tempfile",
+ "tessera-access",
  "url",
 ]
 
@@ -3408,6 +3419,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tessera-access",
  "tessera-analyse",
  "tessera-authz",
  "tessera-build",
@@ -3510,6 +3522,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "tempfile",
+ "tessera-access",
  "tessera-build",
  "tessera-catalogue",
  "tessera-config",
@@ -3550,6 +3563,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tessera-access",
  "tessera-analyse",
  "tessera-roaring",
  "tessera-spatial",
@@ -3566,6 +3580,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tessera-access",
  "tessera-types",
  "trybuild",
 ]

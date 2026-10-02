@@ -9,7 +9,6 @@ pub use identity::{IdentityError, IdentityKey, TesseraId, IDENTITY_CONSTRUCTION,
 /// they are one database; the repository's working method is why they are one implementation). It
 /// carries no feature gate: the calls are platform-gated inside the module, and a crate that never
 /// asks about its own memory never names it.
-pub mod label;
 pub mod process;
 pub mod scalar;
 
@@ -62,8 +61,6 @@ macro_rules! define_id_newtype {
 define_id_newtype!(EntityId, u64);
 define_id_newtype!(RowId, u32);
 define_id_newtype!(TermId, u32);
-// A distinct access label after normalisation. Internal, as a term id is: no response carries one.
-define_id_newtype!(LabelId, u32);
 // An attribute index ordinal, local to one column (`docs/design/filter-index.md` §2.2).
 //
 // **Deliberately not convertible to `TermId`, and the reason is an authorisation one.** The two
@@ -218,7 +215,10 @@ pub struct GenerationStamp {
 // 30: an access label is an expression. A dictionary holds terms and, for each label holding a
 // conjunction, a key of its own; the manifest carries no plugin hash or declared bounds. A 29
 // bundle is refused.
-pub const BUNDLE_FORMAT: u32 = 30;
+// 31: an item's labels are read as one disjunction, and each of its operands is a key: a term under
+// itself, a conjunction under its own key. A 30 dictionary keys a whole label holding a conjunction,
+// which a reader at 31 would evaluate as one, so a 30 bundle is refused.
+pub const BUNDLE_FORMAT: u32 = 31;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;

@@ -7,7 +7,7 @@ use rustc_hash::FxHashSet;
 
 use tessera_lifecycle::membership::Attachment;
 use tessera_lifecycle::Overlay;
-use tessera_types::label::Label;
+use tessera_access::Label;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::EntityId;
 

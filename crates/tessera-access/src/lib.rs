@@ -11,12 +11,39 @@
 //! any one of them. The expressions have no negation, so a label is monotone in the terms held:
 //! holding more terms admits a superset.
 //!
-//! The index over labels, and their evaluation from a credential's terms, are in `tessera-authz`.
+//! [`Labels`] holds many labels in one hash-consed DAG and evaluates them from a credential's
+//! terms. What an item is indexed under, and the postings and bitmaps behind each key, are in
+//! `tessera-authz`.
+//!
+//! This crate depends on no other crate of the workspace, so every crate that reads a label or a
+//! credential's terms, the identity catalogue included, may use it.
 
+mod dag;
+mod labels;
 mod normal;
 mod parse;
 
 use std::fmt;
+
+pub use dag::Scratch;
+pub use labels::Labels;
+
+/// A distinct access label after normalisation, numbered by [`Labels`]. Internal: no response
+/// carries one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct LabelId(u32);
+
+impl LabelId {
+    #[inline]
+    pub const fn new(raw: u32) -> Self {
+        LabelId(raw)
+    }
+
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// The label every principal holds, valid only as a whole label.
 pub const PUBLIC: &str = "public";
@@ -34,17 +61,6 @@ pub enum Expr {
     Term(Box<str>),
     And(Vec<Expr>),
     Or(Vec<Expr>),
-}
-
-/// Which index serves a label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shape {
-    /// `public`, which every session holds.
-    Public,
-    /// A single term or a disjunction of terms. It is indexed under each of its terms.
-    AnyOf,
-    /// Any label holding a conjunction. It is indexed under its label id and evaluated in the DAG.
-    Compound,
 }
 
 /// A normalised access label.
@@ -111,19 +127,11 @@ impl Label {
         self.0.as_ref()
     }
 
-    pub fn shape(&self) -> Shape {
-        match &self.0 {
-            None => Shape::Public,
-            Some(e) if e.is_any_of() => Shape::AnyOf,
-            Some(_) => Shape::Compound,
-        }
-    }
-
     /// The text stored for this label. Parsing it gives this label back.
     pub fn canonical(&self) -> String {
         match &self.0 {
             None => PUBLIC.to_owned(),
-            Some(e) => normal::canonical(e),
+            Some(e) => e.canonical(),
         }
     }
 
@@ -143,6 +151,11 @@ impl Label {
 }
 
 impl Expr {
+    /// The text of this expression, written as [`Label::canonical`] writes a label.
+    pub fn canonical(&self) -> String {
+        normal::canonical(self)
+    }
+
     fn witness<'a>(&'a self, held: &impl Fn(&str) -> bool) -> Option<Vec<&'a str>> {
         match self {
             Expr::Term(t) => held(t).then(|| vec![&**t]),
@@ -171,7 +184,7 @@ impl Expr {
     }
 
     /// Whether this is a term or a disjunction of terms.
-    pub fn is_any_of(&self) -> bool {
+    fn is_any_of(&self) -> bool {
         match self {
             Expr::Term(_) => true,
             Expr::Or(v) => v.iter().all(|e| matches!(e, Expr::Term(_))),
@@ -185,6 +198,17 @@ impl Expr {
             Expr::Term(_) => std::slice::from_ref(self),
             Expr::And(v) | Expr::Or(v) => v,
         }
+    }
+}
+
+/// The operands of the disjunction of the normalised expressions `exprs`, normalised: nested
+/// disjunctions flattened, operands sorted and deduplicated, and a conjunction removed where
+/// another operand's conjuncts are among its own. Each is a term or a conjunction. A list of labels
+/// and the same disjunction written as one label have the same operands.
+pub fn disjuncts(exprs: Vec<Expr>) -> Vec<Expr> {
+    match normal::normalise(Expr::Or(exprs)) {
+        Expr::Or(v) => v,
+        e => vec![e],
     }
 }
 
@@ -378,7 +402,7 @@ mod tests {
 
     #[test]
     fn public_is_accepted_only_as_the_whole_label() {
-        assert_eq!(label(" public ").shape(), Shape::Public);
+        assert_eq!(label(" public ").expr(), None);
         assert_eq!(label("public").canonical(), "public");
         for text in [
             "Public",
@@ -390,7 +414,7 @@ mod tests {
         ] {
             assert!(Label::parse(text, DEFAULT_MAX_NODES).is_err(), "{text}");
         }
-        assert!(label("publicly").shape() == Shape::AnyOf);
+        assert_eq!(label("publicly").canonical(), "publicly");
     }
 
     #[test]
@@ -406,16 +430,24 @@ mod tests {
         ] {
             assert!(Label::parse(text, DEFAULT_MAX_NODES).is_err(), "{text}");
         }
-        assert_eq!(label("inheritance").shape(), Shape::AnyOf);
+        assert_eq!(label("inheritance").canonical(), "inheritance");
+    }
+
+    fn disjuncts_of(labels: &[&str]) -> Vec<String> {
+        let exprs = labels.iter().filter_map(|t| label(t).expr().cloned()).collect();
+        disjuncts(exprs).iter().map(normal::canonical).collect()
     }
 
     #[test]
-    fn shapes() {
-        assert_eq!(label("a").shape(), Shape::AnyOf);
-        assert_eq!(label("a|b|\"c d\"").shape(), Shape::AnyOf);
-        assert_eq!(label("a|(a&b)").shape(), Shape::AnyOf);
-        assert_eq!(label("a&b").shape(), Shape::Compound);
-        assert_eq!(label("a|(b&c)").shape(), Shape::Compound);
+    fn a_list_of_labels_and_one_label_writing_the_same_disjunction_have_the_same_disjuncts() {
+        assert_eq!(disjuncts_of(&["a|(b&c)"]), ["a", "b&c"]);
+        assert_eq!(disjuncts_of(&["b&c", "a"]), ["a", "b&c"]);
+        assert_eq!(disjuncts_of(&["a", "a&b"]), ["a"]);
+        assert_eq!(disjuncts_of(&["a|(a&b)"]), ["a"]);
+        assert_eq!(disjuncts_of(&["x|y", "y|z"]), ["x", "y", "z"]);
+        assert_eq!(disjuncts_of(&["(a&b)|c", "a&b&d"]), ["c", "a&b"]);
+        assert_eq!(disjuncts_of(&["a&(b|c)"]), ["a&(b|c)"]);
+        assert!(disjuncts(Vec::new()).is_empty());
     }
 
     #[test]
@@ -430,7 +462,6 @@ mod tests {
     fn a_disjunction_of_terms_has_no_node_limit() {
         let wide = (0..5000).map(|i| format!("t{i}")).collect::<Vec<_>>();
         let label = Label::parse(&wide.join("|"), DEFAULT_MAX_NODES).unwrap();
-        assert_eq!(label.shape(), Shape::AnyOf);
         assert_eq!(label.expr().map(|e| e.operands().len()), Some(5000));
         assert!(Label::parse("a|b|c", 1).is_ok());
         let compound = format!("x&({})", wide[..DEFAULT_MAX_NODES].join("|"));

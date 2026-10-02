@@ -1,5 +1,6 @@
 """A corpus whose items carry access expressions: conjunctions, several labels on one item, a
-quoted term, and items with no label of their own.
+quoted term, disjunctions with conjunctions among their operands, a conjunction that another of the
+item's labels absorbs, and items with no label of their own.
 
 The oracle's answers here come from the labels each item was given, read by `oracle.access`'s own
 parser and evaluated by direct recursion. Nothing is read back from the bundle, so a build that
@@ -44,6 +45,7 @@ LABELS: list[list[str]] = [
     [],
     ["(a&b&c)|(d&e)", "ir:new"],
     ["(t&c)|(s&(b|a))"],
+    ["ir:other|(x&y)", "ir:other&eu"],
 ]
 
 PRINCIPALS: list[list[str]] = [
