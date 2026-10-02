@@ -157,27 +157,6 @@ function cellXY(cell: bigint): {x: number; y: number} {
 }
 
 /**
- * Each count's place among the cells' counts, from 0 to 1, as histogram equalisation places it: the
- * middle of the run of cells holding that count, in all the cells sorted by count. Where most cells
- * hold small counts, as fine cells do, the small counts still spread over the lower part of the
- * scale. Every count is 1 where the cells hold one count between them.
- */
-export function equalised(cells: readonly DensityCell[]): Map<number, number> {
-  const counts = cells.map((c) => c.count).sort((a, b) => a - b);
-  const last = counts.length - 1;
-  const place = new Map<number, number>();
-  if (counts.length === 0) return place;
-  if (counts[0] === counts[last]) return place.set(counts[0]!, 1);
-  for (let i = 0; i <= last; ) {
-    let j = i;
-    while (j < last && counts[j + 1] === counts[i]) j++;
-    place.set(counts[i]!, (i + j) / 2 / last);
-    i = j + 1;
-  }
-  return place;
-}
-
-/**
  * The counts contour lines are drawn at: up to four distinct counts at the 25th, 50th, 75th and
  * 90th percentiles of the cells' counts, ascending. Empty where no cell has a count.
  */
@@ -231,7 +210,10 @@ export function binDensity(counts: DensityCounts): DensityImage | null {
   const height = y1 - y0 + 1;
   const data = new Uint8ClampedArray(width * height * 4);
 
-  const rank = equalised(cells);
+  // Rank the distinct counts: a bin's intensity is its rank among the counts drawn.
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
 
   for (const cell of cells) {
     const t = rank.get(cell.count) ?? 0;

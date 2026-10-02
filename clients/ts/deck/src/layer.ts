@@ -22,7 +22,7 @@ import {NEUTRAL} from '@tesseradb/client/internal';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {DEFAULT_COLOURING, buildColourAttribute, encodingSignature, rampAt as rampAtStops, rgbOfHex, type Colouring, type Encoding, type Rgb} from './colour.js';
 import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
-import {binDensity, contourThresholds, densityPaint, densityStops, equalised, filterDensity, type DensityCell, type DensityColours, type DensityCounts, type DensityMode} from './density.js';
+import {binDensity, contourThresholds, densityPaint, densityStops, filterDensity, type DensityCell, type DensityColours, type DensityCounts, type DensityMode} from './density.js';
 import {LABEL_LINE_HEIGHT, labelLine, labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {importAggregation} from './aggregation-loader.js';
 import {LookupTexture} from './lut.js';
@@ -695,11 +695,13 @@ export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
 }
 
 /**
- * The grid: one square per cell, {@link DENSITY_COVERAGE} of a cell wide, coloured by its count's
- * place among the cells' counts ({@link equalised}), in {@link DENSITY_STEPS} steps of `stops`.
+ * The grid: one square per cell, {@link DENSITY_COVERAGE} of a tile wide, coloured by the rank of
+ * its count among the distinct counts drawn, in {@link DENSITY_STEPS} steps of `stops`.
  */
 function gridSquares(cells: readonly DensityCell[], span: number, stops: readonly Rgb[]): GridDatum[] {
-  const rank = equalised(cells);
+  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
+  const rank = new Map<number, number>();
+  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
   const steps = Array.from({length: DENSITY_STEPS}, (_, i) => [...rampAtStops(stops, i / (DENSITY_STEPS - 1))] as [number, number, number]);
   const half = (span * DENSITY_COVERAGE) / 2;
   return cells.map((c) => {
