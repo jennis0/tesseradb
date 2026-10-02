@@ -930,10 +930,11 @@ async fn the_catalogue_routes_match_the_description() {
     let resp = send(
         &patch,
         "/control/principals/ann",
-        Some(("PrincipalChange", json!({ "bypass": true }))),
+        Some(("PrincipalChange", json!({ "disabled": false }))),
     );
     assert_answer(&doc, &patch, resp.await.unwrap(), 200).await;
-    let resp = send(&patch, "/control/principals/ann", Some(("PrincipalChange", json!({}))));
+    assert_invalid(&doc, "PrincipalChange", &json!({}));
+    let resp = send(&patch, "/control/principals/ann", Some(("", json!({}))));
     assert_refusal_to(&doc, Some(&patch), resp.await.unwrap(), 422, "contract").await;
     let resp = send(
         &patch,
@@ -1081,27 +1082,33 @@ async fn the_catalogue_routes_match_the_description() {
 }
 
 /// Every control operation refuses an accepted credential without the permission it needs with
-/// `403 forbidden`, before the body is read; a writer without `bypass` is refused every write;
-/// and `admin` reaches status and the catalogue and no write.
+/// `403 forbidden`, before the body is read: a write needs `write`, flush and compaction `write`
+/// and `write-all`, and status and the catalogue `admin`.
 #[tokio::test]
 async fn every_control_route_needs_its_permission() {
     use tessera_catalogue::{Grantee, Permission, PrincipalKind};
     let doc = description();
     let f = fixture().await;
     let catalogue = &f.server.state.catalogue;
-    let key_for = |name: &str, permissions: &[Permission], bypass: bool| {
+    let key_for = |name: &str, permissions: &[Permission]| {
         catalogue.create_principal(name, PrincipalKind::Service).unwrap();
         for p in permissions {
             catalogue.grant_permission(Grantee::Principal(name), *p).unwrap();
         }
-        catalogue.set_bypass(name, bypass).unwrap();
         catalogue.create_api_key(name, None, None).unwrap().0.key
     };
-    let nothing = key_for("nothing", &[], true);
-    let writer = key_for("writer", &[Permission::Write], false);
-    let admin = key_for("admin", &[Permission::Admin], false);
+    let everything_but = |missing: &[Permission]| -> Vec<Permission> {
+        Permission::ALL.into_iter().filter(|p| !missing.contains(p)).collect()
+    };
+    let nothing = key_for("nothing", &[]);
+    let writer = key_for("writer", &[Permission::Write]);
+    let flusher = key_for("flusher", &[Permission::Write, Permission::WriteAll]);
+    let not_writer = key_for("not-writer", &everything_but(&[Permission::Write]));
+    let not_admin = key_for("not-admin", &everything_but(&[Permission::Admin]));
+    let not_write_all = key_for("not-write-all", &everything_but(&[Permission::WriteAll]));
+    let admin = key_for("admin", &[Permission::Admin]);
 
-    let mut writes = 0;
+    let (mut writes, mut operations) = (0, 0);
     for (path, item) in doc["paths"].as_object().unwrap() {
         if !path.starts_with("/control/") {
             continue;
@@ -1113,33 +1120,52 @@ async fn every_control_route_needs_its_permission() {
                 .map(|s| if s.starts_with('{') { "1" } else { s })
                 .collect::<Vec<_>>()
                 .join("/");
-            let send = |key: &str| {
-                f.server
+            let tag = op["tags"][0].as_str().unwrap_or("");
+            // Each credential, and whether the route refuses it.
+            let cases: Vec<(&str, &str, bool)> = match tag {
+                "control: flush" | "control: compact" => {
+                    operations += 1;
+                    vec![
+                        ("write", &writer, true),
+                        ("all but write", &not_writer, true),
+                        ("all but write-all", &not_write_all, true),
+                        ("admin", &admin, true),
+                        ("write and write-all", &flusher, false),
+                    ]
+                }
+                "control: identity" | "control: status" => vec![
+                    ("write", &writer, true),
+                    ("all but admin", &not_admin, true),
+                    ("admin", &admin, false),
+                ],
+                _ => {
+                    writes += 1;
+                    vec![
+                        ("all but write", &not_writer, true),
+                        ("admin", &admin, true),
+                        ("write", &writer, false),
+                    ]
+                }
+            };
+            for (who, key, refused) in [("nothing", nothing.as_str(), true)].into_iter().chain(cases) {
+                let resp = f
+                    .server
                     .client
                     .request(method.clone(), f.server.control_url(&concrete))
                     .bearer_auth(key)
                     .send()
-            };
-            let resp = send(&nothing).await.unwrap();
-            assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
-            let is_write = !op["tags"][0]
-                .as_str()
-                .is_some_and(|t| matches!(t, "control: identity" | "control: status" | "control: flush" | "control: compact"));
-            if is_write {
-                writes += 1;
-                let resp = send(&writer).await.unwrap();
-                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
-                let resp = send(&admin).await.unwrap();
-                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
-            } else {
-                let resp = send(&writer).await.unwrap();
-                assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
-                let resp = send(&admin).await.unwrap();
-                assert_ne!(resp.status().as_u16(), 403, "{method} {path} with admin");
+                    .await
+                    .unwrap();
+                if refused {
+                    assert_refusal_to(&doc, Some(&method), resp, 403, "forbidden").await;
+                } else {
+                    assert_ne!(resp.status().as_u16(), 403, "{method} {path} with {who}");
+                }
             }
         }
     }
     assert_eq!(writes, 13, "ingest, changes, the declarations, layers and artifacts");
+    assert_eq!(operations, 2, "flush and compact");
 }
 
 #[tokio::test]

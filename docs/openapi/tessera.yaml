@@ -126,11 +126,15 @@ paths:
         credential. The body names the principal to act as: a local principal by `principal`, or
         an OIDC identity by its `access_token`, which is checked as `POST /v1/login` checks one.
         The session carries that principal's terms and its `read` and `write`, and never its
-        `admin`, `authorise-as` or `bypass`. The target must hold `read`.
+        `admin`, `authorise-as`, `read-all` or `write-all`, so an integrator's key cannot read the
+        whole corpus through a target that may. The target must hold `read`.
 
         With the operator credential, the body may instead name `terms`: the session holds those
         terms and `read`, for no principal of the catalogue, and no catalogue change ends it. A
-        local operator reads as any set of terms this way without setting up principals.
+        local operator reads as any set of terms this way without setting up principals. Or it
+        may send `read_all: true` for a session of the superuser itself, which holds `read` and
+        `read-all`: its authorised set is every item, deletions and suppressions still apply to
+        it, and it satisfies every view's, layer's and artifact's label.
 
         The session ends at the earliest of `token_max_lifetime` after the request, the expiry of
         the key that minted it, and the target access token's `exp`. It also ends when a catalogue
@@ -170,7 +174,7 @@ paths:
         "415":
           $ref: "#/components/responses/NotJsonContentType"
         "422":
-          description: "The body names other than exactly one of `principal`, `access_token` and `terms`, or the access token was not accepted."
+          description: "The body names other than exactly one of `principal`, `access_token`, `terms` and `read_all`, or the access token was not accepted."
           content:
             application/json:
               schema:
@@ -250,13 +254,22 @@ paths:
         provider's published keys, then issuer, audience, `exp` and `nbf`, and its claims are
         mapped to terms and groups by the provider's claim rules and role mappings.
 
-        The principal must hold `read`. The session carries its terms and its `read` and `write`.
-        It ends at the earliest of `token_max_lifetime` after the request, the key's expiry and the
+        The principal must hold `read`. The session carries its terms and its `read`, `write`,
+        `read-all` and `write-all`. A session holding `read-all` has every item as its authorised
+        set, with deletions and suppressions applied, and satisfies every view's, layer's and
+        artifact's label. It ends at the earliest of `token_max_lifetime` after the request, the key's expiry and the
         access token's `exp`, and when a catalogue change affects the principal, the key or the
         provider.
 
+        An access token whose `typ` header is present and is not `JWT`, `at+jwt` or
+        `application/at+jwt` is refused, so a logout token or another typed JWT is not accepted
+        as an access token. An OpenID Connect ID token is refused by its audience, the client's
+        id, where the provider's `audience` names the API.
+
         Every reason a credential is not accepted answers the same `401`, so the answer does not
-        show whether a principal exists. Subject to compute admission.
+        show whether a principal exists. Password checks have their own admission limit, about one
+        per core with as many waiting; past it the request is answered `429` with `Retry-After`,
+        whether or not the name exists. Subject to compute admission.
       security: []
       requestBody:
         required: true
@@ -2612,11 +2625,10 @@ paths:
     patch:
       tags: ["control: identity"]
       operationId: changePrincipal
-      summary: "Disable or enable a principal, or set its `bypass`."
+      summary: "Disable or enable a principal."
       description: |
-        Each field present is applied. Disabling a principal ends its sessions and those minted
-        with its keys, and no credential of it is accepted until it is enabled. `bypass` lets a
-        principal with `write` write against the whole corpus.
+        Disabling a principal ends its sessions and those minted with its keys, and no credential
+        of it is accepted until it is enabled.
       security:
         - controlCredential: []
       parameters:
@@ -2830,7 +2842,7 @@ paths:
         "415":
           $ref: "#/components/responses/NotJsonContentType"
         "422":
-          description: "A permission is not one of `read`, `write`, `authorise-as` and `admin`."
+          description: "A permission is not one of `read`, `write`, `authorise-as`, `admin`, `read-all` and `write-all`."
           content:
             application/json:
               schema:
@@ -3227,7 +3239,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: "The provider is declared in `tessera.toml`; change it there and restart."
+          description: "The provider is declared in `tessera.toml`; change it there and restart. Or another provider has the same issuer and audience, so a token from either would be accepted by both."
           content:
             application/json:
               schema:
@@ -3358,7 +3370,7 @@ components:
     controlCredential:
       type: http
       scheme: bearer
-      description: "The operator credential, which authenticates the built-in superuser holding every permission and `bypass`; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes need `write` and `bypass`; status, flush, compaction and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`."
+      description: "The operator credential, which authenticates the built-in superuser holding every permission; an API key; or an OIDC access token, whose permissions come from its provider's role mappings. Every path on the control listener requires one, checked before the request's query or body is read, so a caller without one is answered `401` ahead of any other refusal. Writes need `write`; flush and compaction need `write` and `write-all`; status and the catalogue's verbs need `admin`. A credential without them is `403 forbidden`. Not built yet: masking a write by the writer's own terms. A principal with `write` writes against the whole corpus."
     sessionToken:
       type: http
       scheme: bearer
@@ -3537,7 +3549,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Forbidden:
-      description: "`403 forbidden`: the credential was accepted and does not hold the permission the route needs, or, on a write, holds `write` without `bypass`. The detail names what is missing."
+      description: "`403 forbidden`: the credential was accepted and does not hold the permission the route needs. The detail names what is missing."
       content:
         application/json:
           schema:
@@ -3620,7 +3632,7 @@ components:
     AuthoriseRequest:
       type: object
       additionalProperties: false
-      description: Exactly one of the three fields.
+      description: Exactly one of the four fields.
       properties:
         principal:
           type: string
@@ -3633,22 +3645,34 @@ components:
           description: "The terms the session holds, with `read` and no other permission, for no principal of the catalogue. Accepted with the operator credential alone; an API key sending it is `403 forbidden`. Each term is trimmed and an empty one is dropped. The rest are held as given, since nothing is stored: a term no grant could hold, such as one holding a control character, admits the items labelled with it. No catalogue change ends the session."
           items:
             type: string
+        read_all:
+          const: true
+          description: "A session of the superuser itself, holding `read` and `read-all`: its authorised set is every item, deletions and suppressions still apply, and it satisfies every label. Accepted with the operator credential alone; an API key sending it is `403 forbidden`."
       oneOf:
         - required: [principal]
           not:
             anyOf:
               - required: [access_token]
               - required: [terms]
+              - required: [read_all]
         - required: [access_token]
           not:
             anyOf:
               - required: [principal]
               - required: [terms]
+              - required: [read_all]
         - required: [terms]
           not:
             anyOf:
               - required: [principal]
               - required: [access_token]
+              - required: [read_all]
+        - required: [read_all]
+          not:
+            anyOf:
+              - required: [principal]
+              - required: [access_token]
+              - required: [terms]
 
     AuthoriseResponse:
       type: object
@@ -3714,7 +3738,7 @@ components:
 
     Permission:
       type: string
-      enum: [read, write, authorise-as, admin]
+      enum: [read, write, authorise-as, admin, read-all, write-all]
 
     CatalogueChange:
       type: object
@@ -3741,16 +3765,15 @@ components:
     PrincipalChange:
       type: object
       additionalProperties: false
+      required: [disabled]
       properties:
         disabled:
-          type: boolean
-        bypass:
           type: boolean
 
     PrincipalRecord:
       type: object
       additionalProperties: false
-      required: [name, kind, disabled, bypass, has_password, terms, permissions, groups]
+      required: [name, kind, disabled, has_password, terms, permissions, groups]
       properties:
         name:
           type: string
@@ -3758,8 +3781,6 @@ components:
           type: string
           enum: [person, service]
         disabled:
-          type: boolean
-        bypass:
           type: boolean
         has_password:
           type: boolean
@@ -3958,7 +3979,7 @@ components:
           description: Matched exactly, whole, and only in the claim named.
         group:
           type: string
-          description: The local group whose terms and permissions an identity with the value receives. It never receives `bypass`.
+          description: The local group whose terms and permissions an identity with the value receives, `read-all` and `write-all` among them.
 
     ProviderDeclaration:
       type: object
@@ -3969,6 +3990,7 @@ components:
           type: string
         audience:
           type: string
+          description: "The `aud` an access token must hold. Name the API, not a client, so that an ID token, whose `aud` is the client's id, is refused. No two providers have the same issuer and audience."
         jwks_url:
           type: string
         claim_rules:

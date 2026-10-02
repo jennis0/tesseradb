@@ -68,6 +68,9 @@ pub enum ShedCause {
     SingleFlight,
     /// A suggestion walk is already in flight for this session.
     SuggestInFlight,
+    /// `serve.compute_threads` password checks were already running and as many waiting.
+    /// `Retry-After` is [`RETRY_AFTER_SECS`].
+    PasswordGate,
     /// The catalogue changed each time a session was about to be registered. `Retry-After` is
     /// [`RETRY_AFTER_SECS`].
     CatalogueChanging,
@@ -78,6 +81,9 @@ impl ShedCause {
         match self {
             ShedCause::ComputeGate => {
                 "the server is at its compute-admission bound; retry shortly".to_string()
+            }
+            ShedCause::PasswordGate => {
+                "the server is checking as many passwords as it admits; retry shortly".to_string()
             }
             ShedCause::BulkGate => {
                 "the server is at its bulk-read admission bound; retry shortly".to_string()

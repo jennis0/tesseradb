@@ -2,9 +2,11 @@
 //! OIDC providers, and the sessions they authorised. Every route needs `admin`, checked by the
 //! control router.
 //!
-//! A change commits to the catalogue first, then ends every session it affected, and answers
-//! how many it ended. A read answers names, terms and permissions; it never answers a password
-//! hash or an API key's secret, which is shown once, when the key is created.
+//! A change commits to the catalogue first, then ends every session it affected on the same
+//! blocking thread, and answers how many it ended. The handler awaits that thread and is dropped
+//! when its client goes away; the thread is not, so a committed change always ends its sessions.
+//! A read answers names, terms and permissions; it never answers a password hash or an API key's
+//! secret, which is shown once, when the key is created.
 
 use std::sync::Arc;
 
@@ -73,7 +75,8 @@ fn refusal(e: CatalogueError) -> ApiError {
         CatalogueError::NotFound { .. } => ApiError::Unknown(e.to_string()),
         CatalogueError::Exists { .. }
         | CatalogueError::ReadOnly { .. }
-        | CatalogueError::DeclaredTwice { .. } => ApiError::Conflict(e.to_string()),
+        | CatalogueError::DeclaredTwice { .. }
+        | CatalogueError::SameIssuer { .. } => ApiError::Conflict(e.to_string()),
         other => {
             tracing::error!(error = %other, "the catalogue could not be changed");
             ApiError::FailClosed(
@@ -88,17 +91,19 @@ struct Change {
     sessions_ended: usize,
 }
 
-/// Runs a catalogue change off the async threads, then ends the sessions it affected.
+/// Runs a catalogue change off the async threads and ends the sessions it affected straight
+/// after it commits, on the same thread.
 async fn change(
     state: &Arc<AppState>,
     f: impl FnOnce(&tessera_catalogue::Catalogue) -> Result<Affected, CatalogueError> + Send + 'static,
 ) -> Result<Json<Change>, ApiError> {
-    let affected = state
-        .blocking(move |state| f(&state.catalogue).map_err(refusal))
+    let sessions_ended = state
+        .blocking(move |state| {
+            let affected = f(&state.catalogue).map_err(refusal)?;
+            Ok(state.end_affected_now(&affected))
+        })
         .await?;
-    Ok(Json(Change {
-        sessions_ended: state.end_affected(&affected).await,
-    }))
+    Ok(Json(Change { sessions_ended }))
 }
 
 fn permissions(p: PermissionSet) -> Vec<&'static str> {
@@ -117,7 +122,6 @@ fn principal_json(p: PrincipalInfo) -> Value {
         "name": p.name,
         "kind": p.kind.as_str(),
         "disabled": p.disabled,
-        "bypass": p.bypass,
         "has_password": p.has_password,
         "terms": p.terms,
         "permissions": permissions(p.permissions),
@@ -236,12 +240,10 @@ async fn create_principal(
     change(&state, move |c| c.create_principal(&req.name, kind)).await
 }
 
-/// Each field present is applied, `disabled` first.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChangePrincipal {
-    disabled: Option<bool>,
-    bypass: Option<bool>,
+    disabled: bool,
 }
 
 async fn change_principal(
@@ -249,34 +251,14 @@ async fn change_principal(
     Path(name): Path<String>,
     ApiJson(req): ApiJson<ChangePrincipal>,
 ) -> Result<Json<Change>, ApiError> {
-    if req.disabled.is_none() && req.bypass.is_none() {
-        return Err(ApiError::Contract(
-            "the request changes nothing; send `disabled`, `bypass` or both".into(),
-        ));
-    }
     change(&state, move |c| {
-        let mut affected = Affected::default();
-        if let Some(disabled) = req.disabled {
-            let a = if disabled {
-                c.disable_principal(&name)?
-            } else {
-                c.enable_principal(&name)?
-            };
-            merge(&mut affected, a);
+        if req.disabled {
+            c.disable_principal(&name)
+        } else {
+            c.enable_principal(&name)
         }
-        if let Some(bypass) = req.bypass {
-            merge(&mut affected, c.set_bypass(&name, bypass)?);
-        }
-        Ok(affected)
     })
     .await
-}
-
-fn merge(into: &mut Affected, from: Affected) {
-    into.principals.extend(from.principals);
-    into.api_keys.extend(from.api_keys);
-    into.providers.extend(from.providers);
-    into.generation = into.generation.max(from.generation);
 }
 
 async fn delete_principal(

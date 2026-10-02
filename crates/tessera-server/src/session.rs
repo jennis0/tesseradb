@@ -3,9 +3,10 @@
 //! credential is an API key whose principal holds `authorise-as`, or the operator credential; it
 //! mints a session for a local principal it names, or for an OIDC identity whose access token it
 //! passes on. The session carries the target's terms and its `read` and `write`, and never its
-//! `admin`, `authorise-as` or `bypass`. The operator credential alone may instead name the terms
-//! the session holds, with `read` and nothing else, so a local operator reads as any set of terms
-//! without a principal in the catalogue.
+//! `admin`, `authorise-as`, `read-all` or `write-all`. The operator credential alone may instead
+//! name the terms the session holds, with `read` and nothing else, so a local operator reads as
+//! any set of terms without a principal in the catalogue, or ask for a session of the superuser
+//! itself, which holds `read-all` and reads every item.
 
 use std::sync::Arc;
 
@@ -67,14 +68,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for Integrator {
     }
 }
 
-/// Exactly one of the three fields: the local principal to act as, the access token of the OIDC
-/// identity to act as, or, with the operator credential alone, the terms the session holds.
+/// Exactly one of the four fields: the local principal to act as, the access token of the OIDC
+/// identity to act as, or, with the operator credential alone, the terms the session holds or
+/// `read_all: true` for a session of the superuser itself.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthoriseReq {
     principal: Option<String>,
     access_token: Option<String>,
     terms: Option<Vec<String>>,
+    read_all: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,34 +92,45 @@ async fn authorise(
     Integrator(minter): Integrator,
     ApiJson(req): ApiJson<AuthoriseReq>,
 ) -> Result<Json<AuthoriseResp>, ApiError> {
-    let target = match (req.principal, req.access_token, req.terms) {
-        (Some(principal), None, None) => auth::named(&state.catalogue, &principal)?,
-        (None, None, Some(terms)) => {
-            if !matches!(minter.principal, Principal::Superuser) {
-                return Err(ApiError::Forbidden(
-                    "a session for a set of terms is minted with the operator credential alone; \
-                     name a `principal` instead"
-                        .into(),
-                ));
-            }
-            auth::terms(&state.catalogue, terms)
+    let operator = matches!(minter.principal, Principal::Superuser);
+    let operator_only = |what: &str| {
+        ApiError::Forbidden(format!(
+            "a session {what} is minted with the operator credential alone; name a `principal` \
+             instead"
+        ))
+    };
+    // The superuser's own session is authorised for itself, so it carries `read-all`; every other
+    // session is minted through `authorise-as` and never does.
+    let (target, minter) = match (req.principal, req.access_token, req.terms, req.read_all) {
+        (Some(principal), None, None, None) => {
+            (auth::named(&state.catalogue, &principal)?, Some(minter))
         }
-        (None, Some(token), None) => auth::access_token(&state, &token).await.map_err(|_| {
-            ApiError::Contract(
-                "the access token was not accepted; send a current token from a declared \
-                 provider"
-                    .into(),
-            )
-        })?,
+        (None, None, Some(terms), None) if operator => {
+            (auth::terms(&state.catalogue, terms), Some(minter))
+        }
+        (None, None, Some(_), None) => return Err(operator_only("for a set of terms")),
+        (None, None, None, Some(true)) if operator => (Caller::superuser(), None),
+        (None, None, None, Some(true)) => return Err(operator_only("reading every item")),
+        (None, Some(token), None, None) => {
+            let target = auth::access_token(&state, &token).await.map_err(|_| {
+                ApiError::Contract(
+                    "the access token was not accepted; send a current token from a declared \
+                     provider"
+                        .into(),
+                )
+            })?;
+            (target, Some(minter))
+        }
         _ => {
             return Err(ApiError::Contract(
                 "send exactly one of `principal`, naming a local principal, `access_token`, an \
-                 OIDC identity's access token, and `terms`, with the operator credential"
+                 OIDC identity's access token, and, with the operator credential, `terms` or \
+                 `read_all: true`"
                     .into(),
             ))
         }
     };
-    let minted = auth::mint(&state, target, Some(minter)).await?;
+    let minted = auth::mint(&state, target, minter).await?;
     Ok(Json(AuthoriseResp {
         token: minted.token,
         token_id: minted.token_id,

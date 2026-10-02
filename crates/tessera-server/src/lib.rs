@@ -150,6 +150,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
             config.compute_queue,
             config.admission_timeout_ms,
         ),
+        password_gate: ComputeGate::for_passwords(
+            config.password_admission,
+            config.admission_timeout_ms,
+        ),
         // `POST /v1/items` and `POST /v1/artifacts` only.
         bulk_gate: ComputeGate::for_bulk_reads(config.bulk_admission),
         // The viewer gate never covers the control plane, so writes have a limiter of their own.

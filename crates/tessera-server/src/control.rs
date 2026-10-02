@@ -1,7 +1,8 @@
 //! The control (admin) plane: ingest, changes, declarations, status, flush and compact, and the
 //! catalogue's verbs ([`crate::identity`]). Every route requires a credential, checked once at the
-//! router by [`authenticate_control`]; writes need `write` and `bypass`, and everything else
-//! `admin`. `/healthz` and `/readyz` are served on the viewer and session listeners, not here.
+//! router by [`authenticate_control`]. Writes need `write`, flush and compaction `write` and
+//! `write-all`, and status and the catalogue's verbs `admin`. `/healthz` and `/readyz` are served
+//! on the viewer and session listeners, not here.
 //!
 //! A write is acknowledged only after its WAL append is fsynced: parse, allocate ids, append,
 //! fsync, apply, then 200. A deletion or suppression whose append fails is still applied to the
@@ -143,21 +144,24 @@ pub fn router(state: Arc<AppState>) -> Router {
                     state.limits.publish_max_body_bytes,
                 )),
         )
-        .route_layer(axum::middleware::from_fn(require_unmasked_write));
+        .route_layer(axum::middleware::from_fn(require_write));
+    // An ingest pipeline flushes after its writes, so flushing needs no `admin`.
     let operations = Router::new()
-        .route("/control/status", get(status))
         .route("/control/flush", post(flush))
-        .route("/control/compact", post(compact));
+        .route("/control/compact", post(compact))
+        .route_layer(axum::middleware::from_fn(require_write_all));
+    let admin_routes = Router::new().route("/control/status", get(status));
     // Fault arming exists only in a fault-injection build, behind the credential like every route.
     #[cfg(feature = "fault-injection")]
-    let operations = operations
+    let admin_routes = admin_routes
         .route("/control/faults/arm", post(faults_arm))
         .route("/control/faults/arrivals", get(faults_arrivals))
         .route("/control/faults/release", post(faults_release));
-    let administration = operations
+    let administration = admin_routes
         .merge(crate::identity::routes())
         .route_layer(axum::middleware::from_fn(require_admin));
     writes
+        .merge(operations)
         .merge(administration)
         // `Router::layer`, not `route_layer`, so every route, and every unrouted path, is behind
         // the credential.
@@ -205,7 +209,7 @@ fn caller(request: &axum::extract::Request) -> &crate::auth::Caller {
         .expect("authenticate_control runs before every route")
 }
 
-/// Status, flush, compaction and the catalogue's verbs need `admin`.
+/// Status and the catalogue's verbs need `admin`.
 async fn require_admin(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -214,22 +218,24 @@ async fn require_admin(
     Ok(next.run(request).await)
 }
 
-/// Writes need `write`, and `bypass` as well: a write masked by the writer's own terms is not
-/// built, and an unmasked write by a principal without `bypass` could change or name items it
-/// cannot see.
-async fn require_unmasked_write(
+/// Writes need `write`. Not built yet: masking a write by the writer's own terms. A principal
+/// with `write` and without `write-all` writes against the whole corpus, as one with both does.
+async fn require_write(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    caller(&request).require(tessera_catalogue::Permission::Write)?;
+    Ok(next.run(request).await)
+}
+
+/// Flush and compaction act on every item, so they need `write` and `write-all`.
+async fn require_write_all(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
     let caller = caller(&request);
     caller.require(tessera_catalogue::Permission::Write)?;
-    if !caller.resolution.bypass {
-        return Err(ApiError::Forbidden(
-            "writes masked by the writer's own terms are not built, so a write on the control \
-             plane needs `bypass`; write as a principal with `write` and `bypass`"
-                .into(),
-        ));
-    }
+    caller.require(tessera_catalogue::Permission::WriteAll)?;
     Ok(next.run(request).await)
 }
 

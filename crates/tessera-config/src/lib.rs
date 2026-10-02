@@ -194,17 +194,17 @@ struct RawServe {
     ///
     /// Default: not set.
     control: Option<String>,
-    /// A file holding the operator credential. On the control plane it authenticates the built-in
-    /// superuser, which holds every permission and `bypass` and is not in the catalogue, so an
-    /// empty catalogue still has an administrator. Its contents are trimmed. Changing the file
-    /// and restarting rotates it. `tessera serve` refuses to start when the file
-    /// cannot be read, and when neither this nor `operator_credential_env` is set. When both are
-    /// set, the file is used.
+    /// A file holding the operator credential. It authenticates the built-in superuser, which
+    /// holds every permission, `read-all` and `write-all` among them, and is not in the catalogue,
+    /// so an empty catalogue still has an administrator. Its contents are trimmed. Changing the
+    /// file and restarting rotates it. `tessera serve` refuses to start when the file cannot be
+    /// read or holds only white space, and when neither this nor `operator_credential_env` is set.
+    /// When both are set, the file is used.
     ///
     /// Default: not set.
     operator_credential_file: Option<PathBuf>,
-    /// An environment variable holding the operator credential. `tessera serve` refuses to start
-    /// when it is unset.
+    /// An environment variable holding the operator credential, trimmed as the file is.
+    /// `tessera serve` refuses to start when it is unset or holds only white space.
     ///
     /// Default: not set.
     operator_credential_env: Option<String>,
@@ -650,6 +650,9 @@ pub struct Config {
     pub oidc_providers: Vec<OidcProvider>,
     pub compute_threads: usize,
     pub compute_admission: usize,
+    /// Password checks admitted at once: `compute_threads`. As many more may wait. Not a key of
+    /// its own.
+    pub password_admission: usize,
     pub compute_queue: usize,
     pub admission_timeout_ms: u64,
     pub single_flight_wait_ms: u64,
@@ -698,12 +701,14 @@ pub struct OidcProvider {
 }
 
 /// The serving runtime's `max_blocking_threads`: one per request any admission bound lets
-/// through, plus [`BLOCKING_THREAD_RESERVE`]. A queued request holds none.
+/// through, password checks included, plus [`BLOCKING_THREAD_RESERVE`]. A queued request holds
+/// none.
 pub fn serving_blocking_threads(config: &Config) -> usize {
     config
         .compute_admission
         .saturating_add(config.bulk_admission)
         .saturating_add(config.ingest_admission)
+        .saturating_add(config.password_admission)
         .saturating_add(BLOCKING_THREAD_RESERVE)
 }
 
@@ -1086,6 +1091,7 @@ fn parse(text: &str) -> Result<Config> {
         oidc_providers,
         compute_threads,
         compute_admission,
+        password_admission: compute_threads,
         compute_queue,
         admission_timeout_ms: serve
             .admission_timeout_ms
@@ -1176,22 +1182,25 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// Read the secret, or refuse a credential that is declared nowhere or cannot be read.
+    /// Read the secret, trimmed, or refuse a credential that is declared nowhere, cannot be read
+    /// or is empty.
     pub fn resolve(&self, name: &'static str) -> Result<String> {
-        if let Some(path) = &self.file {
-            let secret = fs::read_to_string(path).map_err(|source| {
-                ConfigError::CredentialFileUnreadable {
-                    which: name,
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            return Ok(secret.trim().to_string());
+        let secret = if let Some(path) = &self.file {
+            fs::read_to_string(path).map_err(|source| ConfigError::CredentialFileUnreadable {
+                which: name,
+                path: path.clone(),
+                source,
+            })?
+        } else if let Some(var) = &self.env {
+            std::env::var(var).map_err(|_| ConfigError::MissingCredential(name))?
+        } else {
+            return Err(ConfigError::MissingCredential(name));
+        };
+        let secret = secret.trim();
+        if secret.is_empty() {
+            return Err(ConfigError::EmptyCredential(name));
         }
-        if let Some(var) = &self.env {
-            return std::env::var(var).map_err(|_| ConfigError::MissingCredential(name));
-        }
-        Err(ConfigError::MissingCredential(name))
+        Ok(secret.to_string())
     }
 }
 
@@ -1503,6 +1512,26 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_operator_credential_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = tmp.path().join(DEPLOYMENT_FILE);
+        std::fs::write(tmp.path().join("operator.cred"), " \n").unwrap();
+        std::fs::write(
+            &at,
+            valid_toml("operator_credential_file = \"operator.cred\"\n").replace(
+                "operator_credential_env = \"TESSERA_TEST_OPERATOR_CRED\"\n",
+                "",
+            ),
+        )
+        .unwrap();
+        let config = load(&at).expect("the file loads");
+        assert!(matches!(
+            config.operator_credential.resolve("operator"),
+            Err(ConfigError::EmptyCredential("operator"))
+        ));
+    }
+
+    #[test]
     fn a_serving_credential_is_read_at_startup_rather_than_at_parse() {
         let toml = valid_toml("").replace(
             "TESSERA_TEST_OPERATOR_CRED",
@@ -1623,7 +1652,11 @@ mod tests {
         assert_eq!(config.bulk_response_ms, 5);
         assert_eq!(
             serving_blocking_threads(&config),
-            config.compute_admission + 3 + config.ingest_admission + BLOCKING_THREAD_RESERVE
+            config.compute_admission
+                + 3
+                + config.ingest_admission
+                + config.password_admission
+                + BLOCKING_THREAD_RESERVE
         );
     }
 

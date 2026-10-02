@@ -187,7 +187,7 @@ Finds `tessera.toml` as `tessera build` does, opens the bundle at `[bundle] path
 
 SIGTERM or SIGINT stops the server at once, even while it opens the bundle, and it exits 0. Stopping ends every viewer session, because sessions are held in memory. A write is acknowledged only once the write-ahead log holds it on disc, so stopping loses no acknowledged write. A deletion or suppression answered with 500 because the log could not be written is in force but not on disc, and a restart undoes it until the change is sent again.
 
-It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator credential is not set or its file cannot be read: under `[serve]`, `operator_credential_file` or `operator_credential_env` names the file or environment variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there cannot be opened or is held open by another process. It also refuses when the bundle cannot be read and when the write-ahead log fails its checksum. An address that cannot be bound, such as one already in use, stops it with exit 1 after the bundle has opened.
+It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator credential is not set, is empty, or its file cannot be read: under `[serve]`, `operator_credential_file` or `operator_credential_env` names the file or environment variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there cannot be opened or is held open by another process. It also refuses when the bundle cannot be read and when the write-ahead log fails its checksum. An address that cannot be bound, such as one already in use, stops it with exit 1 after the bundle has opened.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
@@ -215,15 +215,14 @@ For example, `tessera login --server http://127.0.0.1:8080 --principal ann < pas
 ## `tessera logout`
 
 ```text
-tessera logout [OPTIONS] --server <URL>
+tessera logout --server <URL>
 ```
 
-End a session on the viewer plane.
+End a session on the viewer plane. The session token is read from `TESSERA_TOKEN`, never from an argument.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. |
-| `--token` | `TOKEN` |  | The session token to end. Without it the token is read from `TESSERA_TOKEN`. |
+| `--server` | `URL` |  | The viewer plane's address, such as `http://127.0.0.1:8080`. The session token to end is read from `TESSERA_TOKEN`. |
 
 ## `tessera session`
 
@@ -233,18 +232,18 @@ tessera session <COMMAND>
 
 Mint and revoke sessions on the session plane, and list and end sessions on the control plane.
 
-The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding `authorise-as`, or the operator credential, which alone may name the session's terms. The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
+The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding `authorise-as`, or the operator credential, which alone may name the session's terms or ask for a session reading every item. The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
 
 
 ## `tessera session authorise`
 
 ```text
-tessera session authorise --session <URL> <--principal <NAME>|--access-token|--term <TERM>>
+tessera session authorise --session <URL> <--principal <NAME>|--access-token|--term <TERM>|--read-all>
 ```
 
 Mint a session on the session plane, with the credential in `TESSERA_API_KEY`: an API key whose principal holds `authorise-as`, or the operator credential.
 
-A session for a principal carries the target's terms and its `read` and `write`. A session for `--term`s, which only the operator credential may mint, holds those terms and `read`. It prints `token`, `token_id` and `expires_at` as JSON.
+A session for a principal carries the target's terms and its `read` and `write`, and never its `read-all` or `write-all`. With the operator credential alone, a session for `--term`s holds those terms and `read`, and a session for `--read-all` reads every item. It prints `token`, `token_id` and `expires_at` as JSON.
 
 | Argument | Value | Default | Description |
 | --- | --- | --- | --- |
@@ -252,6 +251,7 @@ A session for a principal carries the target's terms and its `read` and `write`.
 | `--principal` | `NAME` |  | Act as this local principal. |
 | `--access-token` |  |  | Act as the OIDC identity whose access token is read from the first line of stdin. |
 | `--term` | `TERM` |  | A term the session holds, with the operator credential. Repeatable. |
+| `--read-all` |  |  | A session of the superuser itself, which reads every item, with the operator credential. |
 
 ## `tessera session revoke`
 
@@ -384,20 +384,6 @@ Enable a disabled principal.
 | `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
 | `NAME` |  |  | The principal's name. |
 
-## `tessera principal bypass`
-
-```text
-tessera principal bypass --control <ADDRESS> <NAME> <STATE>
-```
-
-Set whether a principal with `write` writes against the whole corpus.
-
-| Argument | Value | Default | Description |
-| --- | --- | --- | --- |
-| `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
-| `NAME` |  |  | The principal's name. |
-| `STATE` |  |  | `on` or `off`. |
-
 ## `tessera principal set-password`
 
 ```text
@@ -459,7 +445,7 @@ Issue an API key for a principal. The whole key is printed once, here.
 | `--control` | `ADDRESS` |  | The control plane's address: `http://<host>:<port>`, or `unix:<path>` for a Unix socket. |
 | `PRINCIPAL` |  |  | The principal's name. |
 | `--expires-at` | `SECONDS` |  | When the key, and every session authorised with it, ends, in seconds since the Unix epoch. Without it the key does not expire. |
-| `--permission` | `NAME` |  | A permission the key holds: `read`, `write`, `authorise-as` or `admin`. Repeatable. Without it the key holds its principal's permissions. |
+| `--permission` | `NAME` |  | A permission the key holds: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. Repeatable. Without it the key holds its principal's permissions. |
 
 ## `tessera key revoke`
 
@@ -578,7 +564,7 @@ A term says what the grantee may see, and a permission what it may do. The sessi
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
 | `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
-| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. |
 
 ## `tessera revoke-grant`
 
@@ -594,7 +580,7 @@ Revoke a term or a permission from a principal or a group, on the control plane.
 | `--principal` | `NAME` |  | The local principal the grant is made to. |
 | `--group` | `NAME` |  | The group the grant is made to. |
 | `--term` | `TERM` |  | A term, which says what the grantee may see. Repeatable: the terms are granted or revoked in one change, and one refused term refuses them all. |
-| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or `admin`. |
+| `--permission` | `NAME` |  | A permission, which says what the grantee may do: `read`, `write`, `authorise-as`, `admin`, `read-all` or `write-all`. |
 
 ## `tessera provider`
 

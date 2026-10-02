@@ -303,7 +303,7 @@ enum Command {
     ///
     /// It refuses to start, and exits 1, when `tessera.toml` is refused as `tessera build` would
     /// refuse it or lacks one of the three `[serve]` addresses. It refuses when the operator
-    /// credential is not set or its file cannot be read: under `[serve]`,
+    /// credential is not set, is empty, or its file cannot be read: under `[serve]`,
     /// `operator_credential_file` or `operator_credential_env` names the file or environment
     /// variable holding it. It refuses when `[catalogue] dir` is not set, or the catalogue there
     /// cannot be opened or is held open by another process. It also refuses when the bundle cannot be read
@@ -323,13 +323,15 @@ enum Command {
     /// For example, `tessera login --server http://127.0.0.1:8080 --principal ann <
     /// password.txt`.
     Login(identity::LoginArgs),
-    /// End a session on the viewer plane.
+    /// End a session on the viewer plane. The session token is read from `TESSERA_TOKEN`, never
+    /// from an argument.
     Logout(identity::LogoutArgs),
     /// Mint and revoke sessions on the session plane, and list and end sessions on the control
     /// plane.
     ///
     /// The session plane's verbs read their credential from `TESSERA_API_KEY`: an API key holding
-    /// `authorise-as`, or the operator credential, which alone may name the session's terms.
+    /// `authorise-as`, or the operator credential, which alone may name the session's terms or ask
+    /// for a session reading every item.
     /// The control plane's read their credential from `TESSERA_CREDENTIAL` and need `admin`.
     Session {
         #[command(subcommand)]
@@ -1732,14 +1734,15 @@ fn main() -> ExitCode {
             // **The blocking pool is sized here, from the config's declared consumers**, and this
             // is the only place in the process where that number exists.
             //
-            // It is sized explicitly rather than left at tokio's default (512) because two things
-            // depend on it and neither states it: the viewer plane's `spawn_blocking` closures,
-            // bounded by `compute_admission`, and `/control/ingest`'s, bounded by
+            // It is sized explicitly rather than left at tokio's default (512) because three things
+            // depend on it and none states it: the viewer plane's `spawn_blocking` closures,
+            // bounded by `compute_admission` and `bulk_admission`, password checks at login,
+            // bounded by `password_admission`, and `/control/ingest`'s, bounded by
             // `ingest_admission`. A tokio release or an embedder's own builder could move that
             // default in silence, and an admitted viewport would then queue behind ingest closures
             // in the shared FIFO with no timeout — hanging rather than shedding.
             //
-            // Derived rather than asserted-against: `serving_blocking_threads` covers both bounds
+            // Derived rather than asserted-against: `serving_blocking_threads` covers every bound
             // plus a reserve, so there is no configuration in which an admitted request finds no
             // thread.
             let blocking_threads = tessera_config::serving_blocking_threads(&prepared.config);

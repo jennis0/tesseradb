@@ -323,6 +323,17 @@ impl ComputeGate {
         )
     }
 
+    /// The limit on password checks: `admission` at once and as many waiting, each for at most
+    /// `admission_timeout_ms`. One past that is shed with a 429.
+    pub fn for_passwords(admission: usize, admission_timeout_ms: u64) -> Self {
+        Self::with_cause(
+            admission,
+            admission,
+            admission_timeout_ms,
+            crate::error::ShedCause::PasswordGate,
+        )
+    }
+
     /// The limit on bulk reads: `admission` at once and none waiting, so one past it is shed with
     /// a 429 at once. A bulk read never releases its compute permit early, so taking the slot
     /// is taking the permit and nothing waits for one.
@@ -683,6 +694,9 @@ pub struct AppState {
     pub suggest_admission: SuggestAdmission,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
+    /// Password checks at login, about one per core with a short queue, so a flood of argon2id
+    /// work cannot take every blocking thread from admitted viewer and ingest requests.
+    pub password_gate: ComputeGate,
     /// `POST /v1/items` and `POST /v1/artifacts` only. Runs under its own admission limit,
     /// `serve.bulk_admission`, so a long read takes no slot from the viewport and item routes. The
     /// compute threads and the memory cap are shared.
@@ -878,12 +892,19 @@ impl AppState {
         n
     }
 
-    /// Ends every session a catalogue change affected, and returns how many.
-    pub async fn end_affected(self: &Arc<Self>, affected: &tessera_catalogue::Affected) -> usize {
+    /// Ends every session a catalogue change affected, prunes them on the calling thread, and
+    /// returns how many. A change calls it on the blocking thread that committed it, straight
+    /// after the commit, so its sessions end whether or not its caller is still waiting.
+    pub fn end_affected_now(&self, affected: &tessera_catalogue::Affected) -> usize {
         if affected.is_empty() {
             return 0;
         }
-        self.end_sessions(|entry| entry.affected_by(affected)).await
+        let ended = self.sessions.lock().end_where(|e| e.affected_by(affected));
+        let n = ended.len();
+        if n > 0 {
+            self.engine.prune_tokens(&ended.into_iter().collect());
+        }
+        n
     }
 
     /// Drops the sessions `ended` names from the engine's caches, on a blocking thread, and
@@ -1033,6 +1054,29 @@ mod compute_gate_tests {
         drop(first_permits);
         let fourth = gate.admit().await;
         assert!(fourth.is_ok(), "a slot leak would make this admit shed too");
+    }
+
+    /// The password gate admits its bound and as many waiting, and sheds past that at once with
+    /// its own cause.
+    #[tokio::test]
+    async fn the_password_gate_sheds_past_its_bound_and_queue() {
+        let gate = ComputeGate::for_passwords(1, 60_000);
+        let (held, _) = gate.admit().await.expect("the first check is admitted");
+        let waiting = tokio::spawn({
+            let slots = Arc::clone(&gate.slots);
+            async move { slots.available_permits() }
+        });
+        assert_eq!(waiting.await.unwrap(), 1, "one slot is left for the queue");
+        let queued = Arc::clone(&gate.slots).try_acquire_owned().unwrap();
+        assert!(matches!(
+            gate.admit().await,
+            Err(ApiError::Backpressure {
+                cause: crate::error::ShedCause::PasswordGate,
+                ..
+            })
+        ));
+        drop((held, queued));
+        assert!(gate.admit().await.is_ok());
     }
 
     /// `in_flight` and `waiting` follow an admitted permit and return to zero on release.

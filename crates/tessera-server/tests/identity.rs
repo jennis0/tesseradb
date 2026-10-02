@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -246,8 +247,10 @@ async fn a_session_ends_no_later_than_the_key_that_authorised_it() {
     assert_eq!(resp.status(), 401);
 }
 
+/// A principal with `write` writes against the whole corpus. Flushing needs `write-all` as well,
+/// and `admin` is not needed for either.
 #[tokio::test]
-async fn a_write_needs_write_and_bypass() {
+async fn a_write_needs_write_and_a_flush_needs_write_all() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     let post = reqwest::Method::POST;
@@ -255,14 +258,148 @@ async fn a_write_needs_write_and_bypass() {
     control(&server, post.clone(), "/control/grants", json!({ "principal": "pipeline", "permission": "write" })).await;
     let key = control(&server, post.clone(), "/control/principals/pipeline/keys", json!({})).await;
     let key = key["key"].as_str().unwrap().to_owned();
-    let flush = |key: String| {
+    let suppress = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(&key)
+        .json(&json!([{ "op": "suppress", "match": { "id": member(3) } }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(suppress.status(), 200);
+    let flush = || {
+        server
+            .client
+            .post(server.control_url("/control/flush?wait=visible"))
+            .bearer_auth(&key)
+            .send()
+    };
+    assert_eq!(flush().await.unwrap().status(), 403);
+    control(&server, post, "/control/grants", json!({ "principal": "pipeline", "permission": "write-all" })).await;
+    assert_eq!(flush().await.unwrap().status(), 202);
+}
+
+/// A session of a principal holding `read-all` reads every item through the masked path, so a
+/// suppression still applies to it. A session minted for that principal through `authorise-as`
+/// carries only its `read` and `write`, and reads only its terms.
+#[tokio::test]
+async fn read_all_reads_every_item_and_never_reaches_a_minted_session() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let post = reqwest::Method::POST;
+    person(&server, "auditor", &["1"]).await;
+    for p in ["write", "read-all", "write-all"] {
+        control(&server, post.clone(), "/control/grants", json!({ "principal": "auditor", "permission": p })).await;
+    }
+    let own = login_password(&server, "auditor").await;
+    assert_eq!(visible(&server, &own).await, N_ITEMS);
+    let minted = authorise_as(&server, &server.integrator_key, "auditor").await;
+    assert_eq!(visible(&server, &minted).await, N_ITEMS.div_ceil(3));
+
+    let listed = control(&server, reqwest::Method::GET, "/control/sessions?principal=auditor", json!({})).await;
+    let mut carried: Vec<(Option<String>, Value)> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["minted_by"].as_str().map(str::to_owned), s["permissions"].clone()))
+        .collect();
+    carried.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        carried,
+        vec![
+            (None, json!(["read", "write", "read-all", "write-all"])),
+            (Some(INTEGRATOR.to_owned()), json!(["read", "write"])),
+        ]
+    );
+
+    // The operator's own session reads every item too, and a suppression applies to both.
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "read_all": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let operator = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
+    assert_eq!(visible(&server, &operator).await, N_ITEMS);
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!([{ "op": "suppress", "match": { "id": member(3) } }]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(visible(&server, &operator).await, N_ITEMS - 1);
+    assert_eq!(visible(&server, &own).await, N_ITEMS - 1);
+
+    // Only the operator credential asks for a session reading every item.
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(&server.integrator_key)
+        .json(&json!({ "read_all": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+/// Logout ends the session it is sent with, and only that one.
+#[tokio::test]
+async fn logout_ends_the_session_it_is_sent_with() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    person(&server, "ann", &["0"]).await;
+    let first = login_password(&server, "ann").await;
+    let second = login_password(&server, "ann").await;
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/logout"))
+        .bearer_auth(&first)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(meta_status(&server, &first).await, 403);
+    assert_eq!(meta_status(&server, &second).await, 200);
+}
+
+/// An integrator revokes the sessions it minted, and an attempt on another integrator's session
+/// is answered the same way and ends nothing.
+#[tokio::test]
+async fn an_integrator_cannot_revoke_a_session_another_minted() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let post = reqwest::Method::POST;
+    person(&server, "ann", &["0"]).await;
+    control(&server, post.clone(), "/control/principals", json!({ "name": "partner", "kind": "service" })).await;
+    control(&server, post.clone(), "/control/grants", json!({ "principal": "partner", "permission": "authorise-as" })).await;
+    let partner = control(&server, post.clone(), "/control/principals/partner/keys", json!({})).await;
+    let partner = partner["key"].as_str().unwrap().to_owned();
+
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(&server.integrator_key)
+        .json(&json!({ "principal": "ann" }))
+        .send()
+        .await
+        .unwrap();
+    let minted: Value = resp.json().await.unwrap();
+    let token = minted["token"].as_str().unwrap().to_owned();
+    let revoke = |key: String| {
         let server = &server;
+        let token_id = minted["token_id"].clone();
         async move {
             server
                 .client
-                .post(server.control_url("/control/changes"))
+                .post(server.session_url("/session/revoke"))
                 .bearer_auth(key)
-                .json(&json!([{ "op": "suppress", "match": { "id": member(3) } }]))
+                .json(&json!({ "token_id": token_id }))
                 .send()
                 .await
                 .unwrap()
@@ -270,28 +407,88 @@ async fn a_write_needs_write_and_bypass() {
                 .as_u16()
         }
     };
-    assert_eq!(flush(key.clone()).await, 403);
-    control(&server, reqwest::Method::PATCH, "/control/principals/pipeline", json!({ "bypass": true })).await;
-    assert_eq!(flush(key).await, 200);
+    assert_eq!(revoke(partner).await, 204);
+    assert_eq!(meta_status(&server, &token).await, 200);
+    assert_eq!(revoke(server.integrator_key.clone()).await, 204);
+    assert_eq!(meta_status(&server, &token).await, 403);
 }
 
-/// A test identity provider: an Ed25519 key published at a loopback JWKS URL.
+/// A change whose client goes away before the answer still ends the sessions it affected.
+#[tokio::test]
+async fn a_committed_change_ends_its_sessions_when_its_client_goes_away() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    person(&server, "ann", &["0"]).await;
+    let token = login_password(&server, "ann").await;
+
+    // Setting a password hashes it with argon2id first, which outlasts the client's patience.
+    let impatient = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(20))
+        .build()
+        .unwrap();
+    let gone = impatient
+        .put(server.control_url("/control/principals/ann/password"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "password": "a different long passphrase" }))
+        .send()
+        .await;
+    assert!(gone.is_err(), "the client gave up before the answer");
+
+    // Wait for the change to commit, seen as the old password no longer logging in, then for the
+    // committing thread to end the session, which it does straight after.
+    let wait = |what: &'static str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        move || assert!(std::time::Instant::now() < deadline, "{what}")
+    };
+    let check = wait("the change never committed");
+    while login(&server, json!({ "password": { "principal": "ann", "password": PASSWORD } }))
+        .await
+        .status()
+        == 200
+    {
+        check();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let check = wait("the change committed and its session was not ended");
+    while meta_status(&server, &token).await == 200 {
+        check();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(meta_status(&server, &token).await, 403);
+}
+
+/// A test identity provider: an Ed25519 key published at a loopback JWKS URL, which counts the
+/// fetches it answers and can be taken down.
 struct Idp {
     url: String,
     keys: Arc<parking_lot::Mutex<Value>>,
     signers: Vec<(String, Vec<u8>, Value)>,
+    fetches: Arc<AtomicUsize>,
+    down: Arc<AtomicBool>,
     _task: tokio::task::JoinHandle<()>,
 }
 
 impl Idp {
     async fn start() -> Idp {
         let keys = Arc::new(parking_lot::Mutex::new(json!({ "keys": [] })));
-        let served = Arc::clone(&keys);
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let down = Arc::new(AtomicBool::new(false));
+        let (served, counted, failing) = (Arc::clone(&keys), Arc::clone(&fetches), Arc::clone(&down));
         let app = axum::Router::new().route(
             "/keys",
             axum::routing::get(move || {
                 let served = Arc::clone(&served);
-                async move { axum::Json(served.lock().clone()) }
+                let counted = Arc::clone(&counted);
+                let failing = Arc::clone(&failing);
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    // Slow enough that concurrent verifications overlap the fetch.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    if failing.load(Ordering::SeqCst) {
+                        return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    Ok(axum::Json(served.lock().clone()))
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -303,6 +500,8 @@ impl Idp {
             url,
             keys,
             signers: Vec::new(),
+            fetches,
+            down,
             _task: task,
         };
         idp.add_key("k1");
@@ -336,11 +535,26 @@ impl Idp {
     }
 
     fn token(&self, kid: &str, claims: Value) -> String {
+        self.typed_token(kid, Some("JWT"), claims)
+    }
+
+    fn typed_token(&self, kid: &str, typ: Option<&str>, claims: Value) -> String {
         let (_, der, _) = self.signers.iter().find(|(k, _, _)| k == kid).unwrap();
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(kid.to_owned());
+        header.typ = typ.map(str::to_owned);
         jsonwebtoken::encode(&header, &claims, &EncodingKey::from_ed_der(der)).unwrap()
     }
+
+    fn fetches(&self) -> usize {
+        self.fetches.load(Ordering::SeqCst)
+    }
+}
+
+/// A token with `alg: none` and no signature, which no verifier may accept.
+fn unsigned(claims: &Value) -> String {
+    let part = |v: &Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+    format!("{}.{}.", part(&json!({ "alg": "none", "typ": "JWT" })), part(claims))
 }
 
 const ISSUER: &str = "https://login.example.org";
@@ -355,7 +569,11 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     let server = serve(&tmp).await;
     let mut idp = Idp::start().await;
     let post = reqwest::Method::POST;
-    for (group, permissions) in [("readers", &["read"][..]), ("admins", &["read", "admin"][..])] {
+    for (group, permissions) in [
+        ("readers", &["read"][..]),
+        ("admins", &["read", "admin"][..]),
+        ("auditors", &["read", "read-all"][..]),
+    ] {
         control(&server, post.clone(), "/control/groups", json!({ "name": group })).await;
         for p in permissions {
             control(&server, post.clone(), "/control/grants", json!({ "group": group, "permission": p })).await;
@@ -369,6 +587,7 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
         "role_mappings": [
             { "claim": "groups[*]", "value": "tessera-readers", "group": "readers" },
             { "claim": "groups[*]", "value": "tessera-admins", "group": "admins" },
+            { "claim": "groups[*]", "value": "tessera-auditors", "group": "auditors" },
         ],
     });
     control(&server, reqwest::Method::PUT, "/control/providers/corp", provider.clone()).await;
@@ -397,15 +616,51 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
         &EncodingKey::from_secret(b"anyone can sign this"),
     )
     .unwrap();
-    for bad in [
-        idp.token("k1", wrong_audience),
-        idp.token("k1", no_subject),
-        idp.token("k1", claims(&["tessera-readers"], now_secs() - 1)),
-        hs256,
+    let mut not_yet = claims(&["tessera-readers"], exp);
+    not_yet["nbf"] = json!(now_secs() + 120);
+    let mut wrong_issuer = claims(&["tessera-readers"], exp);
+    wrong_issuer["iss"] = json!("https://login.example.net");
+    idp.add_key("unpublished");
+    for (why, bad) in [
+        ("wrong audience", idp.token("k1", wrong_audience)),
+        ("no subject", idp.token("k1", no_subject)),
+        ("expired", idp.token("k1", claims(&["tessera-readers"], now_secs() - 1))),
+        ("HS256", hs256),
+        ("not before", idp.token("k1", not_yet)),
+        ("wrong issuer", idp.token("k1", wrong_issuer)),
+        ("unknown key", idp.token("unpublished", claims(&["tessera-readers"], exp))),
+        ("alg none", unsigned(&claims(&["tessera-readers"], exp))),
+        (
+            "a logout token",
+            idp.typed_token("k1", Some("logout+jwt"), claims(&["tessera-readers"], exp)),
+        ),
     ] {
         let resp = login(&server, json!({ "access_token": bad })).await;
-        assert_eq!(resp.status(), 401);
+        assert_eq!(resp.status(), 401, "{why}");
     }
+    // A token typed as an access token, or untyped, is accepted.
+    for typ in [Some("at+jwt"), Some("application/at+jwt"), None] {
+        let token = idp.typed_token("k1", typ, claims(&["tessera-readers"], exp));
+        let resp = login(&server, json!({ "access_token": token })).await;
+        assert_eq!(resp.status(), 200, "{typ:?}");
+    }
+
+    // A mapping to a group holding `read-all` reads every item, and a session minted through
+    // `authorise-as` for the same identity reads only its terms.
+    let auditor = idp.token("k1", claims(&["tessera-auditors"], exp));
+    let resp = login(&server, json!({ "access_token": auditor.clone() })).await;
+    let own = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
+    assert_eq!(visible(&server, &own).await, N_ITEMS);
+    let resp = server
+        .client
+        .post(server.session_url("/session/authorise"))
+        .bearer_auth(&server.integrator_key)
+        .json(&json!({ "access_token": auditor }))
+        .send()
+        .await
+        .unwrap();
+    let minted = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
+    assert_eq!(visible(&server, &minted).await, 0);
 
     // An admin mapping reaches the catalogue on the control plane with the token as its bearer,
     // and no write.
@@ -448,7 +703,6 @@ async fn an_oidc_identity_logs_in_and_administers_through_its_role_mappings() {
     // A rotated key is fetched when a token names it.
     idp.add_key("k2");
     idp.publish(&["k1", "k2"]);
-    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
     let resp = login(&server, json!({ "access_token": idp.token("k2", claims(&["tessera-readers"], exp)) })).await;
     assert_eq!(resp.status(), 200);
     let session = resp.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_owned();
@@ -480,6 +734,7 @@ async fn the_catalogue_survives_a_restart() {
             limits: Default::default(),
             suggest_admission: Default::default(),
             compute_gate: generous_test_gate(),
+            password_gate: generous_password_gate(),
             bulk_gate: generous_bulk_gate(),
             ingest_admission: tessera_server::state::IngestAdmission::new(4),
             catalogue,
@@ -561,4 +816,67 @@ async fn providers_declared_in_the_file_are_read_only() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
+}
+
+/// A catalogue declaring `corp` with `idp`'s keys, and a verifier with the intervals given.
+fn verifier_for(
+    idp: &Idp,
+    refetch: std::time::Duration,
+    max_age: std::time::Duration,
+) -> (tessera_catalogue::Catalogue, tessera_server::oidc::Verifier, TempDir) {
+    let (catalogue, _, dir) = test_identity();
+    catalogue
+        .create_provider(&tessera_catalogue::Provider {
+            name: "corp".into(),
+            issuer: ISSUER.into(),
+            audience: "tessera".into(),
+            jwks_url: idp.url.clone(),
+            rules: Vec::new(),
+            role_mappings: Vec::new(),
+        })
+        .unwrap();
+    let verifier = tessera_server::oidc::Verifier::with_intervals(refetch, max_age);
+    (catalogue, verifier, dir)
+}
+
+/// Concurrent tokens naming a key the provider does not publish cost one fetch, and a failed
+/// fetch is not repeated within the refetch interval.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jwks_url_is_fetched_once_at_a_time_and_a_failure_is_remembered() {
+    let mut idp = Idp::start().await;
+    let hour = std::time::Duration::from_secs(3600);
+    let (catalogue, verifier, _dir) = verifier_for(&idp, hour, hour);
+    idp.add_key("unpublished");
+    let exp = now_secs() + 300;
+    let unknown = idp.token("unpublished", claims(&[], exp));
+    let (catalogue, verifier) = (Arc::new(catalogue), Arc::new(verifier));
+    let mut attempts = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let (catalogue, verifier, unknown) = (Arc::clone(&catalogue), Arc::clone(&verifier), unknown.clone());
+        attempts.spawn(async move { verifier.verify(&catalogue, &unknown).await.is_none() });
+    }
+    assert!(attempts.join_all().await.into_iter().all(|refused| refused));
+    assert_eq!(idp.fetches(), 1);
+    assert!(verifier.verify(&catalogue, &idp.token("k1", claims(&[], exp))).await.is_some());
+    assert_eq!(idp.fetches(), 1);
+
+    idp.down.store(true, Ordering::SeqCst);
+    let (catalogue, verifier, _dir) = verifier_for(&idp, hour, hour);
+    let token = idp.token("k1", claims(&[], exp));
+    assert!(verifier.verify(&catalogue, &token).await.is_none());
+    assert!(verifier.verify(&catalogue, &token).await.is_none());
+    assert_eq!(idp.fetches(), 2);
+}
+
+/// Keys past their age are fetched again, and kept in use when that fetch fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_refetch_keeps_the_keys_held() {
+    let idp = Idp::start().await;
+    let zero = std::time::Duration::ZERO;
+    let (catalogue, verifier, _dir) = verifier_for(&idp, zero, zero);
+    let token = idp.token("k1", claims(&[], now_secs() + 300));
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+    idp.down.store(true, Ordering::SeqCst);
+    assert!(verifier.verify(&catalogue, &token).await.is_some());
+    assert_eq!(idp.fetches(), 2);
 }

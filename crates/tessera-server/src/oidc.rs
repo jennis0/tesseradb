@@ -8,9 +8,18 @@
 //! are accepted: a provider publishes public keys, and a shared-secret algorithm would let anyone
 //! holding the published key sign.
 //!
+//! A token whose `typ` header is present must name a JWT or an access token (`at+jwt`, RFC 9068).
+//! Any other type, such as `logout+jwt` or `id_token+jwt`, is refused. An OpenID Connect ID token
+//! usually carries `typ: JWT` or no `typ`, so this rule cannot tell it apart; its `aud` is the
+//! client's id, so a provider whose `audience` names the API, and not a client, refuses it.
+//!
 //! Keys are fetched when first needed and kept for [`KEYS_MAX_AGE`]. A token naming a key the
-//! cached set lacks fetches the set again, at most once per [`REFETCH_INTERVAL`] for each URL, so
-//! a provider's key rotation is picked up and a stream of unknown key ids costs one fetch.
+//! cached set lacks fetches the set again. Each URL has one fetch in flight at a time, and is
+//! fetched at most once per refetch interval, [`REFETCH_INTERVAL`], whether the last fetch
+//! succeeded or failed. [`Verifier::with_intervals`] sets both durations. A provider's key
+//! rotation is therefore picked up, a stream of unknown key ids costs one fetch per interval, and
+//! a provider that is down is not asked again by every request. A refetch that fails leaves the
+//! keys of the last successful fetch in use, however old they are.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,15 +62,22 @@ pub struct Accepted {
     pub claims: Value,
 }
 
+/// One URL's keys. Its lock is held across a fetch, so a second caller waits for the fetch in
+/// flight and reads what it found.
+#[derive(Default)]
 struct Keys {
-    keys: Arc<Vec<Jwk>>,
-    fetched: Instant,
+    /// The keys of the last successful fetch, and when it ended.
+    keys: Option<(Arc<Vec<Jwk>>, Instant)>,
+    /// When the last fetch, successful or not, began.
+    attempted: Option<Instant>,
 }
 
 /// Verifies access tokens and caches each provider's published keys by URL.
 pub struct Verifier {
     http: reqwest::Client,
-    keys: Mutex<HashMap<String, Keys>>,
+    keys: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Keys>>>>,
+    refetch_interval: Duration,
+    keys_max_age: Duration,
 }
 
 impl Default for Verifier {
@@ -72,6 +88,12 @@ impl Default for Verifier {
 
 impl Verifier {
     pub fn new() -> Verifier {
+        Verifier::with_intervals(REFETCH_INTERVAL, KEYS_MAX_AGE)
+    }
+
+    /// A verifier that fetches each URL at most once per `refetch_interval`, and fetches keys
+    /// older than `keys_max_age` again.
+    pub fn with_intervals(refetch_interval: Duration, keys_max_age: Duration) -> Verifier {
         Verifier {
             http: reqwest::Client::builder()
                 .timeout(FETCH_TIMEOUT)
@@ -79,6 +101,8 @@ impl Verifier {
                 .build()
                 .expect("a client with a timeout and no redirects builds"),
             keys: Mutex::new(HashMap::new()),
+            refetch_interval,
+            keys_max_age,
         }
     }
 
@@ -98,6 +122,12 @@ impl Verifier {
         let header = jsonwebtoken::decode_header(token).map_err(|e| format!("header: {e}"))?;
         if !ASYMMETRIC.contains(&header.alg) {
             return Err(format!("algorithm {:?} is not accepted", header.alg));
+        }
+        if let Some(typ) = &header.typ {
+            let typ = typ.to_ascii_lowercase();
+            if !matches!(typ.as_str(), "jwt" | "at+jwt" | "application/at+jwt") {
+                return Err(format!("a token of type `{typ}` is not an access token"));
+            }
         }
         let issuer = unverified_issuer(token)?;
         let providers: Vec<Provider> = catalogue
@@ -176,27 +206,38 @@ impl Verifier {
         }
     }
 
-    /// The keys published at `url`, fetched when absent or stale, or when `refetch` is set and
-    /// the last fetch is older than [`REFETCH_INTERVAL`].
+    /// The keys published at `url`. They are fetched when there are none, when they are older
+    /// than the maximum age, or when `refetch` is set, unless a fetch began within the refetch
+    /// interval. A failed fetch answers the keys already held, or the failure when there are none.
     async fn keys_for(&self, url: &str, refetch: bool) -> Result<Arc<Vec<Jwk>>, String> {
-        {
-            let cached = self.keys.lock();
-            if let Some(k) = cached.get(url) {
-                let age = k.fetched.elapsed();
-                if age < KEYS_MAX_AGE && (!refetch || age < REFETCH_INTERVAL) {
-                    return Ok(Arc::clone(&k.keys));
-                }
-            }
+        let slot = Arc::clone(self.keys.lock().entry(url.to_owned()).or_default());
+        let mut slot = slot.lock().await;
+        let held = slot.keys.as_ref().map(|(k, _)| Arc::clone(k));
+        let fresh = slot
+            .keys
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < self.keys_max_age);
+        let tried_lately = slot
+            .attempted
+            .is_some_and(|at| at.elapsed() < self.refetch_interval);
+        if (fresh && !refetch) || tried_lately {
+            return held.ok_or_else(|| format!("fetching {url} failed lately"));
         }
-        let keys = Arc::new(self.fetch(url).await?);
-        self.keys.lock().insert(
-            url.to_owned(),
-            Keys {
-                keys: Arc::clone(&keys),
-                fetched: Instant::now(),
+        slot.attempted = Some(Instant::now());
+        match self.fetch(url).await {
+            Ok(keys) => {
+                let keys = Arc::new(keys);
+                slot.keys = Some((Arc::clone(&keys), Instant::now()));
+                Ok(keys)
+            }
+            Err(why) => match held {
+                Some(keys) => {
+                    tracing::warn!(reason = %why, "a JWKS refetch failed; the keys held are kept");
+                    Ok(keys)
+                }
+                None => Err(why),
             },
-        );
-        Ok(keys)
+        }
     }
 
     /// The keys of the JWKS document at `url`. A key this crate cannot read is skipped.

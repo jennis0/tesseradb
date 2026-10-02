@@ -85,8 +85,10 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
         "correct horse battery staple\n",
     ));
     let token = login["token"].as_str().unwrap();
-    let out = run(&["logout", "--server", &bound.viewer, "--token", token], &[], "");
+    let out = run(&["logout", "--server", &bound.viewer], &[("TESSERA_TOKEN", token)], "");
     assert!(out.status.success(), "{out:?}");
+    let listed = answer(admin_run(&["session", "list", "--principal", "ann"], ""));
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 0);
     let refused = run(
         &["login", "--server", &bound.viewer, "--principal", "ann"],
         &[],
@@ -130,8 +132,14 @@ fn the_catalogue_verbs_manage_principals_and_sessions() {
     let operator = [("TESSERA_API_KEY", OPERATOR_CREDENTIAL)];
     let minted = answer(run(&by_terms, &operator, ""));
     let token = minted["token"].as_str().unwrap();
-    let out = run(&["logout", "--server", &bound.viewer, "--token", token], &[], "");
+    let out = run(&["logout", "--server", &bound.viewer], &[("TESSERA_TOKEN", token)], "");
     assert!(out.status.success(), "{out:?}");
+
+    // The operator credential mints a session of its own that reads every item, which a key may
+    // not.
+    let read_all = ["session", "authorise", "--session", &bound.session, "--read-all"];
+    assert!(!run(&read_all, &integrator, "").status.success());
+    assert!(answer(run(&read_all, &operator, ""))["token"].is_string());
 
     // Groups, a provider mapping to one, and revoking a grant.
     answer(admin_run(&["group", "create", "admins"], ""));

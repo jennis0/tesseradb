@@ -334,6 +334,7 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         },
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         compute_gate: generous_test_gate(),
+        password_gate: generous_password_gate(),
         bulk_gate: generous_bulk_gate(),
         ingest_admission: tessera_server::state::IngestAdmission::new(64),
         catalogue,

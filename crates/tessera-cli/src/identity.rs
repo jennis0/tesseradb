@@ -3,8 +3,9 @@
 //! server's JSON answer is printed on stdout, and a refusal on stderr with exit 1.
 //!
 //! Secrets are never arguments, which other users of the machine can read: a password, an API key
-//! or an access token to log in with is read from stdin, the session plane's credential from
-//! `TESSERA_API_KEY`, and the control plane's credential from `TESSERA_CREDENTIAL`.
+//! or an access token to log in with is read from stdin, the session token to log out with from
+//! `TESSERA_TOKEN`, the session plane's credential from `TESSERA_API_KEY`, and the control plane's
+//! credential from `TESSERA_CREDENTIAL`.
 
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
@@ -233,21 +234,16 @@ pub(crate) fn login(args: LoginArgs) -> ExitCode {
 
 #[derive(Args)]
 pub(crate) struct LogoutArgs {
-    /// The viewer plane's address, such as `http://127.0.0.1:8080`.
+    /// The viewer plane's address, such as `http://127.0.0.1:8080`. The session token to end is
+    /// read from `TESSERA_TOKEN`.
     #[arg(long, value_name = "URL")]
     server: String,
-    /// The session token to end. Without it the token is read from `TESSERA_TOKEN`.
-    #[arg(long)]
-    token: Option<String>,
 }
 
 pub(crate) fn logout(args: LogoutArgs) -> ExitCode {
     let answer = (|| {
         let target = Target::parse(&args.server)?;
-        let token = match args.token {
-            Some(token) => token,
-            None => env_secret("TESSERA_TOKEN", "session token")?,
-        };
+        let token = env_secret("TESSERA_TOKEN", "session token")?;
         send(&target, "POST", "/v1/logout", Some(&token), None)
     })();
     finish("logout", answer)
@@ -258,9 +254,10 @@ pub(crate) enum SessionCommand {
     /// Mint a session on the session plane, with the credential in `TESSERA_API_KEY`: an API key
     /// whose principal holds `authorise-as`, or the operator credential.
     ///
-    /// A session for a principal carries the target's terms and its `read` and `write`. A session
-    /// for `--term`s, which only the operator credential may mint, holds those terms and `read`.
-    /// It prints `token`, `token_id` and `expires_at` as JSON.
+    /// A session for a principal carries the target's terms and its `read` and `write`, and never
+    /// its `read-all` or `write-all`. With the operator credential alone, a session for `--term`s
+    /// holds those terms and `read`, and a session for `--read-all` reads every item. It prints
+    /// `token`, `token_id` and `expires_at` as JSON.
     Authorise {
         /// The session plane's address, such as `http://127.0.0.1:8081`.
         #[arg(long, value_name = "URL")]
@@ -313,6 +310,9 @@ pub(crate) struct AuthoriseTarget {
     /// A term the session holds, with the operator credential. Repeatable.
     #[arg(long = "term", value_name = "TERM")]
     terms: Vec<String>,
+    /// A session of the superuser itself, which reads every item, with the operator credential.
+    #[arg(long)]
+    read_all: bool,
 }
 
 #[derive(Args)]
@@ -359,6 +359,7 @@ pub(crate) fn session(command: SessionCommand) -> ExitCode {
                 AuthoriseTarget {
                     access_token: true, ..
                 } => json!({ "access_token": stdin_secret("access token")? }),
+                AuthoriseTarget { read_all: true, .. } => json!({ "read_all": true }),
                 AuthoriseTarget { terms, .. } => json!({ "terms": terms }),
             };
             send(&at, "POST", "/session/authorise", Some(&key), Some(&body))
@@ -438,16 +439,6 @@ pub(crate) enum PrincipalCommand {
         /// The principal's name.
         name: String,
     },
-    /// Set whether a principal with `write` writes against the whole corpus.
-    Bypass {
-        #[command(flatten)]
-        control: Control,
-        /// The principal's name.
-        name: String,
-        /// `on` or `off`.
-        #[arg(value_parser = ["on", "off"])]
-        state: String,
-    },
     /// Set a principal's password, read from the first line of stdin.
     SetPassword {
         #[command(flatten)]
@@ -485,11 +476,6 @@ pub(crate) fn principal(command: PrincipalCommand) -> ExitCode {
         PrincipalCommand::Enable { control, name } => {
             control.call("PATCH", &at(&name), Some(json!({ "disabled": false })))
         }
-        PrincipalCommand::Bypass {
-            control,
-            name,
-            state,
-        } => control.call("PATCH", &at(&name), Some(json!({ "bypass": state == "on" }))),
         PrincipalCommand::SetPassword { control, name } => stdin_secret("password").and_then(|p| {
             control.call(
                 "PUT",
@@ -523,8 +509,8 @@ pub(crate) enum KeyCommand {
         /// epoch. Without it the key does not expire.
         #[arg(long, value_name = "SECONDS")]
         expires_at: Option<u64>,
-        /// A permission the key holds: `read`, `write`, `authorise-as` or `admin`. Repeatable.
-        /// Without it the key holds its principal's permissions.
+        /// A permission the key holds: `read`, `write`, `authorise-as`, `admin`, `read-all` or
+        /// `write-all`. Repeatable. Without it the key holds its principal's permissions.
         #[arg(long = "permission", value_name = "NAME")]
         permissions: Vec<String>,
     },
@@ -670,8 +656,8 @@ pub(crate) struct Granted {
     /// in one change, and one refused term refuses them all.
     #[arg(long = "term", value_name = "TERM")]
     terms: Vec<String>,
-    /// A permission, which says what the grantee may do: `read`, `write`, `authorise-as` or
-    /// `admin`.
+    /// A permission, which says what the grantee may do: `read`, `write`, `authorise-as`,
+    /// `admin`, `read-all` or `write-all`.
     #[arg(long, value_name = "NAME")]
     permission: Option<String>,
 }

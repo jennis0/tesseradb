@@ -1,16 +1,17 @@
 //! Credentials on the three listeners, and minting sessions from them.
 //!
 //! A bearer credential is the operator credential, an API key (`tsk_…`) or an OIDC access token.
-//! The operator credential authenticates the superuser, which holds every permission and
-//! `bypass`. An API key authenticates its local principal, with the permissions the catalogue
-//! resolves for that key. An access token authenticates an OIDC identity, whose terms and
-//! permissions the catalogue derives from its claims.
+//! The operator credential authenticates the superuser, which holds every permission. An API key
+//! authenticates its local principal, with the permissions the catalogue resolves for that key.
+//! An access token authenticates an OIDC identity, whose terms and permissions the catalogue
+//! derives from its claims.
 //!
 //! A session is minted from a resolution the catalogue made at some generation. The engine builds
 //! the session's authorised set without any lock held, and the session is registered under the
-//! registry's lock only if the catalogue is still at that generation. A change applies its report
-//! under the same lock after it commits, so a session is either registered before the change ends
-//! it or resolved again after the change.
+//! registry's lock only if the catalogue is still at that generation. A change ends the sessions
+//! it affected under the same lock, on the thread that committed it and before that thread
+//! returns, so a session is either registered before the change ends it or resolved again after
+//! the change, and a caller that goes away cannot leave a committed change's sessions running.
 
 use std::sync::Arc;
 
@@ -60,14 +61,14 @@ impl Caller {
         }
     }
 
-    fn superuser() -> Caller {
+    /// The holder of the operator credential, which holds every permission.
+    pub fn superuser() -> Caller {
         Caller {
             principal: Principal::Superuser,
             api_key: None,
             resolution: Resolution {
                 terms: Default::default(),
                 permissions: Permission::ALL.into_iter().collect(),
-                bypass: true,
                 generation: 0,
             },
             expires_at: None,
@@ -109,7 +110,6 @@ impl Source {
                     .map(str::to_owned)
                     .collect(),
                 permissions: [Permission::Read].into_iter().collect(),
-                bypass: false,
                 generation: catalogue.generation(),
             }),
         }
@@ -171,14 +171,16 @@ pub fn api_key(catalogue: &Catalogue, key: &str) -> Result<Caller, ApiError> {
 }
 
 /// A local principal by name and password. The check is argon2id, so it runs off the async
-/// threads.
+/// threads, admitted by the password gate whether or not the name exists.
 pub async fn password(
     state: &Arc<AppState>,
     principal: String,
     password: String,
 ) -> Result<Caller, ApiError> {
+    let (permits, _) = state.password_gate.admit().await?;
     state
         .blocking(move |state| {
+            let _permits = permits;
             let auth = state
                 .catalogue
                 .verify_password(&principal, &password)
@@ -273,13 +275,22 @@ pub struct Minted {
 /// How many times a session is resolved again when the catalogue changes while it is minted.
 const MINT_ATTEMPTS: usize = 3;
 
-/// The permissions a session carries: `read` and `write` only. `admin`, `authorise-as` and
-/// `bypass` are never carried by a session.
-fn session_permissions(p: PermissionSet) -> PermissionSet {
-    [Permission::Read, Permission::Write]
-        .into_iter()
-        .filter(|q| p.contains(*q))
-        .collect()
+/// The permissions a session carries. A session a principal authorised for itself carries its
+/// `read`, `write`, `read-all` and `write-all`. A session minted through `authorise-as` carries
+/// the target's `read` and `write` only, so an integrator's key cannot reach the whole corpus
+/// through a target that could. No session carries `admin` or `authorise-as`.
+fn session_permissions(p: PermissionSet, minted: bool) -> PermissionSet {
+    let carried: &[Permission] = if minted {
+        &[Permission::Read, Permission::Write]
+    } else {
+        &[
+            Permission::Read,
+            Permission::Write,
+            Permission::ReadAll,
+            Permission::WriteAll,
+        ]
+    };
+    carried.iter().copied().filter(|q| p.contains(*q)).collect()
 }
 
 /// Mints a session for `target`, or for `target` through `minter`'s `authorise-as`. The target
@@ -318,14 +329,18 @@ pub async fn mint(
                     .into(),
             ));
         }
+        let permissions = session_permissions(resolution.permissions, minter.is_some());
+        let every_item = permissions.contains(Permission::ReadAll);
         let auth_data = serde_json::to_vec(&serde_json::json!({ "terms": resolution.terms }))
             .expect("a list of strings serialises");
         let session = state
             .gated(move |state| {
-                state
-                    .engine
-                    .authorise(&auth_data)
-                    .map_err(crate::error::map_engine_error)
+                let session = if every_item {
+                    state.engine.authorise_all()
+                } else {
+                    state.engine.authorise(&auth_data)
+                };
+                session.map_err(crate::error::map_engine_error)
             })
             .await?;
         let now = now_secs();
@@ -350,7 +365,7 @@ pub async fn mint(
                 .as_ref()
                 .map_or(target.api_key.clone(), |m| m.api_key.clone()),
             minted_by: minter.as_ref().and_then(|m| m.local_name().map(str::to_owned)),
-            permissions: session_permissions(resolution.permissions),
+            permissions,
             created_at: now,
             expires_at,
         };

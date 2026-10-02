@@ -677,6 +677,20 @@ pub fn generous_test_gate() -> ComputeGate {
     ComputeGate::new(64, 64, 250)
 }
 
+/// The password gate every mount takes, generous for the same reason.
+pub fn generous_password_gate() -> ComputeGate {
+    ComputeGate::for_passwords(16, 250)
+}
+
+/// An OIDC verifier that fetches a provider's keys again whenever a token names one it lacks, so
+/// a test of key rotation need not wait out the refetch interval.
+pub fn test_verifier() -> tessera_server::oidc::Verifier {
+    tessera_server::oidc::Verifier::with_intervals(
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(3600),
+    )
+}
+
 /// The bulk-read lane every mount but the lane's own tests takes, generous for the same reason.
 pub fn generous_bulk_gate() -> ComputeGate {
     ComputeGate::for_bulk_reads(16)
@@ -1023,10 +1037,11 @@ async fn mount_server_with_flush(
         limits,
         suggest_admission: tessera_server::state::SuggestAdmission::new(),
         compute_gate,
+        password_gate: generous_password_gate(),
         bulk_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         catalogue,
-        oidc: tessera_server::oidc::Verifier::new(),
+        oidc: test_verifier(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
         faults,
     });

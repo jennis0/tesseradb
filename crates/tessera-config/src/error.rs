@@ -12,6 +12,7 @@ pub enum ConfigError {
     MissingDisclosureSection,
     MissingDisclosureKey(&'static str),
     MissingCredential(&'static str),
+    EmptyCredential(&'static str),
     CredentialFileUnreadable {
         which: &'static str,
         path: PathBuf,
@@ -104,6 +105,11 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "there is no {which} credential; set `{which}_credential_file` or \
                  `{which}_credential_env` under [serve] and put the secret in that file or variable"
+            ),
+            ConfigError::EmptyCredential(which) => write!(
+                f,
+                "the {which} credential is empty, and an empty bearer would authenticate as the \
+                 superuser; put a long random secret in the file or variable"
             ),
             ConfigError::CredentialFileUnreadable {
                 which,
