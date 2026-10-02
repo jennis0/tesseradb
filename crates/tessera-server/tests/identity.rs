@@ -768,59 +768,68 @@ async fn the_catalogue_survives_a_restart() {
     assert_eq!(visible(&server, &token).await, N_ITEMS);
 }
 
-/// A deployment declaring no catalogue refuses to start, and a provider declared in the file is
-/// listed and cannot be changed through the API.
-#[tokio::test]
-async fn providers_declared_in_the_file_are_read_only() {
-    let tmp = TempDir::new().unwrap();
+/// Writes `tessera.toml` for a deployment serving a fixture bundle on ephemeral ports, with
+/// `catalogue` appended as its catalogue section.
+fn deployment(tmp: &TempDir, catalogue: &str) -> std::path::PathBuf {
     let bundle = build_fixture(tmp.path(), N_ITEMS);
     std::fs::write(tmp.path().join("operator.cred"), OPERATOR_CREDENTIAL).unwrap();
-    let write = |catalogue: &str| {
-        let text = format!(
-            r#"
-            [bundle]
-            path = "{bundle}"
-            cache = "cache"
-            wal = "wal.log"
-            [plugin]
-            module = "builtin:passthrough"
-            [disclosure]
-            token_max_lifetime = 3600
-            [serve]
-            viewer = "127.0.0.1:0"
-            session = "127.0.0.1:0"
-            control = "127.0.0.1:0"
-            operator_credential_file = "operator.cred"
-            {catalogue}
-            "#,
-            bundle = bundle.display(),
-        );
-        let path = tmp.path().join("tessera.toml");
-        std::fs::write(&path, text).unwrap();
-        path
-    };
+    let text = [
+        "[bundle]".to_owned(),
+        format!("path = {:?}", bundle.display().to_string()),
+        "cache = \"cache\"".into(),
+        "wal = \"wal.log\"".into(),
+        "[plugin]".into(),
+        "module = \"builtin:passthrough\"".into(),
+        "[disclosure]".into(),
+        "token_max_lifetime = 3600".into(),
+        "[serve]".into(),
+        "viewer = \"127.0.0.1:0\"".into(),
+        "session = \"127.0.0.1:0\"".into(),
+        "control = \"127.0.0.1:0\"".into(),
+        "operator_credential_file = \"operator.cred\"".into(),
+        catalogue.to_owned(),
+    ]
+    .join("\n");
+    let path = tmp.path().join("tessera.toml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
 
-    assert!(
-        tessera_server::prepare(&write("")).is_err(),
-        "a deployment with no catalogue is refused"
-    );
+/// A deployment whose file declares the provider `corp`, served.
+async fn serve_file_provider(tmp: &TempDir) -> TestServer {
+    let catalogue = [
+        "[catalogue]",
+        "dir = \"catalogue\"",
+        "[[catalogue.providers]]",
+        "name = \"corp\"",
+        "issuer = \"https://login.example.org\"",
+        "audience = \"tessera\"",
+        "jwks_url = \"https://login.example.org/keys\"",
+    ]
+    .join("\n");
+    let prepared = tessera_server::prepare(&deployment(tmp, &catalogue)).expect("the deployment starts");
+    serve_state(prepared.state, String::new(), None).await
+}
 
-    let prepared = tessera_server::prepare(&write(
-        r#"
-        [catalogue]
-        dir = "catalogue"
-        [[catalogue.providers]]
-        name = "corp"
-        issuer = "https://login.example.org"
-        audience = "tessera"
-        jwks_url = "https://login.example.org/keys"
-        "#,
-    ))
-    .expect("the deployment starts");
-    let server = serve_state(prepared.state, String::new(), None).await;
+#[test]
+fn a_deployment_declaring_no_catalogue_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    assert!(tessera_server::prepare(&deployment(&tmp, "")).is_err());
+}
+
+#[tokio::test]
+async fn a_provider_declared_in_the_file_is_listed_as_read_only() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_file_provider(&tmp).await;
     let listed = control(&server, reqwest::Method::GET, "/control/providers", json!({})).await;
     assert_eq!(listed["providers"][0]["name"], "corp");
     assert_eq!(listed["providers"][0]["read_only"], true);
+}
+
+#[tokio::test]
+async fn a_provider_declared_in_the_file_cannot_be_removed() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve_file_provider(&tmp).await;
     let resp = server
         .client
         .delete(server.control_url("/control/providers/corp"))
