@@ -23,7 +23,6 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from pyroaring import BitMap
 
-from . import access as access_mod
 from . import identity as identity_mod
 from . import morton as morton_mod
 
@@ -469,11 +468,6 @@ class Bundle:
 
     def term_id_of(self, descriptor: bytes) -> int | None:
         return self.descriptor_to_term_id.get(descriptor)
-
-    def satisfied_term_ids(self, held_terms) -> set[int]:
-        """The dictionary ordinals a credential presenting `held_terms` satisfies, labels holding a
-        conjunction included (`oracle.access.satisfied_keys`)."""
-        return access_mod.satisfied_keys(self.descriptor_to_term_id, held_terms)
 
     def extent_of(self, view_id: str) -> tuple[float, float, float, float]:
         """The frame a view's positions are quantised against, as `(x_min, x_max, y_min, y_max)`.

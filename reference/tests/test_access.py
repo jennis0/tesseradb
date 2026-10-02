@@ -11,11 +11,12 @@ from oracle.access import (
     Refused,
     Term,
     admits,
+    card_labels,
     held_term,
-    satisfied_keys,
     parse,
     satisfies,
     terms,
+    witness,
 )
 
 
@@ -107,20 +108,32 @@ def test_a_credentials_term_is_held_trimmed_and_never_public_or_a_control_charac
     assert held_term(term) == held
 
 
-def test_a_credential_satisfies_its_terms_public_and_the_labels_its_terms_satisfy():
-    dictionary = {
-        b"public": 0,
-        b"a": 1,
-        b"\x00a&b": 2,
-        b"c": 3,
-        b"\x00(a|c)&d": 4,
-    }
-    assert satisfied_keys(dictionary, []) == {0}
-    assert satisfied_keys(dictionary, ["a"]) == {0, 1}
-    assert satisfied_keys(dictionary, [" a ", "b"]) == {0, 1, 2}
-    assert satisfied_keys(dictionary, ["c", "d"]) == {0, 3, 4}
-    # A credential naming a key's own text holds no term.
-    assert satisfied_keys(dictionary, ["\x00a&b"]) == {0}
+def everything(_term):
+    return True
+
+
+def test_a_witness_takes_the_satisfied_operand_with_fewest_terms_then_the_first():
+    assert witness(parse("(t&c)|(s&(b|a))"), everything) == ["a", "s"]
+    assert witness(parse("(a&b&c)|(d&e)"), everything) == ["d", "e"]
+    assert witness(parse("(t&c)|(s&(b|a))"), holding("s", "b", "c")) == ["b", "s"]
+    assert witness(parse("(t&c)|(s&(b|a))"), holding("s")) is None
+    assert witness(parse("public"), holding()) == []
+
+
+def test_a_card_serves_each_held_term_and_one_clause_of_each_satisfied_conjunction():
+    labels = ["eu&(ir:legal|ir:new)", "ir:new|ir:secret", "x&y"]
+    assert card_labels(labels, holding("eu", "ir:new", "ir:secret")) == [
+        "eu&ir:new",
+        "ir:new",
+        "ir:secret",
+    ]
+    assert card_labels(labels, holding("ir:secret")) == ["ir:secret"]
+    assert card_labels(labels, holding("x")) == []
+    assert card_labels(["public", "a"], holding("a")) == ["a", "public"]
+    assert card_labels(['s&"team b"', '"team b"'], holding("s", "team b")) == [
+        '"team b"',
+        's&"team b"',
+    ]
 
 
 def test_a_space_inside_quotes_makes_another_term():

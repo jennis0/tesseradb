@@ -13,7 +13,9 @@ accepted only as the whole label, and every principal satisfies it. `inherited` 
 
 This module evaluates the tree as written, by direct recursion. It does not normalise, share
 subexpressions or number terms, so agreeing with the engine's label DAG is evidence about both.
-The engine's limit on the size of a label holding a conjunction is not modelled.
+The engine's limit on the size of a label holding a conjunction is not modelled, and neither is
+the item card's answer for a label written with a conjunction that normalisation reduces to a
+disjunction of terms, such as `(a|b)&(a|b|c)`.
 """
 
 from __future__ import annotations
@@ -88,6 +90,49 @@ def admits(labels, held: Callable[[str], bool]) -> bool:
     return any(satisfies(parse(label), held) for label in labels)
 
 
+def witness(tree, held: Callable[[str], bool]) -> list[str] | None:
+    """Held terms whose conjunction satisfies `tree`, sorted and distinct, or `None` where `held`
+    does not satisfy it. Of a disjunction, the satisfied operand with fewest terms, then the first
+    in code point order, is taken."""
+    if isinstance(tree, Public):
+        return []
+    if isinstance(tree, Term):
+        return [tree.name] if held(tree.name) else None
+    found = [witness(operand, held) for operand in tree.operands]
+    if isinstance(tree, And):
+        if any(w is None for w in found):
+            return None
+        return sorted(set().union(*found))
+    satisfied = [w for w in found if w is not None]
+    return min(satisfied, key=lambda w: (len(w), w)) if satisfied else None
+
+
+def write_term(name: str) -> str:
+    """A term as label text: bare where every character may stand bare, and quoted otherwise."""
+    if all(c in BARE for c in name):
+        return name
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def card_labels(labels, held: Callable[[str], bool]) -> list[str]:
+    """What an item card serves for an item carrying `labels`, to a principal holding `held`: each
+    term of a label that is a term or a disjunction of terms, where held, and `public` where a label
+    is `public`; and of each label holding a conjunction that `held` satisfies, its witness, with
+    its terms joined by `&`. Each entry is label text, and the list is sorted and distinct."""
+    out = set()
+    for text in labels:
+        tree = parse(text)
+        if isinstance(tree, Public):
+            out.add(PUBLIC)
+        elif isinstance(tree, Term) or (
+            isinstance(tree, Or) and all(isinstance(o, Term) for o in tree.operands)
+        ):
+            out.update(write_term(t) for t in terms(tree) if held(t))
+        elif (w := witness(tree, held)) is not None:
+            out.add("&".join(write_term(t) for t in w))
+    return sorted(out)
+
+
 def held_term(term: str) -> str | None:
     """A term a credential presents, as it is held: trimmed, and `None` where nothing is left,
     where it holds a control character, or where it is `public` in any case. Every principal holds
@@ -98,27 +143,6 @@ def held_term(term: str) -> str | None:
     if name.isascii() and name.lower() == PUBLIC:
         return None
     return name
-
-
-#: The first byte of a dictionary key that indexes one label holding a conjunction; the label's
-#: canonical text follows it.
-COMPOUND_KEY = b"\x00"
-
-
-def satisfied_keys(dictionary: dict[bytes, int], held_terms) -> set[int]:
-    """The ordinals of the dictionary keys a credential presenting `held_terms` satisfies: each term
-    it holds that the dictionary carries, `public`, and every key of a label holding a conjunction
-    whose label those terms satisfy. The label is read from the key's text and evaluated here, by
-    direct recursion, apart from the engine's DAG."""
-    held = {h for t in held_terms if (h := held_term(t)) is not None}
-    out: set[int] = set()
-    for key, ordinal in dictionary.items():
-        if key.startswith(COMPOUND_KEY):
-            if satisfies(parse(key[1:].decode("utf-8")), held.__contains__):
-                out.add(ordinal)
-        elif key == PUBLIC.encode() or key.decode("utf-8", "replace") in held:
-            out.add(ordinal)
-    return out
 
 
 def terms(tree) -> set[str]:
