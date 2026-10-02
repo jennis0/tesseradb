@@ -887,142 +887,281 @@ async fn login_and_logout_match_the_description() {
     assert_framework_refusal(&doc, &reqwest::Method::POST, resp, 400).await;
 }
 
-/// Every catalogue verb on the control plane, with a success and a refusal each.
-#[tokio::test]
-async fn the_catalogue_routes_match_the_description() {
-    let doc = description();
-    let f = fixture().await;
-    let s = &f.server;
-    let (get, post, put, patch, delete) = (
-        reqwest::Method::GET,
-        reqwest::Method::POST,
-        reqwest::Method::PUT,
-        reqwest::Method::PATCH,
-        reqwest::Method::DELETE,
-    );
-    let send = |method: &reqwest::Method, path: &str, body: Option<(&str, Value)>| {
-        let mut req = control(s, method, path);
+/// The control plane driven with the operator credential. A request body is checked against the
+/// named schema first, unless the name is empty.
+struct Control {
+    doc: Value,
+    f: Fixture,
+}
+
+impl Control {
+    async fn new() -> Self {
+        Control {
+            doc: description(),
+            f: fixture().await,
+        }
+    }
+
+    /// Creates `ann`, and the group `analysts` when `group` is set, through the catalogue.
+    fn with_ann(self, group: bool) -> Self {
+        let catalogue = &self.f.server.state.catalogue;
+        catalogue
+            .create_principal("ann", tessera_catalogue::PrincipalKind::Person)
+            .unwrap();
+        if group {
+            catalogue.create_group("analysts").unwrap();
+        }
+        self
+    }
+
+    async fn send(
+        &self,
+        method: &reqwest::Method,
+        path: &str,
+        body: Option<(&str, Value)>,
+    ) -> reqwest::Response {
+        let mut req = control(&self.f.server, method, path);
         if let Some((schema, body)) = body {
             if !schema.is_empty() {
-                assert_valid(&doc, schema, &body);
+                assert_valid(&self.doc, schema, &body);
             }
             req = req.json(&body);
         }
-        req.send()
-    };
+        req.send().await.unwrap()
+    }
 
-    // Principals.
+    async fn answer(
+        &self,
+        method: &reqwest::Method,
+        path: &str,
+        body: Option<(&str, Value)>,
+    ) -> Value {
+        let resp = self.send(method, path, body).await;
+        assert_answer(&self.doc, method, resp, 200).await
+    }
+
+    async fn refusal(
+        &self,
+        method: &reqwest::Method,
+        path: &str,
+        body: Option<(&str, Value)>,
+        status: u16,
+        code: &str,
+    ) {
+        let resp = self.send(method, path, body).await;
+        assert_refusal_to(&self.doc, Some(method), resp, status, code).await;
+    }
+}
+
+const GET: reqwest::Method = reqwest::Method::GET;
+const POST: reqwest::Method = reqwest::Method::POST;
+const PUT: reqwest::Method = reqwest::Method::PUT;
+const PATCH: reqwest::Method = reqwest::Method::PATCH;
+const DELETE: reqwest::Method = reqwest::Method::DELETE;
+
+/// Each catalogue verb on principals and passwords, with a success and a refusal each.
+#[tokio::test]
+async fn the_principal_and_password_routes_match_the_description() {
+    let c = Control::new().await;
     let created = json!({ "name": "ann", "kind": "person" });
-    let resp = send(&post, "/control/principals", Some(("PrincipalCreate", created.clone())));
-    assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
-    let resp = send(&post, "/control/principals", Some(("PrincipalCreate", created)));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 409, "conflict").await;
+    c.answer(
+        &POST,
+        "/control/principals",
+        Some(("PrincipalCreate", created.clone())),
+    )
+    .await;
+    c.refusal(
+        &POST,
+        "/control/principals",
+        Some(("PrincipalCreate", created)),
+        409,
+        "conflict",
+    )
+    .await;
     let body = json!({ "name": "bo", "kind": "robot" });
-    assert_invalid(&doc, "PrincipalCreate", &body);
-    let resp = send(&post, "/control/principals", Some(("", body)));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&get, "/control/principals", None);
-    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
-    let resp = send(&get, "/control/principals/ann", None);
-    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
-    let resp = send(&get, "/control/principals/nobody", None);
-    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
-    let resp = send(
-        &patch,
+    assert_invalid(&c.doc, "PrincipalCreate", &body);
+    c.refusal(
+        &POST,
+        "/control/principals",
+        Some(("", body)),
+        422,
+        "contract",
+    )
+    .await;
+    c.answer(&GET, "/control/principals", None).await;
+    c.answer(&GET, "/control/principals/ann", None).await;
+    c.refusal(&GET, "/control/principals/nobody", None, 404, "unknown")
+        .await;
+    let change = json!({ "disabled": false });
+    c.answer(
+        &PATCH,
         "/control/principals/ann",
-        Some(("PrincipalChange", json!({ "disabled": false }))),
-    );
-    assert_answer(&doc, &patch, resp.await.unwrap(), 200).await;
-    assert_invalid(&doc, "PrincipalChange", &json!({}));
-    let resp = send(&patch, "/control/principals/ann", Some(("", json!({}))));
-    assert_refusal_to(&doc, Some(&patch), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(
-        &patch,
+        Some(("PrincipalChange", change)),
+    )
+    .await;
+    assert_invalid(&c.doc, "PrincipalChange", &json!({}));
+    c.refusal(
+        &PATCH,
+        "/control/principals/ann",
+        Some(("", json!({}))),
+        422,
+        "contract",
+    )
+    .await;
+    let change = json!({ "disabled": true });
+    c.refusal(
+        &PATCH,
         "/control/principals/nobody",
-        Some(("PrincipalChange", json!({ "disabled": true }))),
-    );
-    assert_refusal_to(&doc, Some(&patch), resp.await.unwrap(), 404, "unknown").await;
+        Some(("PrincipalChange", change)),
+        404,
+        "unknown",
+    )
+    .await;
 
-    // Passwords.
+    let path = "/control/principals/ann/password";
     let body = json!({ "password": "correct horse battery staple" });
-    let resp = send(&put, "/control/principals/ann/password", Some(("PasswordSet", body)));
-    assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
+    c.answer(&PUT, path, Some(("PasswordSet", body))).await;
     let body = json!({ "password": "short" });
-    let resp = send(&put, "/control/principals/ann/password", Some(("PasswordSet", body)));
-    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&delete, "/control/principals/ann/password", None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, "/control/principals/nobody/password", None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+    c.refusal(&PUT, path, Some(("PasswordSet", body)), 422, "contract")
+        .await;
+    c.answer(&DELETE, path, None).await;
+    c.refusal(
+        &DELETE,
+        "/control/principals/nobody/password",
+        None,
+        404,
+        "unknown",
+    )
+    .await;
 
-    // Keys.
+    c.answer(&DELETE, "/control/principals/ann", None).await;
+    c.refusal(&DELETE, "/control/principals/ann", None, 404, "unknown")
+        .await;
+}
+
+/// Each catalogue verb on keys, with a success and a refusal each.
+#[tokio::test]
+async fn the_key_routes_match_the_description() {
+    let c = Control::new().await.with_ann(false);
     let body = json!({ "permissions": ["read"], "expires_at": 4_000_000_000u64 });
-    let resp = send(&post, "/control/principals/ann/keys", Some(("KeyCreate", body)));
-    let issued = assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    let issued = c
+        .answer(
+            &POST,
+            "/control/principals/ann/keys",
+            Some(("KeyCreate", body)),
+        )
+        .await;
     let body = json!({ "permissions": ["superuser"] });
-    assert_invalid(&doc, "KeyCreate", &body);
-    let resp = send(&post, "/control/principals/ann/keys", Some(("", body)));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&post, "/control/principals/nobody/keys", Some(("KeyCreate", json!({}))));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 404, "unknown").await;
-    let resp = send(&get, "/control/principals/ann/keys", None);
-    let keys = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    assert_invalid(&c.doc, "KeyCreate", &body);
+    c.refusal(
+        &POST,
+        "/control/principals/ann/keys",
+        Some(("", body)),
+        422,
+        "contract",
+    )
+    .await;
+    let body = Some(("KeyCreate", json!({})));
+    c.refusal(
+        &POST,
+        "/control/principals/nobody/keys",
+        body,
+        404,
+        "unknown",
+    )
+    .await;
+    let keys = c.answer(&GET, "/control/principals/ann/keys", None).await;
     assert_eq!(keys["keys"][0]["prefix"], issued["prefix"]);
-    let resp = send(&get, "/control/principals/nobody/keys", None);
-    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
+    c.refusal(
+        &GET,
+        "/control/principals/nobody/keys",
+        None,
+        404,
+        "unknown",
+    )
+    .await;
     let path = format!("/control/keys/{}", issued["prefix"].as_str().unwrap());
-    let resp = send(&delete, &path, None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, &path, None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+    c.answer(&DELETE, &path, None).await;
+    c.refusal(&DELETE, &path, None, 404, "unknown").await;
+}
 
-    // Groups and members.
+/// Each catalogue verb on groups and their members, with a success and a refusal each.
+#[tokio::test]
+async fn the_group_and_member_routes_match_the_description() {
+    let c = Control::new().await.with_ann(false);
     let body = json!({ "name": "analysts" });
-    let resp = send(&post, "/control/groups", Some(("GroupCreate", body.clone())));
-    assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
-    let resp = send(&post, "/control/groups", Some(("GroupCreate", body)));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 409, "conflict").await;
-    let resp = send(&post, "/control/groups", Some(("GroupCreate", json!({ "name": " " }))));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&put, "/control/groups/analysts/members/ann", None);
-    assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
-    let resp = send(&put, "/control/groups/analysts/members/nobody", None);
-    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 404, "unknown").await;
-    let resp = send(&get, "/control/groups", None);
-    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
-    let resp = send(&get, "/control/groups/analysts", None);
-    let group = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    c.answer(
+        &POST,
+        "/control/groups",
+        Some(("GroupCreate", body.clone())),
+    )
+    .await;
+    c.refusal(
+        &POST,
+        "/control/groups",
+        Some(("GroupCreate", body)),
+        409,
+        "conflict",
+    )
+    .await;
+    let body = Some(("GroupCreate", json!({ "name": " " })));
+    c.refusal(&POST, "/control/groups", body, 422, "contract")
+        .await;
+    c.answer(&PUT, "/control/groups/analysts/members/ann", None)
+        .await;
+    c.refusal(
+        &PUT,
+        "/control/groups/analysts/members/nobody",
+        None,
+        404,
+        "unknown",
+    )
+    .await;
+    c.answer(&GET, "/control/groups", None).await;
+    let group = c.answer(&GET, "/control/groups/analysts", None).await;
     assert_eq!(group["members"], json!(["ann"]));
-    let resp = send(&get, "/control/groups/nobody", None);
-    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
-    let resp = send(&delete, "/control/groups/analysts/members/ann", None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, "/control/groups/nobody/members/ann", None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+    c.refusal(&GET, "/control/groups/nobody", None, 404, "unknown")
+        .await;
+    c.answer(&DELETE, "/control/groups/analysts/members/ann", None)
+        .await;
+    c.refusal(
+        &DELETE,
+        "/control/groups/nobody/members/ann",
+        None,
+        404,
+        "unknown",
+    )
+    .await;
+    c.answer(&DELETE, "/control/groups/analysts", None).await;
+    c.refusal(&DELETE, "/control/groups/analysts", None, 404, "unknown")
+        .await;
+}
 
-    // Grants.
-    for (path, method) in [("/control/grants", &post), ("/control/grants/revoke", &post)] {
+/// Granting and revoking, with a success for each kind of grant and a refusal each.
+#[tokio::test]
+async fn the_grant_routes_match_the_description() {
+    let c = Control::new().await.with_ann(true);
+    for path in ["/control/grants", "/control/grants/revoke"] {
         for body in [
             json!({ "principal": "ann", "term": "0" }),
             json!({ "principal": "ann", "terms": ["0", "1"] }),
             json!({ "group": "analysts", "permission": "read" }),
         ] {
-            let resp = send(method, path, Some(("Grant", body)));
-            assert_answer(&doc, method, resp.await.unwrap(), 200).await;
+            c.answer(&POST, path, Some(("Grant", body))).await;
         }
         let body = json!({ "principal": "ann" });
-        assert_invalid(&doc, "Grant", &body);
-        let resp = send(method, path, Some(("", body)));
-        assert_refusal_to(&doc, Some(method), resp.await.unwrap(), 422, "contract").await;
-        let resp = send(method, path, Some(("Grant", json!({ "group": "nobody", "term": "0" }))));
-        assert_refusal_to(&doc, Some(method), resp.await.unwrap(), 404, "unknown").await;
+        assert_invalid(&c.doc, "Grant", &body);
+        c.refusal(&POST, path, Some(("", body)), 422, "contract")
+            .await;
+        let body = Some(("Grant", json!({ "group": "nobody", "term": "0" })));
+        c.refusal(&POST, path, body, 404, "unknown").await;
     }
-    let resp = send(&delete, "/control/groups/analysts", None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, "/control/groups/analysts", None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+}
 
-    // Providers.
+/// Each catalogue verb on identity providers, with a success and a refusal each.
+#[tokio::test]
+async fn the_provider_routes_match_the_description() {
+    let c = Control::new().await;
     let declared = json!({
         "issuer": "https://login.example.org",
         "audience": "tessera",
@@ -1031,54 +1170,56 @@ async fn the_catalogue_routes_match_the_description() {
         "role_mappings": [{ "claim": "groups[*]", "value": "tessera-admins", "group": "admins" }],
     });
     for _ in 0..2 {
-        let resp = send(
-            &put,
-            "/control/providers/corp",
-            Some(("ProviderDeclaration", declared.clone())),
-        );
-        assert_answer(&doc, &put, resp.await.unwrap(), 200).await;
+        let body = Some(("ProviderDeclaration", declared.clone()));
+        c.answer(&PUT, "/control/providers/corp", body).await;
     }
     let mut insecure = declared.clone();
     insecure["jwks_url"] = json!("http://login.example.org/keys");
-    let resp = send(&put, "/control/providers/other", Some(("ProviderDeclaration", insecure)));
-    assert_refusal_to(&doc, Some(&put), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&get, "/control/providers", None);
-    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
-    let resp = send(&get, "/control/providers/corp", None);
-    let provider = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let body = Some(("ProviderDeclaration", insecure));
+    c.refusal(&PUT, "/control/providers/other", body, 422, "contract")
+        .await;
+    c.answer(&GET, "/control/providers", None).await;
+    let provider = c.answer(&GET, "/control/providers/corp", None).await;
     assert_eq!(provider["read_only"], false);
-    let resp = send(&get, "/control/providers/nobody", None);
-    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 404, "unknown").await;
-    let resp = send(&delete, "/control/providers/corp", None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, "/control/providers/corp", None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+    c.refusal(&GET, "/control/providers/nobody", None, 404, "unknown")
+        .await;
+    c.answer(&DELETE, "/control/providers/corp", None).await;
+    c.refusal(&DELETE, "/control/providers/corp", None, 404, "unknown")
+        .await;
+}
 
-    // Sessions.
-    let auth = authorise_checked(&doc, s, &["0"]).await;
+/// Listing and ending sessions, with a success and a refusal each.
+#[tokio::test]
+async fn the_session_routes_match_the_description() {
+    let c = Control::new().await;
+    let s = &c.f.server;
+    let auth = authorise_checked(&c.doc, s, &["0"]).await;
     let viewer = principal_for(s, &["0"]);
-    let resp = send(&get, &format!("/control/sessions?principal={viewer}"), None);
-    let listed = assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
+    let listed = c
+        .answer(&GET, &format!("/control/sessions?principal={viewer}"), None)
+        .await;
     assert_eq!(listed["sessions"][0]["token_id"], auth["token_id"]);
     assert_eq!(listed["sessions"][0]["minted_by"], json!(INTEGRATOR));
-    let resp = send(&get, "/control/sessions?principal=a&provider=b", None);
-    assert_refusal_to(&doc, Some(&get), resp.await.unwrap(), 422, "contract").await;
-    let resp = send(&get, "/control/sessions", None);
-    assert_answer(&doc, &get, resp.await.unwrap(), 200).await;
-    let resp = send(
-        &post,
-        "/control/sessions/end",
-        Some(("SessionsEnd", json!({ "principal": viewer }))),
-    );
-    let ended = assert_answer(&doc, &post, resp.await.unwrap(), 200).await;
+    c.refusal(
+        &GET,
+        "/control/sessions?principal=a&provider=b",
+        None,
+        422,
+        "contract",
+    )
+    .await;
+    c.answer(&GET, "/control/sessions", None).await;
+    let body = Some(("SessionsEnd", json!({ "principal": viewer })));
+    let ended = c.answer(&POST, "/control/sessions/end", body).await;
     assert_eq!(ended["sessions_ended"], 1);
-    let resp = send(&post, "/control/sessions/end", Some(("", json!({}))));
-    assert_refusal_to(&doc, Some(&post), resp.await.unwrap(), 422, "contract").await;
-
-    let resp = send(&delete, "/control/principals/ann", None);
-    assert_answer(&doc, &delete, resp.await.unwrap(), 200).await;
-    let resp = send(&delete, "/control/principals/ann", None);
-    assert_refusal_to(&doc, Some(&delete), resp.await.unwrap(), 404, "unknown").await;
+    c.refusal(
+        &POST,
+        "/control/sessions/end",
+        Some(("", json!({}))),
+        422,
+        "contract",
+    )
+    .await;
 }
 
 /// Every control operation refuses an accepted credential without the permission it needs with
