@@ -100,6 +100,12 @@ export const displayStyles = css`
     color: var(--_tessera-ink);
     font-weight: 500;
   }
+  /* The readout column the other sliders keep on their right is kept here too, so the tracks end
+     together; this slider's readout is the line under it. */
+  .resolution,
+  .resolution + span + .ends {
+    margin-right: 48px;
+  }
   .resolution {
     position: relative;
     display: flex;

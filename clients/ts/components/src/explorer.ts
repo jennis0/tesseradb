@@ -1517,8 +1517,9 @@ export class TesseraExplorer extends TesseraElement {
                     @click=${() => (this.densityColoursOpen = !this.densityColoursOpen)}><span class="bar" style=${`background:${densityGradient(colours, scheme)}`}></span>${DENSITY_COLOUR_TITLES[colours]}${icon('chev', 12, 1.4)}</button>
                   ${colourList}`
               : nothing}
-            <label for="density-strength">Strength</label><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
-              @input=${(e: Event) => change({densityStrength: number(e)})} />
+            <label for="density-strength">Strength</label>
+            <div class="with-readout"><input id="density-strength" part="density-strength" type="range" min="0.1" max="1" step="0.05" .value=${String(s.densityStrength)}
+              @input=${(e: Event) => change({densityStrength: number(e)})} /><span class="readout">${Math.round(s.densityStrength * 100)}%</span></div>
           </div>`;
     return html`<div part="display" class="display">
       <div class="hd">Display</div>
@@ -1529,8 +1530,9 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       <div class="sliders">
         ${this.sizeControls(radius, !s.points)}
-        <label for="point-opacity">Opacity</label><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
-          @input=${(e: Event) => change({pointOpacity: number(e)})} />
+        <label for="point-opacity">Opacity</label>
+        <div class="with-readout"><input id="point-opacity" part="point-opacity" type="range" min="0.1" max="1" step="0.05" .value=${String(opacity)} ?disabled=${!s.points}
+          @input=${(e: Event) => change({pointOpacity: number(e)})} /><span class="readout">${Math.round(opacity * 100)}%</span></div>
       </div>
       <div class="rule"></div>
       <div class="lead" id="density-label">Density</div>
@@ -1627,7 +1629,8 @@ export class TesseraExplorer extends TesseraElement {
     const number = (e: Event) => Number((e.target as HTMLInputElement).value);
     const {min, max, step} = SIZE_RANGE;
     const choice = html`<span id="size-by-label">Size by</span>
-      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`} ?disabled=${disabled}
+      <button part="size-by" class="ramp-choice" type="button" aria-haspopup="menu" aria-expanded=${this.sizeMenuOpen ? 'true' : 'false'} aria-label=${`Size by: ${sizeBy === null ? 'None' : columnCaption(sizeBy)}`}
+        ?disabled=${disabled || (sizeBy === null && this.sizeColumns.length === 0)} title=${this.sizeColumns.length === 0 ? 'No number column to size by' : nothing}
         @click=${() => (this.sizeMenuOpen = !this.sizeMenuOpen)} @keydown=${this.onSizeByKey}><span class="t">${sizeBy === null ? 'None' : columnCaption(sizeBy)}</span>${icon('chev', 12, 1.4)}</button>`;
     if (sizeBy === null) {
       if (this.hideSize) return choice;
