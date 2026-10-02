@@ -1,0 +1,4306 @@
+{
+ "started_at": "2026-10-02T14:36:40+00:00",
+ "server": {
+  "started": false,
+  "pid": 659795,
+  "memory_max_bytes": "25769803776",
+  "memory_before": {
+   "vmhwm_gib": 23.99,
+   "vmrss_gib": 10.93,
+   "rssanon_gib": 4.94,
+   "rssfile_gib": 5.98
+  },
+  "memory_after": {
+   "vmhwm_gib": 23.99,
+   "vmrss_gib": 11.46,
+   "rssanon_gib": 4.98,
+   "rssfile_gib": 6.48
+  }
+ },
+ "binary": "/home/joe/code/tessera/.claude/worktrees/gbif-diagnostic/bin/tessera-serve",
+ "bundle": "/home/joe/code/tessera/data/ladder/gbif/bundle",
+ "manifest_digest": "10a6de420ec67c83849a555bc45f5773424853294899b99ad3a14dc72de1732c",
+ "box": {
+  "host": "DESKTOP-9DGUVO2",
+  "cpu": "AMD Ryzen 9 5900X 12-Core Processor",
+  "cpus": 12,
+  "memory_gib": 47.0,
+  "kernel": "6.18.40.1-microsoft-standard-WSL2"
+ },
+ "viewer": "http://127.0.0.1:8791",
+ "settings": {
+  "screen": [
+   1600,
+   900
+  ],
+  "budget": 500000,
+  "piece_tiles": 25000,
+  "lookups": 200,
+  "seed": 20261002
+ },
+ "principals": [
+  {
+   "label": "1%",
+   "terms": [
+    "AI",
+    "BH",
+    "DJ",
+    "ER",
+    "MX",
+    "PN",
+    "TM",
+    "XZ"
+   ],
+   "salt": [
+    "XZ",
+    "ER",
+    "PN",
+    "BH",
+    "TM",
+    "DJ"
+   ],
+   "visible": 35064409,
+   "share": 0.01
+  },
+  {
+   "label": "7%",
+   "terms": [
+    "AU",
+    "BH",
+    "BL",
+    "CC",
+    "DJ",
+    "RE",
+    "SM",
+    "SS",
+    "TV"
+   ],
+   "salt": [
+    "SM",
+    "TV",
+    "BL",
+    "BH",
+    "SS",
+    "CC",
+    "DJ"
+   ],
+   "visible": 244851023,
+   "share": 0.07
+  },
+  {
+   "label": "85%",
+   "terms": [
+    "AU",
+    "BE",
+    "BH",
+    "BL",
+    "BV",
+    "CA",
+    "CH",
+    "CO",
+    "CR",
+    "DE",
+    "DJ",
+    "DK",
+    "ES",
+    "FI",
+    "FR",
+    "GB",
+    "IN",
+    "KM",
+    "MC",
+    "MY",
+    "NL",
+    "NO",
+    "NR",
+    "SE",
+    "SS",
+    "SX",
+    "TM",
+    "US",
+    "VA",
+    "ZA"
+   ],
+   "salt": [
+    "NR",
+    "VA",
+    "BV",
+    "MC",
+    "BL",
+    "BH",
+    "TM",
+    "SS",
+    "DJ",
+    "KM"
+   ],
+   "visible": 2971574576,
+   "share": 0.8501
+  },
+  {
+   "label": "100%",
+   "terms": [
+    "AD",
+    "AE",
+    "AF",
+    "AG",
+    "AI",
+    "AL",
+    "AM",
+    "AO",
+    "AQ",
+    "AR",
+    "AS",
+    "AT",
+    "AU",
+    "AW",
+    "AX",
+    "AZ",
+    "BA",
+    "BB",
+    "BD",
+    "BE",
+    "BF",
+    "BG",
+    "BH",
+    "BI",
+    "BJ",
+    "BL",
+    "BM",
+    "BN",
+    "BO",
+    "BQ",
+    "BR",
+    "BS",
+    "BT",
+    "BV",
+    "BW",
+    "BY",
+    "BZ",
+    "CA",
+    "CD",
+    "CF",
+    "CG",
+    "CH",
+    "CI",
+    "CK",
+    "CL",
+    "CM",
+    "CN",
+    "CO",
+    "CR",
+    "CU",
+    "CV",
+    "CW",
+    "CX",
+    "CY",
+    "CZ",
+    "DE",
+    "DK",
+    "DM",
+    "DO",
+    "DZ",
+    "EC",
+    "EE",
+    "EG",
+    "EH",
+    "ER",
+    "ES",
+    "ET",
+    "FI",
+    "FJ",
+    "FK",
+    "FM",
+    "FO",
+    "FR",
+    "GA",
+    "GB",
+    "GD",
+    "GE",
+    "GF",
+    "GG",
+    "GH",
+    "GI",
+    "GL",
+    "GM",
+    "GN",
+    "GP",
+    "GQ",
+    "GR",
+    "GS",
+    "GT",
+    "GU",
+    "GW",
+    "GY",
+    "HK",
+    "HM",
+    "HN",
+    "HR",
+    "HT",
+    "HU",
+    "ID",
+    "IE",
+    "IL",
+    "IM",
+    "IN",
+    "IO",
+    "IQ",
+    "IR",
+    "IS",
+    "IT",
+    "JE",
+    "JM",
+    "JO",
+    "JP",
+    "KE",
+    "KG",
+    "KH",
+    "KI",
+    "KN",
+    "KP",
+    "KR",
+    "KW",
+    "KY",
+    "KZ",
+    "LA",
+    "LB",
+    "LC",
+    "LI",
+    "LK",
+    "LR",
+    "LS",
+    "LT",
+    "LU",
+    "LV",
+    "LY",
+    "MA",
+    "MD",
+    "ME",
+    "MF",
+    "MG",
+    "MH",
+    "MK",
+    "ML",
+    "MM",
+    "MN",
+    "MO",
+    "MP",
+    "MQ",
+    "MR",
+    "MS",
+    "MT",
+    "MU",
+    "MV",
+    "MW",
+    "MX",
+    "MY",
+    "MZ",
+    "NA",
+    "NC",
+    "NE",
+    "NF",
+    "NG",
+    "NI",
+    "NL",
+    "NO",
+    "NP",
+    "NU",
+    "NZ",
+    "OM",
+    "PA",
+    "PE",
+    "PF",
+    "PG",
+    "PH",
+    "PK",
+    "PL",
+    "PM",
+    "PN",
+    "PR",
+    "PS",
+    "PT",
+    "PW",
+    "PY",
+    "QA",
+    "RE",
+    "RO",
+    "RS",
+    "RU",
+    "RW",
+    "SA",
+    "SB",
+    "SC",
+    "SD",
+    "SE",
+    "SG",
+    "SH",
+    "SI",
+    "SJ",
+    "SK",
+    "SL",
+    "SN",
+    "SO",
+    "SR",
+    "SS",
+    "ST",
+    "SV",
+    "SX",
+    "SY",
+    "SZ",
+    "TC",
+    "TD",
+    "TF",
+    "TG",
+    "TH",
+    "TJ",
+    "TK",
+    "TL",
+    "TM",
+    "TN",
+    "TO",
+    "TR",
+    "TT",
+    "TV",
+    "TW",
+    "TZ",
+    "UA",
+    "UG",
+    "UM",
+    "UNRECORDED",
+    "US",
+    "UY",
+    "UZ",
+    "VA",
+    "VC",
+    "VE",
+    "VG",
+    "VI",
+    "VN",
+    "VU",
+    "WF",
+    "WS",
+    "XK",
+    "XZ",
+    "YE",
+    "YT",
+    "ZA",
+    "ZM",
+    "ZW",
+    "ZZ"
+   ],
+   "salt": [
+    "XZ",
+    "VA",
+    "TV",
+    "BV",
+    "ER",
+    "BL",
+    "PN",
+    "BH",
+    "TM",
+    "SS"
+   ],
+   "visible": 3495606278,
+   "share": 1.0
+  }
+ ],
+ "ran_s": 565.8,
+ "measurements": {
+  "session.1%.authorise.first": {
+   "n": 1,
+   "median": 25.63,
+   "p95": 25.63,
+   "max": 25.63
+  },
+  "session.1%.first_counts.first": {
+   "n": 1,
+   "median": 7990.49,
+   "p95": 7990.49,
+   "max": 7990.49
+  },
+  "session.1%.first_marks.first": {
+   "n": 1,
+   "median": 24393.87,
+   "p95": 24393.87,
+   "max": 24393.87,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.1%.authorise.again": {
+   "n": 1,
+   "median": 1.3,
+   "p95": 1.3,
+   "max": 1.3
+  },
+  "session.1%.first_counts.again": {
+   "n": 1,
+   "median": 988.44,
+   "p95": 988.44,
+   "max": 988.44
+  },
+  "session.1%.first_marks.again": {
+   "n": 1,
+   "median": 7100.9,
+   "p95": 7100.9,
+   "max": 7100.9,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.7%.authorise.first": {
+   "n": 1,
+   "median": 24.52,
+   "p95": 24.52,
+   "max": 24.52
+  },
+  "session.7%.first_counts.first": {
+   "n": 1,
+   "median": 1230.98,
+   "p95": 1230.98,
+   "max": 1230.98
+  },
+  "session.7%.first_marks.first": {
+   "n": 1,
+   "median": 16598.54,
+   "p95": 16598.54,
+   "max": 16598.54,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.7%.authorise.again": {
+   "n": 1,
+   "median": 1.13,
+   "p95": 1.13,
+   "max": 1.13
+  },
+  "session.7%.first_counts.again": {
+   "n": 1,
+   "median": 1083.76,
+   "p95": 1083.76,
+   "max": 1083.76
+  },
+  "session.7%.first_marks.again": {
+   "n": 1,
+   "median": 8547.71,
+   "p95": 8547.71,
+   "max": 8547.71,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.85%.authorise.first": {
+   "n": 1,
+   "median": 372.37,
+   "p95": 372.37,
+   "max": 372.37
+  },
+  "session.85%.first_counts.first": {
+   "n": 1,
+   "median": 4941.62,
+   "p95": 4941.62,
+   "max": 4941.62
+  },
+  "session.85%.first_marks.first": {
+   "n": 1,
+   "median": 72602.64,
+   "p95": 72602.64,
+   "max": 72602.64,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.85%.authorise.again": {
+   "n": 1,
+   "median": 9.79,
+   "p95": 9.79,
+   "max": 9.79
+  },
+  "session.85%.first_counts.again": {
+   "n": 1,
+   "median": 8376.4,
+   "p95": 8376.4,
+   "max": 8376.4
+  },
+  "session.85%.first_marks.again": {
+   "n": 1,
+   "median": 71933.75,
+   "p95": 71933.75,
+   "max": 71933.75,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.100%.authorise.first": {
+   "n": 1,
+   "median": 415.09,
+   "p95": 415.09,
+   "max": 415.09
+  },
+  "session.100%.first_counts.first": {
+   "n": 1,
+   "median": 4939.57,
+   "p95": 4939.57,
+   "max": 4939.57
+  },
+  "session.100%.first_marks.first": {
+   "n": 1,
+   "median": 66829.36,
+   "p95": 66829.36,
+   "max": 66829.36,
+   "shed": 0,
+   "errors": 0
+  },
+  "session.100%.authorise.again": {
+   "n": 1,
+   "median": 4.28,
+   "p95": 4.28,
+   "max": 4.28
+  },
+  "session.100%.first_counts.again": {
+   "n": 1,
+   "median": 7693.86,
+   "p95": 7693.86,
+   "max": 7693.86
+  },
+  "session.100%.first_marks.again": {
+   "n": 1,
+   "median": 76125.41,
+   "p95": 76125.41,
+   "max": 76125.41,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z0.artifacts": {
+   "n": 2,
+   "median": 3434.1,
+   "p95": 5836.73,
+   "max": 5836.73,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z1-4.zoom_in": {
+   "n": 1,
+   "median": 916.48,
+   "p95": 916.48,
+   "max": 916.48,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z1-4.repeat": {
+   "n": 1,
+   "median": 967.24,
+   "p95": 967.24,
+   "max": 967.24,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z1-4.artifacts": {
+   "n": 2,
+   "median": 3.74,
+   "p95": 2513.03,
+   "max": 2513.03,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z5-8.zoom_in": {
+   "n": 2,
+   "median": 1213.58,
+   "p95": 3281.99,
+   "max": 3281.99,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z5-8.repeat": {
+   "n": 2,
+   "median": 21.94,
+   "p95": 2161.39,
+   "max": 2161.39,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z5-8.artifacts": {
+   "n": 4,
+   "median": 29.25,
+   "p95": 92.85,
+   "max": 92.85,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z9-11.artifacts": {
+   "n": 4,
+   "median": 83.78,
+   "p95": 4570.45,
+   "max": 4570.45,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.z12-14.artifacts": {
+   "n": 8,
+   "median": 3.0,
+   "p95": 48.74,
+   "max": 48.74,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.1%.pass.fresh_total": {
+   "n": 1,
+   "median": 22790.0,
+   "p95": 22790.0,
+   "max": 22790.0
+  },
+  "map.1%.pass.repeat_total": {
+   "n": 1,
+   "median": 8880.0,
+   "p95": 8880.0,
+   "max": 8880.0
+  },
+  "map.7%.z0.artifacts": {
+   "n": 2,
+   "median": 1618.68,
+   "p95": 2139.34,
+   "max": 2139.34,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z1-4.zoom_in": {
+   "n": 2,
+   "median": 702.16,
+   "p95": 1329.72,
+   "max": 1329.72,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z1-4.artifacts": {
+   "n": 2,
+   "median": 27.37,
+   "p95": 54.98,
+   "max": 54.98,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z5-8.zoom_in": {
+   "n": 1,
+   "median": 7854.93,
+   "p95": 7854.93,
+   "max": 7854.93,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z5-8.artifacts": {
+   "n": 4,
+   "median": 3.2,
+   "p95": 39.55,
+   "max": 39.55,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z9-11.artifacts": {
+   "n": 4,
+   "median": 45.57,
+   "p95": 7043.92,
+   "max": 7043.92,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.z12-14.artifacts": {
+   "n": 8,
+   "median": 4.33,
+   "p95": 7.07,
+   "max": 7.07,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.7%.pass.fresh_total": {
+   "n": 1,
+   "median": 21080.0,
+   "p95": 21080.0,
+   "max": 21080.0
+  },
+  "map.100%.z0.artifacts": {
+   "n": 2,
+   "median": 71.72,
+   "p95": 1884.32,
+   "max": 1884.32,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z1-4.zoom_in": {
+   "n": 2,
+   "median": 23474.46,
+   "p95": 26696.76,
+   "max": 26696.76,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z1-4.artifacts": {
+   "n": 2,
+   "median": 4256.53,
+   "p95": 5995.03,
+   "max": 5995.03,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z5-8.zoom_in": {
+   "n": 2,
+   "median": 2854.07,
+   "p95": 20623.99,
+   "max": 20623.99,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z5-8.pan": {
+   "n": 2,
+   "median": 109.96,
+   "p95": 466.92,
+   "max": 466.92,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z5-8.artifacts": {
+   "n": 4,
+   "median": 426.72,
+   "p95": 681.43,
+   "max": 681.43,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z9-11.zoom_in": {
+   "n": 2,
+   "median": 296.57,
+   "p95": 24674.15,
+   "max": 24674.15,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z9-11.pan": {
+   "n": 2,
+   "median": 76.53,
+   "p95": 277.3,
+   "max": 277.3,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z9-11.artifacts": {
+   "n": 4,
+   "median": 122.17,
+   "p95": 133.97,
+   "max": 133.97,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z12-14.zoom_in": {
+   "n": 2,
+   "median": 14.91,
+   "p95": 5615.64,
+   "max": 5615.64,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z12-14.pan": {
+   "n": 1,
+   "median": 2.54,
+   "p95": 2.54,
+   "max": 2.54,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.z12-14.artifacts": {
+   "n": 8,
+   "median": 4.85,
+   "p95": 14.03,
+   "max": 14.03,
+   "shed": 0,
+   "errors": 0
+  },
+  "map.100%.pass.fresh_total": {
+   "n": 1,
+   "median": 120160.0,
+   "p95": 120160.0,
+   "max": 120160.0
+  },
+  "lookup.1%.item_card": {
+   "n": 181,
+   "median": 1.42,
+   "p95": 62.19,
+   "max": 108.96,
+   "errors": 0
+  },
+  "lookup.1%.filter_eq_gbifid": {
+   "n": 181,
+   "median": 2.29,
+   "p95": 18.63,
+   "max": 25.54,
+   "errors": 0
+  },
+  "lookup.100%.item_card": {
+   "n": 200,
+   "median": 46.66,
+   "p95": 72.9,
+   "max": 106.03,
+   "errors": 0
+  },
+  "lookup.100%.filter_eq_gbifid": {
+   "n": 200,
+   "median": 20.99,
+   "p95": 38.44,
+   "max": 43.89,
+   "errors": 0
+  }
+ },
+ "detail": {
+  "run_id": "1790951800630054080",
+  "principals": [
+   {
+    "label": "1%",
+    "target": 0.01,
+    "terms": [
+     "AI",
+     "BH",
+     "DJ",
+     "ER",
+     "MX",
+     "PN",
+     "TM",
+     "XZ"
+    ],
+    "base_terms": 2,
+    "salt": [
+     "XZ",
+     "ER",
+     "PN",
+     "BH",
+     "TM",
+     "DJ"
+    ],
+    "visible": 35064409,
+    "open_first": {
+     "meta_ms": 3.2,
+     "first_counts_ms": 7990.49,
+     "first_marks_ms": 24393.87,
+     "first_view_ms": 29411.15,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 7967.42,
+        "server_ms": 7964.42,
+        "bytes": 70297,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 4555.94,
+        "server_ms": 510.18,
+        "bytes": 95478,
+        "status": 200,
+        "served": 559
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 4536.92,
+        "server_ms": 1256.41,
+        "bytes": 2027398,
+        "status": 200,
+        "served": 47483
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 1089.59,
+        "server_ms": 808.91,
+        "bytes": 108150,
+        "status": 200,
+        "served": 168
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 5186.71,
+        "server_ms": 3931.01,
+        "bytes": 45495,
+        "status": 200,
+        "served": 341
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 143.3,
+        "server_ms": 75.59,
+        "bytes": 7475,
+        "status": 200,
+        "served": 6
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 418.13,
+        "server_ms": 280.71,
+        "bytes": 11124,
+        "status": 200,
+        "served": 23
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 10.17,
+        "server_ms": 8.54,
+        "bytes": 790,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 34.7,
+        "server_ms": 32.97,
+        "bytes": 7410,
+        "status": 200,
+        "served": 5
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 4.76,
+        "server_ms": 3.47,
+        "bytes": 790,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 54.94,
+        "server_ms": 28.94,
+        "bytes": 9459,
+        "status": 200,
+        "served": 17
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 34.88,
+        "server_ms": 18.65,
+        "bytes": 7794,
+        "status": 200,
+        "served": 8
+       },
+       {
+        "kind": "artifacts",
+        "depth": 9,
+        "ms": 5017.28,
+        "server_ms": 4996.22,
+        "bytes": 849511,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 7987.293460999354,
+      "marks_ms": 16070.052208999186,
+      "view_ms": 24352.40067599989,
+      "artifacts_ms": 5017.275754998991,
+      "depth": 9,
+      "source": "counts",
+      "pieces": 11,
+      "visible": 35064409,
+      "served": 48610,
+      "shed": 0,
+      "errors": 0
+     }
+    },
+    "open_again": {
+     "meta_ms": 0.71,
+     "first_counts_ms": 988.44,
+     "first_marks_ms": 7100.9,
+     "first_view_ms": 8942.95,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 976.65,
+        "server_ms": 974.13,
+        "bytes": 70296,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 1504.23,
+        "server_ms": 85.54,
+        "bytes": 95478,
+        "status": 200,
+        "served": 559
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 2359.38,
+        "server_ms": 661.79,
+        "bytes": 2027398,
+        "status": 200,
+        "served": 47483
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 184.33,
+        "server_ms": 39.05,
+        "bytes": 108149,
+        "status": 200,
+        "served": 168
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 1343.93,
+        "server_ms": 622.19,
+        "bytes": 45494,
+        "status": 200,
+        "served": 341
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 141.82,
+        "server_ms": 108.83,
+        "bytes": 7475,
+        "status": 200,
+        "served": 6
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 163.6,
+        "server_ms": 85.75,
+        "bytes": 11124,
+        "status": 200,
+        "served": 23
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 14.88,
+        "server_ms": 13.56,
+        "bytes": 791,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 18.29,
+        "server_ms": 16.61,
+        "bytes": 7409,
+        "status": 200,
+        "served": 5
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 3.89,
+        "server_ms": 2.41,
+        "bytes": 790,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 22.9,
+        "server_ms": 14.4,
+        "bytes": 9459,
+        "status": 200,
+        "served": 17
+       },
+       {
+        "kind": "marks",
+        "depth": 9,
+        "ms": 23.39,
+        "server_ms": 22.03,
+        "bytes": 7794,
+        "status": 200,
+        "served": 8
+       },
+       {
+        "kind": "artifacts",
+        "depth": 9,
+        "ms": 1842.04,
+        "server_ms": 1823.81,
+        "bytes": 849511,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 987.733500000104,
+      "marks_ms": 5780.6392409984255,
+      "view_ms": 7062.795259998893,
+      "artifacts_ms": 1842.0439189994795,
+      "depth": 9,
+      "source": "counts",
+      "pieces": 11,
+      "visible": 35064409,
+      "served": 48610,
+      "shed": 0,
+      "errors": 0
+     }
+    }
+   },
+   {
+    "label": "7%",
+    "target": 0.07,
+    "terms": [
+     "AU",
+     "BH",
+     "BL",
+     "CC",
+     "DJ",
+     "RE",
+     "SM",
+     "SS",
+     "TV"
+    ],
+    "base_terms": 2,
+    "salt": [
+     "SM",
+     "TV",
+     "BL",
+     "BH",
+     "SS",
+     "CC",
+     "DJ"
+    ],
+    "visible": 244851023,
+    "open_first": {
+     "meta_ms": 1.03,
+     "first_counts_ms": 1230.98,
+     "first_marks_ms": 16598.54,
+     "first_view_ms": 21135.11,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 1218.8,
+        "server_ms": 1216.45,
+        "bytes": 107737,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 13158.85,
+        "server_ms": 943.04,
+        "bytes": 1876666,
+        "status": 200,
+        "served": 32140
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 2080.44,
+        "server_ms": 773.5,
+        "bytes": 40759,
+        "status": 200,
+        "served": 119
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 57.26,
+        "server_ms": 44.13,
+        "bytes": 21236,
+        "status": 200,
+        "served": 116
+       },
+       {
+        "kind": "artifacts",
+        "depth": 8,
+        "ms": 4536.57,
+        "server_ms": 4520.07,
+        "bytes": 1064231,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 1229.9524290010595,
+      "marks_ms": 15296.548469001209,
+      "view_ms": 16590.69987300063,
+      "artifacts_ms": 4536.572117000105,
+      "depth": 8,
+      "source": "counts",
+      "pieces": 3,
+      "visible": 244851023,
+      "served": 32375,
+      "shed": 0,
+      "errors": 0
+     }
+    },
+    "open_again": {
+     "meta_ms": 0.74,
+     "first_counts_ms": 1083.76,
+     "first_marks_ms": 8547.71,
+     "first_view_ms": 8613.93,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 1071.88,
+        "server_ms": 1069.35,
+        "bytes": 107737,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 6609.99,
+        "server_ms": 133.86,
+        "bytes": 1876665,
+        "status": 200,
+        "served": 32140
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 775.44,
+        "server_ms": 127.09,
+        "bytes": 40757,
+        "status": 200,
+        "served": 119
+       },
+       {
+        "kind": "marks",
+        "depth": 8,
+        "ms": 9.04,
+        "server_ms": 7.41,
+        "bytes": 21235,
+        "status": 200,
+        "served": 116
+       },
+       {
+        "kind": "artifacts",
+        "depth": 8,
+        "ms": 66.22,
+        "server_ms": 51.62,
+        "bytes": 1064229,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 1083.015174999673,
+      "marks_ms": 7394.472910998957,
+      "view_ms": 8540.283301999807,
+      "artifacts_ms": 66.21543300025223,
+      "depth": 8,
+      "source": "counts",
+      "pieces": 3,
+      "visible": 244851023,
+      "served": 32375,
+      "shed": 0,
+      "errors": 0
+     }
+    }
+   },
+   {
+    "label": "85%",
+    "target": 0.85,
+    "terms": [
+     "AU",
+     "BE",
+     "BH",
+     "BL",
+     "BV",
+     "CA",
+     "CH",
+     "CO",
+     "CR",
+     "DE",
+     "DJ",
+     "DK",
+     "ES",
+     "FI",
+     "FR",
+     "GB",
+     "IN",
+     "KM",
+     "MC",
+     "MY",
+     "NL",
+     "NO",
+     "NR",
+     "SE",
+     "SS",
+     "SX",
+     "TM",
+     "US",
+     "VA",
+     "ZA"
+    ],
+    "base_terms": 20,
+    "salt": [
+     "NR",
+     "VA",
+     "BV",
+     "MC",
+     "BL",
+     "BH",
+     "TM",
+     "SS",
+     "DJ",
+     "KM"
+    ],
+    "visible": 2971574576,
+    "open_first": {
+     "meta_ms": 1.06,
+     "first_counts_ms": 4941.62,
+     "first_marks_ms": 72602.64,
+     "first_view_ms": 75047.17,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 4911.42,
+        "server_ms": 4830.21,
+        "bytes": 672218,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 6,
+        "ms": 67623.31,
+        "server_ms": 9292.44,
+        "bytes": 2506811,
+        "status": 200,
+        "served": 32435
+       },
+       {
+        "kind": "artifacts",
+        "depth": 6,
+        "ms": 2444.52,
+        "server_ms": 2419.55,
+        "bytes": 1678696,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 4940.565887000048,
+      "marks_ms": 67623.30617000043,
+      "view_ms": 72598.93181000007,
+      "artifacts_ms": 2444.523840000329,
+      "depth": 6,
+      "source": "counts",
+      "pieces": 1,
+      "visible": 2971574576,
+      "served": 32435,
+      "shed": 0,
+      "errors": 0
+     }
+    },
+    "open_again": {
+     "meta_ms": 1.29,
+     "first_counts_ms": 8376.4,
+     "first_marks_ms": 71933.75,
+     "first_view_ms": 73862.96,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 8346.31,
+        "server_ms": 8342.05,
+        "bytes": 672218,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 6,
+        "ms": 63524.21,
+        "server_ms": 8893.54,
+        "bytes": 2506810,
+        "status": 200,
+        "served": 32435
+       },
+       {
+        "kind": "artifacts",
+        "depth": 6,
+        "ms": 1929.21,
+        "server_ms": 1910.09,
+        "bytes": 1678696,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 8375.117600000522,
+      "marks_ms": 63524.20521200111,
+      "view_ms": 71929.61678199936,
+      "artifacts_ms": 1929.21010200007,
+      "depth": 6,
+      "source": "counts",
+      "pieces": 1,
+      "visible": 2971574576,
+      "served": 32435,
+      "shed": 0,
+      "errors": 0
+     }
+    }
+   },
+   {
+    "label": "100%",
+    "target": 1.0,
+    "terms": [
+     "AD",
+     "AE",
+     "AF",
+     "AG",
+     "AI",
+     "AL",
+     "AM",
+     "AO",
+     "AQ",
+     "AR",
+     "AS",
+     "AT",
+     "AU",
+     "AW",
+     "AX",
+     "AZ",
+     "BA",
+     "BB",
+     "BD",
+     "BE",
+     "BF",
+     "BG",
+     "BH",
+     "BI",
+     "BJ",
+     "BL",
+     "BM",
+     "BN",
+     "BO",
+     "BQ",
+     "BR",
+     "BS",
+     "BT",
+     "BV",
+     "BW",
+     "BY",
+     "BZ",
+     "CA",
+     "CD",
+     "CF",
+     "CG",
+     "CH",
+     "CI",
+     "CK",
+     "CL",
+     "CM",
+     "CN",
+     "CO",
+     "CR",
+     "CU",
+     "CV",
+     "CW",
+     "CX",
+     "CY",
+     "CZ",
+     "DE",
+     "DK",
+     "DM",
+     "DO",
+     "DZ",
+     "EC",
+     "EE",
+     "EG",
+     "EH",
+     "ER",
+     "ES",
+     "ET",
+     "FI",
+     "FJ",
+     "FK",
+     "FM",
+     "FO",
+     "FR",
+     "GA",
+     "GB",
+     "GD",
+     "GE",
+     "GF",
+     "GG",
+     "GH",
+     "GI",
+     "GL",
+     "GM",
+     "GN",
+     "GP",
+     "GQ",
+     "GR",
+     "GS",
+     "GT",
+     "GU",
+     "GW",
+     "GY",
+     "HK",
+     "HM",
+     "HN",
+     "HR",
+     "HT",
+     "HU",
+     "ID",
+     "IE",
+     "IL",
+     "IM",
+     "IN",
+     "IO",
+     "IQ",
+     "IR",
+     "IS",
+     "IT",
+     "JE",
+     "JM",
+     "JO",
+     "JP",
+     "KE",
+     "KG",
+     "KH",
+     "KI",
+     "KN",
+     "KP",
+     "KR",
+     "KW",
+     "KY",
+     "KZ",
+     "LA",
+     "LB",
+     "LC",
+     "LI",
+     "LK",
+     "LR",
+     "LS",
+     "LT",
+     "LU",
+     "LV",
+     "LY",
+     "MA",
+     "MD",
+     "ME",
+     "MF",
+     "MG",
+     "MH",
+     "MK",
+     "ML",
+     "MM",
+     "MN",
+     "MO",
+     "MP",
+     "MQ",
+     "MR",
+     "MS",
+     "MT",
+     "MU",
+     "MV",
+     "MW",
+     "MX",
+     "MY",
+     "MZ",
+     "NA",
+     "NC",
+     "NE",
+     "NF",
+     "NG",
+     "NI",
+     "NL",
+     "NO",
+     "NP",
+     "NU",
+     "NZ",
+     "OM",
+     "PA",
+     "PE",
+     "PF",
+     "PG",
+     "PH",
+     "PK",
+     "PL",
+     "PM",
+     "PN",
+     "PR",
+     "PS",
+     "PT",
+     "PW",
+     "PY",
+     "QA",
+     "RE",
+     "RO",
+     "RS",
+     "RU",
+     "RW",
+     "SA",
+     "SB",
+     "SC",
+     "SD",
+     "SE",
+     "SG",
+     "SH",
+     "SI",
+     "SJ",
+     "SK",
+     "SL",
+     "SN",
+     "SO",
+     "SR",
+     "SS",
+     "ST",
+     "SV",
+     "SX",
+     "SY",
+     "SZ",
+     "TC",
+     "TD",
+     "TF",
+     "TG",
+     "TH",
+     "TJ",
+     "TK",
+     "TL",
+     "TM",
+     "TN",
+     "TO",
+     "TR",
+     "TT",
+     "TV",
+     "TW",
+     "TZ",
+     "UA",
+     "UG",
+     "UM",
+     "UNRECORDED",
+     "US",
+     "UY",
+     "UZ",
+     "VA",
+     "VC",
+     "VE",
+     "VG",
+     "VI",
+     "VN",
+     "VU",
+     "WF",
+     "WS",
+     "XK",
+     "XZ",
+     "YE",
+     "YT",
+     "ZA",
+     "ZM",
+     "ZW",
+     "ZZ"
+    ],
+    "base_terms": 237,
+    "salt": [
+     "XZ",
+     "VA",
+     "TV",
+     "BV",
+     "ER",
+     "BL",
+     "PN",
+     "BH",
+     "TM",
+     "SS"
+    ],
+    "visible": 3495606278,
+    "open_first": {
+     "meta_ms": 124.22,
+     "first_counts_ms": 4939.57,
+     "first_marks_ms": 66829.36,
+     "first_view_ms": 68433.86,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 4749.75,
+        "server_ms": 4744.77,
+        "bytes": 1845979,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 5,
+        "ms": 61850.25,
+        "server_ms": 9546.57,
+        "bytes": 2191035,
+        "status": 200,
+        "served": 14378
+       },
+       {
+        "kind": "artifacts",
+        "depth": 5,
+        "ms": 1604.51,
+        "server_ms": 1583.83,
+        "bytes": 1823272,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 4815.352506000636,
+      "marks_ms": 61850.25273899919,
+      "view_ms": 66703.78921200063,
+      "artifacts_ms": 1604.5050030006678,
+      "depth": 5,
+      "source": "counts",
+      "pieces": 1,
+      "visible": 3495606278,
+      "served": 14378,
+      "shed": 0,
+      "errors": 0
+     }
+    },
+    "open_again": {
+     "meta_ms": 0.85,
+     "first_counts_ms": 7693.86,
+     "first_marks_ms": 76125.41,
+     "first_view_ms": 77714.54,
+     "step": {
+      "map_zoom": 0,
+      "requests": [
+       {
+        "kind": "seed",
+        "depth": 8,
+        "ms": 7582.06,
+        "server_ms": 7576.11,
+        "bytes": 1845978,
+        "status": 200,
+        "served": 0
+       },
+       {
+        "kind": "marks",
+        "depth": 5,
+        "ms": 68390.43,
+        "server_ms": 8956.72,
+        "bytes": 2191034,
+        "status": 200,
+        "served": 14378
+       },
+       {
+        "kind": "artifacts",
+        "depth": 5,
+        "ms": 1589.13,
+        "server_ms": 1565.55,
+        "bytes": 1823272,
+        "status": 200,
+        "served": 0
+       }
+      ],
+      "counts_ms": 7693.017906998648,
+      "marks_ms": 68390.43233600023,
+      "view_ms": 76123.22603499888,
+      "artifacts_ms": 1589.1254899997875,
+      "depth": 5,
+      "source": "counts",
+      "pieces": 1,
+      "visible": 3495606278,
+      "served": 14378,
+      "shed": 0,
+      "errors": 0
+     }
+    }
+   }
+  ],
+  "regions": {
+   "europe": [
+    262.4,
+    171.406
+   ],
+   "eastern-us": [
+    148.622,
+    193.833
+   ]
+  },
+  "map": {
+   "1%": {
+    "fresh": {
+     "steps": [
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 6,
+         "ms": 913.59,
+         "server_ms": 439.9,
+         "bytes": 17076,
+         "status": 200,
+         "served": 79
+        },
+        {
+         "kind": "artifacts",
+         "depth": 6,
+         "ms": 3.74,
+         "server_ms": 1.58,
+         "bytes": 14052,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 913.5882939990552,
+       "view_ms": 916.4806919998227,
+       "artifacts_ms": 3.7391059995570686,
+       "depth": 6,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 846,
+       "served": 79,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 3281.64,
+         "server_ms": 21.87,
+         "bytes": 11060,
+         "status": 200,
+         "served": 4
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 92.85,
+         "server_ms": 90.37,
+         "bytes": 9828,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 3281.640310000512,
+       "view_ms": 3281.9894639997074,
+       "artifacts_ms": 92.85304600052768,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 714,
+       "served": 4,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 16.04,
+         "server_ms": 14.1,
+         "bytes": 8228,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.10586900134512689,
+       "artifacts_ms": 16.041044000303373,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 4570.45,
+         "server_ms": 0.17,
+         "bytes": 12326,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.032425001336378045,
+       "artifacts_ms": 4570.451801000672,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 74.64,
+         "server_ms": 72.21,
+         "bytes": 12325,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03824199848168064,
+       "artifacts_ms": 74.64360799895076,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.61,
+         "server_ms": 0.25,
+         "bytes": 9828,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03364400072314311,
+       "artifacts_ms": 2.610510999147664,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.15,
+         "server_ms": 0.17,
+         "bytes": 9827,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.026237999918521382,
+       "artifacts_ms": 2.1493399999599205,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 1.98,
+         "server_ms": 0.16,
+         "bytes": 9827,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.02450900137773715,
+       "artifacts_ms": 1.9784899996011518,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 3.0,
+         "server_ms": 0.2,
+         "bytes": 9828,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.02466300065862015,
+       "artifacts_ms": 2.999979999003699,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 5836.73,
+         "server_ms": 5815.03,
+         "bytes": 849512,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 179.21034000028158,
+       "artifacts_ms": 5836.731775998487,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 35064409,
+       "served": 48610,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 2513.03,
+         "server_ms": 1406.02,
+         "bytes": 645671,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 14.496191000944236,
+       "artifacts_ms": 2513.025039999775,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 14581231,
+       "served": 19886,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 1213.13,
+         "server_ms": 1074.31,
+         "bytes": 1273719,
+         "status": 200,
+         "served": 102
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 36.27,
+         "server_ms": 0.27,
+         "bytes": 1270118,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 1213.128981000409,
+       "view_ms": 1213.584777999131,
+       "artifacts_ms": 36.270162998334854,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 5024909,
+       "served": 102,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 29.25,
+         "server_ms": 0.34,
+         "bytes": 1270118,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.09902999954647385,
+       "artifacts_ms": 29.24651399916911,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024909,
+       "served": 102,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 125.35,
+         "server_ms": 4.19,
+         "bytes": 3832551,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03707699943333864,
+       "artifacts_ms": 125.3504639989842,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 83.78,
+         "server_ms": 0.29,
+         "bytes": 3832550,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.04113600152777508,
+       "artifacts_ms": 83.78029999948922,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 47.76,
+         "server_ms": 0.31,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.034111999411834404,
+       "artifacts_ms": 47.7618730001268,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 48.74,
+         "server_ms": 0.37,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03708599979290739,
+       "artifacts_ms": 48.74288700011675,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 46.81,
+         "server_ms": 0.32,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03377899884071667,
+       "artifacts_ms": 46.80524000104924,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 43.36,
+         "server_ms": 0.29,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.0331150004058145,
+       "artifacts_ms": 43.36428199894726,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 3434.1,
+         "server_ms": 3417.19,
+         "bytes": 849511,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 144.57437099918025,
+       "artifacts_ms": 3434.1045080000185,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 35064409,
+       "served": 48610,
+       "shed": 0,
+       "errors": 0
+      }
+     ],
+     "wall_s": 22.79
+    },
+    "repeat": {
+     "steps": [
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 6,
+         "ms": 964.22,
+         "server_ms": 326.8,
+         "bytes": 17076,
+         "status": 200,
+         "served": 79
+        },
+        {
+         "kind": "artifacts",
+         "depth": 6,
+         "ms": 3.97,
+         "server_ms": 1.7,
+         "bytes": 14051,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 964.215272999354,
+       "view_ms": 967.2365169990371,
+       "artifacts_ms": 3.972354001234635,
+       "depth": 6,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 846,
+       "served": 79,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 21.62,
+         "server_ms": 19.56,
+         "bytes": 11058,
+         "status": 200,
+         "served": 4
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.75,
+         "server_ms": 0.29,
+         "bytes": 9828,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 21.623581000312697,
+       "view_ms": 21.937059998890618,
+       "artifacts_ms": 2.7494580008351477,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 714,
+       "served": 4,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.19,
+         "server_ms": 0.21,
+         "bytes": 8227,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.11118800102849491,
+       "artifacts_ms": 2.1866120005142875,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.35,
+         "server_ms": 0.2,
+         "bytes": 12323,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.037169000279391184,
+       "artifacts_ms": 2.3532369996246416,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.4,
+         "server_ms": 0.23,
+         "bytes": 12323,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03685999945446383,
+       "artifacts_ms": 2.4019969987421064,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.83,
+         "server_ms": 0.24,
+         "bytes": 9828,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.029550999897764996,
+       "artifacts_ms": 2.826977000950137,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.45,
+         "server_ms": 0.2,
+         "bytes": 9827,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.02706200029933825,
+       "artifacts_ms": 2.445164000164368,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.65,
+         "server_ms": 0.21,
+         "bytes": 9827,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.031781999496161006,
+       "artifacts_ms": 2.646210999955656,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.59,
+         "server_ms": 0.19,
+         "bytes": 9827,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.025459999960730784,
+       "artifacts_ms": 2.585853999335086,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 698,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 2554.04,
+         "server_ms": 2534.17,
+         "bytes": 849511,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 195.6636470004014,
+       "artifacts_ms": 2554.0357059999224,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 35064409,
+       "served": 48610,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 1096.5,
+         "server_ms": 32.41,
+         "bytes": 645671,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 16.13566699961666,
+       "artifacts_ms": 1096.4989040003275,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 14581231,
+       "served": 19886,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 2161.01,
+         "server_ms": 1207.26,
+         "bytes": 1273719,
+         "status": 200,
+         "served": 102
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 38.71,
+         "server_ms": 7.61,
+         "bytes": 1270118,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 2161.0070989991073,
+       "view_ms": 2161.3896149992797,
+       "artifacts_ms": 38.71058900040225,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 5024909,
+       "served": 102,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 33.61,
+         "server_ms": 0.21,
+         "bytes": 1270118,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.14318700050353073,
+       "artifacts_ms": 33.60670599977311,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024909,
+       "served": 102,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 503.14,
+         "server_ms": 5.45,
+         "bytes": 3832551,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.05166200025996659,
+       "artifacts_ms": 503.1431409988727,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 91.38,
+         "server_ms": 0.25,
+         "bytes": 3832550,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03947199911635835,
+       "artifacts_ms": 91.37756599920976,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 42.21,
+         "server_ms": 0.23,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.0420340002165176,
+       "artifacts_ms": 42.21102199880988,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 48.03,
+         "server_ms": 0.2,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03260000084992498,
+       "artifacts_ms": 48.02640299931227,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 41.29,
+         "server_ms": 0.17,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.033244999940507114,
+       "artifacts_ms": 41.28785199827689,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 46.56,
+         "server_ms": 0.25,
+         "bytes": 2402598,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03331399966555182,
+       "artifacts_ms": 46.556766999856336,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 5024854,
+       "served": 100,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 9,
+         "ms": 816.16,
+         "server_ms": 798.08,
+         "bytes": 849510,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 152.08376400005363,
+       "artifacts_ms": 816.1600749990612,
+       "depth": 9,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 35064409,
+       "served": 48610,
+       "shed": 0,
+       "errors": 0
+      }
+     ],
+     "wall_s": 8.88
+    }
+   },
+   "7%": {
+    "fresh": {
+     "steps": [
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 1130.61,
+         "server_ms": 261.76,
+         "bytes": 40566,
+         "status": 200,
+         "served": 183
+        },
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 174.02,
+         "server_ms": 23.39,
+         "bytes": 8564,
+         "status": 200,
+         "served": 19
+        },
+        {
+         "kind": "artifacts",
+         "depth": 10,
+         "ms": 27.37,
+         "server_ms": 22.19,
+         "bytes": 36069,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 1304.6264610002254,
+       "view_ms": 1329.722167,
+       "artifacts_ms": 27.373294999051723,
+       "depth": 10,
+       "source": "counts",
+       "pieces": 2,
+       "visible": 7737,
+       "served": 202,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 7854.53,
+         "server_ms": 0.56,
+         "bytes": 66164,
+         "status": 200,
+         "served": 4
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 3.2,
+         "server_ms": 0.25,
+         "bytes": 64932,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 7854.530182999952,
+       "view_ms": 7854.9335389998305,
+       "artifacts_ms": 3.2045709995145444,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 7707,
+       "served": 4,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 2.57,
+         "server_ms": 0.24,
+         "bytes": 63396,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.1915159991767723,
+       "artifacts_ms": 2.5727779993758304,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 7043.92,
+         "server_ms": 0.24,
+         "bytes": 186855,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.030592000257456675,
+       "artifacts_ms": 7043.9214580001135,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 72.5,
+         "server_ms": 67.01,
+         "bytes": 186853,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.04267499934940133,
+       "artifacts_ms": 72.50229400051467,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 4.05,
+         "server_ms": 0.26,
+         "bytes": 119524,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.04041800093546044,
+       "artifacts_ms": 4.047514999911073,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 3.5,
+         "server_ms": 0.2,
+         "bytes": 119524,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03132699930574745,
+       "artifacts_ms": 3.498931999274646,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 3.3,
+         "server_ms": 0.22,
+         "bytes": 119524,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.029324000934138894,
+       "artifacts_ms": 3.3045590007532155,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 4.33,
+         "server_ms": 0.21,
+         "bytes": 119524,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.027289999707136303,
+       "artifacts_ms": 4.329529001552146,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7690,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 8,
+         "ms": 2139.34,
+         "server_ms": 2081.67,
+         "bytes": 1064232,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 36.04258500126889,
+       "artifacts_ms": 2139.342378000947,
+       "depth": 8,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 244851023,
+       "served": 32375,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 475.36,
+         "server_ms": 301.58,
+         "bytes": 84083,
+         "status": 200,
+         "served": 6
+        },
+        {
+         "kind": "marks",
+         "depth": 3,
+         "ms": 225.86,
+         "server_ms": 154.13,
+         "bytes": 8051,
+         "status": 200,
+         "served": 4
+        },
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 54.98,
+         "server_ms": 3.6,
+         "bytes": 83877,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 701.2205650007672,
+       "view_ms": 702.1557449988904,
+       "artifacts_ms": 54.97569200088037,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 2,
+       "visible": 19431,
+       "served": 12,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 39.55,
+         "server_ms": 32.06,
+         "bytes": 201189,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.051687000450328924,
+       "artifacts_ms": 39.55445999963558,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19329,
+       "served": 4,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 6.72,
+         "server_ms": 0.28,
+         "bytes": 201188,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.05134499951964244,
+       "artifacts_ms": 6.715901999996277,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19329,
+       "served": 4,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 45.57,
+         "server_ms": 13.04,
+         "bytes": 564453,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03254900002502836,
+       "artifacts_ms": 45.57013099838514,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 14.42,
+         "server_ms": 0.28,
+         "bytes": 564454,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.04283199996280018,
+       "artifacts_ms": 14.421510999454767,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 6.67,
+         "server_ms": 0.24,
+         "bytes": 345572,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.032871999792405404,
+       "artifacts_ms": 6.6694830002234085,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 6.35,
+         "server_ms": 0.24,
+         "bytes": 345572,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03417200059629977,
+       "artifacts_ms": 6.350406998535618,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 6.62,
+         "server_ms": 0.24,
+         "bytes": 345572,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03167899922118522,
+       "artifacts_ms": 6.62174700119067,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 3,
+         "ms": 7.07,
+         "server_ms": 0.27,
+         "bytes": 345572,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.03298899900983088,
+       "artifacts_ms": 7.068958000672865,
+       "depth": 3,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 19278,
+       "served": 2,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 8,
+         "ms": 1618.68,
+         "server_ms": 1603.01,
+         "bytes": 1064232,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 32.17777300051239,
+       "artifacts_ms": 1618.6830360002205,
+       "depth": 8,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 244851023,
+       "served": 32375,
+       "shed": 0,
+       "errors": 0
+      }
+     ],
+     "wall_s": 21.08
+    }
+   },
+   "100%": {
+    "fresh": {
+     "steps": [
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 7,
+         "ms": 26686.85,
+         "server_ms": 3439.05,
+         "bytes": 2451079,
+         "status": 200,
+         "served": 44737
+        },
+        {
+         "kind": "artifacts",
+         "depth": 7,
+         "ms": 5995.03,
+         "server_ms": 1675.29,
+         "bytes": 1308456,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 26686.850976000642,
+       "view_ms": 26696.76364299994,
+       "artifacts_ms": 5995.03064900091,
+       "depth": 7,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 1238711395,
+       "served": 44737,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 20596.9,
+         "server_ms": 1038.88,
+         "bytes": 7604578,
+         "status": 200,
+         "served": 165916
+        },
+        {
+         "kind": "artifacts",
+         "depth": 10,
+         "ms": 681.43,
+         "server_ms": 70.89,
+         "bytes": 3369895,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 20596.90367300027,
+       "view_ms": 20623.987968998335,
+       "artifacts_ms": 681.4253269985784,
+       "depth": 10,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 252127344,
+       "served": 165916,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 459.17,
+         "server_ms": 172.12,
+         "bytes": 3204485,
+         "status": 200,
+         "served": 43268
+        },
+        {
+         "kind": "artifacts",
+         "depth": 10,
+         "ms": 426.72,
+         "server_ms": 1.68,
+         "bytes": 3193831,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 459.17084500069905,
+       "view_ms": 466.9166910007334,
+       "artifacts_ms": 426.71640099979413,
+       "depth": 10,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 175991233,
+       "served": 131857,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 13,
+         "ms": 24636.45,
+         "server_ms": 7363.91,
+         "bytes": 8433455,
+         "status": 200,
+         "served": 187436
+        },
+        {
+         "kind": "artifacts",
+         "depth": 13,
+         "ms": 133.97,
+         "server_ms": 26.12,
+         "bytes": 3649383,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 24636.449348001406,
+       "view_ms": 24674.148911000884,
+       "artifacts_ms": 133.9703499997995,
+       "depth": 13,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 13998085,
+       "served": 187436,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 13,
+         "ms": 261.2,
+         "server_ms": 93.14,
+         "bytes": 5751570,
+         "status": 200,
+         "served": 91413
+        },
+        {
+         "kind": "artifacts",
+         "depth": 13,
+         "ms": 133.29,
+         "server_ms": 1.09,
+         "bytes": 3916263,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 261.20208899919817,
+       "view_ms": 277.29824999914854,
+       "artifacts_ms": 133.28591299978143,
+       "depth": 13,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 13254653,
+       "served": 187192,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 16,
+         "ms": 5604.25,
+         "server_ms": 5580.62,
+         "bytes": 1423545,
+         "status": 200,
+         "served": 32370
+        },
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 14.03,
+         "server_ms": 0.55,
+         "bytes": 597029,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 5604.248321998966,
+       "view_ms": 5615.639072000704,
+       "artifacts_ms": 14.034343001185334,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 376054,
+       "served": 32370,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "europe",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 4.87,
+         "server_ms": 0.28,
+         "bytes": 158180,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.25433900009375066,
+       "artifacts_ms": 4.870414000833989,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 12777,
+       "served": 2022,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 4.85,
+         "server_ms": 0.21,
+         "bytes": 167652,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.38689000029989984,
+       "artifacts_ms": 4.852213998674415,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 16592,
+       "served": 2761,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "europe",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 7.27,
+         "server_ms": 0.21,
+         "bytes": 342884,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.28053099958924577,
+       "artifacts_ms": 7.26670199946966,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 131557,
+       "served": 4826,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 5,
+         "ms": 71.72,
+         "server_ms": 43.31,
+         "bytes": 1823270,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 122.71304200112354,
+       "artifacts_ms": 71.7157449998922,
+       "depth": 5,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 3495606278,
+       "served": 14378,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 3,
+       "from": 0,
+       "map_zoom": 3,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 7,
+         "ms": 16430.56,
+         "server_ms": 2687.6,
+         "bytes": 1784122,
+         "status": 200,
+         "served": 29869
+        },
+        {
+         "kind": "marks",
+         "depth": 7,
+         "ms": 7031.47,
+         "server_ms": 2330.14,
+         "bytes": 1275577,
+         "status": 200,
+         "served": 13331
+        },
+        {
+         "kind": "artifacts",
+         "depth": 7,
+         "ms": 4256.53,
+         "server_ms": 847.83,
+         "bytes": 1177896,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 23462.03332299956,
+       "view_ms": 23474.464450000596,
+       "artifacts_ms": 4256.533411000419,
+       "depth": 7,
+       "source": "counts",
+       "pieces": 2,
+       "visible": 1166293658,
+       "served": 43222,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 6,
+       "from": 3,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 2800.25,
+         "server_ms": 604.06,
+         "bytes": 6437409,
+         "status": 200,
+         "served": 137266
+        },
+        {
+         "kind": "artifacts",
+         "depth": 10,
+         "ms": 591.38,
+         "server_ms": 19.19,
+         "bytes": 2933543,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 2800.246718999915,
+       "view_ms": 2854.0688939992833,
+       "artifacts_ms": 591.3801909991889,
+       "depth": 10,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 209988558,
+       "served": 137266,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 6,
+       "map_zoom": 6,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 10,
+         "ms": 107.48,
+         "server_ms": 39.03,
+         "bytes": 980086,
+         "status": 200,
+         "served": 5658
+        },
+        {
+         "kind": "artifacts",
+         "depth": 10,
+         "ms": 342.93,
+         "server_ms": 6.59,
+         "bytes": 2466407,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 107.47963499852631,
+       "view_ms": 109.9623160007468,
+       "artifacts_ms": 342.9321439998603,
+       "depth": 10,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 126038072,
+       "served": 63815,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 9,
+       "from": 6,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 13,
+         "ms": 268.07,
+         "server_ms": 27.76,
+         "bytes": 6962912,
+         "status": 200,
+         "served": 154506
+        },
+        {
+         "kind": "artifacts",
+         "depth": 13,
+         "ms": 122.17,
+         "server_ms": 1.02,
+         "bytes": 3019111,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 268.07389200075704,
+       "view_ms": 296.56612199869414,
+       "artifacts_ms": 122.16670899942983,
+       "depth": 13,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 15721862,
+       "served": 154506,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 9,
+       "map_zoom": 9,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 13,
+         "ms": 67.4,
+         "server_ms": 7.6,
+         "bytes": 2691767,
+         "status": 200,
+         "served": 35281
+        },
+        {
+         "kind": "artifacts",
+         "depth": 13,
+         "ms": 97.24,
+         "server_ms": 0.91,
+         "bytes": 3049382,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 67.40395499946317,
+       "view_ms": 76.53491200107965,
+       "artifacts_ms": 97.24084800109267,
+       "depth": 13,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 12388743,
+       "served": 130096,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 12,
+       "from": 9,
+       "map_zoom": 12,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 16,
+         "ms": 8.58,
+         "server_ms": 1.5,
+         "bytes": 895093,
+         "status": 200,
+         "served": 23449
+        },
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 5.92,
+         "server_ms": 0.47,
+         "bytes": 296164,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 8.581305999541655,
+       "view_ms": 14.912520000507357,
+       "artifacts_ms": 5.92020399926696,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 257705,
+       "served": 23449,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-in",
+       "region": "eastern-us",
+       "zoom": 14,
+       "from": 12,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 1.91,
+         "server_ms": 0.2,
+         "bytes": 40484,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.2041769985225983,
+       "artifacts_ms": 1.9118430009257281,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 7198,
+       "served": 1434,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 16,
+         "ms": 1.77,
+         "server_ms": 0.16,
+         "bytes": 47075,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 0.1876739988802001,
+       "artifacts_ms": 1.7660389985394431,
+       "depth": 16,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 23949,
+       "served": 2155,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "pan",
+       "region": "eastern-us",
+       "zoom": 14,
+       "map_zoom": 14,
+       "requests": [
+        {
+         "kind": "marks",
+         "depth": 15,
+         "ms": 1.89,
+         "server_ms": 0.21,
+         "bytes": 54259,
+         "status": 200,
+         "served": 504
+        },
+        {
+         "kind": "artifacts",
+         "depth": 15,
+         "ms": 2.47,
+         "server_ms": 0.16,
+         "bytes": 40676,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 1.885431998744025,
+       "view_ms": 2.535805999286822,
+       "artifacts_ms": 2.473544000167749,
+       "depth": 15,
+       "source": "counts",
+       "pieces": 1,
+       "visible": 4374,
+       "served": 504,
+       "shed": 0,
+       "errors": 0
+      },
+      {
+       "kind": "zoom-out",
+       "region": "world",
+       "zoom": 0,
+       "map_zoom": 0,
+       "requests": [
+        {
+         "kind": "artifacts",
+         "depth": 5,
+         "ms": 1884.32,
+         "server_ms": 1864.73,
+         "bytes": 1823272,
+         "status": 200,
+         "served": 0
+        }
+       ],
+       "marks_ms": 0.0,
+       "view_ms": 47.71435299880977,
+       "artifacts_ms": 1884.3203590004123,
+       "depth": 5,
+       "source": "counts",
+       "pieces": 0,
+       "visible": 3495606278,
+       "served": 14378,
+       "shed": 0,
+       "errors": 0
+      }
+     ],
+     "wall_s": 120.16
+    }
+   }
+  },
+  "lookups": {
+   "1%": {
+    "ids_served": 181,
+    "asked": 181,
+    "failures": 0,
+    "filter_rows": {
+     "1": 181
+    }
+   },
+   "100%": {
+    "ids_served": 937151,
+    "asked": 200,
+    "failures": 0,
+    "filter_rows": {
+     "1": 200
+    }
+   }
+  }
+ }
+}
