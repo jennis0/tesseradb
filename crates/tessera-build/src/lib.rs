@@ -839,13 +839,14 @@ impl AccessPlan {
     /// indexed under, into `out`, sorted and distinct: [`tessera_authz::index_keys`] over the row's
     /// labels. Where no label names a conjunction, or there is one label, that is the union of each
     /// label's own keys, and no label is read again.
-    fn row_keys(&self, labels: &[u64], out: &mut Vec<u64>) -> Result<()> {
+    fn row_keys(&self, labels: &[u64], out: &mut Vec<u64>) {
         out.clear();
         let together =
             labels.len() > 1 && labels.iter().any(|&l| self.names_conjunction[l as usize]);
         if together {
             let texts = labels.iter().map(|&l| self.labels[l as usize].as_str());
-            let keys = tessera_authz::index_keys(texts).map_err(BuildError::Invalid)?;
+            let keys = tessera_authz::index_keys(texts)
+                .expect("each label of the vocabulary was read at the plan");
             out.extend(keys.iter().map(|key| {
                 let key = std::str::from_utf8(key).expect("a key is a label's own text");
                 self.descriptors
@@ -859,7 +860,6 @@ impl AccessPlan {
         }
         out.sort_unstable();
         out.dedup();
-        Ok(())
     }
 }
 
@@ -890,7 +890,6 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
     }
     let mut fill = input::AccessFill::default();
     let mut keys = Vec::new();
-    let mut refused = None;
     for (index, view) in args.views.iter().enumerate() {
         // One visit per key a row's labels are indexed under.
         let one = input::scan_access_field(
@@ -902,19 +901,13 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
             &plan.labels,
             plan.default_term[index],
             |id, labels| {
-                if let Err(e) = plan.row_keys(labels, &mut keys) {
-                    refused = Some(e);
-                    return std::ops::ControlFlow::Break(());
-                }
+                plan.row_keys(labels, &mut keys);
                 for &key in &keys {
                     visit(index, id, key)?;
                 }
                 std::ops::ControlFlow::Continue(())
             },
         )?;
-        if let Some(e) = refused.take() {
-            return Err(e);
-        }
         fill.carried += one.carried;
         fill.filled += one.filled;
     }
