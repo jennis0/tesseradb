@@ -4,7 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from oracle.access import And, Or, Public, Refused, Term, parse, satisfies, terms
+from oracle.access import (
+    And,
+    Or,
+    Public,
+    Refused,
+    Term,
+    admits,
+    card_labels,
+    held_term,
+    parse,
+    satisfies,
+    terms,
+    witness,
+)
 
 
 def holding(*names):
@@ -69,6 +82,58 @@ def test_satisfies(text, held, expected):
 def test_terms_are_those_named():
     assert terms(parse('a&(b|"c d")&a')) == {"a", "b", "c d"}
     assert terms(parse("public")) == set()
+
+
+def test_a_list_of_labels_admits_a_principal_satisfying_any_one():
+    assert admits(["x", "a&b"], holding("a", "b"))
+    assert admits(["x", "a&b"], holding("x"))
+    assert not admits(["x", "a&b"], holding("a"))
+    assert not admits([], holding("a"))
+
+
+@pytest.mark.parametrize(
+    "term, held",
+    [
+        (" red ", "red"),
+        ("team a", "team a"),
+        ("", None),
+        (" ", None),
+        ("public", None),
+        (" PuBlic ", None),
+        ("a\x01b", None),
+        ("\x00a&b", None),
+    ],
+)
+def test_a_credentials_term_is_held_trimmed_and_never_public_or_a_control_character(term, held):
+    assert held_term(term) == held
+
+
+def everything(_term):
+    return True
+
+
+def test_a_witness_takes_the_satisfied_operand_with_fewest_terms_then_the_first():
+    assert witness(parse("(t&c)|(s&(b|a))"), everything) == ["a", "s"]
+    assert witness(parse("(a&b&c)|(d&e)"), everything) == ["d", "e"]
+    assert witness(parse("(t&c)|(s&(b|a))"), holding("s", "b", "c")) == ["b", "s"]
+    assert witness(parse("(t&c)|(s&(b|a))"), holding("s")) is None
+    assert witness(parse("public"), holding()) == []
+
+
+def test_a_card_serves_each_held_term_and_one_clause_of_each_satisfied_conjunction():
+    labels = ["eu&(ir:legal|ir:new)", "ir:new|ir:secret", "x&y"]
+    assert card_labels(labels, holding("eu", "ir:new", "ir:secret")) == [
+        "eu&ir:new",
+        "ir:new",
+        "ir:secret",
+    ]
+    assert card_labels(labels, holding("ir:secret")) == ["ir:secret"]
+    assert card_labels(labels, holding("x")) == []
+    assert card_labels(["public", "a"], holding("a")) == ["a", "public"]
+    assert card_labels(['s&"team b"', '"team b"'], holding("s", "team b")) == [
+        '"team b"',
+        's&"team b"',
+    ]
 
 
 def test_a_space_inside_quotes_makes_another_term():

@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 
 use tessera_lifecycle::resolve::{self, Batch, RowIdentity, Verdict};
 use tessera_lifecycle::wal::ChangeOp;
-use tessera_plugin::Descriptor;
 use tessera_store::manifest::DeclaredScalar;
 use tessera_store::unique::{KeyKind, UniqueKey};
 use tessera_store::StoreError;
@@ -20,7 +19,7 @@ impl Engine {
     /// across calls. `/control/ingest` resolves before the batch is durably appended. An
     /// extension id is never satisfiable by any session, so a live/replay mismatch only
     /// renumbers bookkeeping.
-    pub fn resolve_terms(&self, descriptors: &[Descriptor]) -> Vec<TermId> {
+    pub fn resolve_terms(&self, descriptors: &[Vec<u8>]) -> Vec<TermId> {
         self.write
             .live()
             .resolve_terms(&self.generation.load().dict, descriptors)
@@ -470,8 +469,8 @@ impl Engine {
         self.write.mint_vocabulary_values(vocabulary, values)
     }
 
-    /// Declare a view group while the service runs. The gate's labels are checked here, since
-    /// only the engine holds the plugin; every other rule is the write executor's.
+    /// Declare a view group while the service runs. The gate's labels are checked here, by the
+    /// rule a build applies; every other rule is the write executor's.
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn create_view_group(
         &self,
@@ -495,14 +494,14 @@ impl Engine {
         self.write.create_plain_view(declaration)
     }
 
-    /// [`tessera_plugin::check_point_default`] with this engine's plugin: the default as stored,
+    /// [`tessera_types::label::point_default`]: the default as stored,
     /// or a view refusal.
     fn check_point_default(
         &self,
         default: Option<&str>,
     ) -> std::result::Result<Option<String>, crate::write::AcceptError> {
         default
-            .map(|default| tessera_plugin::check_point_default(self.plugin.as_ref(), default))
+            .map(tessera_types::label::point_default)
             .transpose()
             .map_err(|detail| {
                 crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused {
@@ -511,13 +510,13 @@ impl Engine {
             })
     }
 
-    /// [`tessera_plugin::check_visibility`] with this engine's plugin: the gate as stored, or a
+    /// [`tessera_types::label::declared_visibility`]: the gate as stored, or a
     /// view refusal.
     fn check_visibility(
         &self,
         visibility: Option<&[String]>,
     ) -> std::result::Result<Option<Vec<String>>, crate::write::AcceptError> {
-        tessera_plugin::check_visibility(self.plugin.as_ref(), visibility).map_err(|detail| {
+        tessera_types::label::declared_visibility(visibility).map_err(|detail| {
             crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::ViewRefused { detail })
         })
     }

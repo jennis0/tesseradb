@@ -6,13 +6,14 @@ pub mod term_sweep;
 pub mod tier;
 
 pub use dict::{
-    coalesce_dict_extents, Dict, DictStreamWriter, DictWriter, PUBLIC_LABEL, PUBLIC_TERM,
+    coalesce_dict_extents, Dict, DictStreamWriter, DictWriter, MAX_DISTINCT_TERMS,
+    MAX_KEYS_PER_ITEM, PUBLIC_LABEL, PUBLIC_TERM,
 };
 pub use fragment::{
     build_fragment, build_fragment_with_deltas, delta_entities, residual_fragment, FragmentCache,
     FragmentCacheError, FrozenFragment,
 };
-pub use label::{Label, LabelError, Labels, Shape, DEFAULT_MAX_NODES};
+pub use label::{index_keys, Label, LabelError, LabelIndex, Labels, Shape, DEFAULT_MAX_NODES};
 pub use postings::{
     decode_single_batch, encode_posting, encode_posting_bitmap, write_posting_records,
     write_postings, PostingRef, PostingsReader, PostingsSpool,

@@ -33,7 +33,6 @@ tessera-types = { path = "../tessera-types" }
 # corpus must not learn to read an artefact — and says nothing about who depends on it; the CLI
 # and several test crates already do.
 tessera-corpus = { path = "../tessera-corpus" }
-tessera-plugin = { path = "../tessera-plugin" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-spatial = { path = "../tessera-spatial" }
 tessera-store = { path = "../tessera-store" }

@@ -191,6 +191,7 @@ class Deployment:
         return {int(t) for t in self._read([], leaf).column("tessera_id").to_pylist()}
 
     def assert_serves_the_model(self) -> None:
+        self.server.refreshed()
         expected = {t: v for t, v in self.holdings.items.items() if t in self.holdings.visible()}
         assert self.served() == expected
 

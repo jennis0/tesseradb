@@ -628,7 +628,6 @@ fn a_fold_discarded_after_logging_the_unsuppression_hides_nothing_less() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         tessera_engine::EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

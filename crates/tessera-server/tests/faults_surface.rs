@@ -22,7 +22,6 @@ use std::time::Duration;
 use common::*;
 use tessera_engine::Engine;
 use tessera_lifecycle::faults::FaultSwitchboard;
-use tessera_plugin::Passthrough;
 
 /// The wire analogue of `FaultSwitchboard::arrivals`, polled: how many times the executor has
 /// reached `site` since it was armed, read over the control plane.
@@ -59,7 +58,6 @@ async fn the_manifest_seam_pauses_and_releases_over_the_control_plane() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");
@@ -178,7 +176,6 @@ async fn an_executor_panic_fails_readiness_and_reports_dead() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");

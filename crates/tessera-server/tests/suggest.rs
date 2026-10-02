@@ -300,7 +300,6 @@ async fn a_spent_walk_budget_reports_more_even_on_a_short_page() {
         &bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         engine_config,
     )
     .expect("engine should open against a freshly built bundle");

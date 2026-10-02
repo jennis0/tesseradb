@@ -26,7 +26,6 @@ pub use tessera_build::config::AccessInput;
 use tessera_build::{build, BuildArgs, ViewArgs};
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::faults::FaultSwitchboard;
-use tessera_plugin::Passthrough;
 use sha2::Digest as _;
 use tessera_catalogue::{Catalogue, Grantee, Permission, PrincipalKind};
 use tessera_server::state::{AppState, ComputeGate, IngestAdmission, ServeLimits, SessionRegistry};
@@ -356,7 +355,6 @@ pub async fn serve_with_faults_and_config(
         &bundle_root,
         &dir.join("cache"),
         &dir.join("wal.log"),
-        Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");
@@ -545,7 +543,7 @@ pub async fn spawn_server_with_stream_flush(
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
-    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, config)
         .expect("engine should open against a freshly built bundle");
     mount_server_with_flush(
         engine,
@@ -709,7 +707,7 @@ pub async fn spawn_server_with_bulk_reads(
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
-    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, config)
         .expect("engine should open against a freshly built bundle");
     engine
         .start_write_executor(1024)
@@ -756,7 +754,7 @@ pub async fn spawn_server_with_config_and_gate(
     compute_gate: ComputeGate,
 ) -> TestServer {
     let max_k = config.max_k;
-    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, config)
         .expect("engine should open against a freshly built bundle");
     spawn_server_from_engine(engine, max_k, compute_gate).await
 }
@@ -894,7 +892,7 @@ pub async fn spawn_server_with_visible_wait(
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
-    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+    let mut engine = Engine::open(bundle_root, cache_dir, wal_path, config)
         .expect("engine should open against a freshly built bundle");
     engine
         .start_write_executor(1024)
@@ -924,7 +922,7 @@ pub async fn spawn_server_with_cors(
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
-    let engine = Engine::open(bundle_root, cache_dir, wal_path, Passthrough::new(), config)
+    let engine = Engine::open(bundle_root, cache_dir, wal_path, config)
         .expect("engine should open against a freshly built bundle");
     mount_server_with(
         engine,

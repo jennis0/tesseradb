@@ -44,7 +44,6 @@ fn engine_over_fixture(tmp: &Path, root: &Path, config: EngineConfig) -> Engine 
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");
@@ -155,7 +154,6 @@ fn engine_over_fixture_with_sparse_term(tmp: &Path, root: &Path, config: EngineC
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");
@@ -757,7 +755,6 @@ fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
         &root,
         &tmp.path().join("cache-r"),
         &tmp.path().join("wal-r.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("a read-only engine opens");
@@ -768,7 +765,6 @@ fn the_startup_sweep_reclaims_an_orphaned_prefix_and_leaves_everything_else() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the engine reopens");
@@ -834,7 +830,6 @@ fn a_restart_onto_the_folded_prefix_converges() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the folded prefix opens on its own, with every digest it names verifying");
@@ -910,7 +905,6 @@ fn a_restart_before_the_rotation_resurrects_the_retirement_harmlessly_and_perman
         &root,
         &tmp.path().join("cache"),
         &wal,
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the folded prefix opens");
@@ -1073,7 +1067,6 @@ fn a_merge_cap_above_the_base_segment_is_obeyed() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config(),
     )
     .expect("the bundle reopens after a fold and a merge under the cap");
@@ -1545,7 +1538,6 @@ fn the_flip_does_not_arm_the_refresh_shed() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("engine should open");
@@ -1961,7 +1953,6 @@ fn term_ordinals_are_stable_across_a_fold() {
         &root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the folded prefix opens on its own");

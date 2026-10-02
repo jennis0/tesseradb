@@ -18,8 +18,8 @@ by an API key whose principal holds `authorise-as`, which acts as any principal.
 to an integrator's backend; whoever holds it reads everything any principal may. A session minted
 through `authorise-as` carries the target's terms and its `read` and `write`, and never its
 `read-all`, so the key reads what each principal's terms admit and no more. The catalogue and
-the server's credential checks are inside the trusted computing base, and the terms they resolve
-are what every later check in this chapter tests against.
+the server's credential checks are inside the trusted computing base. The terms they resolve, and
+the access labels those terms satisfy, are what every later check in this chapter tests against.
 
 A principal holding `read-all`, granted directly, through a group or through an OIDC role
 mapping, authorises a session for itself whose authorised set is every item. Its set is built
@@ -103,9 +103,11 @@ A served quantity MUST be computed from inside the requesting viewer's visible s
 a density cell, a cluster's shape or a label taken over the whole corpus and then checked against
 that set before display is a defect, not a filtered view.
 
-An item carries a set of terms, and a token satisfies the set of terms its credential resolved to.
-An item is in the authorised set when the two sets intersect, and the authorised set is built once
-per session, at authorisation. The visible set is the authorised set minus the overlay, the record
+An item carries access labels, each an expression over terms such as `secret&(team_a|team_b)`,
+and a token holds the terms its credential names. An item is in the authorised set when the token's
+terms satisfy one of its labels, and the authorised set is built once per session, at
+authorisation ([access control](access-control.md#how-labels-are-indexed)). The expressions have no
+negation, so holding more terms never admits fewer items. The visible set is the authorised set minus the overlay, the record
 of every item currently hidden by a deletion or a suppression, composed at the start of every
 request, before anything reads it. Everything that counts, draws or labels an item reads that one
 set. A filter narrows which of the visible set is drawn or counted into the filtered set, and can
@@ -220,8 +222,8 @@ complete as a response and says that the read is not ([serving](serving.md#bulk-
 ## Reading in bulk
 
 `POST /v1/items` and `POST /v1/artifacts` answer under the properties above. Every page composes
-the visible set again, an item's labels are the ones the viewer holds, as on the item card, and an
-artifact is served on its layer's terms, as on the viewport. An item's unique values are fields like
+the visible set again, an item's labels are one clause of its label the viewer satisfies, as on
+the item card, and an artifact is served on its layer's terms, as on the viewport. An item's unique values are fields like
 any other, returned only on request, in that item's own row.
 
 A read of items whose filter bounds its matches through a unique field's index or an artifact's
@@ -231,10 +233,12 @@ follows its size, so a value held only by an item the viewer cannot see drives t
 a value nobody holds, with the same rows, counts and pages. The index lookup's own time can differ
 between a value that is held and one that is not, which the timing row below covers.
 
-**Stored order shows which items share a full set of terms.** A read of items in stored order
-returns a viewer's items in the order of their entity ids. Within each build batch and each ingest
-window, entity ids are assigned in order of each item's full set of access terms, the units its
-access labels resolve to, including terms the viewer does not hold. Within one set, a build orders
+**Stored order shows which items share a full set of index keys.** A read of items in stored
+order returns a viewer's items in the order of their entity ids. Within each build batch and each
+ingest window, entity ids are assigned in order of each item's full set of index keys: the terms of
+its labels that are disjunctions of terms, and one key for each label holding a conjunction
+([access control](access-control.md#how-labels-are-indexed)), including keys the viewer does not
+satisfy. Within one set, a build orders
 items by their map cell in the build's anchor view and then by source order, and an ingest orders
 them in the order its window received them, so a viewer who reads positions or unique values can see
 where one set ends and the next begins.
@@ -242,12 +246,13 @@ where one set ends and the next begins.
 An edit moves an item to a new entity, taken in the window that commits it, so an edited item
 reads as one arriving in that window.
 
-A viewer therefore learns which of their visible items share a full set of access terms, and
+A viewer therefore learns which of their visible items share a full set of index keys, and
 roughly in which batch or window each arrived or was last edited. Where two such groups show the
-same labels the viewer holds, the viewer learns that the items of at least one of them carry terms
-the viewer does not hold, which is what the item card withholds by serving only the labels the viewer holds. The
-sets are ordered by the terms' internal numbers, which follow the order in which terms first
-appeared, so the order of the sets hints at which terms the viewer does not hold appeared first.
+same clauses on the item card, the viewer learns that the items of at least one of them carry a key
+the viewer does not satisfy, which is what the item card withholds by serving only clauses the
+viewer satisfies. The sets are ordered by the keys' internal numbers, which follow the order in
+which keys first appeared, so the order of the sets hints at which keys the viewer does not satisfy
+appeared first.
 The viewer learns no term's name, no count of the items they cannot see, and nothing about any one
 item outside their visible set. Map order discloses none of this grouping and serves every field
 stored order serves. **Not built yet:** restricting stored order to some viewers. Every viewer may
@@ -304,7 +309,7 @@ reason given, and one, the per-tile timing channel, remains open.
 | A lower bound on how many values a category has | Where an operator numbers a vocabulary's values densely, the largest code a viewer can see bounds the count from below | Low | The operator's own numbering; an owner ruling that set-size inference from it is not defended against | C22 |
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
-| Which of their visible items share a full set of access terms, and so, where two such groups show the same labels the viewer holds, that items in at least one of them carry terms the viewer does not hold; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| Which of their visible items share a full set of index keys, and so, where two such groups show the same clauses on the item card, that items in at least one of them carry a key the viewer does not satisfy; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which keys they do not satisfy first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full key set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
 not a residual channel and does not appear above: a caller-declared generating set, an authored
@@ -318,7 +323,6 @@ membership-requirement declaration are covered under what this does not claim, b
 | Cryptographic strength of the `tessera_id` | Not needed. The permutation hides a lower bound on the number of hidden items, a low-severity channel. The grouping by access it would also hide is disclosed by a stored-order read. An adversary who recovered the key would be back at that channel and nothing more. |
 | A defence against a bundle holder | Anyone holding the bundle has the key, the term index and the coordinates. None of the properties above are claimed against them. |
 | Isolation of partitions | **Not built yet.** The design specifies that a partition a token cannot reach must contribute nothing to an answer, and a partition the system cannot reach through failure must be treated as an error rather than an empty contribution. A deployment today has one partition, so neither case can arise, and neither rule has anything to test it. |
-| Agreement between the two authorisation functions | Nothing checks that the function deriving terms from an item's access label and the one deriving terms from a viewer's credentials agree about what a term means. The only plugin that exists passes strings through unchanged, so they cannot disagree; a check needs a plugin whose functions could. |
 | Verification of what an operator declares | A vocabulary value, a layer's or an artifact's own access label, or supplied artifact content that the operator declares visible is served as declared. The service cannot check provenance. An item with no access label of its own is visible to nobody unless the declaration names a default label, in which case an unlabelled item is treated as if it carried that label and nothing wider. |
 | Quantification of the timing channel | Open in the register: correlating a tile's service time with the viewer's own visible count leaves a residual nobody has quantified, so it is recorded rather than closed. |
 | Protection of data at rest | This chapter covers what a viewer can learn from responses. Data on disc has a different adversary. |
@@ -328,7 +332,7 @@ membership-requirement declaration are covered under what this does not claim, b
 
 | Property | How it is checked | What is not covered |
 |---|---|---|
-| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. Both the differential and the manual assessment ran only against the plugin that passes credentials through unchanged; no route has been checked against a plugin whose two functions could disagree |
+| Every quantity computed from the viewer's own visible set | Compared, value for value, against an independent second implementation across three planted states, over the three surfaces the comparison covers: tiles, the points batch and the density layer's masked per-cell counts. The same property was probed manually against a running server across the request contract and the memory-safety surface beneath it, and no route past it was found | Served artifacts travel on their own frame and are not part of this comparison. The three-surface differential and the manual assessment ran over corpora whose items each carry single terms. A second differential covers access expressions on a built bundle: over items carrying conjunctions, several labels each and a quoted term, it compares which items a bulk read returns to each of thirteen principals, the `labels` beside each, and each item's card, with an oracle that parses and evaluates each item's own labels. It does not compare tiles or counts over such a corpus. Labels holding a conjunction written by ingest are checked by Rust tests of the engine over a flush and a restart |
 | A derived artifact served on the terms its layer declares | Compared against an independent implementation with two viewers differing by exactly one item inside an artifact's member set, under the strictest requirement, and the difference asserted before anything downstream rests on it. An artifact's own label is compared against an independent implementation over a built bundle and a service the artifacts were published into, across a restart and a fold; and a viewer lacking a label is shown to get byte-identical answers, on every viewer route, from a deployment holding the artifact and one that never published it | The other membership requirements are covered by Rust tests rather than the differential suite |
 | Samples taken after masking | Compared against an independent implementation with a wrong-shaped stand-in, a sample taken in storage order rather than from the visible set, that the comparison is required to disagree with | None |
 | A client never sees an entity id | Scanned across every wire surface, including the density layer's sub-cell counts, and the logs, for a byte pattern matching the underlying identity, with a planted true positive on every scan confirming the scan itself works. The scan covers both bulk reads, each read whole across responses and the items read in both orders, and every cursor they issue, whose decoded bytes are swept at every offset | A cursor's bytes are swept for 8-byte values only |

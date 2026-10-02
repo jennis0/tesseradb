@@ -7,6 +7,7 @@ use rustc_hash::FxHashSet;
 
 use tessera_lifecycle::membership::Attachment;
 use tessera_lifecycle::Overlay;
+use tessera_types::label::Label;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::EntityId;
 
@@ -65,13 +66,13 @@ impl ArtifactVerdict {
     }
 }
 
-/// The access-label test for one layer's artifacts and one viewer: an artifact with a label is
-/// admitted when the viewer's credential holds any of its descriptors, and one with none by
-/// `unlabelled`, which the layer's `artifact_visibility.default` decided. It reads the credential
-/// and nothing a request can narrow, so a filter never moves it.
+/// The access-label test for one layer's artifacts and one viewer: an artifact with labels is
+/// admitted when the terms the viewer's credential holds satisfy any of them, and one with none
+/// by `unlabelled`, which the layer's `artifact_visibility.default` decided. It reads the
+/// credential and nothing a request can narrow, so a filter never moves it.
 #[derive(Clone, Copy)]
 pub struct LabelGate<'a> {
-    /// `None` admits every artifact.
+    /// The terms the viewer holds, or `None` for a viewer holding every term.
     held: Option<&'a FxHashSet<Vec<u8>>>,
     unlabelled: bool,
 }
@@ -84,23 +85,25 @@ impl<'a> LabelGate<'a> {
         }
     }
 
-    /// The gate of a session authorised for every item, which admits every artifact.
-    pub fn every_label() -> Self {
+    /// The gate of a viewer holding every term, which satisfies every label that parses.
+    pub fn every_term(unlabelled: bool) -> Self {
         LabelGate {
             held: None,
-            unlabelled: true,
+            unlabelled,
         }
     }
 
-    /// Whether an artifact carrying `access` is admitted.
-    pub fn admits(&self, access: &[Vec<u8>]) -> bool {
-        let Some(held) = self.held else {
-            return true;
-        };
+    /// Whether an artifact carrying `access` is admitted. A label that did not parse admits
+    /// nobody.
+    pub fn admits(&self, access: &[Option<Label>]) -> bool {
         if access.is_empty() {
             return self.unlabelled;
         }
-        access.iter().any(|d| held.contains(d))
+        let held = |term: &str| self.held.is_none_or(|held| held.contains(term.as_bytes()));
+        access
+            .iter()
+            .flatten()
+            .any(|label| label.satisfied_by(&held))
     }
 }
 
@@ -433,7 +436,7 @@ mod tests {
         let d = declaration(true, None);
         let mut rows = attached_rows(&[1, 2, 3]);
         let records = Arc::make_mut(&mut rows.records);
-        records.access = vec![Some(Arc::from(vec![b"x".to_vec()].as_slice()))];
+        records.access = vec![Some(super::super::rows::parse_access(&[b"x".to_vec()]))];
         let mask = Bitmap::of(&[1, 2, 3]);
         let never = |_: &Attachment| -> bool { panic!("a withheld label asked its target") };
         let held = FxHashSet::default();

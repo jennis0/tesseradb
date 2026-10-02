@@ -172,7 +172,7 @@ def test_connect_reads_a_hosted_deployment_with_the_token_it_was_given(db):
 
 
 def test_connect_has_no_way_to_mint_another_principal_and_no_way_to_write(db):
-    """§1, §8: minting needs the session credential and writing needs the operator's."""
+    """§1, §8: minting needs a session-plane credential and writing needs the operator's."""
     v = connect(db.viewer_url, "a-token-this-test-never-uses")
     assert not hasattr(v, "viewer")
     for verb in ("insert", "declare", "commit", "check", "remove", "suppress", "leave"):

@@ -19,7 +19,7 @@
 //!   set and **every** principal passes, so the outsider's 404 on `atlas` is the assertion that
 //!   separates the two semantics.
 //! - **A gate's label is one label** (decision 0132). `ledger` is gated on the one label
-//!   `finance,legal`, which is one term with a comma in it: the principal holding that term
+//!   `"finance,legal"`, a quoted term with a comma in it: the principal holding that term
 //!   reaches it, and a principal holding `finance`, `legal` or both does not. A reader that split
 //!   the label would gate `ledger` as `atlas` is gated.
 //! - **The scoped surface collapses whole** (`views.md` §5): for a principal who cannot reach the
@@ -83,10 +83,11 @@ const QUARTERS: [Quarter; 4] = [
     ("2026-Q4", 8..28, None),
 ];
 
-/// The one label `ledger` is gated on: one term, the comma being part of it (decision 0132).
-/// Its entities lie outside every other view's range, so interning the term touches no other
-/// entity's label set.
+/// The one term `ledger` is gated on, the comma being part of it (decision 0132). Its entities lie
+/// outside every other view's range, so interning the term touches no other entity's label set.
 const COMMA_TERM: &str = "finance,legal";
+/// [`COMMA_TERM`] written as a label, quoted because it holds a comma.
+const COMMA_LABEL: &str = "\"finance,legal\"";
 const LEDGER: std::ops::Range<u64> = 40..50;
 
 /// The `sealed` group's own roster. The **group** is gated, so a failing principal sees neither
@@ -244,7 +245,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
     let atlas_points = dir.join("atlas.parquet");
     write_view_points(&atlas_points, "atlas", 0..20, None);
     let ledger_points = dir.join("ledger.parquet");
-    write_points_labelled(&ledger_points, "ledger", LEDGER, None, |_| COMMA_TERM);
+    write_points_labelled(&ledger_points, "ledger", LEDGER, None, |_| COMMA_LABEL);
     let mut views = vec![
         gated_view("world", &world_points, None),
         // **A disjunctive gate.** A gate wanting several terms declares them as a list
@@ -252,7 +253,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
         // intersection with the principal's.
         gated_view("atlas", &atlas_points, Some(&["finance", "legal"])),
         // **One label with a comma in it**: one term, gating exactly the principals who hold it.
-        gated_view("ledger", &ledger_points, Some(&[COMMA_TERM])),
+        gated_view("ledger", &ledger_points, Some(&[COMMA_LABEL])),
     ];
     for (key, members, visibility) in QUARTERS {
         let id = format!("quarter:{key}");
@@ -616,8 +617,8 @@ async fn a_disjunctive_gate_admits_either_term_and_neither_admits_nobody() {
     );
 }
 
-/// **A gate's label is one label, taken verbatim** (`views.md` §6, decision 0132): `ledger` is
-/// gated on `finance,legal`, which is one term with a comma in it. The principal holding that
+/// **A gate's label is one label** (`views.md` §6, decision 0132): `ledger` is gated on
+/// `"finance,legal"`, a quoted term with a comma in it. The principal holding that
 /// term reaches the view; a principal holding `finance`, `legal` or both does not, because none of
 /// those is the term. A reader that split the label on the comma would admit all three and gate
 /// `ledger` exactly as `atlas` is gated, so the holders of the fragments are the discriminating
@@ -1103,9 +1104,9 @@ async fn a_view_created_after_a_session_authorised_waits_for_re_authorisation() 
     );
 }
 
-/// **A created view may carry a gate, and the labels are checked against the plugin that will
-/// evaluate them** (decision 0132). One label is a string and several are a list, each element
-/// one term; a gate naming no terms, or carrying an empty element, is refused rather than stored:
+/// **A created view may carry a gate, and its labels are read as access expressions** (decision
+/// 0132). One label is a string and several are a list, each element one expression; a gate
+/// naming no terms, or carrying an empty element, is refused rather than stored:
 /// it would be a gate satisfied by nobody, the view reachable by no principal including its
 /// author.
 #[tokio::test]

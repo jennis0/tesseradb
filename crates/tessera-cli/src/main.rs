@@ -417,7 +417,7 @@ enum CorpusCommand {
         #[arg(long)]
         zoom: u8,
         /// The principal's grant, in the mask catalogue's term-set encoding: comma-separated
-        /// decimal term descriptors (the `builtin:passthrough` label form).
+        /// decimal terms.
         #[arg(long)]
         grant: String,
         /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).

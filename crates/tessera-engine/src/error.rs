@@ -3,7 +3,6 @@
 use std::io;
 
 use tessera_lifecycle::wal::WalError;
-use tessera_plugin::PluginError;
 use tessera_store::StoreError;
 
 /// Engine-level failures. Every variant here is fail-closed: none of them hand back a partial or
@@ -27,7 +26,9 @@ pub enum EngineError {
     BrowseRefused(crate::browse::BrowseRefused),
     Store(StoreError),
     Wal(WalError),
-    Plugin(PluginError),
+    /// The credential presented at authorise is not in the form this service reads. The detail
+    /// names the form, never the bytes sent.
+    Credential(String),
     Io(io::Error),
     /// A viewport request named a view this bundle doesn't have.
     UnknownView(String),
@@ -49,7 +50,7 @@ pub enum EngineError {
     /// per-partition anchor would serve a half-masked bundle with no error. Unreachable today:
     /// the build emits exactly one partition.
     MultiPartitionView(String),
-    /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
+    /// A bundle-level file (`CURRENT`, a manifest) was not the shape this engine expects.
     Malformed(String),
     /// `/v1/categories` was asked for a `visibility = "derived"` column whose per-`(column, code)`
     /// derived postings could not be read. Refused rather than served empty: an empty value set
@@ -117,7 +118,7 @@ impl std::fmt::Display for EngineError {
             EngineError::BrowseRefused(why) => write!(f, "browse refused: {why}"),
             EngineError::Store(e) => write!(f, "store error: {e}"),
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
-            EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
+            EngineError::Credential(e) => write!(f, "credential refused: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
             EngineError::UnknownView(view) => write!(f, "unknown view '{view}'"),
             EngineError::SegmentWithoutRowBase { view, seg_id } => write!(

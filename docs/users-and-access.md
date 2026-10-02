@@ -1,16 +1,17 @@
 # Users, credentials and access expressions
 
-A design note. It proposes principals stored by Tessera, standard ways to authenticate them,
-permissions for what a principal may do, and Accumulo-style access expressions for what a principal
-may see. The catalogue, the three listeners' credentials, sessions and their ending, and the
-catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients are built, and
-[system/access-control.md](system/access-control.md) describes them. **Not built yet:** access
-expressions and their index, removing the plugin, writes masked by the writer's terms, writes with
-a session token on the viewer listener, and the audit log. Until masked writes are built, a
-principal with `write` writes against the whole corpus whether or not it holds `write-all`. While
-writes are unmasked, a principal with `write` can upsert an item it cannot see, by its unique
-value, and change its label. Granting `write` therefore grants what `read-all` grants wherever a
-view has a unique field.
+A design note, part built. It proposes principals stored by Tessera, standard ways to
+authenticate them, permissions for what a principal may do, and Accumulo-style access expressions
+for what a principal may see. The catalogue, the three listeners' credentials, sessions and their
+ending, the catalogue's verbs over HTTP, the CLI and the TypeScript and Python clients, access
+expressions and their index, and the removal of the plugin are built, and
+[system/access-control.md](system/access-control.md) describes them; where the build differs from
+this note, the note says so at the claim. **Not built yet:** writes masked by the writer's terms,
+writes with a session token on the viewer listener, and the audit log. Until masked writes are
+built, a principal with `write` writes against the whole corpus whether or not it holds
+`write-all`. While writes are unmasked, a principal with `write` can upsert an item it cannot see,
+by its unique value, and change its label. Granting `write` therefore grants what `read-all`
+grants wherever a view has a unique field.
 
 ## Decisions
 
@@ -281,6 +282,14 @@ affects no access decision.
 Label ids are internal, as term ids are, and no response carries one. A compaction retires a label
 id whose items have all been removed.
 
+**As built:** an item carries a list of labels, as the access column and `access` always allowed,
+and admits a principal who satisfies any one of them. It is indexed under the union of its labels'
+keys: each term of a disjunction of terms, and one key of its own for each label holding a
+conjunction, whose dictionary ordinal is that label's id. The permission signature is the item's
+sorted set of keys, so two items share a signature exactly when their labels give them the same
+keys. The DAG is derived from those keys in the dictionary, and nothing else stores it. **Not
+built yet:** retiring a key at compaction; the dictionary keeps every key it has issued.
+
 ### The expression DAG
 
 Every label that holds a conjunction is compiled into one shared directed acyclic graph. A leaf is a term. An inner node is
@@ -310,7 +319,8 @@ The DAG's size is linear in the total size of the distinct expressions, so an ex
 disjuncts costs space in proportion to its length. Converting to disjunctive normal form would cost
 space exponential in the number of disjuncts. A label that holds a conjunction and is longer than a
 configured number of nodes is
-refused when it is written, with the count in the message.
+refused when it is written, with the count in the message. **Not built yet:** configuring the
+number; it is 1,024.
 
 ### Authorising
 
@@ -335,16 +345,22 @@ figures are paid at session start and never by a map request.
 
 - A label created by ingest after a session authorised is evaluated against that session's stored
   terms by the background refresh, and joins its authorised set if true. A term unknown at
-  authorise then widens the session once it appears.
-- An item card shows, of the item's label, one clause the viewer satisfies. Walking the true nodes
-  from the label's root gives it. The card never shows the whole expression, which could name terms
-  the viewer does not hold.
+  authorise then widens the session once it appears. **Not built yet:** the session keeps the keys
+  it resolved at authorise, so it sees less than its terms admit until it authorises again, never
+  more. The engine can tell, from the keys promoted since, whether a session is behind, and
+  nothing outside its tests asks.
+- An item card shows each held term of the item's labels that are a single term or a disjunction
+  of terms, and, for each of its labels holding a conjunction that the viewer satisfies, one clause
+  of it in held terms: at each disjunction the satisfied operand with fewest terms, then the first
+  in byte order (built). A held term that appears only inside a conjunction is not shown on its
+  own. The card never shows the whole of such a label, which could name terms the viewer does not
+  hold.
 - Containment for cluster labels reasons about sets of entities and their signatures, and applies
   unchanged with label ids as the signatures.
-- The plugin trait in `tessera-plugin` is removed. The two functions it held become the parser on
-  the item side and the catalogue on the credential side. Both use one vocabulary, so the service
+- The plugin trait in `tessera-plugin` is removed (built). The two functions it held become the
+  parser on the item side and the catalogue on the credential side. Both use one vocabulary, so the service
   can report terms that some label names and no grant or claim rule can produce, and the reverse.
-- The bundle's format changes and its version is bumped.
+- The bundle's format changes and its version is bumped (built: 30, and the WAL's 32).
 - Pages in `docs/system/` that this note changes, and which are rewritten when it is built:
   - [write-path](system/write-path.md), where an item's permission signature is its sorted list of
     terms. Here it is the label id.
@@ -493,5 +509,6 @@ A new crate, `tessera-catalogue`, holds the SQLite catalogue, credential checks 
 from a principal to its terms and permissions. It depends on nothing that can see a row id or an
 entity id, and `scripts/check-layers.sh` denies it `tessera-store`, `tessera-authz` and
 `tessera-engine`. The server depends on it and hands the engine a set of terms. The expression
-parser, normalisation and the DAG belong in `tessera-authz`, beside the index they replace.
-`tessera-plugin` is deleted.
+parser and normalisation are in `tessera-types`, and the DAG and the index over labels are in
+`tessera-authz` (built). A leaf crate, `tessera-access`, holding the parser and the DAG together,
+is not built yet. `tessera-plugin` is deleted (built).

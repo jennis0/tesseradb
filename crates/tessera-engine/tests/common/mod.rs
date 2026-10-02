@@ -111,7 +111,6 @@ use parquet::arrow::ArrowWriter;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{default_compute_threads, ArtifactOut, Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{EntityId, IdentityKey, TesseraId};
@@ -613,7 +612,6 @@ pub fn open_engine_publishing_with_tick_period(
         bundle_root,
         cache_dir,
         wal_path,
-        Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: secs,
             ..config()
@@ -631,7 +629,6 @@ pub fn open_engine(bundle_root: &Path, cache_dir: &Path, wal_path: &Path) -> Eng
         bundle_root,
         cache_dir,
         wal_path,
-        Passthrough::new(),
         config(),
     )
     .expect("engine should open against a freshly built bundle")
@@ -642,7 +639,6 @@ pub fn open_engine_uncapped(bundle_root: &Path, cache_dir: &Path, wal_path: &Pat
         bundle_root,
         cache_dir,
         wal_path,
-        Passthrough::new(),
         config_uncapped(),
     )
     .expect("engine should open against a freshly built bundle")
@@ -692,7 +688,6 @@ pub fn engine_at(tmp: &Path, root: &Path, tick_secs: u64) -> Engine {
         root,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: tick_secs,
             ..config()

@@ -55,7 +55,6 @@ use croaring::Bitmap;
 use rand::SeedableRng;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig, RowProjection};
-use tessera_plugin::Passthrough;
 use tessera_spatial::{tiles_for_bbox, Bounds};
 use tessera_store::{open_bundle, tile_ranges_all, Bundle};
 
@@ -339,7 +338,6 @@ fn main() {
         &bundle_root,
         &tmp1.path().join("cache"),
         &tmp1.path().join("wal.log"),
-        Passthrough::new(),
         cfg,
     )
     .expect("engine (forced serial) should open");
@@ -348,7 +346,6 @@ fn main() {
         &bundle_root,
         &tmp2.path().join("cache"),
         &tmp2.path().join("wal.log"),
-        Passthrough::new(),
         cfg,
     )
     .expect("engine (forced parallel) should open");

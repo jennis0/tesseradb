@@ -23,7 +23,6 @@ use rand::{Rng, SeedableRng};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_types::IdentityKey;
 
@@ -161,7 +160,6 @@ fn measure(args: &Args) -> Result<Vec<Duration>, String> {
         &args.bundle,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             // Production defaults, deliberately: under a saturated θ the threshold clause never

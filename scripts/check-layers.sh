@@ -101,7 +101,7 @@ fi
 # extension module built as a cdylib, so there is no rlib for a workspace crate to link even if one
 # tried, and an edge into it would put the interpreter's ABI underneath the binary.
 for leaf in bench python; do
-  for c in types plugin cache authz store spatial lifecycle engine wire config server build cli; do
+  for c in types cache authz store spatial lifecycle engine wire config server build cli; do
     # Match a dependency declaration (`tessera-bench = ...` or a path to it), not prose -- these
     # manifests discuss the harness in comments, and a substring grep flags its own documentation.
     if grep -nE "^[[:space:]]*tessera-$leaf[[:space:]]*=|\.\./tessera-$leaf" \

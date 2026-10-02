@@ -25,7 +25,6 @@ tessera-config = { path = "../tessera-config" }
 tessera-engine = { path = "../tessera-engine" }
 tessera-wire = { path = "../tessera-wire" }
 tessera-lifecycle = { path = "../tessera-lifecycle" }
-tessera-plugin = { path = "../tessera-plugin" }
 tessera-catalogue = { path = "../tessera-catalogue" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

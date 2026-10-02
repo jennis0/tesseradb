@@ -266,7 +266,8 @@ export class TesseraClient {
    * `POST /session/authorise`: mints a session with the `sessionCredential` option. For a principal,
    * the session carries the target's terms and its `read` and `write`, and the target must hold
    * `read`. For `terms`, which only the operator credential may name, the session holds those terms
-   * and `read`.
+   * and `read`. A term is trimmed, and one that is empty, holds a control character or is `public`
+   * is not held.
    *
    * @param target - The local principal to act as, by name, the OIDC identity whose access token is
    *   passed on, or the terms the session holds.
@@ -868,7 +869,9 @@ export class TesseraClient {
   /**
    * `POST /v1/items/{tessera_id}`: one item's whole record. `fields` is keyed by column name, with
    * a category given as its vocabulary key and a column the item has no value for left out.
-   * `labels` lists the item's access labels this session satisfies and no others. `views` and
+   * `labels` is why this session sees the item: each held term of a label that is a term or a
+   * disjunction of terms, and one satisfied clause of each label holding a conjunction, as label
+   * text, and nothing else. A held term that appears only inside a conjunction is not listed. `views` and
    * `scoped` cover only the views this principal may reach.
    *
    * @param tesseraId - The item's `tessera_id`, as a viewport result's `ids` carries it.

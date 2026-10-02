@@ -481,7 +481,6 @@ fn open_engine(dir: &Path) -> tessera_engine::Engine {
         &dir.join("bundle"),
         &dir.join("cache"),
         &dir.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         tessera_engine::EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 1024,

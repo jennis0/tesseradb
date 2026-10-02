@@ -39,7 +39,7 @@ pub fn viewer_layer(state: &AppState) -> Option<CorsLayer> {
 }
 
 /// The session plane's layer, from the development list only. The production list never reaches
-/// the session plane, because the session credential must never be held by a browser; reading
+/// the session plane, because its credentials must never be held by a browser; reading
 /// the field here means no caller can pass the other list.
 pub fn session_layer(state: &AppState) -> Option<CorsLayer> {
     layer(&state.limits.dev_cors_origins, false)

@@ -31,8 +31,6 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_BIN = REPO_ROOT / "target" / "release" / "tessera"
 
-#: The service principal the harness mints every session through, with `authorise-as`.
-INTEGRATOR = "reference-oracle-integrator"
 OPERATOR_CREDENTIAL = "reference-oracle-operator-secret"
 
 DEFAULT_POINTS = "data/scaled/geometry.parquet"
@@ -527,50 +525,15 @@ class Server:
         self.session_base = f"http://127.0.0.1:{session_port}"
         self.control_base = f"http://127.0.0.1:{control_port}"
         self.operator_credential = operator_credential
-        self._integrator_key: str | None = None
-        self._principals: set[str] = set()
-
-    def _catalogue(self, method: str, path: str, body: dict | None = None) -> requests.Response:
-        return requests.request(
-            method,
-            f"{self.control_base}{path}",
-            headers={"Authorization": f"Bearer {self.operator_credential}"},
-            json=body,
-            timeout=30,
-        )
-
-    def _ensure(self, resp: requests.Response) -> None:
-        """A catalogue change succeeded, or named something that already exists."""
-        if resp.status_code != 409:
-            resp.raise_for_status()
-
-    def principal_for(self, terms: list[str]) -> str:
-        """The local principal holding `read` and exactly `terms`, created on first use. `public`
-        is held by every session and granted to none, so it is left out, as is an empty term."""
-        held = sorted({t.strip() for t in terms if t.strip() and t.strip().lower() != "public"})
-        name = "viewer-" + hashlib.sha256(json.dumps(held).encode()).hexdigest()[:16]
-        if name not in self._principals:
-            self._ensure(self._catalogue("POST", "/control/principals", {"name": name, "kind": "person"}))
-            self._catalogue("POST", "/control/grants", {"principal": name, "permission": "read"}).raise_for_status()
-            for term in held:
-                self._catalogue("POST", "/control/grants", {"principal": name, "term": term}).raise_for_status()
-            self._principals.add(name)
-        return name
 
     def authorise(self, terms: list[str]) -> dict:
-        """A session for a principal holding `terms`, minted through `authorise-as`."""
-        if self._integrator_key is None:
-            self._ensure(self._catalogue("POST", "/control/principals", {"name": INTEGRATOR, "kind": "service"}))
-            self._catalogue(
-                "POST", "/control/grants", {"principal": INTEGRATOR, "permission": "authorise-as"}
-            ).raise_for_status()
-            issued = self._catalogue("POST", f"/control/principals/{INTEGRATOR}/keys", {})
-            issued.raise_for_status()
-            self._integrator_key = issued.json()["key"]
+        """A session holding exactly `terms` and `read`, minted with the operator credential. The
+        server holds a term trimmed, and drops one that is empty, holds a control character or is
+        `public`."""
         resp = requests.post(
             f"{self.session_base}/session/authorise",
-            headers={"Authorization": f"Bearer {self._integrator_key}"},
-            json={"principal": self.principal_for(terms)},
+            headers={"Authorization": f"Bearer {self.operator_credential}"},
+            json={"terms": terms},
             timeout=60,
         )
         resp.raise_for_status()
@@ -781,6 +744,17 @@ class Server:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def refreshed(self, timeout: float = 60.0) -> None:
+        """Wait until no session refresh is running. A publication arms the refresh of every
+        resident session as it lands, and until that refresh reaches a session its reads serve the
+        previous generation's rows beside the current generation's deletions."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.status()["write_executor"]["flush"]["refresh_in_flight"]:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"a session refresh was still running after {timeout}s")
 
     def flush(self, timeout: float = 60.0) -> None:
         """Ask for a flush and **wait for one to complete** (contracts §3.4).

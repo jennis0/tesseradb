@@ -95,7 +95,6 @@ impl Fixture {
             &self.root,
             &self.cache,
             &self.wal,
-            tessera_plugin::Passthrough::new(),
             EngineConfig {
                 flush_max_age_secs: 3600,
                 // **The row trigger off.** This cell drives publication itself — it pins `B`

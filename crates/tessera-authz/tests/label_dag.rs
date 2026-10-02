@@ -164,9 +164,10 @@ fn every_evaluation_agrees_with_direct_evaluation() {
                 expected,
                 "{context}"
             );
-            let witness = labels.witness(case.id, &by_id);
+            let witness = case.label.witness(&|t| by_id(term_id(t)));
             assert_eq!(witness.is_some(), expected, "{context}");
-            let only_witness = witness.unwrap_or_default();
+            let only_witness: Vec<TermId> =
+                witness.unwrap_or_default().into_iter().map(term_id).collect();
             assert!(only_witness.iter().all(|&t| by_id(t)), "{context}");
             assert!(
                 !expected || labels.satisfied(case.id, &|t| only_witness.contains(&t)),

@@ -34,6 +34,8 @@ pub(crate) struct TestSwitches {
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
     pub(crate) aggregate_alone_rows: AtomicU64,
+    /// The most terms a flush may carry the dictionary to: [`tessera_authz::MAX_DISTINCT_TERMS`].
+    pub(crate) max_distinct_terms: AtomicU64,
     /// Whether the next row-projection build waits, inside the build, until this is cleared.
     /// The build that takes the hold clears `projection_build_hold_wanted` and waits on
     /// `projection_build_held`, so later builds run.
@@ -58,6 +60,12 @@ pub(crate) struct TestSwitches {
     pub(crate) unique_round_paused: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) unique_round_holding: AtomicBool,
+    /// Whether every ingest call waits on entry, on the thread its handler runs on, and how many
+    /// are waiting.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_parked: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) ingest_parked_count: AtomicU64,
 }
 
 impl TestSwitches {
@@ -98,6 +106,20 @@ impl TestSwitches {
         self.unique_round_holding.store(false, Ordering::SeqCst);
     }
 
+    /// Called on entry to an ingest call. Waits while a test parks ingest.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn park_ingest_while_wanted(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.ingest_parked.load(Ordering::SeqCst) {
+            return;
+        }
+        self.ingest_parked_count.fetch_add(1, Ordering::SeqCst);
+        while self.ingest_parked.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.ingest_parked_count.fetch_sub(1, Ordering::SeqCst);
+    }
+
     /// Called by the executor before it drains its work queue. Waits while a test holds it.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn hold_work_pass_if_paused(&self) {
@@ -123,6 +145,7 @@ impl Default for TestSwitches {
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
+            max_distinct_terms: AtomicU64::new(tessera_authz::MAX_DISTINCT_TERMS),
             #[cfg(feature = "fault-injection")]
             projection_build_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
@@ -139,6 +162,10 @@ impl Default for TestSwitches {
             unique_round_paused: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             unique_round_holding: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_parked: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            ingest_parked_count: AtomicU64::new(0),
         }
     }
 }

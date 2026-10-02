@@ -83,8 +83,9 @@ pub struct IngestReceipt {
     /// The batch id was accepted before with this body. The `tessera_id`s are the first
     /// acceptance's, and every count is zero, since this request changed nothing.
     pub replayed: bool,
-    /// The rows that created an item whose label resolves to more terms than the plugin
-    /// declares an item carries, by position in the request. They are stored all the same.
+    /// The rows that created an item indexed under more than
+    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys, by position in the request. They are stored all
+    /// the same.
     pub over_bound: Vec<usize>,
 }
 
@@ -135,9 +136,25 @@ pub(crate) struct Planned {
     /// The unique values the created and edited rows set, as `(declared position, key widened)`.
     pub(crate) keys: Vec<(u16, u128)>,
     pub(crate) artifacts: BatchArtifacts,
-    /// The request rows creating or editing an item whose label resolves to more terms than the
-    /// plugin declares an item carries.
+    /// The request rows creating or editing an item indexed under more keys than
+    /// [`tessera_authz::MAX_KEYS_PER_ITEM`].
     pub(crate) over_bound: Vec<u32>,
+}
+
+/// The keys row `at`'s labels index its item under, by the rule a build applies to its access
+/// column ([`tessera_authz::index_keys`]).
+fn index_keys(at: usize, labels: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, AcceptError> {
+    let texts = labels
+        .iter()
+        .map(|label| std::str::from_utf8(label))
+        .collect::<Result<Vec<&str>, _>>()
+        .map_err(|_| {
+            AcceptError::Contract(format!(
+                "row {at}, access: a label is not UTF-8; write each label as UTF-8 text"
+            ))
+        })?;
+    tessera_authz::index_keys(texts)
+        .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))
 }
 
 impl Engine {
@@ -146,6 +163,8 @@ impl Engine {
     ///
     /// Blocking: a tokio handler calls this inside `spawn_blocking`.
     pub fn ingest(&self, request: IngestRequest) -> Result<IngestReceipt, AcceptError> {
+        #[cfg(feature = "fault-injection")]
+        self.switches.park_ingest_while_wanted();
         // A stepped-down node would bury what it accepts under a manifest assembled from older
         // served state; denies are not gated.
         if self.any_partition_stepped_down() {
@@ -470,7 +489,7 @@ impl Engine {
             }
         }
 
-        let bound = self.declared_bounds().max_terms_per_item as usize;
+        let bound = tessera_authz::MAX_KEYS_PER_ITEM;
         let mut over_bound = Vec::new();
         let live = self.write.live();
         for (row, at) in rows.iter_mut().zip(&written_from) {
@@ -533,10 +552,7 @@ impl Engine {
         views.extend(held_views.iter().filter(|v| **v != own_view).cloned());
 
         let descriptors = match &row.labels {
-            Some(labels) => self
-                .plugin
-                .terms_of_labels(labels)
-                .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?,
+            Some(labels) => index_keys(at, labels)?,
             None => self.stored_label(generation, old)?,
         };
         let carried =
@@ -755,9 +771,7 @@ impl Engine {
                 }
             },
         };
-        self.plugin
-            .terms_of_labels(&labels)
-            .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))
+        index_keys(at, &labels)
     }
 
     /// Decide one row naming `entity` against what the item stores.
@@ -788,10 +802,7 @@ impl Engine {
         let carried = |position: usize| !row.omitted.contains(&position);
 
         if let Some(labels) = &row.labels {
-            let descriptors = self
-                .plugin
-                .terms_of_labels(labels)
-                .map_err(|e| AcceptError::Contract(format!("row {at}, access: {e}")))?;
+            let descriptors = index_keys(at, labels)?;
             // A novel descriptor is on no stored label.
             let supplied = self
                 .write

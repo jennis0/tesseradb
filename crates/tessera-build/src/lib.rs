@@ -68,7 +68,6 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use tessera_authz::{write_postings, DictWriter};
-use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::tiler::{sort_batch, ScalarValue, TilerItem};
 use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
@@ -610,9 +609,16 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// position in a sorted vocabulary for a field-sourced view, and a disagreement about that list is
 /// a disagreement about every permanent entity id (I9).
 pub(crate) struct AccessPlan {
+    /// The dictionary key each source term names. For a field-sourced view a source term is a
+    /// position among the sorted keys its labels are indexed under ([`tessera_authz::index_keys`]).
     pub descriptors: input::TermDescriptors,
-    /// The source term a point of view `v` carrying none is given, indexed by
-    /// [`BuildArgs::views`]. Meaningless for the relation route, which fills nothing.
+    /// A field-sourced view's distinct labels, sorted, as its access column and its default carry
+    /// them. Empty for the relation route.
+    pub labels: Vec<String>,
+    /// Per position in [`Self::labels`], the source terms the label is indexed under.
+    pub keys_of_label: Vec<Vec<u64>>,
+    /// The label a point of view `v` carrying none is given, as a position in [`Self::labels`],
+    /// indexed by [`BuildArgs::views`]. Meaningless for the relation route, which fills nothing.
     ///
     /// **One vocabulary, one term per view's default** (`views.md` §7): term ids are entity
     /// space and every view's labels are interned into the same dictionary, so the vocabulary is
@@ -735,6 +741,8 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
         // The relation supplies its own integer term ids and needs no vocabulary pass.
         return Ok(AccessPlan {
             descriptors: input::TermDescriptors::Ids,
+            labels: Vec::new(),
+            keys_of_label: Vec::new(),
             default_term: vec![None; args.views.len()],
         });
     }
@@ -780,8 +788,35 @@ pub(crate) fn plan_access(args: &BuildArgs, numbering: &ids::Numbering) -> Resul
             })
         })
         .collect();
+    // Each distinct label read once, by the rule ingest applies to a row's `access`, into the keys
+    // it is indexed under. A source term is a key's position in their sorted union.
+    let label_keys = vocabulary
+        .iter()
+        .map(|label| tessera_authz::index_keys([label.as_str()]).map_err(BuildError::Invalid))
+        .collect::<Result<Vec<Vec<Vec<u8>>>>>()?;
+    let mut keys: Vec<String> = label_keys
+        .iter()
+        .flatten()
+        .map(|key| String::from_utf8(key.clone()).expect("a key is a label's own text"))
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let keys_of_label = label_keys
+        .iter()
+        .map(|label| {
+            label
+                .iter()
+                .map(|key| {
+                    keys.binary_search_by(|k| k.as_bytes().cmp(key))
+                        .expect("every key is in the union") as u64
+                })
+                .collect()
+        })
+        .collect();
     Ok(AccessPlan {
-        descriptors: input::TermDescriptors::Vocabulary(vocabulary),
+        descriptors: input::TermDescriptors::Vocabulary(keys),
+        labels: vocabulary,
+        keys_of_label,
         default_term,
     })
 }
@@ -811,20 +846,24 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
         })?;
         return Ok(input::AccessFill::default());
     }
-    let input::TermDescriptors::Vocabulary(vocabulary) = &plan.descriptors else {
-        unreachable!("planned by `plan_access` together")
-    };
     let mut fill = input::AccessFill::default();
     for (index, view) in args.views.iter().enumerate() {
+        // One visit per key a label is indexed under. A key two of a row's labels share is
+        // visited twice, which both builds deduplicate per item.
         let one = input::scan_access_field(
             view_source(args, index, numbering),
             match &view.access.source {
                 AccessSource::Field(field) => Some(field.as_str()),
                 _ => None,
             },
-            vocabulary,
+            &plan.labels,
             plan.default_term[index],
-            |id, term| visit(index, id, term),
+            |id, label| {
+                for &key in &plan.keys_of_label[label as usize] {
+                    visit(index, id, key)?;
+                }
+                std::ops::ControlFlow::Continue(())
+            },
         )?;
         fill.carried += one.carried;
         fill.filled += one.filled;
@@ -1315,9 +1354,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         terms.dedup();
     }
 
-    // ---- 2. label each item through the plugin, interning descriptors ----------------
-    let plugin = Passthrough::new();
-    let bounds = plugin.declared_bounds();
+    // ---- 2. intern each item's index keys ------------------------------------------
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     let mut dict = DictWriter::new(&dict_dir);
@@ -1333,20 +1370,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let mut over_bound_items = 0u64;
     for point in &points {
         let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
-        let labels: Vec<Vec<u8>> = source_terms
+        let descriptors: Vec<Vec<u8>> = source_terms
             .iter()
             .map(|t| access.descriptors.descriptor(*t).into_owned().into_bytes())
             .collect();
-        let descriptors = plugin.terms_of_labels(&labels)?;
-        if descriptors.len() > bounds.max_terms_per_item as usize {
+        if descriptors.len() > tessera_authz::MAX_KEYS_PER_ITEM {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
             //
             // This counts descriptors, and the streaming pipeline counts the item's signature
             // length; the two always agree. `read_pairs` returns each item's source terms sorted
-            // and deduplicated, so the label list has distinct elements, passthrough yields one
-            // distinct descriptor per element, and interning is injective — the descriptor count
-            // *is* the distinct term count, which is what a signature holds.
+            // and deduplicated, each source term is one key, and interning is injective, so the
+            // descriptor count *is* the distinct key count, which is what a signature holds.
             over_bound_items += 1;
         }
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
@@ -1367,9 +1402,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
     if over_bound_items > 0 {
         eprintln!(
-            "warning: {over_bound_items} item(s) exceed the plugin's declared \
-             max_terms_per_item ({}); no term was dropped",
-            bounds.max_terms_per_item
+            "warning: {over_bound_items} item(s) are indexed under more than {} keys; no key \
+             was dropped",
+            tessera_authz::MAX_KEYS_PER_ITEM
         );
     }
 
@@ -1921,7 +1956,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &artifact_store,
         &args.out.join(PREFIX),
         PHASH,
-        &plugin.data_plugin_hash(),
         &mut derived_index,
     );
     drop(artifact_store);
@@ -1989,7 +2023,6 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             other_paths,
             unique,
         },
-        &plugin,
         n,
         term_count,
         pair_count,
@@ -2061,7 +2094,6 @@ struct BundleFiles {
 fn write_manifests(
     args: &BuildArgs,
     files: &BundleFiles,
-    plugin: &Passthrough,
     n: u64,
     term_count: u64,
     pair_count: u64,
@@ -2072,7 +2104,6 @@ fn write_manifests(
     occupancies: &[Occupancy],
     term_images: &[Option<crate::term_images_pass::ViewTermImages>],
 ) -> Result<BuildReport> {
-    let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     // Contracts §2.2 / §2.3 divide the two `files` maps by *when* a file appeared:
     // `MANIFEST.files` covers every file present at build time, and `SEGMENTS-<n>.files` covers
@@ -2166,11 +2197,6 @@ fn write_manifests(
     let manifest = Manifest {
         bundle_format: BUNDLE_FORMAT,
         created_at: chrono::Utc::now().to_rfc3339(),
-        data_plugin_hash: plugin.data_plugin_hash(),
-        declared_bounds: serde_json::json!({
-            "max_distinct_terms": bounds.max_distinct_terms,
-            "max_terms_per_item": bounds.max_terms_per_item,
-        }),
         // The schema, compiled. `MANIFEST.declared_scalars` is the *only* thing downstream reads:
         // `columns.arrow`'s tail is written in this order, `/control/ingest` builds each row's
         // scalar vector in this order, and flush, merge and the fold all take their writer schema

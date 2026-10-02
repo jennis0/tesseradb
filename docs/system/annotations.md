@@ -178,13 +178,13 @@ relation between two artifacts is only named where both ends of it are visible t
 
 ## Visibility
 
-Like a point, a layer can carry an access label, and a viewer who does not hold a matching term
+Like a point, a layer can carry an access label, and a viewer whose terms do not satisfy it
 cannot know the layer exists at all: a request naming it behaves exactly as a request naming a
 layer that was never declared.
 
 A layer can also declare that each artifact carries its own access label, independent of its
 layer's and independent of any of its members': `artifact_visibility = { field = "team", default =
-"inherited" }`. An artifact whose own label a viewer does not hold does not exist for them,
+"inherited" }`. An artifact whose own labels a viewer does not satisfy does not exist for them,
 whatever they can see of its membership. On every viewer route it is answered exactly as an
 artifact that was never published: no row, no count, no parent or target naming it, a `404` by
 identifier, an empty operand for `member_of` and the artifact region leaf, and no gap in a browse
@@ -196,7 +196,8 @@ strings or a dictionary of strings, or from an inline row's `access`. At a runni
 record of a publication, and each row of a growth, carries its labels: `"access": ["team-a",
 "team-b"]` on a JSON row, or an `access` column in the Arrow form of a growth, read as a points
 file's access column is: a string, a list of strings or a dictionary of strings. A record carrying
-labels on a layer that names no field is refused, and so are labels the plugin maps to no term.
+labels on a layer that names no field is refused, and so is a label that is not an access
+expression.
 
 Every artifact created on a layer whose field is named states its labels, at a build and at a
 running service alike. At a build the artifact source carries the field's column, and an inline row
@@ -219,8 +220,9 @@ changes nothing, and a different one is refused. It takes effect when the level 
 as every fill does. Changing a label means deleting the artifact and publishing it again, under a
 new identifier.
 
-A label is compared with the terms the viewer's credential resolved to, so a label no item
-carries is still one a credential can hold. A layer's own label is compared the same way.
+A label is an access expression, evaluated against the terms the viewer's credential holds, so a
+label no item carries is still one a credential can satisfy. An artifact carrying several labels
+admits a viewer who satisfies any one of them. A layer's own label is evaluated the same way.
 
 Separately, a layer declares a membership requirement: how much of an artifact's declared
 membership a viewer must already be able to see before the artifact itself is served.

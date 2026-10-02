@@ -158,7 +158,7 @@ tessera serve: No such file or directory (os error 2)
 
 In a second `tessera` shell, ask the viewer address whether the server is ready, and ask the session
 address for a token. Your backend will ask with an API key whose principal holds `authorise-as`,
-naming the principal to read as. The operator credential can instead name the access labels the
+naming the principal to read as. The operator credential can instead name the access terms the
 token holds, which needs no principal in the catalogue:
 
 ```console

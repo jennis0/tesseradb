@@ -456,7 +456,6 @@ fn open(fx: &Fixture) -> Engine {
         &fx.root,
         &fx.tmp.path().join("cache"),
         &fx.tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

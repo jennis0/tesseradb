@@ -47,7 +47,6 @@ use tessera_engine::filter::{
 use tessera_engine::{CategoryQuery, Engine, EngineConfig};
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{AttrLocalId, EntityId, IdentityKey};
@@ -819,7 +818,7 @@ fn main() {
     let comp = composed(&codes);
 
     // ------------------------------------------------------------------ stage 0: fresh build
-    let engine = Engine::open(&bundle, &a.work.join("cache"), &a.work.join("wal"), Passthrough::new(), config())
+    let engine = Engine::open(&bundle, &a.work.join("cache"), &a.work.join("wal"), config())
         .expect("engine opens");
     engine.set_coalesce_for_test(false);
     let credential = format!(
@@ -886,7 +885,6 @@ fn main() {
         &bundle,
         &a.work.join("cache"),
         &a.work.join("wal"),
-        Passthrough::new(),
         config(),
     )
     .expect("engine reopens");

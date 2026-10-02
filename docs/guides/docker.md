@@ -212,7 +212,7 @@ tessera-docker-tessera-1   tessera   "/usr/local/bin/tess…"   tessera   7 seco
 
 From the host, ask for a token. Your application's backend will ask with an API key whose
 principal holds `authorise-as`, naming the principal to read as. The operator credential can
-instead name the access labels the token holds, which needs no principal in the catalogue:
+instead name the access terms the token holds, which needs no principal in the catalogue:
 
 ```console
 $ curl -sS http://127.0.0.1:9162/session/authorise \

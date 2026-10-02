@@ -458,7 +458,7 @@ impl LiveState {
             .collect()
     }
 
-    pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Vec<TermId> {
+    pub(crate) fn resolve_terms(&self, dict: &Dict, descriptors: &[Vec<u8>]) -> Vec<TermId> {
         let mut state = lock_recover(&self.resolver_state);
         let (extension, next_extension_id) = std::mem::take(&mut *state);
         let mut resolver = DescriptorResolver::resume(dict, extension, next_extension_id);
@@ -469,7 +469,7 @@ impl LiveState {
 
     /// The terms `descriptors` resolve to, interning none: `None` where one is novel, which no
     /// stored label holds.
-    pub(crate) fn lookup_terms(&self, dict: &Dict, descriptors: &[Descriptor]) -> Option<Vec<TermId>> {
+    pub(crate) fn lookup_terms(&self, dict: &Dict, descriptors: &[Vec<u8>]) -> Option<Vec<TermId>> {
         let state = lock_recover(&self.resolver_state);
         descriptors
             .iter()

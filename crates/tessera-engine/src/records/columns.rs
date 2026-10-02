@@ -213,11 +213,16 @@ fn read_run(cx: &PageCx<'_>, plan: &FieldPlan, rows: &[Taken], budget: usize) ->
             SystemField::Position => {
                 SystemValues::Position(positions(generation, open, rows)?)
             }
-            SystemField::Labels => SystemValues::Labels(
-                rows.iter()
-                    .map(|row| engine.labels_for(generation, open.served.session, row.entity))
-                    .collect::<Result<_>>()?,
-            ),
+            SystemField::Labels => {
+                let mut parsed = FxHashMap::default();
+                SystemValues::Labels(
+                    rows.iter()
+                        .map(|row| {
+                            engine.labels_for(generation, open.served.session, row.entity, &mut parsed)
+                        })
+                        .collect::<Result<_>>()?,
+                )
+            }
         });
     }
     Ok(Run {

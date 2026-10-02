@@ -36,8 +36,7 @@ struct RawConfig {
     /// What `tessera build` and `tessera check` read.
     #[serde(default)]
     build: RawBuild,
-    /// The authorisation plugin, which turns an access label into the terms a viewer's token is
-    /// checked against.
+    /// The rule that reads credentials and access labels. It has one value.
     plugin: RawPlugin,
     /// How long a viewer's token lasts.
     ///
@@ -153,8 +152,8 @@ struct RawBuild {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPlugin {
-    /// The plugin. This build has one, `builtin:passthrough`, which makes each access label its
-    /// own term, and refuses any other name.
+    /// `builtin:passthrough`, the one value, and any other is refused: a credential's terms are
+    /// taken as presented, and every access label is an access expression.
     module: String,
 }
 

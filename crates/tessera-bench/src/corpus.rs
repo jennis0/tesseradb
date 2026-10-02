@@ -78,7 +78,7 @@ pub struct Grant {
 }
 
 impl Grant {
-    /// The `Passthrough` plugin's auth-data form: `{"terms": ["<descriptor>", ...]}`.
+    /// The auth-data form: `{"terms": ["<term>", ...]}`.
     ///
     /// Descriptors must come from the bundle's own dictionary — `Dict::lookup` silently drops
     /// unknown ones, so a guessed descriptor yields a *smaller* mask than intended and a

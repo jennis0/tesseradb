@@ -42,7 +42,6 @@ fn delete_then_reingest_gives_the_value_to_the_new_item_across_flush_rotation_an
             &root,
             &tmp.path().join("cache"),
             &wal_path,
-            tessera_plugin::Passthrough::new(),
             EngineConfig {
                 flush_max_age_secs: 3600,
                 // **The row trigger off.** This cell drives publication itself — it pins `B`
@@ -135,7 +134,6 @@ fn open_engine(dir: &std::path::Path) -> Engine {
         &root,
         &dir.join("cache"),
         &dir.join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             flush_max_items: usize::MAX,

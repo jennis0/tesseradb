@@ -16,7 +16,6 @@ fn engine_over(root: &std::path::Path, tmp: &tempfile::TempDir, wal: &str) -> En
         root,
         &tmp.path().join(format!("cache-{wal}")),
         &tmp.path().join(wal),
-        tessera_plugin::Passthrough::new(),
         EngineConfig {
             flush_max_age_secs: 3600,
             ..config()

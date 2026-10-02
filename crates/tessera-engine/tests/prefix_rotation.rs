@@ -152,7 +152,6 @@ fn engine_over_fixture(tmp: &tempfile::TempDir, root: &Path, cache: &str, wal: &
         root,
         &tmp.path().join(cache),
         &tmp.path().join(wal),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("engine should open against a freshly built bundle");
@@ -352,7 +351,6 @@ fn a_pre_rotation_fragment_is_unreachable_by_key_on_disc_and_across_a_restart() 
         &root,
         &cache_dir,
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config_uncapped(),
     )
     .expect("the new prefix opens on its own");

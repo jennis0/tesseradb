@@ -1394,9 +1394,7 @@ impl LayerDeclaration {
             return refuse("`artifact_visibility.field`");
         }
         let label = |key: &str, word: &str| {
-            crate::label::declared_label(key, word)
-                .map(str::to_string)
-                .map_err(DeclarationError::Label)
+            crate::label::declared_label(key, word).map_err(DeclarationError::Label)
         };
         if let Some(visibility) = &self.visibility {
             let visibility = label("visibility", visibility)?;

@@ -269,7 +269,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             ApiError::FailClosed(format!("column '{column}' cannot be suggested over"))
         }
         // Everything else is the deployment's fault, and its text can name a path, a segment, a
-        // bundle file or what the plugin said (`Malformed`, `Plugin`, `Wal`, an unreadable filter
+        // bundle file (`Malformed`, `Wal`, an unreadable filter
         // artefact in `FilterRefused`), so it is logged and never sent.
         other => {
             tracing::error!(detail = %other, "an engine failure; answering fail-closed");
@@ -719,13 +719,12 @@ mod tests {
     }
 
     /// An engine failure whose text is the deployment's answers a 500 whose body carries none of
-    /// that text: a bundle file, a plugin, a filter artefact and a derived column's postings.
+    /// that text: a bundle file, a filter artefact and a derived column's postings.
     #[test]
     fn engine_failures_send_none_of_their_internal_text() {
         let secret = "/srv/bundles/p0/seg-0007/records.blob entity 144999";
         for e in [
             EngineError::Malformed(secret.to_string()),
-            EngineError::Plugin(tessera_plugin::PluginError::Malformed(secret.to_string())),
             EngineError::FilterRefused(secret.to_string()),
             EngineError::Io(std::io::Error::other(secret)),
             EngineError::SegmentWithoutRowBase {

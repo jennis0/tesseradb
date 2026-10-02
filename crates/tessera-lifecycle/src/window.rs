@@ -127,8 +127,8 @@ pub struct WindowEntry<W> {
     pub edits: Vec<UnallocatedEdit>,
     /// One per row of the request, in request order: what the row became.
     pub slots: Vec<Slot>,
-    /// The request rows creating an item whose label resolves to more terms than the plugin
-    /// declares an item carries.
+    /// The request rows creating an item indexed under more than
+    /// [`tessera_authz::MAX_KEYS_PER_ITEM`] keys.
     pub over_bound: Vec<u32>,
     pub batch_id: String,
     pub body_hash: [u8; 32],
@@ -494,9 +494,8 @@ fn tally(pending: &[PendingItem]) -> FragmentationTally {
     by_rank.sort_unstable_by_key(|&index| id_of(index));
 
     // `(last id seen, postings so far)` per term. The second half is `k_t`, and it counts **rows**,
-    // never occurrences: a plugin may return one term twice for one item (the built-in passthrough
-    // splits `access` on commas and does not deduplicate), and a `k_t` above `W` would make the
-    // baseline below negative.
+    // never occurrences: a row's term list may hold one term twice, and a `k_t` above `W` would
+    // make the baseline below negative.
     let mut last: FxHashMap<TermId, (u64, u64)> = FxHashMap::default();
     let mut t = FragmentationTally {
         rows,
@@ -1125,8 +1124,8 @@ mod tests {
     /// A term repeated within one row is **one** posting, and it is found however far apart the
     /// repetitions sit in the row's term list.
     ///
-    /// Reachable from the wire: the built-in passthrough plugin splits `access` on commas and does
-    /// not deduplicate, so `access = "a,b,a"` arrives here as `[a, b, a]`. Were the repetition
+    /// A row's term list is not deduplicated on every path that builds one, so it can arrive here
+    /// as `[a, b, a]`. Were the repetition
     /// counted, a term's `k` could exceed the window's row count and its baseline
     /// `k·(W − k + 1)/W` would go negative — which, cast to the unsigned counter, saturates to zero
     /// silently rather than failing.

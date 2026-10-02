@@ -98,8 +98,8 @@ class Database:
     - `temporary`: `True` for a database `create()` made without a path, which `close()`
       deletes.
     - `built`: `True` once the first commit has built the database.
-    - `terms`: the access terms `viewer()` and `token()` hold when given none: every access label
-      the database's rows carry, and each view's default label.
+    - `terms`: the access terms `viewer()` and `token()` hold when given none: every term the
+      database's access labels name, and the terms of each view's default label.
     - `inserts`: the `Insert` records made before the first commit, which it builds from.
     - `pending`: the `Insert` records made since the last commit, which the next one sends.
     - `listening`: the addresses the server listens on, as `serve()` returns them, or `None`
@@ -1443,8 +1443,8 @@ class Database:
     def viewer(self, terms: Sequence[str] | None = None) -> Viewer:
         """A reader of this database holding only the access terms given.
 
-        - `terms`: the access terms. The reader sees an item when it holds one of the item's
-          labels. Without them the reader is the operator, which holds `read-all` and sees every
+        - `terms`: the access terms. The reader sees an item when its terms satisfy one of the
+          item's labels. Without them the reader is the operator, which holds `read-all` and sees every
           item that is not deleted or suppressed.
 
         Every count, map and record the reader is given covers only what those terms let it see.

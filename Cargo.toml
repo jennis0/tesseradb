@@ -5,7 +5,6 @@ members = [
     "crates/tessera-roaring",
     "crates/tessera-cache",
     "crates/tessera-analyse",
-    "crates/tessera-plugin",
     "crates/tessera-catalogue",
     "crates/tessera-authz",
     "crates/tessera-filter",

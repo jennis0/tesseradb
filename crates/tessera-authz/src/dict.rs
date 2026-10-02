@@ -1,4 +1,7 @@
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
+
+use crate::label::LabelIndex;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -8,13 +11,22 @@ use tessera_types::TermId;
 ///
 /// Every build interns this descriptor first, so term `0` is `public` in every bundle and is
 /// minted for no other descriptor. Every session resolved by the engine gains it by construction.
-/// It is neither a grant nor a plugin behaviour.
+/// It is not a grant.
 pub const PUBLIC_LABEL: &[u8] = tessera_types::label::PUBLIC.as_bytes();
 
 /// [`PUBLIC_LABEL`]'s term id. `0` is the first ordinal a dictionary assigns, not an absent
 /// sentinel; reserving it makes the label's identity a property of the format rather than of the
 /// input.
 pub const PUBLIC_TERM: TermId = TermId::new(0);
+
+/// The most distinct index keys a dictionary is sized for. A flush that would carry the dictionary
+/// to it is refused, because the in-memory ids given to keys no flush has promoted count down from
+/// `u32::MAX` and must stay above every ordinal.
+pub const MAX_DISTINCT_TERMS: u64 = 200_000_000;
+
+/// The index keys an item is expected to carry at most. An item past it is indexed with every key
+/// and reported, because dropping a key would change who can see the item.
+pub const MAX_KEYS_PER_ITEM: usize = 4_096;
 
 /// Writes dictionary extents: deduplicates descriptors and assigns ordinal term IDs.
 pub struct DictWriter {
@@ -231,6 +243,9 @@ pub struct Dict {
     by_hash: FxHashMap<u64, TermId>,
     /// The descriptors whose hash an earlier descriptor holds.
     collided: FxHashMap<Box<[u8]>, TermId>,
+    /// The labels indexed under a key of their own, shared between a dictionary and its
+    /// extensions until an extension adds one.
+    labels: Arc<LabelIndex>,
 }
 
 fn descriptor_hash(descriptor: &[u8]) -> u64 {
@@ -254,8 +269,14 @@ impl Dict {
             ends: Vec::new(),
             by_hash: FxHashMap::default(),
             collided: FxHashMap::default(),
+            labels: Arc::default(),
         }
         .load_extending(paths)
+    }
+
+    /// The labels this dictionary indexes under a key of their own.
+    pub fn labels(&self) -> &LabelIndex {
+        &self.labels
     }
 
     /// Give `descriptor` the next ordinal unless it already has one: skip-if-present, not
@@ -274,6 +295,9 @@ impl Dict {
             std::collections::hash_map::Entry::Occupied(_) => {
                 self.collided.insert(descriptor.into(), id);
             }
+        }
+        if crate::label::label_of_key(descriptor).is_some() {
+            Arc::make_mut(&mut self.labels).add(id, descriptor);
         }
     }
 
@@ -339,6 +363,34 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The labels a dictionary indexes under keys of their own are the same whether the
+    /// dictionary was loaded from its extents or extended in memory by a flush.
+    #[test]
+    fn a_label_key_is_evaluated_after_a_load_and_after_an_extension() {
+        let temp = TempDir::new().unwrap();
+        let keys = crate::index_keys(["public", "a&b", "c"]).unwrap();
+        let mut writer = DictWriter::new(temp.path());
+        for key in &keys {
+            writer.intern(key);
+        }
+        let loaded = Dict::load(&writer.finish().unwrap()).unwrap();
+        let extended = Dict::load(&[])
+            .unwrap()
+            .extended_with(&keys[..1])
+            .extended_with(&keys[1..]);
+        for dict in [&loaded, &extended] {
+            let key = dict.lookup(&keys[0]).unwrap();
+            assert!(dict.labels().is_label_key(key));
+            let mut out = Vec::new();
+            dict.labels().authorise(["a", "b"], &mut out);
+            assert_eq!(out, vec![key]);
+            out.clear();
+            dict.labels().authorise(["a", "c"], &mut out);
+            assert!(out.is_empty());
+            assert!(!dict.labels().is_label_key(dict.lookup(b"c").unwrap()));
+        }
+    }
 
     #[test]
     fn test_dict_writer_and_loader() {

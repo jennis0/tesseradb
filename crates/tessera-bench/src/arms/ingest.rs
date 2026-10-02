@@ -122,7 +122,6 @@ use tessera_build::{BuildArgs, BuildObserver, BuildStage};
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{Engine, EngineConfig};
 use tessera_lifecycle::UnallocatedRow;
-use tessera_plugin::Passthrough;
 use tessera_spatial::Bounds;
 use tessera_store::read::open_bundle;
 use tessera_types::{IdentityKey, TermId};
@@ -485,7 +484,6 @@ pub fn run_batch(ctx: &Context, batch_sizes: &[usize], seed: u64) -> Result<()> 
                 &fixture.root,
                 &tmp.join("cache"),
                 &tmp.join("wal.log"),
-                Passthrough::new(),
                 EngineConfig {
                     token_max_lifetime_secs: 3600,
                     max_k: 200,
@@ -628,7 +626,6 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
             &fixture.root,
             &tmp.join("cache"),
             &tmp.join("wal.log"),
-            Passthrough::new(),
             EngineConfig {
                 token_max_lifetime_secs: 3600,
                 max_k: k.max(200),
@@ -876,7 +873,6 @@ pub fn run_concurrent(
                 &fixture.root,
                 &tmp.join("cache"),
                 &tmp.join("wal.log"),
-                Passthrough::new(),
                 EngineConfig {
                     token_max_lifetime_secs: 3600,
                     max_k: 200,
@@ -1222,7 +1218,6 @@ pub fn run_rate(ctx: &Context, sweep: &RateSweep) -> Result<()> {
                         &base,
                         &tmp.join("cache"),
                         &tmp.join("wal.log"),
-                        Passthrough::new(),
                         EngineConfig {
                             token_max_lifetime_secs: 3600,
                             max_k: 200,

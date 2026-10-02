@@ -36,7 +36,6 @@ use tessera_engine::{
     AggregateCaps, AggregateHead, AggregateRequest, AggregateSink, By, Engine, EngineConfig,
     Grouping, PageEnd, Pick, RecordsLimits, Session, SinkResult, TableHead,
 };
-use tessera_plugin::Passthrough;
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -208,7 +207,6 @@ fn main() -> Result<(), BoxError> {
         &args.bundle,
         &tmp.join("cache"),
         &tmp.join("wal.log"),
-        Passthrough::new(),
         EngineConfig {
             token_max_lifetime_secs: 3600,
             max_k: 1_000,

@@ -44,7 +44,6 @@ fn open_with(config: EngineConfig, tmp: &TempDir, bundle_root: &Path) -> Engine 
         bundle_root,
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
-        tessera_plugin::Passthrough::new(),
         config,
     )
     .expect("engine should open against a freshly built bundle");

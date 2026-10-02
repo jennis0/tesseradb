@@ -71,7 +71,6 @@ impl ArtifactProjections {
         // no postings. Logged rather than returned, since the caller's alternative would be to
         // fail a request over a derivation that has a correct fallback.
         let partition = source
-            .filter(|source| source.signature_shaped())
             .and_then(|source| self.partition_for(&at, store, source));
         let built = match predicate {
             Some(PredicateSource::Spatial(spatial)) => {

@@ -35,8 +35,7 @@ const NOVEL: &[u8] = b"dept:secret";
 /// The fixture's `ALL_TERM` — which resolves — plus [`NOVEL`], which does not.
 const PARTLY_UNRESOLVED: &[u8] = br#"{"terms": ["0", "dept:secret"]}"#;
 
-/// The fixture's `ALL_TERM`, named twice. The passthrough plugin hands descriptors on verbatim and
-/// deduplicates nothing, so this is two descriptors resolving to one ordinal.
+/// The fixture's `ALL_TERM`, named twice, which is one term held.
 const DOUBLED: &[u8] = br#"{"terms": ["0", "0"]}"#;
 
 fn engine_on_fixture(tmp: &Path) -> (Engine, PathBuf) {
@@ -202,6 +201,36 @@ fn a_credential_naming_one_descriptor_twice_is_never_hinted() {
         visible(&engine, &doubled),
         visible(&engine, &once),
         "and it still sees exactly what the single-descriptor credential sees"
+    );
+}
+
+/// A term the dictionary carries only inside a label holding a conjunction is not a key of its
+/// own, and leaves the session behind only once it, or a label it satisfies, is promoted.
+#[test]
+fn a_term_named_only_inside_a_conjunction_is_hinted_only_by_its_own_promotion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (engine, _root) = engine_on_fixture(tmp.path());
+    promote(&engine, &tmp.path().join("label"), b"\x000&dept:secret");
+
+    let session = engine
+        .authorise(br#"{"terms": ["0", "dept:secret"]}"#)
+        .expect("authorises");
+    assert_eq!(
+        resolved(&session),
+        2,
+        "the term `0` and the label `0&dept:secret`, and no key for `dept:secret` alone"
+    );
+
+    promote(&engine, &tmp.path().join("unrelated"), b"dept:unrelated");
+    assert!(
+        !session.is_stale(&engine.generation()),
+        "a promotion of a term this session does not hold leaves it current"
+    );
+
+    promote(&engine, &tmp.path().join("own"), NOVEL);
+    assert!(
+        session.is_stale(&engine.generation()),
+        "the promotion of the held term as a key of its own leaves it behind"
     );
 }
 

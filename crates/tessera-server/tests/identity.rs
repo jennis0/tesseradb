@@ -736,7 +736,6 @@ async fn the_catalogue_survives_a_restart() {
             &tmp.path().join("bundle"),
             &tmp.path().join("cache"),
             &tmp.path().join("wal.log"),
-            tessera_plugin::Passthrough::new(),
             default_engine_config(),
         )
         .unwrap();

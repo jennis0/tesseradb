@@ -2473,7 +2473,7 @@ async fn both_session_routes_require_the_credential_before_the_body() {
                 assert_eq!(
                     resp.status().as_u16(),
                     status,
-                    "POST {path} ({kind:?}) with the session credential"
+                    "POST {path} ({kind:?}) with a session-plane credential"
                 );
             }
         }

@@ -120,12 +120,13 @@ neither. Beyond those, three checks apply:
 3. Each row is resolved to the item it names, and compared with what that item stores
    ([resolving a batch](#resolving-a-batch)).
 
-A row that creates an item has its access label resolved to terms through the caller's plugin. A
-term is one unit of access: an item carries the terms its label resolves to, a viewer's token
-carries the terms they hold, and with the built-in plugin an item is visible to a viewer who holds
-at least one of its terms. An item with more terms than the declared bound is indexed anyway, with
-a warning, because refusing it would look like an authorisation decision and a resource limit must
-not produce one.
+A row that carries access labels has each read as an access expression by the parser a build
+reads its access column with, and the item is indexed under the keys its labels give it: each term
+of a label that is a disjunction of terms, and one key of its own for each label holding a
+conjunction ([access control](access-control.md#how-labels-are-indexed)). A label that is not an
+expression refuses the request with `422`, naming the row. An item indexed under more than 4,096
+keys is indexed anyway, and reported, because refusing it would look like an authorisation
+decision and a resource limit must not produce one.
 
 A row whose coordinates fall outside the view's frame is stored on the frame's edge, as a build
 stores one, and the response counts it as `clamped`. A coordinate that is not a finite number, or
@@ -253,8 +254,10 @@ Rows arrive at the executor without an entity id. Allocation happens once per co
 the executor rather than per request.
 
 Within one window, entity ids are assigned in order of each item's signature, its sorted,
-deduplicated list of terms, and among items with one signature in the order the window received
-them. This groups the items carrying a term into
+deduplicated list of index keys, and among items with one signature in the order the window
+received them. Two items share a signature exactly when their labels index them under the same
+keys, so a label holding a conjunction groups its items as a term does. This groups the items
+carrying a key into
 contiguous runs of ids, which the term index stores far more compactly than scattered ids. Nothing
 repairs this ordering later: a wider window produces longer runs, and a narrower one does not. Ids
 a compaction freed are assigned first, lowest first, so they land among other terms' runs rather

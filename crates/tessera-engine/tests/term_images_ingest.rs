@@ -247,7 +247,6 @@ fn open(root: &Path, dir: &Path, name: &str) -> Engine {
         root,
         &dir.join(format!("cache-{name}")),
         &dir.join(format!("{name}.log")),
-        tessera_plugin::Passthrough::new(),
         ingest_config(),
     )
     .expect("the engine opens")
