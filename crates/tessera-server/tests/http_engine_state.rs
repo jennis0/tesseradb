@@ -221,6 +221,77 @@ async fn revoke_prunes_the_token() {
     );
 }
 
+/// Logout, a catalogue change and ending a session on the control plane each prune the ended
+/// session's projections before they answer, as revoke does.
+#[tokio::test]
+async fn every_way_a_session_ends_prunes_its_projections() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let entries = || server.state.engine.row_projection_cache_stats().entries;
+
+    let sessions = [
+        authorise(&server, &["0"]).await,
+        authorise(&server, &["1"]).await,
+        authorise(&server, &["0", "1"]).await,
+    ];
+    for session in &sessions {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(session["token"].as_str().unwrap())
+            .json(&serde_json::json!({
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    assert_eq!(entries(), 3);
+
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/logout"))
+        .bearer_auth(sessions[0]["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(entries(), 2, "logout must prune the session it ends");
+
+    let control = |path: &str, body: serde_json::Value| {
+        server
+            .client
+            .post(server.control_url(path))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .json(&body)
+            .send()
+    };
+    let principal = principal_for(&server, &["1"]);
+    let resp = control(
+        "/control/grants",
+        serde_json::json!({ "principal": principal, "term": "2" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        entries(),
+        1,
+        "a catalogue change must prune the sessions it ends"
+    );
+
+    let token_id = sessions[2]["token_id"].as_u64().unwrap();
+    let resp = control(
+        "/control/sessions/end",
+        serde_json::json!({ "token_id": token_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(entries(), 0, "ending a session on the control plane must prune it");
+}
+
 /// The operator credential is compared whole: a prefix of it, an extension of it, the empty
 /// string and a case change are each refused, and the exact credential is accepted.
 #[tokio::test]

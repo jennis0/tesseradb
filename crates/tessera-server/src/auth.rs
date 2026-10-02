@@ -323,20 +323,9 @@ pub async fn mint(
             created_at: now,
             expires_at,
         };
-        let swept = {
-            let mut sessions = state.sessions.lock();
-            if state.catalogue.generation() != resolution.generation {
-                None
-            } else {
-                Some(sessions.insert(entry, now))
-            }
-        };
-        match swept {
-            Some(swept) => {
-                state.prune_sessions(swept);
-                return Ok(minted);
-            }
-            None => state.prune_sessions(vec![minted.token_id]),
+        let current = || state.catalogue.generation() == resolution.generation;
+        if state.register_session(entry, current).await {
+            return Ok(minted);
         }
     }
     Err(ApiError::Backpressure {

@@ -97,7 +97,7 @@ async fn change(
         .blocking(move |state| f(&state.catalogue).map_err(refusal))
         .await?;
     Ok(Json(Change {
-        sessions_ended: state.end_affected(&affected),
+        sessions_ended: state.end_affected(&affected).await,
     }))
 }
 
@@ -643,11 +643,11 @@ async fn end_sessions(
             "send exactly one of `token_id`, `principal` and `provider`".into(),
         ));
     }
-    let ended = state.sessions.lock().end_where(|e| match req.token_id {
-        Some(id) => e.session.token_id() == id,
-        None => selects(&req.principal, &req.provider, e),
-    });
-    let n = ended.len();
-    state.prune_sessions(ended);
-    Ok(Json(Change { sessions_ended: n }))
+    let sessions_ended = state
+        .end_sessions(|e| match req.token_id {
+            Some(id) => e.session.token_id() == id,
+            None => selects(&req.principal, &req.provider, e),
+        })
+        .await;
+    Ok(Json(Change { sessions_ended }))
 }

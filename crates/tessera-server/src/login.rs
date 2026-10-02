@@ -56,10 +56,8 @@ pub(crate) async fn logout(
     ViewerSession(session): ViewerSession,
 ) -> StatusCode {
     let token_id = session.token_id();
-    let ended = state
-        .sessions
-        .lock()
-        .end_where(|e| e.session.token_id() == token_id);
-    state.prune_sessions(ended);
+    state
+        .end_sessions(|e| e.session.token_id() == token_id)
+        .await;
     StatusCode::NO_CONTENT
 }

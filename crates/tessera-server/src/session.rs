@@ -128,10 +128,10 @@ async fn revoke(
         Principal::Local(name) => name.clone(),
         _ => return Ok(StatusCode::NO_CONTENT),
     };
-    let ended = state.sessions.lock().end_where(|e| {
-        e.session.token_id() == req.token_id && e.minted_by.as_deref() == Some(minter.as_str())
-    });
-    // The registry change above is what makes the session unusable; the prune is memory hygiene.
-    state.prune_sessions(ended);
+    state
+        .end_sessions(|e| {
+            e.session.token_id() == req.token_id && e.minted_by.as_deref() == Some(minter.as_str())
+        })
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }

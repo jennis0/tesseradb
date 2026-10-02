@@ -145,9 +145,10 @@ pub struct SessionRegistryStats {
 
 impl SessionRegistry {
     /// Inserts a freshly authorised session and sweeps if the registry has reached its threshold.
-    /// `now_secs` is the caller's wall-clock reading. Returns the swept token ids, for the caller
-    /// to prune from the engine after dropping this lock, which every viewer request takes.
-    pub fn insert(&mut self, entry: SessionEntry, now_secs: u64) -> Vec<u64> {
+    /// `now_secs` is the caller's wall-clock reading. Returns the swept token ids, for
+    /// [`AppState::register_session`] to prune after dropping this lock, which every viewer
+    /// request takes.
+    fn insert(&mut self, entry: SessionEntry, now_secs: u64) -> Vec<u64> {
         let token = entry.session.token().to_string();
         let token_id = entry.session.token_id();
         self.by_token
@@ -206,8 +207,8 @@ impl SessionRegistry {
     }
 
     /// Ends every live session `doomed` selects. Each holder is answered `403 expired-token` until
-    /// the next sweep. Returns the ended token ids, for the caller to prune from the engine.
-    pub fn end_where(&mut self, doomed: impl Fn(&SessionEntry) -> bool) -> Vec<u64> {
+    /// the next sweep. Returns the ended token ids, for [`AppState::end_sessions`] to prune.
+    fn end_where(&mut self, doomed: impl Fn(&SessionEntry) -> bool) -> Vec<u64> {
         let mut ended = Vec::new();
         for slot in self.by_token.values_mut() {
             if let Slot::Live(entry) = slot {
@@ -221,14 +222,6 @@ impl SessionRegistry {
             self.token_id_to_token.remove(token_id);
         }
         ended
-    }
-
-    /// Ends every session a catalogue change reported in `affected`.
-    pub fn end_affected(&mut self, affected: &tessera_catalogue::Affected) -> Vec<u64> {
-        if affected.is_empty() {
-            return Vec::new();
-        }
-        self.end_where(|entry| entry.affected_by(affected))
     }
 
     /// Every live session `keep` selects, in `token_id` order.
@@ -856,23 +849,59 @@ impl AppState {
         Ok(entry)
     }
 
-    /// Drops the sessions `ended` names from the engine's caches, off the request path. The
-    /// registry has already made them unusable.
-    pub fn prune_sessions(self: &Arc<Self>, ended: Vec<u64>) {
+    /// Registers a freshly minted session if `admit` still allows it, under the registry's lock,
+    /// and prunes what the insert's sweep removed. An entry `admit` refuses is never registered,
+    /// and its token's projections are pruned. Returns whether it was registered.
+    pub async fn register_session(
+        self: &Arc<Self>,
+        entry: SessionEntry,
+        admit: impl FnOnce() -> bool,
+    ) -> bool {
+        let token_id = entry.session.token_id();
+        let (registered, ended) = {
+            let mut sessions = self.sessions.lock();
+            if admit() {
+                (true, sessions.insert(entry, now_secs()))
+            } else {
+                (false, vec![token_id])
+            }
+        };
+        self.prune(ended).await;
+        registered
+    }
+
+    /// Ends every live session `doomed` selects, prunes them, and returns how many ended.
+    pub async fn end_sessions(self: &Arc<Self>, doomed: impl Fn(&SessionEntry) -> bool) -> usize {
+        let ended = self.sessions.lock().end_where(doomed);
+        let n = ended.len();
+        self.prune(ended).await;
+        n
+    }
+
+    /// Ends every session a catalogue change affected, and returns how many.
+    pub async fn end_affected(self: &Arc<Self>, affected: &tessera_catalogue::Affected) -> usize {
+        if affected.is_empty() {
+            return 0;
+        }
+        self.end_sessions(|entry| entry.affected_by(affected)).await
+    }
+
+    /// Drops the sessions `ended` names from the engine's caches, on a blocking thread, and
+    /// returns once they are dropped. Every way a session ends reaches this, through
+    /// [`Self::end_sessions`] or the sweep in [`Self::register_session`], after the registry
+    /// has made the session unusable: pruning first would let a request that authenticated
+    /// before the end publish its key again.
+    async fn prune(self: &Arc<Self>, ended: Vec<u64>) {
         if ended.is_empty() {
             return;
         }
         let doomed: FxHashSet<u64> = ended.into_iter().collect();
         let pruner = Arc::clone(self);
-        tokio::task::spawn_blocking(move || pruner.engine.prune_tokens(&doomed));
-    }
-
-    /// Ends every session a catalogue change affected, and returns how many.
-    pub fn end_affected(self: &Arc<Self>, affected: &tessera_catalogue::Affected) -> usize {
-        let ended = self.sessions.lock().end_affected(affected);
-        let n = ended.len();
-        self.prune_sessions(ended);
-        n
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || pruner.engine.prune_tokens(&doomed)).await
+        {
+            tracing::error!(error = %e, "pruning ended sessions from the engine's caches failed");
+        }
     }
 }
 
