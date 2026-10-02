@@ -241,7 +241,7 @@ export class TesseraArtifactList extends TesseraElement {
     const colourLayer = clusterLayerOf(this.resolvedStore?.get('legend').colourBy ?? null);
     const source = colourLayer ? a.colourServed.filter((x) => x.layer === colourLayer) : a.served;
     if (a.layers.length === 0 && !colourLayer) return html`<div class="panel">${heading()}<span part="state" data-state="empty">No layer on</span></div>`;
-    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null)}</div>`;
+    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null, {first: true})}</div>`;
     if (a.status === 'refused') {
       return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span class="dot refuse"></span>${refusalText('Layer unavailable', a.refusal?.code)}</span></div>`;
     }
