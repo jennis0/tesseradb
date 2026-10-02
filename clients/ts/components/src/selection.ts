@@ -9,9 +9,10 @@ import './count.js';
 
 /**
  * The selected region: its counts, the held marks inside it as a list, and its actions. *Shown
- * inside* counts the held marks against the served set. *Matched inside* is exact for the shape
- * unless the server answered for a cover of it. *Visible inside* appears only while no other
- * filter narrows the view. Clicking a listed mark picks it. *Outside* flips the selection to its
+ * inside* counts the held marks against the matched count. *Matched inside* and *Visible inside*
+ * are the store's counts in view over the shape, the figures the status strip shows, exact unless
+ * the server answered for a cover of it; before those land, *Visible inside* appears only while no
+ * other filter narrows the view. Clicking a listed mark picks it. *Outside* flips the selection to its
  * complement, and *Clear* drops it.
  *
  * A selection is a filter: the map and every count narrow to it once it settles. Not built yet:
