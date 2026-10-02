@@ -153,8 +153,8 @@ term index or its delta tiers: every item, since a build and an ingest each refu
 would have no label. The engine rebuilds that set at each publication, as it brings every
 session's set forward, so an item a flush places under a new term or a new label joins the set
 when that publication reaches the session, and the session is never behind the dictionary. The
-set is cached under the watermark alone, so every `read-all` session at one watermark shares one
-copy. The overlay is subtracted from it at each request as from any other, so a deletion or
+set is cached under the bundle, the rule and the watermark, so every `read-all` session at one
+watermark shares one copy. The overlay is subtracted from it at each request as from any other, so a deletion or
 a suppression applies to it. It satisfies every view's, group's, layer's and artifact's own label
 and every layer's default label, as a session holding every term would. An artifact's membership
 requirement still applies, and its members and counts are computed from the visible set. The item
