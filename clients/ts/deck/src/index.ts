@@ -23,7 +23,7 @@ export {
   type Rgb
 } from './colour.js';
 export {DEFAULT_SIZING, type SizeScale, type Sizing} from './size.js';
-export type {DensityCell, DensityColours, DensityCounts, DensityMode} from './density.js';
+export {DEFAULT_DENSITY_SCALE, densityCountAt, densityPosition, type DensityCell, type DensityColours, type DensityCounts, type DensityMode, type DensityScale} from './density.js';
 export {
   DEFAULT_DENSITY_CELL_PX,
   DENSITY_CELL_SIZES,

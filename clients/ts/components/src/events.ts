@@ -1,5 +1,5 @@
 import type {ArtifactDetail, ClauseVerb, Count, FilterExpr, ItemDetail, Masked, RegionProjection, Refusal, SelectionShape} from '@tesseradb/client';
-import type {CategoryPaletteName, DensityColours, DensityMode, RampName, RampScale, SizeScale} from '@tesseradb/deck';
+import type {CategoryPaletteName, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale} from '@tesseradb/deck';
 import type {PanelState} from './states.js';
 
 /** A selection shape as an event carries it: an artifact's `tessera_id` as a decimal string. */
@@ -78,7 +78,8 @@ export type TesseraEventDetails = {
    * A display setting was changed in the explorer's Layers popover; the detail is every setting as
    * it now stands. `radius` and `pointOpacity` are null where the map sizes and fades the points by
    * how many are drawn, and `densityColours` is null where the map chooses. `densityResolution` is
-   * the cell size chosen on the Resolution slider, in CSS pixels.
+   * the cell size chosen on the Resolution slider, in CSS pixels, and `densityScale` the scale
+   * density's colours follow, `linear` or `log`.
    */
   'tessera-displaychange': {
     points: boolean;
@@ -88,6 +89,7 @@ export type TesseraEventDetails = {
     densityColours: DensityColours | null;
     densityStrength: number;
     densityResolution: number;
+    densityScale: DensityScale;
   };
   /**
    * A filter changed. `column` is the column whose control changed, or null for Clear all. After an

@@ -3,8 +3,8 @@ import {css, html, nothing, svg, type PropertyValues, type TemplateResult} from 
 import {property, state} from 'lit/decorators.js';
 import {repeat} from 'lit/directives/repeat.js';
 import type {AggregateSpec, ArtifactDetail, ItemDetail, Store} from '@tesseradb/client';
-import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
-import {DEFAULT_DENSITY_CELL_PX, DENSITY_CELL_SIZES, nearestStop} from '@tesseradb/deck';
+import type {CategoryPaletteName, Colouring, DensityColours, DensityMode, DensityScale, RampName, RampScale, SizeScale, Sizing} from '@tesseradb/deck';
+import {DEFAULT_DENSITY_CELL_PX, DEFAULT_DENSITY_SCALE, DENSITY_CELL_SIZES, nearestStop} from '@tesseradb/deck';
 import {artifactName, emptyDraft} from '@tesseradb/client';
 import {artifactBudgetFor, hasOneLayout, levelForBudget, sizesPoints} from '@tesseradb/client/internal';
 import {DENSITY_COLOUR_TITLES, clusterLayerOf} from '@tesseradb/deck/internal';
@@ -19,7 +19,7 @@ import {attachContextRoot, defineOnce} from './define.js';
 import {icon, type IconName} from './icons.js';
 import {exportparts, forwarded} from './parts.js';
 import {sameFrame} from './view-switch.js';
-import {drawnDensityColours, type TesseraMap} from './map.js';
+import {drawnDensityColours, drawnDensityScale, type TesseraMap} from './map.js';
 import {chrome, tokens} from './tokens.js';
 import './map.js';
 import './status.js';
@@ -58,6 +58,11 @@ const SIZE_SCALES: readonly {scale: SizeScale; label: string}[] = [
   {scale: 'linear', label: 'Linear'},
   {scale: 'log', label: 'Log'},
   {scale: 'rank', label: 'Rank'}
+];
+/** The Scale choices under Resolution, in order. */
+const DENSITY_SCALES: readonly {scale: DensityScale; label: string}[] = [
+  {scale: 'linear', label: 'Linear'},
+  {scale: 'log', label: 'Log'}
 ];
 /** The range of the size sliders, radii in pixels. */
 const SIZE_RANGE = {min: 1, max: 12, step: 0.5} as const;
@@ -216,6 +221,8 @@ const TABS: readonly {sheet: Sheet; icon: IconName; label: string; panel: Panel}
  * @csspart density-resolution - The Resolution slider, while density is drawn: the cell size on
  *   screen, coarse to fine. Its stops past the finest the server will count for the view are shown
  *   struck through, and the slider stops at the last one it can count.
+ * @csspart density-scale - The Linear and Log choice of density's colour scale, while density is
+ *   drawn, each with `data-scale` and `aria-checked`.
  * @csspart density-colours - The button that opens the list of density colours, while density is
  *   drawn in colours.
  * @csspart density-strength - The Strength slider, while density is drawn.
@@ -790,6 +797,8 @@ export class TesseraExplorer extends TesseraElement {
    * slider in the Layers popover changes it.
    */
   @property({type: Number, attribute: 'density-resolution'}) accessor densityResolution = DEFAULT_DENSITY_CELL_PX;
+  /** Passed to the map's `density-scale`; the Scale choice under Resolution in the Layers popover changes it. */
+  @property({attribute: 'density-scale'}) accessor densityScale: DensityScale = DEFAULT_DENSITY_SCALE;
   /** Passed to the map's `category-palette`. */
   @property({attribute: 'category-palette'}) accessor categoryPalette: CategoryPaletteName | '' = '';
   /** Passed to the map's `ramp`. */
@@ -1118,6 +1127,7 @@ export class TesseraExplorer extends TesseraElement {
           .densityColours=${this.densityColours}
           .densityStrength=${this.densityStrength}
           .densityResolution=${this.densityResolution}
+          .densityScale=${this.densityScale}
           .categoryPalette=${this.categoryPalette}
           .ramp=${this.ramp}
           .rampScale=${this.rampScale}
@@ -1439,7 +1449,8 @@ export class TesseraExplorer extends TesseraElement {
       density: this.density,
       densityColours: this.densityColours || null,
       densityStrength: this.densityStrength,
-      densityResolution: this.densityResolution
+      densityResolution: this.densityResolution,
+      densityScale: drawnDensityScale(this.densityScale)
     };
   }
 
@@ -1473,6 +1484,7 @@ export class TesseraExplorer extends TesseraElement {
         ? html`<div class="gap"></div>`
         : html`<div class="sliders">
             ${this.resolutionControl(change)}
+            ${this.densityScaleControl(s.densityScale, change)}
             ${ramped
               ? html`<span id="colours-label">Colours</span>
                   <button part="density-colours" class="ramp-choice" type="button" aria-labelledby="colours-label" aria-expanded=${this.densityColoursOpen ? 'true' : 'false'} aria-controls="density-colour-list"
@@ -1535,6 +1547,20 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       <span></span>
       <div class="ends"><span>Coarse</span><span class="readout">cells ≈ ${px} px</span><span>Fine</span></div>`;
+  }
+
+  /** The Scale choice under Resolution: Linear or Log, the scale density's colours follow. */
+  private densityScaleControl(set: string, change: (patch: Partial<DisplaySettings>) => void): TemplateResult {
+    const scale = drawnDensityScale(set);
+    const at = DENSITY_SCALES.findIndex((x) => x.scale === scale);
+    return html`<span id="density-scale-label">Scale</span>
+      <div part="density-scale" class="seg" role="radiogroup" aria-labelledby="density-scale-label">
+        ${DENSITY_SCALES.map(
+          (x, i) => html`<button type="button" role="radio" data-scale=${x.scale} aria-checked=${x.scale === scale ? 'true' : 'false'} tabindex=${i === at ? '0' : '-1'}
+            @click=${() => change({densityScale: x.scale})}
+            @keydown=${(e: KeyboardEvent) => radioKeys(e, DENSITY_SCALES.length, i, (j) => change({densityScale: DENSITY_SCALES[j]!.scale}))}>${x.label}</button>`
+        )}
+      </div>`;
   }
 
   /**
@@ -1684,6 +1710,7 @@ export class TesseraExplorer extends TesseraElement {
     }
     if (patch.densityStrength !== undefined) this.densityStrength = patch.densityStrength;
     if (patch.densityResolution !== undefined) this.densityResolution = patch.densityResolution;
+    if (patch.densityScale !== undefined) this.densityScale = patch.densityScale;
     emit(this, 'tessera-displaychange', this.display);
   }
 

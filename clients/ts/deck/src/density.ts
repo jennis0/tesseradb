@@ -13,9 +13,10 @@ import {RAMPS, rampAt, type Rgb} from './colour.js';
  * The smooth wash is one texture under the marks, with one bin per cell.
  *
  * Density is coloured by count alone: a bin coloured by its majority cluster would take its colour
- * from the sample. Intensity is histogram-equalised over the bins drawn (datashader's `eq_hist`),
- * since the counts span several orders of magnitude; the hexagons and grid use a quantile scale,
- * which is the same idea per bin.
+ * from the sample. Every mode places a count on one {@link DensityScale} from 0 to the largest
+ * count among the cells drawn ({@link densityPosition}), and picks its colour, alpha or contour
+ * level from that position. The cells drawn are those of the area counted, which runs past the
+ * viewport ({@link DensityCounter}), so the top of the scale holds while the camera pans within it.
  *
  * {@link filterDensity} smooths the binned image so the cells do not show as hard-edged squares.
  */
@@ -36,6 +37,43 @@ export type DensityMode = 'none' | 'smooth' | 'hex' | 'grid' | 'contours';
  * @category Colour
  */
 export type DensityColours = 'warm-grey' | 'viridis' | 'cividis' | 'magma' | 'greys';
+
+/**
+ * How a count is placed between no items and the largest count drawn: `linear`, in proportion to
+ * the count, or `log`, in proportion to the logarithm of one more than the count, which spreads
+ * counts that span several orders of magnitude.
+ *
+ * @category Colour
+ */
+export type DensityScale = 'linear' | 'log';
+
+/** The density scale used where none is set. */
+export const DEFAULT_DENSITY_SCALE: DensityScale = 'log';
+
+/**
+ * Where `count` sits on `scale`, from 0 at no items to 1 at `max`: `count / max` under `linear` and
+ * `log1p(count) / log1p(max)` under `log`. A count is clamped to `[0, max]`, and every count is at
+ * 0 where `max` is 0 or less.
+ */
+export function densityPosition(count: number, max: number, scale: DensityScale): number {
+  if (!(max > 0)) return 0;
+  const c = Math.min(max, Math.max(0, count));
+  return scale === 'log' ? Math.log1p(c) / Math.log1p(max) : c / max;
+}
+
+/** The count at `position` on `scale` up to `max`: the inverse of {@link densityPosition}. */
+export function densityCountAt(position: number, max: number, scale: DensityScale): number {
+  if (!(max > 0)) return 0;
+  const p = Math.min(1, Math.max(0, position));
+  return scale === 'log' ? Math.expm1(p * Math.log1p(max)) : p * max;
+}
+
+/** The largest count among `cells`, 0 where there are none. */
+export function maxCount(cells: readonly DensityCell[]): number {
+  let max = 0;
+  for (const c of cells) if (c.count > max) max = c.count;
+  return max;
+}
 
 /** The titles of the density colours, as a menu shows them. */
 export const DENSITY_COLOUR_TITLES: Readonly<Record<DensityColours, string>> = {
@@ -185,14 +223,46 @@ export function coarsened(counts: DensityCounts, budget: number): DensityCounts 
 }
 
 /**
- * The counts contour lines are drawn at: up to four distinct counts at the 25th, 50th, 75th and
- * 90th percentiles of the cells' counts, ascending. Empty where no cell has a count.
+ * The most cells the hexagons and the contours aggregate. deck aggregates them in the render, so
+ * finer counts are merged to a coarser depth first ({@link coarsened}). The figures hold one answer
+ * under 50 ms of main thread at 1920 × 1080 in headless Chromium's software GL; the contours'
+ * cost per cell is the higher.
  */
-export function contourThresholds(cells: readonly DensityCell[]): number[] {
-  const counts = cells.map((c) => c.count).sort((a, b) => a - b);
-  if (counts.length === 0) return [];
-  const at = [0.25, 0.5, 0.75, 0.9].map((q) => counts[Math.min(counts.length - 1, Math.floor(q * counts.length))]!);
-  return [...new Set(at)];
+export const AGGREGATED_CELLS = {hex: 10_000, contours: 2_000} as const;
+
+/** The merged cells each counts object has been drawn from, so a repaint hands deck the same data. */
+const merged = new WeakMap<DensityCounts, Partial<Record<'hex' | 'contours', DensityCounts>>>();
+
+/**
+ * The cells `mode` draws from `counts`: merged to {@link AGGREGATED_CELLS} for the hexagons and
+ * contours, and as given for the other modes. Their largest count is the top of the scale.
+ */
+export function drawnCells(counts: DensityCounts, mode: DensityMode): DensityCounts {
+  if (mode !== 'hex' && mode !== 'contours') return counts;
+  let held = merged.get(counts);
+  if (!held) merged.set(counts, (held = {}));
+  return (held[mode] ??= coarsened(counts, AGGREGATED_CELLS[mode]));
+}
+
+/** The positions on the scale contour lines are drawn at. */
+const CONTOUR_POSITIONS = [0.2, 0.4, 0.6, 0.8];
+
+/**
+ * The counts contour lines are drawn at, ascending: evenly spaced positions on `scale` between no
+ * items and the largest count among `cells`, up to four. Of the levels between the same two whole
+ * counts only the lowest is kept, since the cells above each are the same. Empty where no cell has
+ * a count.
+ */
+export function contourThresholds(cells: readonly DensityCell[], scale: DensityScale): number[] {
+  const max = maxCount(cells);
+  if (max === 0) return [];
+  const levels: number[] = [];
+  for (const p of CONTOUR_POSITIONS) {
+    const level = densityCountAt(p, max, scale);
+    const last = levels[levels.length - 1];
+    if (last === undefined || Math.ceil(level) !== Math.ceil(last)) levels.push(level);
+  }
+  return levels;
 }
 
 export type DensityImage = {
@@ -214,6 +284,8 @@ export const WASH_HUE: Record<'light' | 'dark', Rgb> = {light: [110, 104, 96], d
 
 /** The most alpha {@link binDensity} writes, so an intensity is `alpha / BIN_ALPHA_MAX`. */
 const BIN_ALPHA_MAX = 178;
+/** The alpha {@link binDensity} writes for a count at the bottom of the scale. */
+const BIN_ALPHA_MIN = 28;
 
 /** The columns and rows `cells` span, inclusive. */
 function extentOf(cells: readonly DensityCell[]): {x0: number; y0: number; x1: number; y1: number} {
@@ -231,10 +303,11 @@ function extentOf(cells: readonly DensityCell[]): {x0: number; y0: number; x1: n
 }
 
 /**
- * Bin the cells into one texel each, over the rectangle they span. A texel's alpha is its intensity
- * and its colour is unset; {@link filterDensity} paints it. `null` where no cell has a count.
+ * Bin the cells into one texel each, over the rectangle they span. A texel's alpha is its intensity,
+ * its count's position on `scale`, and its colour is unset; {@link filterDensity} paints it. `null`
+ * where no cell has a count.
  */
-export function binDensity(counts: DensityCounts): DensityImage | null {
+export function binDensity(counts: DensityCounts, scale: DensityScale = DEFAULT_DENSITY_SCALE): DensityImage | null {
   const {depth} = counts;
   const cells = counts.cells.filter((c) => c.count > 0);
   if (cells.length === 0) return null;
@@ -244,16 +317,12 @@ export function binDensity(counts: DensityCounts): DensityImage | null {
   const height = y1 - y0 + 1;
   const data = new Uint8ClampedArray(width * height * 4);
 
-  // Rank the distinct counts: a bin's intensity is its rank among the counts drawn.
-  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
-  const rank = new Map<number, number>();
-  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
-
+  const max = maxCount(cells);
   for (const cell of cells) {
-    const t = rank.get(cell.count) ?? 0;
+    const t = densityPosition(cell.count, max, scale);
     const i = ((cell.y - y0) * width + (cell.x - x0)) * 4;
     // Faint at the low end and never opaque, so the points stay legible over the densest bin.
-    data[i + 3] = Math.round(28 + t * (BIN_ALPHA_MAX - 28));
+    data[i + 3] = Math.round(BIN_ALPHA_MIN + t * (BIN_ALPHA_MAX - BIN_ALPHA_MIN));
   }
 
   const span = WORLD_SIZE / 2 ** depth;
@@ -285,8 +354,10 @@ function texelsPerCell(cells: number, most: number): number {
  * The binned image as a soft field: one padding cell around it so a halo can extend past an
  * edge cell, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
  * centres and box-blurred by one texel. Under a hue, alpha is proportional to intensity. Under a
- * ramp, the intensity picks the colour and the alpha rises from nothing to opaque over the lower
- * part of the range.
+ * ramp, the alpha rises from nothing to opaque over the lower part of the intensity, and the
+ * colour is the position on the scale the intensity stands for, the binned alpha's floor taken
+ * off. The blur averages a cell with its neighbours, so a lone dense cell among sparse ones is
+ * drawn below its own position.
  */
 export function filterDensity(image: DensityImage, depth: number, paint: DensityPaint = {kind: 'hue', rgb: WASH_HUE.light}): DensityImage {
   const W = image.width + 2;
@@ -356,7 +427,7 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
         data[i + 3] = a;
       } else {
         const t = Math.min(1, a / BIN_ALPHA_MAX);
-        const c = rampAt(paint.stops, t);
+        const c = rampAt(paint.stops, Math.min(1, Math.max(0, (a - BIN_ALPHA_MIN) / (BIN_ALPHA_MAX - BIN_ALPHA_MIN))));
         data[i] = c[0];
         data[i + 1] = c[1];
         data[i + 2] = c[2];
@@ -370,32 +441,38 @@ export function filterDensity(image: DensityImage, depth: number, paint: Density
   return {width, height, data, bounds: [bx0 - span, by0 - span, bx1 + span, by1 + span], filled};
 }
 
+/**
+ * `steps` colours of `stops`, sparse to dense, each taken at the middle of its equal share of the
+ * scale: a position in `[i / steps, (i + 1) / steps)` draws in colour `i`.
+ */
+export function densitySteps(stops: readonly Rgb[], steps: number): Rgb[] {
+  return Array.from({length: steps}, (_, i) => rampAt(stops, (i + 0.5) / steps));
+}
+
 /** The most texels per cell the grid's image takes, enough to leave a hairline between cells. */
 const GRID_SUPERSAMPLE = 8;
 
 /**
- * The grid as one image: each cell a square in the colour of its count's rank among the distinct
- * counts drawn, in `steps` steps of `stops`, drawn with nearest filtering so the squares keep their
+ * The grid as one image: each cell a square in the colour of its count's position on `scale`, in
+ * `steps` steps of `stops`, drawn with nearest filtering so the squares keep their
  * edges. Where the image has room for four or more texels a cell, the last row and column of each
  * cell's texels are left clear, so neighbouring cells show a hairline gap. `null` where no cell has a
  * count.
  */
-export function gridImage(counts: DensityCounts, stops: readonly Rgb[], steps: number): DensityImage | null {
+export function gridImage(counts: DensityCounts, stops: readonly Rgb[], steps: number, scale: DensityScale = DEFAULT_DENSITY_SCALE): DensityImage | null {
   const cells = counts.cells.filter((c) => c.count > 0);
   if (cells.length === 0) return null;
   const {x0, y0, x1, y1} = extentOf(cells);
   const columns = x1 - x0 + 1;
   const rows = y1 - y0 + 1;
-  const distinct = [...new Set(cells.map((c) => c.count))].sort((a, b) => a - b);
-  const rank = new Map<number, number>();
-  distinct.forEach((count, i) => rank.set(count, distinct.length === 1 ? 1 : i / (distinct.length - 1)));
-  const colours = Array.from({length: steps}, (_, i) => rampAt(stops, i / (steps - 1)));
+  const max = maxCount(cells);
+  const colours = densitySteps(stops, steps);
   const S = texelsPerCell(columns * rows, GRID_SUPERSAMPLE);
   const fill = S >= 4 ? S - 1 : S;
   const width = columns * S;
   const data = new Uint8ClampedArray(width * rows * S * 4);
   for (const c of cells) {
-    const colour = colours[Math.min(steps - 1, Math.floor((rank.get(c.count) ?? 0) * steps))]!;
+    const colour = colours[Math.min(steps - 1, Math.floor(densityPosition(c.count, max, scale) * steps))]!;
     for (let dy = 0; dy < fill; dy++) {
       let i = (((c.y - y0) * S + dy) * width + (c.x - x0) * S) * 4;
       for (let dx = 0; dx < fill; dx++, i += 4) {
