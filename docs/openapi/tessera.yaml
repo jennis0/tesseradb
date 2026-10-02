@@ -3652,7 +3652,7 @@ components:
             type: string
         read_all:
           const: true
-          description: "A session of the superuser itself, holding `read` and `read-all`: its authorised set is every item, deletions and suppressions still apply, and it satisfies every label. Accepted with the operator credential alone; an API key sending it is `403 forbidden`."
+          description: "A session of the superuser itself, holding `read` and `read-all`. It satisfies every index key, including one promoted after it was minted, so its authorised set is every item the corpus holds, and an item a flush places under a new term or a new label joins it from that publication. Deletions and suppressions still apply, and it satisfies every view's, group's, layer's and artifact's own label. Accepted with the operator credential alone; an API key sending it is `403 forbidden`."
       oneOf:
         - required: [principal]
           not:

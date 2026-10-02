@@ -146,9 +146,20 @@ A local principal's terms are those granted to it and to each group it belongs t
 identity's terms are those its provider's claim rules produce from the token's claims, together
 with the terms of each local group a role mapping names. The principal must hold `read`. The
 service hands the engine the resolved terms, and the engine builds the authorised set from them.
-A session holding `read-all` is handed every term the dictionary carries instead, and its
-authorised set is built by the same union, so it is every item; the overlay is subtracted from it
-at each request as from any other, and it satisfies every view's, layer's and artifact's label.
+
+A session holding `read-all` holds no terms. It satisfies every index key, including a key
+promoted after it was authorised, so its authorised set is the union of every posting the term
+index and its delta tiers carry: every item, since a build and an ingest each refuse an item that
+would have no label. The engine rebuilds that union at each publication, as it brings every
+session's set forward, so an item a flush places under a new term or a new label joins the set
+when that publication reaches the session, and the session is never behind the dictionary. The
+union is keyed by the watermark alone, so every `read-all` session at one watermark shares one
+cached copy. The overlay is subtracted from it at each request as from any other, so a deletion or
+a suppression applies to it. It satisfies every view's, group's, layer's and artifact's own label
+and every layer's default label, as a session holding every term would. An artifact's membership
+requirement still applies, and its members and counts are computed from the visible set. The item
+card and the `labels` column name, for each of an item's labels, what a session holding every term
+is shown: each term of a disjunction, and one clause of a label holding a conjunction.
 
 A token is a bearer string: unguessable, random, valid until its session ends. It carries no
 claims of its own and nothing that would let a holder work out its terms without asking the
@@ -224,7 +235,8 @@ difference rather than rebuilding either from scratch.
 **Not built yet:** adding to an open session a term it holds that the dictionary did not carry
 at authorise, or a label holding a conjunction that a flush promoted after it and that the
 session's terms satisfy. The session sees fewer items than its terms admit until it authorises
-again, never more. The engine can tell whether a session is behind in this way, from the keys
+again, never more. A `read-all` session is the exception: it satisfies every key, whenever the key
+was promoted. The engine can tell whether a session is behind in this way, from the keys
 promoted since it authorised, but nothing outside its tests asks. **Not built yet:** a signal to
 the client when this happens; nothing on the wire announces it. A client that wants to stay
 current has to re-authorise on its own schedule, bounded only by the token's configured lifetime.

@@ -76,8 +76,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use tessera_types::TermId;
+use rustc_hash::FxHashMap;
 
 use crate::cache::SessionGeometry;
 use crate::cancel::CancelToken;
@@ -108,7 +107,7 @@ pub(crate) const BACKGROUND_DEPTH: u8 = 12;
 pub(crate) struct LadderTask {
     pub(crate) token_id: u64,
     pub(crate) view: String,
-    pub(crate) satisfied: FxHashSet<TermId>,
+    pub(crate) satisfied: crate::session::Satisfied,
     pub(crate) generation: Arc<Generation>,
     pub(crate) geometry: Arc<SessionGeometry>,
 }

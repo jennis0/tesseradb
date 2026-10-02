@@ -5,6 +5,8 @@ use super::out::flat_families;
 use rustc_hash::FxHashMap;
 use tessera_types::label::{conjunction_text, Label};
 
+use crate::session::SatisfiedKeys;
+
 /// `POST /v1/items/{handle}`'s payload: a visible item's full record — every declared field that
 /// carries a value, by declared name. Names, not tags: a blob field's tag is a declaration position and an index internal, resolved to the
 /// declared name engine-side. No tag, no entity id and no blob detail crosses the trust boundary.
@@ -116,10 +118,10 @@ impl Engine {
         let held = |term: &str| session.holds(term);
         let mut clauses = Vec::new();
         for key in keys.into_iter().map(TermId::new) {
-            if !session.satisfied().contains(&key) {
+            if !session.satisfied().holds_key(key) {
                 continue;
             }
-            let clause = match session.satisfied_descriptors().get(&key) {
+            let clause = match session.term_of(key, &generation.dict) {
                 Some(term) => Some(conjunction_text(&[String::from_utf8_lossy(term).as_ref()])),
                 None => parsed
                     .entry(key)

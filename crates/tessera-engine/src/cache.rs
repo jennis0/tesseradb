@@ -28,7 +28,6 @@ use croaring::Portable;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use tessera_authz::FrozenFragment;
-use tessera_types::TermId;
 
 use crate::cancel::CancelToken;
 use crate::projection::RowProjection;
@@ -132,15 +131,16 @@ pub(crate) enum Peek {
 /// unexpressible instead of forbidden.
 ///
 /// **What the refresh needs to produce the next one**, so a background pass needs no session
-/// registry — the engine has none, sessions being values the server holds. `satisfied_sorted` is
-/// what the [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
+/// registry — the engine has none, sessions being values the server holds. `grant` is what the
+/// [`tessera_authz::FragmentCache`] is asked with; `auth_data_hash` is a digest of the
 /// credential, never the credential.
 pub(crate) struct SessionGeometry {
     /// The fragment `projection` was taken over — never the live one, unless they coincide.
     pub(crate) fragment: Arc<FrozenFragment>,
     pub(crate) projection: Arc<RowProjection>,
-    /// The credential's granted terms, sorted — the fragment cache's key component.
-    pub(crate) satisfied_sorted: Arc<Vec<TermId>>,
+    /// What the fragment is the union of, the fragment cache's key component. A `read-all`
+    /// session's is every key, so the refresh rebuilds it from the keys the generation carries.
+    pub(crate) grant: tessera_authz::Grant,
     /// `sha256(auth_data)`, part of the mask identity.
     pub(crate) auth_data_hash: [u8; 32],
 }

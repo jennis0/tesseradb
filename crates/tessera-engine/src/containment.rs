@@ -79,7 +79,7 @@ use std::io;
 use std::sync::Arc;
 
 use croaring::Bitmap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
@@ -88,6 +88,8 @@ use tessera_store::derived::{
 };
 use tessera_store::membership::ContainmentPack;
 use tessera_types::TermId;
+
+use crate::session::SatisfiedKeys;
 
 /// What composing a partition needs from the generation.
 pub struct PartitionSource<'a> {
@@ -241,14 +243,14 @@ impl ContainmentPartition {
     /// `satisfied_rank`'s: the loop stops at the first clause that fails, which is a fact about the
     /// artifact's own composition and not about how close the viewer came — and the expression is
     /// shared by every principal that reaches it.
-    fn satisfied_by(&self, id: u32, satisfied: &FxHashSet<TermId>) -> bool {
+    fn satisfied_by(&self, id: u32, satisfied: &dyn SatisfiedKeys) -> bool {
         let lo = self.pack.expression_at(id as usize) as usize;
         let clauses = self.pack.word(lo);
         let mut at = lo + 1;
         for _ in 0..clauses {
             let len = self.pack.word(at) as usize;
             let met =
-                (at + 1..at + 1 + len).any(|w| satisfied.contains(&TermId::new(self.pack.word(w))));
+                (at + 1..at + 1 + len).any(|w| satisfied.holds_key(TermId::new(self.pack.word(w))));
             if !met {
                 return false;
             }
@@ -266,7 +268,7 @@ impl ContainmentPartition {
     /// candidate*, which would make it whole-population work per artifact.
     pub fn answer_for_one<'a>(
         &'a self,
-        satisfied: &'a FxHashSet<TermId>,
+        satisfied: &'a dyn SatisfiedKeys,
     ) -> ContainmentAnswers<'a> {
         ContainmentAnswers {
             partition: self,
@@ -276,7 +278,7 @@ impl ContainmentPartition {
     }
 
     /// This principal's answers over the whole level, ready to be asked per candidate.
-    pub fn answers<'a>(&'a self, satisfied: &'a FxHashSet<TermId>) -> ContainmentAnswers<'a> {
+    pub fn answers<'a>(&'a self, satisfied: &'a dyn SatisfiedKeys) -> ContainmentAnswers<'a> {
         let memo = if self.expressions() <= dense_limit(self.pairs()) {
             // **The union route, in the form this stage can take.** With few distinct expressions
             // the whole table is cheaper to settle once than to memoise: every candidate that
@@ -350,7 +352,7 @@ enum Memo {
 /// One principal's view of one level's partition.
 pub struct ContainmentAnswers<'a> {
     partition: &'a ContainmentPartition,
-    satisfied: &'a FxHashSet<TermId>,
+    satisfied: &'a dyn SatisfiedKeys,
     memo: Memo,
 }
 
@@ -390,6 +392,7 @@ impl ContainmentAnswers<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustc_hash::FxHashSet;
 
     fn satisfied(terms: &[u32]) -> FxHashSet<TermId> {
         terms.iter().map(|t| TermId::new(*t)).collect()

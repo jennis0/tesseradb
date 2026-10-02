@@ -22,11 +22,15 @@ the server's credential checks are inside the trusted computing base. The terms 
 the access labels those terms satisfy, are what every later check in this chapter tests against.
 
 A principal holding `read-all`, granted directly, through a group or through an OIDC role
-mapping, authorises a session for itself whose authorised set is every item. Its set is built
-as any other session's is, from every term the dictionary carries, and the overlay is subtracted
-from it at every request, so a deletion or suppression applies to it. It
-satisfies every view's, layer's and artifact's label. The operator credential mints such a session
-for the superuser on the session plane, and may also mint one holding a set of terms it names.
+mapping, authorises a session for itself that satisfies every index key, including one promoted
+after the session was authorised. Its authorised set is the union of every posting at the
+corpus's current watermark, rebuilt at each publication, so it is every item the corpus holds, and
+an item a flush places joins it when that publication reaches the session. The overlay is
+subtracted from it at every request, so a deletion or suppression applies to it. It satisfies
+every view's, group's, layer's and artifact's own label and every layer's default label, and an
+artifact's membership requirement still applies to it. The operator credential mints such a
+session for the superuser on the session plane, and may also mint one holding a set of terms it
+names.
 
 A session holds the terms resolved when it was minted. A catalogue change that could change them,
 or the principal's permissions, ends the session: a grant, a membership, a disabled or deleted

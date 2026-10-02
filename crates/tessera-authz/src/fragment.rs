@@ -59,6 +59,49 @@ pub fn build_fragment_with_deltas(
     Ok(fragment)
 }
 
+/// What a fragment is the union of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Grant {
+    /// The postings of these index keys, ascending and distinct.
+    Keys(Arc<Vec<TermId>>),
+    /// Every posting the base and the live tiers carry, so every index key that exists: the
+    /// grant of a session that satisfies every label.
+    Every,
+}
+
+impl Grant {
+    /// The keys a [`Grant::Keys`] names, and none for [`Grant::Every`].
+    pub fn keys(&self) -> &[TermId] {
+        match self {
+            Grant::Keys(keys) => keys,
+            Grant::Every => &[],
+        }
+    }
+}
+
+/// [`build_fragment_with_deltas`] for `grant`.
+pub fn build_grant_with_deltas(
+    grant: &Grant,
+    postings: &PostingsReader,
+    deltas: &[Arc<DeltaTier>],
+) -> io::Result<Bitmap> {
+    let Grant::Every = grant else {
+        return build_fragment_with_deltas(grant.keys(), postings, deltas);
+    };
+    let mut sources = Vec::new();
+    for ordinal in 0..postings.term_count() {
+        sources.extend(postings.posting_at(ordinal)?);
+    }
+    for tier in deltas {
+        for ordinal in tier.ordinals() {
+            sources.extend(tier.posting_at(ordinal)?);
+        }
+    }
+    let mut fragment = union_postings(sources);
+    fragment.run_optimize();
+    Ok(fragment)
+}
+
 /// Append each of `terms`' postings, the base's where `base` is given, then every tier's, to
 /// `sources`. Never appends a tier's whole term set, only the terms given.
 fn collect_postings<'a>(
@@ -137,14 +180,42 @@ fn canonical_key(
     sorted.sort_unstable();
     sorted.dedup();
 
-    let mut hasher = Sha256::new();
-    hasher.update(bundle_identity);
-    hasher.update(rule_hash);
-    hasher.update(watermark.to_le_bytes());
+    let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
     for term in &sorted {
         hasher.update(term.to_le_bytes());
     }
     hasher.finalize().into()
+}
+
+/// What [`Grant::Every`]'s key hashes after the watermark. Nine bytes, so no list of four-byte
+/// term ids hashes the same input.
+const EVERY_KEY: &[u8] = b"every key";
+
+/// The canonical cache key for `grant`: [`canonical_key`] for a list of keys, and for
+/// [`Grant::Every`] the bundle, the rule and the watermark followed by [`EVERY_KEY`], so every
+/// such session at one watermark shares one entry.
+fn grant_key(
+    bundle_identity: &[u8; 32],
+    rule_hash: &[u8; 32],
+    grant: &Grant,
+    watermark: u64,
+) -> [u8; 32] {
+    match grant {
+        Grant::Keys(keys) => canonical_key(bundle_identity, rule_hash, keys, watermark),
+        Grant::Every => {
+            let mut hasher = key_prefix(bundle_identity, rule_hash, watermark);
+            hasher.update(EVERY_KEY);
+            hasher.finalize().into()
+        }
+    }
+}
+
+fn key_prefix(bundle_identity: &[u8; 32], rule_hash: &[u8; 32], watermark: u64) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(bundle_identity);
+    hasher.update(rule_hash);
+    hasher.update(watermark.to_le_bytes());
+    hasher
 }
 
 fn hex_encode(bytes: &[u8; 32]) -> String {
@@ -581,11 +652,25 @@ impl FragmentCache {
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = self.canonical_key_for(satisfied, watermark);
+        self.get_or_build_grant(
+            &Grant::Keys(Arc::new(satisfied.to_vec())),
+            postings,
+            deltas,
+            watermark,
+        )
+    }
+
+    /// [`Self::get_or_build`] for `grant`.
+    pub fn get_or_build_grant(
+        &self,
+        grant: &Grant,
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
         self.slots
-            .get_or_try_build(key, || {
-                self.open_or_build(&key, satisfied, postings, deltas, watermark)
-            })
+            .get_or_try_build(key, || self.open_or_build(&key, grant, postings, deltas, watermark))
             .map_err(|e| match e {
                 SingleFlightError::Building => FragmentCacheError::Building,
                 SingleFlightError::Build(io_err) => FragmentCacheError::Io(io_err),
@@ -602,10 +687,28 @@ impl FragmentCache {
         watermark: u64,
         cancel: &dyn Cancel,
     ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
-        let key = self.canonical_key_for(satisfied, watermark);
+        self.get_or_build_grant_waiting(
+            &Grant::Keys(Arc::new(satisfied.to_vec())),
+            postings,
+            deltas,
+            watermark,
+            cancel,
+        )
+    }
+
+    /// [`Self::get_or_build_waiting`] for `grant`.
+    pub fn get_or_build_grant_waiting(
+        &self,
+        grant: &Grant,
+        postings: &PostingsReader,
+        deltas: &[Arc<DeltaTier>],
+        watermark: u64,
+        cancel: &dyn Cancel,
+    ) -> Result<Arc<FrozenFragment>, FragmentCacheError> {
+        let key = grant_key(&self.bundle_identity, &self.rule_hash, grant, watermark);
         self.slots
             .get_or_try_build_waiting(key, cancel, || {
-                self.open_or_build(&key, satisfied, postings, deltas, watermark)
+                self.open_or_build(&key, grant, postings, deltas, watermark)
             })
             .map_err(|e| match e {
                 WaitingBuildError::Wait(WaitEnded::Budget) => FragmentCacheError::Building,
@@ -619,7 +722,7 @@ impl FragmentCache {
     fn open_or_build(
         &self,
         key: &[u8; 32],
-        satisfied: &[TermId],
+        grant: &Grant,
         postings: &PostingsReader,
         deltas: &[Arc<DeltaTier>],
         watermark: u64,
@@ -632,7 +735,7 @@ impl FragmentCache {
             return Ok(frozen);
         }
         create_private_dir_all(&self.dir)?;
-        let bitmap = build_fragment_with_deltas(satisfied, postings, deltas)?;
+        let bitmap = build_grant_with_deltas(grant, postings, deltas)?;
         self.rebuilds.fetch_add(1, Ordering::Relaxed);
         FrozenFragment::build_and_persist(
             &frag_path,
@@ -749,6 +852,29 @@ mod tests {
                 "seed {seed}: the fragment is not the pointwise union of its terms' postings"
             );
         }
+    }
+
+    /// Every key's fragment is the union of every posting, including a key only a tier carries,
+    /// and is filed under one entry per watermark whatever keys exist.
+    #[test]
+    fn every_key_is_the_union_of_every_posting_under_one_entry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let Corpus { base, mut tiers } = random_corpus(3);
+        tiers[1].push((40, vec![9_000, 9_001]));
+        let (reader, opened) = readers(temp.path(), &base, &tiers);
+
+        let built = build_grant_with_deltas(&Grant::Every, &reader, &opened).unwrap();
+        let every: Vec<TermId> = (0..=40).map(TermId::new).collect();
+        assert_eq!(built.to_vec(), expected_union(&every, &base, &tiers).to_vec());
+
+        let cache = FragmentCache::new(&temp.path().join("cache"), [1; 32], [2; 32]);
+        let first = cache.get_or_build_grant(&Grant::Every, &reader, &opened, 7).unwrap();
+        let second = cache.get_or_build_grant(&Grant::Every, &reader, &[], 7).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.rebuild_count(), 1);
+        let keys = Grant::Keys(Arc::new(every));
+        cache.get_or_build_grant(&keys, &reader, &opened, 7).unwrap();
+        assert_eq!(cache.rebuild_count(), 2, "a list of every key is a different entry");
     }
 
     /// The residual is inside the fragment and covers everything the kept terms' base postings

@@ -72,7 +72,8 @@ export type AuthoriseTarget =
   | {
       /**
        * A session of the superuser itself, holding `read` and `read-all`: its authorised set is
-       * every item, deletions and suppressions still apply, and it satisfies every label. Only the
+       * every item, including an item a flush places under a new term or label after the session
+       * was minted, deletions and suppressions still apply, and it satisfies every label. Only the
        * operator credential may ask for it.
        */
       readAll: true;

@@ -59,8 +59,6 @@ mod scan;
 mod test_support;
 
 use croaring::Bitmap;
-use rustc_hash::FxHashSet;
-use tessera_types::TermId;
 
 use crate::compose::verdict_of;
 use tessera_authz::fragment::FrozenFragment;
@@ -110,7 +108,7 @@ pub(crate) use tessera_filter::{as_f64, narrow_hi, narrow_lo, NativeBound, Narro
 /// the row-space composition calls, so the two cannot disagree about a given entity's disposition.
 pub fn candidate(
     fragment: &FrozenFragment,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn crate::session::SatisfiedKeys,
     overlay: &Overlay,
     buffer: &IngestBuffer,
 ) -> Bitmap {
@@ -123,7 +121,7 @@ pub fn candidate(
 /// the whole fragment.
 pub fn candidate_within(
     fragment: &FrozenFragment,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn crate::session::SatisfiedKeys,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     within: &Bitmap,
@@ -137,7 +135,7 @@ pub fn candidate_within(
 /// Add to `live` each buffered entity `keep` names whose verdict passes.
 fn add_buffered(
     live: &mut Bitmap,
-    satisfied: &FxHashSet<TermId>,
+    satisfied: &dyn crate::session::SatisfiedKeys,
     overlay: &Overlay,
     buffer: &IngestBuffer,
     keep: impl Fn(u32) -> bool,

@@ -143,13 +143,16 @@ receives them through a role mapping as it receives any other. The superuser
 `admin` can make itself hold `read-all` and `write-all`. `admin` is therefore equivalent to every
 permission, and is granted as such.
 
-A session holding `read-all` is authorised through the same path as every other session: its
-authorised set is built as the union of the postings of every term the dictionary carries, so
-the visible set is that union minus the overlay. A deletion or a suppression applies to it as to
-any session. It satisfies every view's, layer's and artifact's label, including a label no item
-carries. A term that first appears after the session was authorised is not in its set, and the
-service marks the session stale, as it marks any session whose credential names a term the
-dictionary has gained since.
+A session holding `read-all` holds no terms and satisfies every index key, including one a flush
+promotes after the session was authorised. Its authorised set is the union of every posting at
+the corpus's current watermark, rebuilt at each publication as every session's set is brought
+forward, so an item placed under a new term or a new label joins it when that publication
+reaches the session. Every `read-all` session at one watermark shares one cached union. The
+visible set is that union minus the overlay, so a deletion or a suppression applies to it as to
+any session. It satisfies every view's, group's, layer's and artifact's own label and every
+layer's default label, including a label no item carries, and an artifact's membership
+requirement still applies. Its item card shows, of each label, what a session holding every term
+is shown.
 
 Flushing and compacting need `write`, as a write does, because a write sent with `?wait=visible`
 flushes. They do not need `admin`, so an ingest pipeline, which ends a commit with a flush, holds
