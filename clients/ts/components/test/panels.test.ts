@@ -328,6 +328,7 @@ describe('<tessera-filter> on a category, before anything is typed', () => {
     await settle(host);
     expect([...registered(store).values()]).toEqual([{groupings: [{by: {field: 'archive', top: 5}}]}]);
     el.remove();
+    await settle(host);
     expect(registered(store).size).toBe(0);
   });
 
