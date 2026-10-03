@@ -25,4 +25,6 @@ pub(crate) struct ServedView<'a> {
     /// This view's `deleted ∪ suppressed` in row space.
     pub(crate) denied: &'a croaring::Bitmap,
     pub(crate) mask_identity: crate::histogram::MaskIdentity,
+    /// The request's cancellation, which a wait on another request's build observes.
+    pub(crate) cancel: Option<crate::CancelToken>,
 }

@@ -173,7 +173,7 @@ impl Engine {
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
         registered: &RegisteredLayer,
         points: &[TaggedPoint],
-    ) -> Vec<Option<u64>> {
+    ) -> Result<Vec<Option<u64>>> {
         let generation = served.generation;
         let declaration = &registered.declaration;
         let name = &declaration.name;
@@ -231,21 +231,19 @@ impl Engine {
                 declaration.require_member_visibility,
                 None | Some(tessera_types::layer::ExistenceCriterion::Count(0 | 1))
             );
-            let counts = needs_counts
-                .then(|| {
-                    self.masked_counts(
-                        &served.mask_identity,
-                        served.name,
+            let counts = match needs_counts {
+                false => None,
+                true => self.masked_counts(
+                        served,
                         name,
                         level,
                         level_version,
                         rows,
                         mask,
-                        crate::artifacts::derives_accumulated_geometry(declaration)
-                            .then_some(&served.segments[..]),
-                    )
-                })
-                .flatten();
+                    crate::artifacts::derives_accumulated_geometry(declaration)
+                        .then_some(&served.segments[..]),
+                )?,
+            };
             let view = ArtifactView {
                 declaration,
                 overlay: &generation.overlay,
@@ -359,6 +357,6 @@ impl Engine {
             }
             open = still_open;
         }
-        tags
+        Ok(tags)
     }
 }

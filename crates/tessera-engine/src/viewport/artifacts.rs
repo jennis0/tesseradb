@@ -137,9 +137,31 @@ pub(crate) struct DependencyContext<'a> {
     /// Each target layer's label test for this viewer, settled once per request: a named default
     /// is put through the plugin once rather than once per candidate.
     labels: std::cell::RefCell<rustc_hash::FxHashMap<String, crate::artifacts::LabelGate<'a>>>,
+    /// The first error a dependency's verdict met. The verdict is a `bool` asked from inside
+    /// another verdict, so the error waits here for [`Self::finish`].
+    failed: std::cell::RefCell<Option<EngineError>>,
 }
 
 impl<'a> DependencyContext<'a> {
+    /// `result`'s value, or `None` with its error held for [`Self::finish`]: for a read made where
+    /// an error cannot be returned, inside a closure the request is answering from.
+    pub(crate) fn held<T>(&self, result: Result<T>) -> Option<T> {
+        result
+            .map_err(|error| {
+                self.failed.borrow_mut().get_or_insert(error);
+            })
+            .ok()
+    }
+
+    /// The first error any dependency's verdict met, which the request answers with in place of
+    /// the verdicts reached since.
+    pub(crate) fn finish(&self) -> Result<()> {
+        match self.failed.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn new(
         served: &'a ServedView<'a>,
         mask: &'a crate::compose::EffectiveMask,
@@ -150,6 +172,7 @@ impl<'a> DependencyContext<'a> {
             mask,
             reachable,
             labels: Default::default(),
+            failed: Default::default(),
         }
     }
 }
@@ -304,27 +327,35 @@ impl Engine {
     ///
     /// Built on first use and shared by every session with the same term set
     /// ([`crate::histogram`]). The walk runs on the count pool, so a request on the compute pool
-    /// does not queue behind it.
+    /// does not queue behind it. A request that waits for another's build and outlasts the wait
+    /// budget is refused [`EngineError::CountsBuilding`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn masked_counts(
         &self,
-        identity: &crate::histogram::MaskIdentity,
-        view: &str,
+        served: &ServedView<'_>,
         layer: &str,
         level: u32,
         level_version: u64,
         rows: &crate::artifacts::ArtifactRows,
         mask: &crate::compose::EffectiveMask,
         segments: Option<&[(&SegmentData, u32)]>,
-    ) -> Option<Arc<crate::histogram::MaskedCounts>> {
+    ) -> Result<Option<Arc<crate::histogram::MaskedCounts>>> {
         use crate::compose::WholeMask;
-        let column = rows.column()?;
+        let Some(column) = rows.column() else {
+            return Ok(None);
+        };
         // A column-only form holds no per-artifact membership, so its geometry is accumulated in
         // this walk rather than read per artifact; where the form holds bitmaps it is not.
         let accumulate = segments.filter(|_| !rows.membership().rows_held());
-        Some(self.masked_counts.get_or_build(
-            identity.key(view, layer, level, level_version, accumulate.is_some()),
-            || {
+        let key = served
+            .mask_identity
+            .key(served.name, layer, level, level_version, accumulate.is_some());
+        let cancel: &dyn tessera_cache::Cancel = match &served.cancel {
+            Some(cancel) => cancel,
+            None => &tessera_cache::NeverCancelled,
+        };
+        self.masked_counts
+            .get_or_build(key, cancel, || {
                 let places = accumulate.map(crate::derived::Placement::of_segments);
                 self.count_pool.install(|| {
                     #[cfg(feature = "fault-injection")]
@@ -334,8 +365,12 @@ impl Engine {
                         places.is_some(),
                     )
                 })
-            },
-        ))
+            })
+            .map(Some)
+            .map_err(|ended| match ended {
+                tessera_cache::WaitEnded::Budget => EngineError::CountsBuilding,
+                tessera_cache::WaitEnded::Cancelled => EngineError::Cancelled,
+            })
     }
 
     /// One artifact, located and gated for one principal.
@@ -353,7 +388,6 @@ impl Engine {
         let (session, generation) = (served.session, served.generation);
         let (view, view_data) = (served.name, served.data);
         let (segments, denied) = (&served.segments[..], served.denied);
-        let mask_identity = served.mask_identity;
         let (shard, entity) = self.identity_key.invert(id);
         if shard != generation.bundle.manifest.identity.shard_id {
             return Ok(None);
@@ -421,8 +455,7 @@ impl Engine {
         });
         // See `Engine::masked_counts`: a cold row-major drill-down pays the whole histogram.
         let counts = self.masked_counts(
-            &mask_identity,
-            view,
+            served,
             &name,
             level,
             level_version,
@@ -432,7 +465,7 @@ impl Engine {
             // for a position per visible row.
             crate::artifacts::derives_accumulated_geometry(&layer.declaration)
                 .then_some(segments),
-        );
+        )?;
         let carried_counts = counts.clone();
         // The same containment the viewport builds, from the same partition.
         let containment = rows
@@ -452,9 +485,9 @@ impl Engine {
             denied,
             counts,
         };
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            artifact_view.verdict(entity, ordinal)
-        else {
+        let verdict = artifact_view.verdict(entity, ordinal);
+        ctx.finish()?;
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } = verdict else {
             return Ok(None);
         };
         Ok(Some(GatedArtifact {
@@ -508,7 +541,7 @@ impl Engine {
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
-        let (geometry, _) =
+        let (geometry, key) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied()
@@ -525,7 +558,8 @@ impl Engine {
             denied,
             generation.buffered_rows(view),
         );
-        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        let mask_identity =
+            self.mask_identity(session, &generation, &geometry, key.segments_version);
         let served = ServedView {
             session,
             generation: &generation,
@@ -534,6 +568,7 @@ impl Engine {
             segments: segments_with_row_bases(view, view_data)?,
             denied,
             mask_identity,
+            cancel: None,
         };
         let Some(gated) = self.gated_artifact(&served, &mask, id)?
         else {
@@ -911,8 +946,7 @@ impl Engine {
         });
         // The target's own count, under the same key the viewport would read.
         let counts = self.masked_counts(
-            &ctx.served.mask_identity,
-            ctx.served.name,
+            ctx.served,
             &attachment.layer,
             attachment.level,
             level_version,
@@ -921,6 +955,9 @@ impl Engine {
             // A prerequisite asks whether the target is *served*, never for its geometry.
             None,
         );
+        let Some(counts) = ctx.held(counts) else {
+            return false;
+        };
         let nested = |a: &tessera_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
@@ -999,6 +1036,7 @@ impl Engine {
         let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
 
         let walked = self.walk_layers(served, req, names, &sets, &dependency_served)?;
+        ctx.finish()?;
         Ok(settle_response(walked, &in_request))
     }
 
@@ -1045,7 +1083,7 @@ impl Engine {
                 ) {
                     continue;
                 }
-                let level = self.level_pass(&layer, number, runs);
+                let level = self.level_pass(&layer, number, runs)?;
                 let passing = self.gate_candidates(&level);
                 let (lineage, cut) = self.cut_level(&level, &passing);
                 served_levels.push(ServedLevel {
@@ -1175,7 +1213,7 @@ impl Engine {
         layer: &'a LayerPass<'a>,
         level: u32,
         runs: &'a tessera_types::layer::ReservedRuns,
-    ) -> LevelPass<'a> {
+    ) -> Result<LevelPass<'a>> {
         let (pass, served) = (layer.pass, layer.pass.served);
         let ((rows, level_version), lineage_version) = self.level_form(
             served,
@@ -1187,8 +1225,7 @@ impl Engine {
         // Decided by the level's layout, never the request: artifact-major counts per artifact,
         // row-major reads the histogram.
         let counts = self.masked_counts(
-            &served.mask_identity,
-            served.name,
+            served,
             &layer.name,
             level,
             level_version,
@@ -1196,7 +1233,7 @@ impl Engine {
             pass.sets.mask,
             crate::artifacts::derives_accumulated_geometry(&layer.registered.declaration)
                 .then_some(&served.segments[..]),
-        );
+        )?;
         // Built after candidacy: the filter decides nothing about which artifacts are served.
         let matched = pass
             .sets
@@ -1208,7 +1245,7 @@ impl Engine {
             .highlighted_here
             .as_ref()
             .map(|here| rows.matched(here));
-        LevelPass {
+        Ok(LevelPass {
             layer,
             level,
             runs,
@@ -1218,7 +1255,7 @@ impl Engine {
             counts,
             matched,
             highlighted,
-        }
+        })
     }
 
     /// **Stage two: the verdict, for every candidate the viewport touches** — the ordinals that

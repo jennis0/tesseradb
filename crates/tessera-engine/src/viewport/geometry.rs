@@ -71,7 +71,7 @@ impl Engine {
         let coordinates = self.view_coordinates(generation, &geometry, view);
         // Names the fragment this request composes against, which under stale-serve is the
         // entry's and not the newest one.
-        let mask_identity = self.mask_identity(session, generation, &geometry);
+        let mask_identity = self.mask_identity(session, generation, &geometry, key.segments_version);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -118,6 +118,7 @@ impl Engine {
             segments,
             denied,
             mask_identity,
+            cancel: cancel.clone(),
         };
 
         let mask = compose(
@@ -307,11 +308,13 @@ impl Engine {
         session: &Session,
         generation: &crate::Generation,
         geometry: &crate::cache::SessionGeometry,
+        projection_segments_version: u64,
     ) -> crate::histogram::MaskIdentity {
         crate::histogram::MaskIdentity {
             token_id: session.token_id(),
             terms: session.terms_digest(),
             segments_version: generation.segments_version,
+            projection_segments_version,
             overlay_version: generation.overlay_version,
             fragment_identity: geometry.fragment.identity,
             fragment_watermark: geometry.fragment.watermark,
@@ -414,7 +417,7 @@ impl Engine {
             .find_map(|partition| partition.views.get(view))
             .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let mut probe = Probe::new();
-        let (geometry, _) =
+        let (geometry, key) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied()
@@ -432,7 +435,8 @@ impl Engine {
             generation.buffered_rows(view),
         );
         let segments = segments_with_row_bases(view, view_data)?;
-        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        let mask_identity =
+            self.mask_identity(session, &generation, &geometry, key.segments_version);
         Ok(self.occupied_tiles(&mask_identity, view, &segments, &mask, depth))
     }
 

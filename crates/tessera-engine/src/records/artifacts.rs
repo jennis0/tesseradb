@@ -504,7 +504,7 @@ impl ArtifactsPager<'_> {
             .any(|p| matches!(p, Property::Centroid | Property::Box));
         let mut levels: Vec<ReadLevel> = (0..layer.runs.len() as u32)
             .map(|level| engine.read_level(served, &open.mask, &layer, level, geometry))
-            .collect();
+            .collect::<Result<_>>()?;
         if let Some(held) = &mut self.filter {
             for level in &mut levels {
                 held.count(engine, &open.mask, &layer.declaration.name, level);
@@ -523,17 +523,17 @@ impl ArtifactsPager<'_> {
                         let levels = (0..target.runs.len() as u32)
                             .map(|level| {
                                 let mut level =
-                                    engine.read_level(served, &open.mask, &target, level, false);
+                                    engine.read_level(served, &open.mask, &target, level, false)?;
                                 if let Some(held) = &mut self.filter {
                                     let name = &target.declaration.name;
                                     held.count(engine, &open.mask, name, &mut level);
                                 }
-                                level
+                                Ok(level)
                             })
-                            .collect();
-                        (target, levels)
+                            .collect::<Result<_>>()?;
+                        Ok((target, levels))
                     })
-                    .collect()
+                    .collect::<Result<_>>()?
             } else {
                 Vec::new()
             };
@@ -574,7 +574,9 @@ impl ArtifactsPager<'_> {
         if let Some(parent) = self.req.parent {
             scope.parent = Some(parent_position(&scope, parent));
         }
-        f(self, &scope).map(Some)
+        let out = f(self, &scope)?;
+        ctx.finish()?;
+        Ok(Some(out))
     }
 
     /// The levels the read walks, in order.

@@ -52,23 +52,14 @@ pub(crate) fn build_compute_pool(
         .build()
 }
 
-/// The pool masked counts are built on ([`Engine::count_pool`]). Its threads run at a nice value
-/// of 10 where the platform lets one thread be lowered, which is Linux; elsewhere they run at the
-/// process's own priority. Nothing is spawned on it, so a panic reaches the `install` caller.
+/// The pool masked counts are built on ([`Engine::count_pool`]). Nothing is spawned on it, so a
+/// panic reaches the `install` caller.
 fn build_count_pool(
     threads: usize,
 ) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("tessera-count-{i}"))
-        .start_handler(|_| {
-            // `PRIO_PROCESS` with `who = 0` names the calling thread on Linux.
-            #[cfg(target_os = "linux")]
-            // SAFETY: `setpriority` reads no memory of ours; a failure leaves the priority as it was.
-            unsafe {
-                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
-            }
-        })
         .build()
 }
 
@@ -147,11 +138,11 @@ pub struct Engine {
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// The shared compute pool every admitted `viewport` request's tile loop `install`s onto, and
     /// the pool a segment write executes on. Its width bounds what requests and writes use at
-    /// once; `count_pool` is the one other pool, and it yields to this one.
+    /// once; `count_pool` is the one other pool.
     pub(crate) pool: Arc<rayon::ThreadPool>,
     /// Where a level's masked counts are built ([`Engine::masked_counts`]): a walk of every visible
-    /// row, seconds long on a large view. As wide as `pool`, at a lower scheduling priority, so a
-    /// build uses the cores no request is using and a request on `pool` never waits for one.
+    /// row, seconds long on a large view. As wide as `pool`, so a request on `pool` never queues
+    /// behind a build's chunks.
     pub(crate) count_pool: Arc<rayon::ThreadPool>,
     /// The bundle **root** — the directory holding `CURRENT` and every prefix under it, not the
     /// prefix directory: that goes stale the moment a fold publishes a new one.

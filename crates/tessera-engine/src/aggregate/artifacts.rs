@@ -131,7 +131,7 @@ impl Layer {
         let read = match &registered {
             None => None,
             Some(layer) => {
-                let read = engine.read_level(served_view, mask, layer, self.level, false);
+                let read = engine.read_level(served_view, mask, layer, self.level, false)?;
                 let reachable = engine.reachable_layers(served_view.session);
                 let context = DependencyContext::new(served_view, mask, &reachable);
                 let dependency_served = engine.dependency_gate(&context);
@@ -156,7 +156,8 @@ impl Layer {
                         ordinals.push(ordinal);
                     }
                 }
-                targets = Targets::of(cx, &read, &ordinals, &dependency_served);
+                targets = Targets::of(cx, &read, &ordinals, &dependency_served)?;
+                context.finish()?;
                 Some(read)
             }
         };
@@ -352,7 +353,7 @@ impl Targets {
         read: &ReadLevel,
         ordinals: &[u32],
         dependency_served: &dyn Fn(&tessera_lifecycle::membership::Attachment) -> bool,
-    ) -> Targets {
+    ) -> Result<Targets> {
         let (engine, served, mask) = (cx.engine, &cx.open.served, &cx.open.mask);
         let mut targets = Targets::default();
         let mut layers: FxHashMap<String, Option<RegisteredLayer>> = FxHashMap::default();
@@ -373,10 +374,12 @@ impl Targets {
                 continue;
             }
             let key = (attachment.layer.clone(), attachment.level);
-            let level = targets
-                .levels
-                .entry(key)
-                .or_insert_with(|| engine.read_level(served, mask, layer, attachment.level, false));
+            let level = match targets.levels.entry(key) {
+                std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(engine.read_level(served, mask, layer, attachment.level, false)?)
+                }
+            };
             let view = level.view(engine, served, mask, layer, dependency_served);
             let crate::artifacts::ArtifactVerdict::Serve { rank, .. } =
                 view.verdict(attachment.entity, attachment.ordinal)
@@ -395,7 +398,7 @@ impl Targets {
                 targets.counted.insert(ordinal);
             }
         }
-        targets
+        Ok(targets)
     }
 }
 

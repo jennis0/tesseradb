@@ -15,7 +15,7 @@
 //!    Publish and the failure guard both compare `seq`, so a removal mid-build is not undone, and
 //!    a failed build does not delete a later builder's slot.
 //! 3. The builder receives what it built whether or not it is retained; a value larger than the
-//!    bound is served and not admitted.
+//!    bound is served and not admitted, to the builder and to every caller waiting for it.
 //! 4. Evicted values are collected under the lock and dropped after it, which [`Slots::remove`]'s
 //!    `#[must_use]` enforces.
 //! 5. Every exit from `Building` notifies waiters with the map lock held, and a waiter re-reads
@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
@@ -71,7 +71,7 @@ enum Slot<K, V> {
     /// own slot from a later builder's. Carries no value, is charged no bytes, and is absent from
     /// the recency index. `wake` is this slot's own condvar, per slot so a publish wakes only the
     /// callers waiting for that key.
-    Building { seq: u64, wake: Arc<Condvar> },
+    Building { seq: u64, wake: Arc<Wake<V>> },
     Ready {
         value: Arc<V>,
         /// The map's own key, held as an `Arc` so a recency touch is a refcount bump, not a clone.
@@ -84,6 +84,14 @@ enum Slot<K, V> {
         /// Hits since publication: the thrash signature [`CacheStats::young_evictions`] reports.
         uses: u32,
     },
+}
+
+/// What a `Building` slot's waiters park on.
+struct Wake<V> {
+    cv: Condvar,
+    /// The value of a build too large to admit (rule 3), handed to the callers waiting for it so
+    /// that each does not build it again in turn.
+    unadmitted: OnceLock<Arc<V>>,
 }
 
 /// A losing arrival's outcome: another caller is already building this key.
@@ -219,7 +227,7 @@ impl<K: Eq + Hash, V> Slots<K, V> {
             Some(Slot::Building { wake, .. }) => {
                 // Held with the map lock, so no wake lands between a waiter deciding to sleep
                 // and sleeping; each woken caller re-reads the map and finds the slot gone.
-                wake.notify_all();
+                wake.cv.notify_all();
                 None
             }
             Some(Slot::Ready {
@@ -497,8 +505,13 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                         };
                         let wake = Arc::clone(wake);
                         // `Ok` means woken: loop and decide again from what the map now says.
-                        slots = self.park(slots, &wake, wait)?;
+                        slots = self.park(slots, &wake.cv, wait)?;
                         waited = true;
+                        if let Some(value) = wake.unadmitted.get() {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            self.waits_satisfied.fetch_add(1, Ordering::Relaxed);
+                            return Ok(Arc::clone(value));
+                        }
                         continue;
                     }
                     Some(Slot::Ready {
@@ -537,7 +550,10 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
                     Arc::clone(&owned_key),
                     Slot::Building {
                         seq,
-                        wake: Arc::new(Condvar::new()),
+                        wake: Arc::new(Wake {
+                            cv: Condvar::new(),
+                            unadmitted: OnceLock::new(),
+                        }),
                     },
                 );
                 self.entries.store(slots.map.len(), Ordering::Relaxed);
@@ -654,6 +670,8 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         };
 
         if charged > bound {
+            // Set before the removal wakes the waiters, so each finds it.
+            let _ = wake.unadmitted.set(Arc::clone(value));
             // A `Building` slot: no value, so nothing to carry out of the critical section.
             let no_value = slots.remove(key);
             debug_assert!(no_value.is_none(), "a Building slot carries no value");
@@ -704,7 +722,7 @@ impl<K: Eq + Hash + Clone, V: CacheWeight> SingleFlightCache<K, V> {
         );
         slots.bytes += charged;
         // Notified after the insert, so a waiter re-reading the map on wake sees `Ready`.
-        wake.notify_all();
+        wake.cv.notify_all();
         tally
     }
 
@@ -1146,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn a_waiter_whose_build_is_oversized_falls_back_to_building_it() {
+    fn a_waiter_whose_build_is_oversized_is_handed_the_value() {
         // Bound below one entry: every build is oversized, served, never retained (rule 3).
         let cache = Arc::new(SingleFlightCache::<u32, Weighed>::new(BIG / 2));
         let (started_tx, started_rx) = mpsc::channel::<()>();
@@ -1172,11 +1190,12 @@ mod tests {
         assert_eq!(builder.join().unwrap().unwrap().0, 99);
         assert_eq!(
             waiter.join().unwrap().unwrap().0,
-            42,
-            "nothing was published, so the waiter must build rather than stall"
+            99,
+            "the waiter is handed the build it waited for rather than building it again"
         );
         assert_eq!(cache.len(), 0, "an oversized value is never retained");
-        assert_eq!(cache.stats().oversized_admissions, 2);
+        assert_eq!(cache.stats().oversized_admissions, 1);
+        assert_eq!(cache.stats().waits_satisfied, 1);
     }
 
     #[test]

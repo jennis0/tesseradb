@@ -2175,7 +2175,10 @@ mod tests {
         for column in &columns {
             let ordinals = column.len();
             for (seed, num, den) in [(21u64, 1u32, 1u32), (22, 1, 2), (23, 1, 13)] {
-                let mask = sampled_mask(seed, column.row_count(), num, den);
+                // Past the column's rows too: a mask may hold rows the column has not yet
+                // addressed, which carry no label.
+                let mask = sampled_mask(seed, column.row_count() + 70, num, den);
+                assert!(mask.maximum().is_some_and(|last| last >= column.row_count()) || num < den);
                 let mut expected = LevelAccumulation::empty(ordinals, true);
                 for row in mask.iter() {
                     let position = reference_position(row);

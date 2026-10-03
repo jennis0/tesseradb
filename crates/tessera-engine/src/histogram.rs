@@ -25,21 +25,28 @@
 //!   counts alone and a viewport deriving a centroid wants both, so each pays for what it reads.
 //! - `segments_version`: row ids mean something only within one geometry. A flush and a fold
 //!   both move it.
+//! - `projection_segments_version`: the generation the session's row projection was built at.
+//!   A session may be served a projection one generation stale, which the rest of the key would
+//!   not otherwise tell from a fresh one.
 //! - `overlay_version`: moved by every overlay or buffer publication, which is every accepted
 //!   deletion, suppression, lift and ingest. A request loads its generation once, at its start, so
 //!   a request that starts after a suppression is accepted reads a key no earlier entry or build
 //!   holds. An unsuppress moves it again and the entry is built afresh, which is why
 //!   `delete, suppress, unsuppress` leaves the entity deleted here too.
 //! - `fragment_identity` and `fragment_watermark`: the fragment the session's projection was built
-//!   from. A session may be served a projection one generation stale, so two requests at one
-//!   `segments_version` can compose against different fragments. A fold rotates the identity.
+//!   from. A fold rotates the identity.
 //!
 //! The filter is not a term: the count beside an artifact does not depend on a filter, so a
 //! filtered request and an unfiltered one read the same entry.
 //!
 //! # Single flight, removal only, and a byte bound
 //!
-//! Concurrent requests for one key share one build ([`tessera_cache::SingleFlightCache`]). Nothing
+//! Concurrent requests for one key share one build ([`tessera_cache::SingleFlightCache`]). A
+//! request waits for another's build as it waits for a row projection: up to
+//! `serve.single_flight_wait_ms`, and no longer than its client stays connected. At most
+//! [`CONCURRENT_BUILDS`] builds walk at once, each holding an accumulator per worker of the count
+//! pool, so live ingest moving `overlay_version` under many term sets queues their rebuilds
+//! rather than holding every accumulator at once. Nothing
 //! mutates a held value: eviction only removes, and a rebuild walks the same mask over the same
 //! column, so the bound decides what is resident and never what is served. An entry larger than
 //! the whole bound is handed to its caller and not admitted.
@@ -50,13 +57,14 @@
 
 use std::sync::Arc;
 
-use tessera_cache::{CacheWeight, NeverCancelled, SingleFlightCache};
+use std::sync::{Condvar, Mutex, PoisonError};
+
+use tessera_cache::{Cancel, CacheWeight, SingleFlightCache, WaitEnded};
 
 use crate::row_column::LevelAccumulation;
 
-/// How long a request waits for another request's build of the same key before building its own.
-/// Far beyond any build measured, so a second request on a key never repeats the walk.
-const BUILD_WAIT_MS: u64 = 600_000;
+/// How many builds may walk at once.
+const CONCURRENT_BUILDS: usize = 2;
 
 /// What one entry is a function of. See the module doc for each term.
 ///
@@ -71,6 +79,7 @@ pub(crate) struct MaskedCountKey {
     pub level_version: u64,
     pub geometry: bool,
     pub segments_version: u64,
+    pub projection_segments_version: u64,
     pub overlay_version: u64,
     pub fragment_identity: [u8; 32],
     pub fragment_watermark: u64,
@@ -86,6 +95,9 @@ pub(crate) struct MaskIdentity {
     /// session holding that term set shares.
     pub terms: [u8; 32],
     pub segments_version: u64,
+    /// The generation the session's row projection was built at, one behind `segments_version`
+    /// while a stale projection is served.
+    pub projection_segments_version: u64,
     pub overlay_version: u64,
     pub fragment_identity: [u8; 32],
     pub fragment_watermark: u64,
@@ -109,6 +121,7 @@ impl MaskIdentity {
             level_version,
             geometry,
             segments_version: self.segments_version,
+            projection_segments_version: self.projection_segments_version,
             overlay_version: self.overlay_version,
             fragment_identity: self.fragment_identity,
             fragment_watermark: self.fragment_watermark,
@@ -274,6 +287,9 @@ pub struct MaskedCountStats {
 /// The cache itself, under a byte bound.
 pub struct MaskedCountCache {
     slots: SingleFlightCache<MaskedCountKey, MaskedCounts>,
+    /// Builds walking now, at most [`CONCURRENT_BUILDS`].
+    building: Mutex<usize>,
+    built: Condvar,
 }
 
 impl Default for MaskedCountCache {
@@ -294,9 +310,17 @@ impl MaskedCountCache {
     /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means no bound, which every
     /// construction site outside the server has until [`Self::set_bound_bytes`] is called.
     pub fn new(bound_bytes: u64) -> Self {
-        let slots = SingleFlightCache::new(bound_bytes);
-        slots.set_wait_budget_ms(BUILD_WAIT_MS);
-        MaskedCountCache { slots }
+        MaskedCountCache {
+            slots: SingleFlightCache::new(bound_bytes),
+            building: Mutex::new(0),
+            built: Condvar::new(),
+        }
+    }
+
+    /// How long a request waits for another request's build of its key
+    /// (`serve.single_flight_wait_ms`).
+    pub fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
+        self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// Move the ceiling, and drop what is held so the memory comes back at once rather than at
@@ -319,18 +343,35 @@ impl MaskedCountCache {
     }
 
     /// This key's counts, building them if nothing is held. A request arriving while another
-    /// builds the same key waits for that build and is handed its result.
-    ///
-    /// `build` is called at most once per call. It is called here, uncached, only if a wait
-    /// outlasts [`BUILD_WAIT_MS`].
-    pub(crate) fn get_or_build(
+    /// builds the same key waits for that build, within the wait budget and while `cancel` holds,
+    /// and is handed its result.
+    pub(crate) fn get_or_build<C: Cancel + ?Sized>(
         &self,
         key: MaskedCountKey,
-        build: impl Fn() -> MaskedCounts,
-    ) -> Arc<MaskedCounts> {
-        self.slots
-            .get_or_derive_waiting(key, None, &NeverCancelled, |_| build())
-            .unwrap_or_else(|_| Arc::new(build()))
+        cancel: &C,
+        build: impl FnOnce() -> MaskedCounts,
+    ) -> Result<Arc<MaskedCounts>, WaitEnded> {
+        self.slots.get_or_derive_waiting(key, None, cancel, |_| {
+            let _permit = self.build_permit();
+            build()
+        })
+    }
+
+    /// One of the [`CONCURRENT_BUILDS`] places to walk, held until the guard drops.
+    fn build_permit(&self) -> impl Drop + '_ {
+        struct Permit<'a>(&'a MaskedCountCache);
+        impl Drop for Permit<'_> {
+            fn drop(&mut self) {
+                *self.0.building.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                self.0.built.notify_one();
+            }
+        }
+        let mut building = self.building.lock().unwrap_or_else(PoisonError::into_inner);
+        while *building >= CONCURRENT_BUILDS {
+            building = self.built.wait(building).unwrap_or_else(PoisonError::into_inner);
+        }
+        *building += 1;
+        Permit(self)
     }
 }
 
@@ -347,6 +388,7 @@ mod tests {
             level: 0,
             level_version: 1,
             segments_version: 1,
+            projection_segments_version: 1,
             overlay_version: overlay,
             fragment_identity: [7u8; 32],
             fragment_watermark: 0,
@@ -357,13 +399,23 @@ mod tests {
         MaskedCounts::new(values.to_vec())
     }
 
+    fn get(
+        cache: &MaskedCountCache,
+        key: MaskedCountKey,
+        build: impl FnOnce() -> MaskedCounts,
+    ) -> Arc<MaskedCounts> {
+        cache
+            .get_or_build(key, &tessera_cache::NeverCancelled, build)
+            .expect("nothing else is building")
+    }
+
     /// A hit does not rebuild, and a miss does.
     #[test]
     fn one_walk_per_key() {
         let cache = MaskedCountCache::default();
         let built = std::sync::atomic::AtomicU32::new(0);
         for _ in 0..3 {
-            let held = cache.get_or_build(key(1, "a", 0), || {
+            let held = get(&cache, key(1, "a", 0), || {
                 built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 counts(&[5, 6])
             });
@@ -381,6 +433,7 @@ mod tests {
     #[test]
     fn concurrent_requests_for_one_key_share_one_build() {
         let cache = Arc::new(MaskedCountCache::default());
+        cache.set_wait_budget_ms(60_000);
         let builds = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let (release, held) = std::sync::mpsc::channel::<()>();
         let held = Arc::new(std::sync::Mutex::new(held));
@@ -388,13 +441,12 @@ mod tests {
             .map(|_| {
                 let (cache, builds, held) = (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
                 std::thread::spawn(move || {
-                    cache
-                        .get_or_build(key(1, "a", 0), || {
-                            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            held.lock().unwrap().recv().unwrap();
-                            counts(&[3, 4])
-                        })
-                        .get(1)
+                    get(&cache, key(1, "a", 0), || {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        held.lock().unwrap().recv().unwrap();
+                        counts(&[3, 4])
+                    })
+                    .get(1)
                 })
             })
             .collect();
@@ -412,17 +464,83 @@ mod tests {
         assert_eq!(cache.stats().hits, 3);
     }
 
+    /// A waiter whose request goes away stops waiting, and the build it was waiting for is
+    /// unaffected.
+    #[test]
+    fn a_waiter_leaves_when_its_request_does() {
+        let cache = Arc::new(MaskedCountCache::default());
+        cache.set_wait_budget_ms(60_000);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let builder = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                get(&cache, key(1, "a", 0), || {
+                    held.recv().unwrap();
+                    counts(&[7])
+                })
+                .get(0)
+            })
+        };
+        while cache.stats().misses == 0 {
+            std::thread::yield_now();
+        }
+        let gone = crate::CancelToken::new();
+        gone.cancel();
+        let waited = cache.get_or_build(key(1, "a", 0), &gone, || counts(&[0]));
+        assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
+        release.send(()).unwrap();
+        assert_eq!(builder.join().unwrap(), 7);
+    }
+
+    /// No more than [`CONCURRENT_BUILDS`] builds walk at once, whatever their keys: the rest have
+    /// claimed their keys and wait for a place.
+    #[test]
+    fn builds_beyond_the_limit_queue() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let cache = Arc::new(MaskedCountCache::default());
+        let walking = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let open = Arc::new(AtomicBool::new(false));
+        let builders: Vec<_> = (0..6u8)
+            .map(|terms| {
+                let (cache, walking, most, open) =
+                    (Arc::clone(&cache), Arc::clone(&walking), Arc::clone(&most), Arc::clone(&open));
+                std::thread::spawn(move || {
+                    get(&cache, key(terms, "a", 0), || {
+                        most.fetch_max(walking.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        while !open.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                        walking.fetch_sub(1, Ordering::SeqCst);
+                        counts(&[u32::from(terms)])
+                    })
+                    .get(0)
+                })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while cache.stats().misses < 6 || walking.load(Ordering::SeqCst) < CONCURRENT_BUILDS {
+            assert!(std::time::Instant::now() < deadline, "the builds never started");
+            std::thread::yield_now();
+        }
+        open.store(true, Ordering::SeqCst);
+        for (terms, builder) in builders.into_iter().enumerate() {
+            assert_eq!(builder.join().unwrap(), terms as u64);
+        }
+        assert_eq!(most.load(Ordering::SeqCst), CONCURRENT_BUILDS);
+    }
+
     /// A deny moves the overlay's counter, so the key a request produces after the acknowledgement
     /// is not the key the pre-deny entry sits under. The pre-deny entry is not edited.
     #[test]
     fn a_deny_rotates_the_key_rather_than_editing_the_entry() {
         let cache = MaskedCountCache::default();
-        let before = cache.get_or_build(key(1, "a", 4), || counts(&[10]));
+        let before = get(&cache, key(1, "a", 4), || counts(&[10]));
         assert_eq!(before.get(0), 10);
-        let after = cache.get_or_build(key(1, "a", 5), || counts(&[9]));
+        let after = get(&cache, key(1, "a", 5), || counts(&[9]));
         assert_eq!(after.get(0), 9, "the corrected count, not the held one");
         assert_eq!(
-            cache.get_or_build(key(1, "a", 4), || counts(&[0])).get(0),
+            get(&cache, key(1, "a", 4), || counts(&[0])).get(0),
             10
         );
     }
@@ -431,9 +549,9 @@ mod tests {
     #[test]
     fn the_counts_are_the_term_sets_own() {
         let cache = MaskedCountCache::default();
-        assert_eq!(cache.get_or_build(key(1, "a", 0), || counts(&[3])).get(0), 3);
-        assert_eq!(cache.get_or_build(key(2, "a", 0), || counts(&[8])).get(0), 8);
-        assert_eq!(cache.get_or_build(key(1, "a", 0), || counts(&[0])).get(0), 3);
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[3])).get(0), 3);
+        assert_eq!(get(&cache, key(2, "a", 0), || counts(&[8])).get(0), 8);
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0])).get(0), 3);
     }
 
     /// The bound evicts the least recently used, lowering it reclaims at once, and an entry
@@ -442,20 +560,20 @@ mod tests {
     fn the_budget_bounds_what_is_resident() {
         let floor = tessera_cache::PER_ENTRY_FLOOR_BYTES;
         let cache = MaskedCountCache::new(2 * floor);
-        cache.get_or_build(key(1, "a", 0), || counts(&[1, 1]));
-        cache.get_or_build(key(2, "a", 0), || counts(&[2, 2]));
+        get(&cache, key(1, "a", 0), || counts(&[1, 1]));
+        get(&cache, key(2, "a", 0), || counts(&[2, 2]));
         assert_eq!(cache.stats().entries, 2);
 
-        cache.get_or_build(key(1, "a", 0), || counts(&[0, 0]));
-        cache.get_or_build(key(3, "a", 0), || counts(&[3, 3]));
+        get(&cache, key(1, "a", 0), || counts(&[0, 0]));
+        get(&cache, key(3, "a", 0), || counts(&[3, 3]));
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.stats().evictions, 1);
-        assert_eq!(cache.get_or_build(key(1, "a", 0), || counts(&[0, 0])).get(0), 1);
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0, 0])).get(0), 1);
 
         cache.set_bound_bytes(0);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().resident_bytes, 0);
-        let held = cache.get_or_build(key(4, "a", 0), || counts(&[9, 9]));
+        let held = get(&cache, key(4, "a", 0), || counts(&[9, 9]));
         assert_eq!(held.get(0), 9);
         assert_eq!(cache.stats().entries, 0);
     }

@@ -262,10 +262,12 @@ impl Engine {
         self.occupancy.set_bound_bytes(bytes);
     }
 
-    /// How long a request waits on another request's in-flight row-projection or fragment build
+    /// How long a request waits on another request's in-flight row-projection, fragment or
+    /// masked-count build
     /// before it is refused (`serve.single_flight_wait_ms`). Unset, an embedder gets [`crate::DEFAULT_SINGLE_FLIGHT_WAIT_MS`].
     pub fn set_single_flight_wait_ms(&self, wait_budget_ms: u64) {
         self.row_projection_cache.set_wait_budget_ms(wait_budget_ms);
+        self.masked_counts.set_wait_budget_ms(wait_budget_ms);
         self.generation
             .load()
             .fragments

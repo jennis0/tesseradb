@@ -1733,3 +1733,52 @@ fn a_points_request_does_not_wait_for_a_count_build() {
         "the points request waited for the count build"
     );
 }
+
+/// **A suppression accepted while a build is in flight is never served that build.** The build
+/// began under the pre-suppression overlay; every request that starts after the acknowledgement
+/// reads a key of its own, so it neither reads the held result nor waits for it.
+#[test]
+fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    let p0 = Some("p0".to_string());
+    let wait = std::time::Duration::from_secs(60);
+
+    engine.hold_next_masked_count_build_for_test();
+    let before = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let session = engine.authorise(&full_coverage_credential()).unwrap();
+            flat_served(&engine, &session)
+        })
+    };
+    wait_until("the held build never started", wait, || {
+        engine.masked_count_cache_stats().misses > 0
+    });
+
+    // Source id 400 is a visible member of `p0`.
+    engine
+        .accept_change(fx.member(400), ChangeOp::Suppress)
+        .unwrap();
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+    let corrected = flat_served(&engine, &after);
+    assert_eq!(
+        engine.masked_count_cache_stats().waiters,
+        0,
+        "the request after the suppression did not wait on the held build"
+    );
+
+    engine.release_masked_count_build_for_test();
+    let held = before.join().unwrap();
+    assert_eq!(
+        corrected[&p0].masked_count,
+        held[&p0].masked_count - 1,
+        "the request after the suppression is served a count without the suppressed member"
+    );
+    let later = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(flat_served(&engine, &later), corrected);
+}
