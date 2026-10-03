@@ -31,7 +31,7 @@ use artifacts::level_is_selected;
 /// How one requested layer's points are tagged.
 pub(super) enum Tagging {
     /// From the labels of its selected levels.
-    Labels(RegisteredLayer),
+    Labels(Box<RegisteredLayer>),
     /// From the served set of the walk.
     Walk,
     /// Not at all: the layer is not drawn on this view, or is gone, deleted or suppressed, and
@@ -165,7 +165,7 @@ impl Engine {
                 {
                     return Tagging::Walk;
                 }
-                Tagging::Labels(registered)
+                Tagging::Labels(Box::new(registered))
             })
             .collect()
     }
