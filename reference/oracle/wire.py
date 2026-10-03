@@ -8,8 +8,8 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order;
                         a scalar with no value is null
     kind 4  trailer    JSON                                   exactly one, last
-    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
-                        key, masked_count, the derived           any points; absent when none served
+    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and every
+                        key, masked_count, the derived           points frame; absent when none served
                         geometry, content, parent_ids,
                         rung, matched, highlighted — then
                         shape_x/shape_y,
@@ -215,13 +215,10 @@ def decode_frames(data: bytes):
                     )
                 )
         elif kind == FRAME_ARTIFACTS:
-            # At most one, and it sits between the counts and the points. A second would silently
-            # concatenate into the artifact surface, which is the same laxity the tiles rule above
-            # refuses.
+            # At most one, after every points frame. A second would silently concatenate into the
+            # artifact surface, which is the same laxity the tiles rule above refuses.
             if artifacts is not None:
                 raise ValueError("more than one artifacts frame")
-            if any(k == FRAME_POINTS for k, _ in frames[:index]):
-                raise ValueError("the artifacts frame precedes every points frame")
             artifacts = []
             for batch in _batches(payload):
                 # `masked_count` is what the *asking principal* can see, never the artifact's
@@ -309,6 +306,8 @@ def decode_frames(data: bytes):
                     "so a present-but-empty one means the emitter and this reader disagree"
                 )
         elif kind == FRAME_POINTS:
+            if artifacts is not None:
+                raise ValueError("a points frame follows the artifacts frame")
             for batch in _batches(payload):
                 # `tessera_id` (u64), not `handle` (u32): contracts r6 retires the per-session
                 # handle from the viewer plane and puts the stable wire identity at the row. The
