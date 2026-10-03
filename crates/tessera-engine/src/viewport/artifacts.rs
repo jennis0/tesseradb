@@ -327,8 +327,8 @@ impl Engine {
     ///
     /// Built on first use and shared by every session with the same term set
     /// ([`crate::histogram`]). The walk runs on the count pool, so a request on the compute pool
-    /// does not queue behind it. A request that waits for another's build and outlasts the wait
-    /// budget is refused [`EngineError::CountsBuilding`].
+    /// does not queue behind it. A request waiting for another's build stops when its client goes
+    /// away, and is refused [`EngineError::CountsBuilding`] past [`crate::histogram`]'s wait bound.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn masked_counts(
         &self,

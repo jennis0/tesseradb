@@ -90,7 +90,7 @@ pub enum EngineError {
     /// not wait, and the caller is told to retry rather than handed a fail-closed 500.
     FragmentBuilding,
     /// A level's masked counts were being built by a concurrent request, and this request waited
-    /// until the wait budget ran out. Same 429 as [`Self::ProjectionBuilding`].
+    /// past the bound on such a wait. Same 429 as [`Self::ProjectionBuilding`].
     CountsBuilding,
     /// The caller's [`crate::cancel::CancelToken`] was observed flipped mid-request — a client
     /// that aborted a fetch it no longer needs. Whole-request abort: no partial `ViewportOut` is

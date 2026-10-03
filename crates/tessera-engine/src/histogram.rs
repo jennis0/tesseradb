@@ -42,8 +42,10 @@
 //! # Single flight, removal only, and a byte bound
 //!
 //! Concurrent requests for one key share one build ([`tessera_cache::SingleFlightCache`]). A
-//! request waits for another's build as it waits for a row projection: up to
-//! `serve.single_flight_wait_ms`, and no longer than its client stays connected. At most
+//! request waits for another's build for as long as its client stays connected, up to
+//! [`BUILD_WAIT_MS`]. A build on a large view takes longer than `serve.single_flight_wait_ms`,
+//! and a viewport has sent its head before it reads the counts, so a refusal at that budget would
+//! cut a response that the build was about to complete. At most
 //! [`CONCURRENT_BUILDS`] builds walk at once, each holding an accumulator per worker of the count
 //! pool, so live ingest moving `overlay_version` under many term sets queues their rebuilds
 //! rather than holding every accumulator at once. Nothing
@@ -65,6 +67,10 @@ use crate::row_column::LevelAccumulation;
 
 /// How many builds may walk at once.
 const CONCURRENT_BUILDS: usize = 2;
+
+/// How long a connected request waits for another's build before it is refused. Far beyond any
+/// build measured, so it ends a wait only on a build that has stopped making progress.
+const BUILD_WAIT_MS: u64 = 600_000;
 
 /// What one entry is a function of. See the module doc for each term.
 ///
@@ -310,17 +316,13 @@ impl MaskedCountCache {
     /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means no bound, which every
     /// construction site outside the server has until [`Self::set_bound_bytes`] is called.
     pub fn new(bound_bytes: u64) -> Self {
+        let slots = SingleFlightCache::new(bound_bytes);
+        slots.set_wait_budget_ms(BUILD_WAIT_MS);
         MaskedCountCache {
-            slots: SingleFlightCache::new(bound_bytes),
+            slots,
             building: Mutex::new(0),
             built: Condvar::new(),
         }
-    }
-
-    /// How long a request waits for another request's build of its key
-    /// (`serve.single_flight_wait_ms`).
-    pub fn set_wait_budget_ms(&self, wait_budget_ms: u64) {
-        self.slots.set_wait_budget_ms(wait_budget_ms);
     }
 
     /// Move the ceiling, and drop what is held so the memory comes back at once rather than at
@@ -343,8 +345,8 @@ impl MaskedCountCache {
     }
 
     /// This key's counts, building them if nothing is held. A request arriving while another
-    /// builds the same key waits for that build, within the wait budget and while `cancel` holds,
-    /// and is handed its result.
+    /// builds the same key waits for that build, while `cancel` holds and up to
+    /// [`BUILD_WAIT_MS`], and is handed its result.
     pub(crate) fn get_or_build<C: Cancel + ?Sized>(
         &self,
         key: MaskedCountKey,
@@ -433,7 +435,6 @@ mod tests {
     #[test]
     fn concurrent_requests_for_one_key_share_one_build() {
         let cache = Arc::new(MaskedCountCache::default());
-        cache.set_wait_budget_ms(60_000);
         let builds = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let (release, held) = std::sync::mpsc::channel::<()>();
         let held = Arc::new(std::sync::Mutex::new(held));
@@ -469,7 +470,6 @@ mod tests {
     #[test]
     fn a_waiter_leaves_when_its_request_does() {
         let cache = Arc::new(MaskedCountCache::default());
-        cache.set_wait_budget_ms(60_000);
         let (release, held) = std::sync::mpsc::channel::<()>();
         let builder = {
             let cache = Arc::clone(&cache);
