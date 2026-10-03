@@ -219,6 +219,27 @@ impl Engine {
             .store(false, Ordering::SeqCst);
     }
 
+    /// Hold the next masked-count build open, on the count pool, until
+    /// [`Self::release_masked_count_build_for_test`]. Builds that start after it are not held.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn hold_next_masked_count_build_for_test(&self) {
+        self.switches
+            .masked_count_build_held
+            .store(true, Ordering::SeqCst);
+        self.switches
+            .masked_count_build_hold_wanted
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn release_masked_count_build_for_test(&self) {
+        self.switches
+            .masked_count_build_held
+            .store(false, Ordering::SeqCst);
+    }
+
     /// Turn the row-space merge off.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

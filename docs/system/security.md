@@ -29,8 +29,17 @@ An operator drives the control plane: ingest, deletion, suppression and compacti
 treats this party as trusted, and every route on the control plane, without exception, requires
 the operator's own credential.
 
-Every cache that holds a viewer's visible set is keyed to one session and is never read by
-another session.
+Every cache that holds a viewer's visible set, or a quantity computed from it, is keyed to one
+session and is never read by another session, with two exceptions keyed on the set of terms the
+credential resolved to. The authorised set is shared by every session whose credential resolved to
+the same terms. The per-artifact counts, centroids and boxes of an annotation layer stored by row
+are shared by every session with the same terms whose visible set was composed from the same
+inputs. That key names each input to the visible set: the term set, the build of the authorised
+set the session's projection came from, the segment set, which every flush and compaction
+replaces, and a counter that every accepted deletion, suppression, lift and ingest moves. A request
+reads both once, at its start, so a request that starts after a suppression is accepted cannot read
+an entry built before it, and cannot wait on a build begun before it. Two sessions that share an
+entry have the same visible set, so neither is served anything the other could not see.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the viewer's own

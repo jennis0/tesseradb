@@ -52,6 +52,26 @@ pub(crate) fn build_compute_pool(
         .build()
 }
 
+/// The pool masked counts are built on ([`Engine::count_pool`]). Its threads run at a nice value
+/// of 10 where the platform lets one thread be lowered, which is Linux; elsewhere they run at the
+/// process's own priority. Nothing is spawned on it, so a panic reaches the `install` caller.
+fn build_count_pool(
+    threads: usize,
+) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("tessera-count-{i}"))
+        .start_handler(|_| {
+            // `PRIO_PROCESS` with `who = 0` names the calling thread on Linux.
+            #[cfg(target_os = "linux")]
+            // SAFETY: `setpriority` reads no memory of ours; a failure leaves the priority as it was.
+            unsafe {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            }
+        })
+        .build()
+}
+
 /// The record a pooled task's panic leaves: subsystem, worker thread, payload, abort-site
 /// backtrace. Separate from the handler so it can be asserted without aborting the process.
 fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
@@ -102,8 +122,8 @@ pub struct Engine {
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// The spatial levels' held shapes, index and per-segment resolved pieces.
     pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
-    /// The masked-count histograms of levels served row-major, per `(session, layer, level)`. Per
-    /// *session*: it moves whenever the principal's mask does, including every accepted deny.
+    /// The masked counts of levels served by row, per `(term set, layer, level)` and generation,
+    /// shared by every session with the same term set ([`crate::histogram`]).
     pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
     /// `N_occ(d)` per `(session, view, depth)` and generation, memoised so a pan at one zoom does
     /// not walk the mask again. Per *session*, since `N_occ` is counted inside one principal's own
@@ -125,10 +145,14 @@ pub struct Engine {
     /// One supplied-content table per `(layer, level)`. Keyed per *deployment*: the verdict that
     /// decides whether a viewer is served an artifact runs before this is read.
     pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
-    /// The one shared compute pool every admitted `viewport` request's tile loop `install`s onto,
-    /// and the pool a segment write executes on since flush. A second pool anywhere in this crate
-    /// would defeat the throttling this gives.
+    /// The shared compute pool every admitted `viewport` request's tile loop `install`s onto, and
+    /// the pool a segment write executes on. Its width bounds what requests and writes use at
+    /// once; `count_pool` is the one other pool, and it yields to this one.
     pub(crate) pool: Arc<rayon::ThreadPool>,
+    /// Where a level's masked counts are built ([`Engine::masked_counts`]): a walk of every visible
+    /// row, seconds long on a large view. As wide as `pool`, at a lower scheduling priority, so a
+    /// build uses the cores no request is using and a request on `pool` never waits for one.
+    pub(crate) count_pool: Arc<rayon::ThreadPool>,
     /// The bundle **root** — the directory holding `CURRENT` and every prefix under it, not the
     /// prefix directory: that goes stale the moment a fold publishes a new one.
     pub(crate) bundle_root: std::path::PathBuf,
@@ -984,6 +1008,10 @@ impl Engine {
             build_compute_pool(config.compute_threads)
                 .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
         );
+        let count_pool = Arc::new(
+            build_count_pool(pool.current_num_threads())
+                .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
+        );
 
         apply_unique_events(
             &mut bundle,
@@ -1047,6 +1075,7 @@ impl Engine {
             lineages: Arc::new(crate::cut::Lineages::new()),
             level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
+            count_pool,
             bundle_root: bundle_root.to_path_buf(),
             suggest_dir,
             config,

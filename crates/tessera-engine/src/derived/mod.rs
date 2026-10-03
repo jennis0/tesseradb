@@ -32,7 +32,7 @@ pub use tessera_types::layer::ComputedProperty;
 
 use dig::concave_rings;
 pub use dig::dig_rings;
-pub use locator::RowLocator;
+pub use locator::{place, Placement, RowLocator};
 pub use reduce::quantised;
 
 /// What a viewer is told about an artifact's shape, beside its masked count.

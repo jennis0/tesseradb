@@ -298,8 +298,8 @@ impl Engine {
         Ok((geometry, key))
     }
 
-    /// What this request's composed mask is, for the masked-count cache's key. Taken from the
-    /// geometry that actually resolved, never the live generation: a session may be served a
+    /// What this request's composed mask is, for the keys of the caches held over it. Taken from
+    /// the geometry that actually resolved, never the live generation: a session may be served a
     /// stale projection, and a key naming the wrong fragment would file one visible set's counts
     /// under another's.
     pub(crate) fn mask_identity(
@@ -310,6 +310,7 @@ impl Engine {
     ) -> crate::histogram::MaskIdentity {
         crate::histogram::MaskIdentity {
             token_id: session.token_id(),
+            terms: session.terms_digest(),
             segments_version: generation.segments_version,
             overlay_version: generation.overlay_version,
             fragment_identity: geometry.fragment.identity,

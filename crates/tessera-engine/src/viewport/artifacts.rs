@@ -298,12 +298,13 @@ impl Engine {
         warmed
     }
 
-    /// This level's masked counts, computed from the composed mask — never from the whole
+    /// This level's masked counts, computed from the composed mask and never from the whole
     /// population, which would reveal a count of items this viewer cannot see. `None` on an
     /// artifact-major level, which counts one artifact at a time instead.
     ///
-    /// Built lazily: a whole walk of the mask costs 0.85-1.7s at 10^7 artifacts, so a cold
-    /// drill-down on a row-major level pays it once to answer about one artifact.
+    /// Built on first use and shared by every session with the same term set
+    /// ([`crate::histogram`]). The walk runs on the count pool, so a request on the compute pool
+    /// does not queue behind it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn masked_counts(
         &self,
@@ -316,33 +317,26 @@ impl Engine {
         mask: &crate::compose::EffectiveMask,
         segments: Option<&[(&SegmentData, u32)]>,
     ) -> Option<Arc<crate::histogram::MaskedCounts>> {
+        use crate::compose::WholeMask;
         let column = rows.column()?;
-        // A column-only form holds no per-artifact membership, so its geometry rides this walk
-        // rather than being read per artifact; where the form holds bitmaps this is skipped.
+        // A column-only form holds no per-artifact membership, so its geometry is accumulated in
+        // this walk rather than read per artifact; where the form holds bitmaps it is not.
         let accumulate = segments.filter(|_| !rows.membership().rows_held());
         Some(self.masked_counts.get_or_build(
             identity.key(view, layer, level, level_version, accumulate.is_some()),
             || {
-                // On the engine's own pool: the walk splits across it and must not spill onto
-                // rayon's global pool.
-                self.pool.install(|| match accumulate {
-                    None => crate::histogram::MaskedCounts::new(column.histogram(mask)),
-                    Some(segments) => {
-                        use crate::compose::WholeMask;
-                        let locator = crate::derived::RowLocator::new(segments.to_vec());
-                        let visible = mask.visible_all();
-                        let counts = column.histogram_over(visible);
-                        let acc = column.accumulate_over(visible, &|row| locator.position(row));
-                        crate::histogram::MaskedCounts::with_geometry(
-                            counts,
-                            crate::histogram::MaskedGeometry::new(acc.counts, acc.sums, acc.boxes),
-                        )
-                    }
+                let places = accumulate.map(crate::derived::Placement::of_segments);
+                self.count_pool.install(|| {
+                    #[cfg(feature = "fault-injection")]
+                    self.switches.hold_masked_count_build_if_wanted();
+                    crate::histogram::MaskedCounts::of(
+                        column.accumulate(mask.visible_all(), places.as_deref()),
+                        places.is_some(),
+                    )
                 })
             },
         ))
     }
-
 
     /// One artifact, located and gated for one principal.
     ///

@@ -48,6 +48,9 @@ pub struct Session {
     /// re-sorted per request. `Arc` so the row-projection cache can carry it for the background
     /// refresh, which has no session registry to look it up in.
     satisfied_sorted: Arc<Vec<TermId>>,
+    /// `sha256` over `satisfied_sorted`, four bytes a term: what a cache shared by every session
+    /// with this term set is keyed on ([`crate::histogram::MaskIdentity::terms`]).
+    terms_digest: [u8; 32],
     /// The descriptor the credential presented for each satisfied term: the only route by which a
     /// term ordinal becomes a string a viewer is shown. The drill-down's `labels` array is built
     /// from this map alone, intersected with an entity's own term list, so a term absent here has
@@ -107,6 +110,11 @@ impl Session {
     /// [`Self::satisfied`] sorted, the fragment-cache key component.
     pub(crate) fn satisfied_sorted(&self) -> &Arc<Vec<TermId>> {
         &self.satisfied_sorted
+    }
+
+    /// See [`Self::terms_digest`].
+    pub(crate) fn terms_digest(&self) -> [u8; 32] {
+        self.terms_digest
     }
 
     /// The descriptor the credential presented for each satisfied term.
@@ -193,6 +201,13 @@ impl Engine {
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
         satisfied_sorted.sort_unstable();
+        let terms_digest: [u8; 32] = {
+            let mut hasher = Sha256::new();
+            for term in satisfied_sorted.iter() {
+                hasher.update(term.raw().to_le_bytes());
+            }
+            hasher.finalize().into()
+        };
         let satisfied_sorted = Arc::new(satisfied_sorted);
 
         // Must be a function of the exact `auth_data` that produced `satisfied` above.
@@ -231,6 +246,7 @@ impl Engine {
             satisfied,
             fragment,
             satisfied_sorted,
+            terms_digest,
             satisfied_descriptors: Arc::new(satisfied_descriptors),
             credentials: Arc::new(credentials),
             visible_views,
@@ -247,7 +263,6 @@ impl Engine {
         // Cancelled first: a ladder fill still running for this token would otherwise re-publish
         // the occupancy entries this call is removing.
         self.stage.cancel(token_id);
-        self.masked_counts.prune_token(token_id);
         self.occupancy.retain_keys(|key| key.token_id != token_id);
         self.derived_geometry.prune_token(token_id);
         self.suggest_sets.prune_token(token_id);
@@ -264,7 +279,6 @@ impl Engine {
         for token_id in token_ids {
             self.stage.cancel(*token_id);
         }
-        self.masked_counts.prune_tokens(token_ids);
         self.occupancy
             .retain_keys(|key| !token_ids.contains(&key.token_id));
         self.derived_geometry.prune_tokens(token_ids);

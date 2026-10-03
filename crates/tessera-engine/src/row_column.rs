@@ -81,6 +81,7 @@ use tessera_store::permutation::RowSpace;
 use tessera_types::layer::ServingLayout;
 
 use crate::artifacts::MembershipRows;
+use crate::derived::{place, Placement};
 
 /// One walk of a level's live artifacts, handing each ordinal its **projected** rows — and the
 /// bytes are produced by [`tessera_store::derived::project_row_column`], beside the format.
@@ -122,8 +123,7 @@ fn for_each_row(rows: &Bitmap, mut visit: impl FnMut(u32)) {
     }
 }
 
-/// [`for_each_row`] over `rows` from `lo` up to but not including `end`: one chunk of a split walk,
-/// which is how the histogram and the accumulation divide the row space.
+/// [`for_each_row`] over `rows` from `lo` up to but not including `end`: one chunk of a split walk.
 fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32)) {
     let mut it = rows.iter();
     it.reset_at_or_after(lo);
@@ -141,6 +141,11 @@ fn for_each_row_in(rows: &Bitmap, lo: u32, end: u64, mut visit: impl FnMut(u32))
         }
     }
 }
+
+/// How many rows of the view one chunk of [`RowColumn::accumulate`] spans. Small beside a large
+/// view's row space, so the pool keeps every worker busy over a mask whose visible rows are
+/// bunched into a few stretches.
+const CHUNK_ROWS: u32 = 1 << 20;
 
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
 /// where a publication built it.
@@ -199,22 +204,77 @@ pub struct RowColumn {
     added: Option<Added>,
 }
 
-/// What one pass over a viewer's visible rows folded up, per ordinal — see
-/// [`RowColumn::accumulate_over`].
-///
-/// **A count a row contributes to here is a count over rows the locator could place**, which is
-/// every row of a well-formed generation and is the same set the positions came from. The masked
-/// count served beside an artifact comes from [`RowColumn::histogram_over`] and counts every
-/// visible row, placeable or not; the two are equal wherever the row space places its own rows, and
-/// this one is never served as a count.
+/// What one pass over a viewer's visible rows folded up, per ordinal: see
+/// [`RowColumn::accumulate`].
 pub struct LevelAccumulation {
+    /// Every visible row carrying the ordinal's label, placed or not. This is the masked count.
     pub counts: Vec<u32>,
-    /// **`u64` and not `f64`**, so the sum is exact and the reduction is associative: the chunks
-    /// are summed in whatever order the pool finishes them, and floating-point addition past 2^53
-    /// would make the answer depend on that order. A row space is `u32`-addressed and a grid
-    /// coordinate is a `u32`, so a per-axis sum is at most `(2^32 - 1)^2`, which is inside `u64`.
+    /// The visible rows a segment places, which is the divisor for the mean. Equal to `counts`
+    /// wherever the row space places its own rows. Empty, like `sums` and `boxes`, when the walk
+    /// was given no positions.
+    pub placed: Vec<u32>,
+    /// `u64` and not `f64`, so the sum is exact and the order chunks are merged in cannot change
+    /// it. A row space is `u32`-addressed and a grid coordinate is a `u32`, so a per-axis sum is
+    /// below `2^64`.
     pub sums: Vec<[u64; 2]>,
+    /// `[x_min, y_min, x_max, y_max]` over the placed rows.
     pub boxes: Vec<[u32; 4]>,
+}
+
+impl LevelAccumulation {
+    fn empty(ordinals: usize, geometry: bool) -> Self {
+        let placed = if geometry { ordinals } else { 0 };
+        LevelAccumulation {
+            counts: vec![0; ordinals],
+            placed: vec![0; placed],
+            sums: vec![[0; 2]; placed],
+            boxes: vec![[u32::MAX, u32::MAX, 0, 0]; placed],
+        }
+    }
+
+    /// One visible row labelled `ordinal`, at `position` where a segment places it. An ordinal
+    /// past the level is dropped, as [`RowColumn::candidates`] drops it.
+    #[inline]
+    fn add(&mut self, ordinal: u32, position: Option<(u32, u32)>) {
+        let i = ordinal as usize;
+        let Some(count) = self.counts.get_mut(i) else {
+            return;
+        };
+        *count += 1;
+        let Some((x, y)) = position else {
+            return;
+        };
+        if let Some(placed) = self.placed.get_mut(i) {
+            *placed += 1;
+            self.sums[i][0] += u64::from(x);
+            self.sums[i][1] += u64::from(y);
+            let b = &mut self.boxes[i];
+            b[0] = b[0].min(x);
+            b[1] = b[1].min(y);
+            b[2] = b[2].max(x);
+            b[3] = b[3].max(y);
+        }
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        for (a, b) in self.counts.iter_mut().zip(&other.counts) {
+            *a += b;
+        }
+        for (a, b) in self.placed.iter_mut().zip(&other.placed) {
+            *a += b;
+        }
+        for (a, b) in self.sums.iter_mut().zip(&other.sums) {
+            a[0] += b[0];
+            a[1] += b[1];
+        }
+        for (a, b) in self.boxes.iter_mut().zip(&other.boxes) {
+            a[0] = a[0].min(b[0]);
+            a[1] = a[1].min(b[1]);
+            a[2] = a[2].max(b[2]);
+            a[3] = a[3].max(b[3]);
+        }
+        self
+    }
 }
 
 /// Labels added to rows a column already addresses — see [`RowColumn::added`].
@@ -1106,182 +1166,166 @@ impl RowColumn {
         Some(sinks.into_iter().map(tessera_roaring::Sink::finish).collect())
     }
 
-    /// **The masked count for every artifact of this level, in one walk of the mask** — decision
-    /// 0093's one named exception, and the only route a row-major level has to the quantity the
-    /// disclosure rule requires.
+    /// The masked count of every artifact of this level: how many rows of the composed mask
+    /// carry its label.
     ///
-    /// **Over the whole mask, not over the viewport.** A viewer is told how many of an artifact's
-    /// documents they can see, which does not change as they pan; a per-viewport count would move
-    /// with the box and let a viewer difference two boxes for the members in between.
-    ///
-    /// **Filter-blind**, exactly as [`MaskedSet::count_intersection`] is: a filtered count here
-    /// would make an artifact's existence criterion a function of the filter, so an artifact would
-    /// appear and disappear as a viewer typed — a filter moving the frontier down, which **I12**
-    /// forbids. [`MaskedSet::visible_all`] is the composed mask and carries no filter, which is what
-    /// makes that structural rather than remembered.
-    ///
-    /// `u32` per artifact, which is ~4 B each — 4 MB at 10⁶ artifacts and 40 MB at 10⁷ — and is why
-    /// the cache holding these is byte-budgeted (`crate::histogram`). A count cannot exceed the row
-    /// space, which is `u32`-addressed.
+    /// Taken over the whole mask and not the viewport, so the number beside an artifact does not
+    /// move as a viewer pans, and two boxes cannot be differenced for the members between them.
+    /// The mask carries no filter, so an artifact's existence criterion cannot move with one.
     pub fn histogram(&self, mask: &impl WholeMask) -> Vec<u32> {
         self.histogram_over(mask.visible_all())
     }
 
-    /// The same walk over a row set the caller already holds — [`Self::histogram`]'s body, and its
-    /// only other caller is browse's **filtered** count (`highlight-and-hierarchy.md` §4), which
-    /// asks for `M_auth ∩ filter` rather than for `M_auth`.
-    ///
-    /// **Taking a bitmap rather than a mask is what makes that expressible without weakening the
-    /// mask-only rule above.** [`Self::histogram`] is filter-blind because the count beside an
-    /// artifact is what the principal may see; this is the *second* number §4 defines, and it is
-    /// obtained by narrowing an already-composed set. A caller handing it anything not derived
-    /// from the composed mask would be counting rows outside `M_auth`, which is why the one
-    /// production caller narrows [`WholeMask::visible_all`] and nothing else.
-    /// # Why it is split, and what the split does not change
-    ///
-    /// The walk is over **every visible row**, and a list column reads a row's whole label list —
-    /// rung 3's `mesh/descriptors` is ~46 labels over 3.6 × 10⁷ rows, so one pass is
-    /// 1.7 × 10⁹ increments and was **measured at 2.7 s** single-threaded, paid once per session
-    /// by whichever request first needs the level's counts (a browse page, or a `member_of`
-    /// leaf's gate).
-    ///
-    /// So the row space is cut into chunks and each is walked on its own thread into its own count
-    /// vector, summed at the end — the same shape the row route's own scan takes, on the pool the
-    /// caller installs. **The answer is identical**: addition is associative, every row lands in
-    /// exactly one chunk, and no chunk sees a row outside `visible`.
-    pub fn histogram_over(&self, visible: &croaring::Bitmap) -> Vec<u32> {
-        use rayon::prelude::*;
-
-        let ordinals = self.len();
-        let Some(last) = visible.maximum() else {
-            return vec![0u32; ordinals];
-        };
-        // One chunk per worker, floored so a small view is not split into slivers whose per-chunk
-        // count vector costs more than the walk it saves.
-        const MIN_CHUNK: u64 = 1 << 21;
-        let span = last as u64 + 1;
-        let workers = rayon::current_num_threads().max(1) as u64;
-        let chunk = (span.div_ceil(workers)).max(MIN_CHUNK);
-        let chunks = span.div_ceil(chunk);
-        (0..chunks)
-            .into_par_iter()
-            .map(|c| {
-                let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
-                let end = (c + 1) * chunk;
-                let mut counts = vec![0u32; ordinals];
-                for_each_row_in(visible, lo, end, |row| {
-                    // **Guarded exactly as [`Self::candidates`] guards an amendment's ordinal.**
-                    // Both routes read the same labels through [`Self::for_each_label`], so an
-                    // ordinal past the level's count has to mean the same thing to both: candidacy
-                    // would drop it and this would panic, which is the two routes disagreeing
-                    // about the level rather than about the mask.
-                    self.for_each_label(row, |ordinal| {
-                        if let Some(count) = counts.get_mut(ordinal as usize) {
-                            *count += 1;
-                        }
-                    });
-                });
-                counts
-            })
-            .reduce(
-                || vec![0u32; ordinals],
-                |mut acc, part| {
-                    for (a, b) in acc.iter_mut().zip(part) {
-                        *a += b;
-                    }
-                    acc
-                },
-            )
+    /// The same count over a row set the caller already holds. Browse's filtered count is the one
+    /// caller that passes anything but the composed mask, and it passes the mask narrowed by a
+    /// filter.
+    pub fn histogram_over(&self, visible: &Bitmap) -> Vec<u32> {
+        self.accumulate(visible, None).counts
     }
 
-    /// **One pass over the visible rows accumulating every artifact's count, position sum and
-    /// bounding box at once** — the masked count and the two derived properties a level served
-    /// from its column alone has no per-artifact membership to compute one at a time.
+    /// One pass over the rows of `visible`, folding up every artifact's count and, given
+    /// `places`, the position sum and bounding box of its placed rows.
     ///
-    /// [`Self::histogram_over`]'s walk with two more accumulators on it, chunked and reduced the
-    /// same way and for the same reason. The row is read once and its position once, whatever the
-    /// layer declares: reading it again per property would multiply the only expensive term.
+    /// A level served from its column alone has no per-artifact membership, and taking one
+    /// artifact's rows out of the column costs every visible row inside its extent, which for a
+    /// scattered artifact is the whole mask. This pass answers for every artifact of the level at
+    /// once.
     ///
-    /// **Why an accumulation and not a per-artifact walk.** The alternative is to take one
-    /// artifact's rows out of the column and compute over them, which costs the visible rows inside
-    /// that artifact's extent — and a *scattered* artifact's extent is the whole row space, so the
-    /// walk is `|M_auth|` per artifact and a viewport serving a hundred of them pays it a hundred
-    /// times. This pays it once for the level, per session, under the same key and the same byte
-    /// budget the counts are under (`crate::histogram`).
+    /// The row space is cut into chunks of [`CHUNK_ROWS`], walked in parallel on the pool the
+    /// caller installs. Each chunk reads the mask as runs of consecutive rows, and each run reads
+    /// its labels and positions as slices. Every row lands in one chunk and the merge adds and
+    /// takes minima and maxima, so the answer does not depend on how the pool schedules them.
     ///
-    /// `position` answers a row's grid position, or `None` for a row no segment places — dropped
-    /// rather than defaulted, exactly as [`crate::derived::RowLocator::position`]'s caller drops it:
-    /// `(0, 0)` is a real position and a row the space cannot place would pull the mean to the
-    /// origin.
-    ///
-    /// ⊘ **The transient is one accumulator set per chunk in flight plus the reduction's** — a
-    /// `u32`, two `u64` and four `u32` an ordinal, 36 B, so 58 MB a level at 1.6×10⁶ artifacts
-    /// times the pool's width, and once more for the value being reduced into. That is the shape
-    /// [`Self::histogram_over`] already has at 4 B an ordinal, at nine times the constant. **It is
-    /// per build in flight and a build is per `(session, level)`**, so a deployment serving *s*
-    /// sessions that each touch a level at once pays it *s* times over; the cache below is what
-    /// keeps a second request on the same key from paying it again.
-    pub fn accumulate_over(
+    /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts and
+    /// 40 B with the geometry, so a pass holds at most the pool's width of them.
+    pub fn accumulate(&self, visible: &Bitmap, places: Option<&[Placement<'_>]>) -> LevelAccumulation {
+        self.accumulate_in_chunks(visible, places, CHUNK_ROWS)
+    }
+
+    fn accumulate_in_chunks(
         &self,
-        visible: &croaring::Bitmap,
-        position: &(dyn Fn(u32) -> Option<(u32, u32)> + Sync),
+        visible: &Bitmap,
+        places: Option<&[Placement<'_>]>,
+        chunk_rows: u32,
     ) -> LevelAccumulation {
         use rayon::prelude::*;
+        use std::sync::{Mutex, PoisonError};
 
         let ordinals = self.len();
-        let empty = || LevelAccumulation {
-            counts: vec![0u32; ordinals],
-            sums: vec![[0u64; 2]; ordinals],
-            boxes: vec![[u32::MAX, u32::MAX, 0, 0]; ordinals],
-        };
-        let Some(last) = visible.maximum() else {
+        let empty = || LevelAccumulation::empty(ordinals, places.is_some());
+        let (Some(first), Some(last)) = (visible.minimum(), visible.maximum()) else {
             return empty();
         };
-        const MIN_CHUNK: u64 = 1 << 21;
-        let span = last as u64 + 1;
-        let workers = rayon::current_num_threads().max(1) as u64;
-        let chunk = (span.div_ceil(workers)).max(MIN_CHUNK);
-        let chunks = span.div_ceil(chunk);
-        (0..chunks)
+        let places = places.unwrap_or(&[]);
+        // The amendment's visible rows, intersected once rather than asked of every row.
+        let added = self.added.as_ref().map(|added| (added, added.rows.and(visible)));
+        let chunk = u64::from(chunk_rows.max(1));
+        let held: Mutex<Vec<LevelAccumulation>> = Mutex::new(Vec::new());
+        (u64::from(first) / chunk..u64::from(last) / chunk + 1)
             .into_par_iter()
-            .map(|c| {
-                let lo = u32::try_from(c * chunk).unwrap_or(u32::MAX);
-                let end = (c + 1) * chunk;
-                let mut acc = empty();
-                for_each_row_in(visible, lo, end, |row| {
-                    let Some((x, y)) = position(row) else {
-                        return;
-                    };
-                    // Guarded as [`Self::histogram_over`]'s is, and for its reason.
-                    self.for_each_label(row, |ordinal| {
-                        let i = ordinal as usize;
-                        if i >= acc.counts.len() {
-                            return;
+            .for_each(|c| {
+                let (lo, end) = (c * chunk, (c + 1) * chunk);
+                let lo = u32::try_from(lo).expect("a chunk starts at or below the mask's last row");
+                let mut acc = held
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop()
+                    .unwrap_or_else(empty);
+                self.walk_chunk(visible, lo, end, places, &mut acc);
+                if let Some((added, rows)) = &added {
+                    for_each_row_in(rows, lo, end, |row| {
+                        let position = place(places, row);
+                        for (_, ordinal) in added.at(row) {
+                            acc.add(*ordinal, position);
                         }
-                        acc.counts[i] += 1;
-                        acc.sums[i][0] += u64::from(x);
-                        acc.sums[i][1] += u64::from(y);
-                        let b = &mut acc.boxes[i];
-                        b[0] = b[0].min(x);
-                        b[1] = b[1].min(y);
-                        b[2] = b[2].max(x);
-                        b[3] = b[3].max(y);
                     });
-                });
-                acc
-            })
-            .reduce(empty, |mut a, b| {
-                for i in 0..a.counts.len() {
-                    a.counts[i] += b.counts[i];
-                    a.sums[i][0] += b.sums[i][0];
-                    a.sums[i][1] += b.sums[i][1];
-                    a.boxes[i][0] = a.boxes[i][0].min(b.boxes[i][0]);
-                    a.boxes[i][1] = a.boxes[i][1].min(b.boxes[i][1]);
-                    a.boxes[i][2] = a.boxes[i][2].max(b.boxes[i][2]);
-                    a.boxes[i][3] = a.boxes[i][3].max(b.boxes[i][3]);
                 }
-                a
-            })
+                held.lock().unwrap_or_else(PoisonError::into_inner).push(acc);
+            });
+        held.into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+            .into_par_iter()
+            .reduce_with(LevelAccumulation::merge)
+            .unwrap_or_else(empty)
+    }
+
+    /// The pack's and the tail's labels over the visible rows of `[lo, end)`, a run at a time.
+    fn walk_chunk(
+        &self,
+        visible: &Bitmap,
+        lo: u32,
+        end: u64,
+        places: &[Placement<'_>],
+        acc: &mut LevelAccumulation,
+    ) {
+        let mut it = visible.iter();
+        it.reset_at_or_after(lo);
+        let mut block = [0u32; ROW_BLOCK];
+        // The first placement that ends past the rows walked so far. Rows ascend, so it only moves
+        // forward.
+        let mut at = 0usize;
+        loop {
+            let n = it.next_many(&mut block);
+            if n == 0 {
+                return;
+            }
+            let mut i = 0;
+            while i < n {
+                let start = u64::from(block[i]);
+                if start >= end {
+                    return;
+                }
+                let mut j = i + 1;
+                while j < n && block[j] == block[j - 1] + 1 && u64::from(block[j]) < end {
+                    j += 1;
+                }
+                let mut row = start;
+                let run_end = start + (j - i) as u64;
+                while row < run_end {
+                    while places.get(at).is_some_and(|p| p.end() <= row) {
+                        at += 1;
+                    }
+                    let (piece_end, here) = match places.get(at) {
+                        Some(p) if u64::from(p.row_base) <= row => (run_end.min(p.end()), Some(p)),
+                        Some(p) => (run_end.min(u64::from(p.row_base)), None),
+                        None => (run_end, None),
+                    };
+                    self.labels_in(row, piece_end, |r, ordinal| {
+                        acc.add(ordinal, here.map(|p| p.position(r)));
+                    });
+                    row = piece_end;
+                }
+                i = j;
+            }
+        }
+    }
+
+    /// Every label the pack and the tail give the rows of `[from, to)`, in row order. The
+    /// amendment's labels are not included: [`Self::accumulate`] reads them from its own rows.
+    fn labels_in(&self, from: u64, to: u64, mut visit: impl FnMut(u32, u32)) {
+        let base_rows = u64::from(self.base_rows());
+        let below = to.min(base_rows);
+        if from < below {
+            match &*self.pack {
+                Pack::Label(pack) => pack.for_each_row_label(from as usize, below as usize, &mut visit),
+                Pack::List(pack) => pack.for_each_row_value(from as usize, below as usize, &mut visit),
+            }
+        }
+        // A list column has no tail: rows above its base are labelled by the amendment alone.
+        let (Pack::Label(_), Some(tail)) = (&*self.pack, &self.tail) else {
+            return;
+        };
+        let lo = from.max(base_rows).max(u64::from(tail.row_base));
+        let hi = to.min(u64::from(tail.row_end()));
+        if lo >= hi {
+            return;
+        }
+        let skip = (lo - u64::from(tail.row_base)) as usize;
+        for (row, &label) in (lo..hi).zip(&tail.labels[skip..]) {
+            if label != ROW_COLUMN_HOLE {
+                visit(row as u32, label);
+            }
+        }
     }
 
     /// The durable bytes — what the fold writes into the prefix.
@@ -2055,6 +2099,105 @@ mod tests {
                     });
                     assert_eq!(walked, expected, "count={count} seed={seed} cut={cut}");
                 }
+            }
+        }
+    }
+
+    /// **The one pass is a row-at-a-time reading of the same labels and positions.** The pass
+    /// reads the pack, the tail and the amendment by three routes, each a run at a time, and
+    /// places a run by the segment it falls in. The reference asks [`RowColumn::for_each_label`]
+    /// of each visible row and resolves its position by scanning the segments, so a run split at
+    /// the wrong row, a segment boundary or a chunk boundary shows up as a count, a sum or a box
+    /// that differs.
+    #[test]
+    fn one_pass_is_a_row_at_a_time_reading() {
+        use rand::{Rng, SeedableRng};
+
+        let disjoint: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 41)..(i * 41 + 41)).collect())
+            .collect();
+        let overlapping: Vec<Vec<u32>> = (0..24u32)
+            .map(|i| ((i * 29)..(i * 29 + 71)).map(|r| r % 1_000).collect())
+            .collect();
+        let mut columns = Vec::new();
+        for (layout, sets) in [
+            (ServingLayout::RowMajorLabel, &disjoint),
+            (ServingLayout::RowMajorList, &overlapping),
+        ] {
+            let slices: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+            let base = composed(&rows_of(&slices), 1_000, layout).expect("builds");
+            columns.push(base.clone());
+            let mut amended = if layout == ServingLayout::RowMajorLabel {
+                let tail = TailLabels::new(
+                    1_000,
+                    (0..200u32)
+                        .map(|i| if i % 5 == 0 { ROW_COLUMN_HOLE } else { i % 24 })
+                        .collect(),
+                );
+                let tailed = base.with_tail(tail);
+                columns.push(tailed.clone());
+                tailed
+            } else {
+                base.clone()
+            };
+            let mut pairs = vec![(1_200, 3), (1_201, 7), (1_202, 3), (1_299, 23)];
+            if layout == ServingLayout::RowMajorList {
+                // A second label at base rows the pack already labels.
+                pairs.splice(0..0, [(17, 5), (18, 5), (999, 0)]);
+            }
+            assert!(amended.amend(&pairs, 1_300));
+            columns.push(amended);
+        }
+
+        // Rows 0..3 below every segment; the first segment's columns stop short of the second's
+        // base, the second's run past the third's, and the last is shorter than the row space.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(5);
+        let mut column = |len: usize| -> Vec<u32> { (0..len).map(|_| rng.gen()).collect() };
+        let segments: Vec<(u32, Vec<u32>, Vec<u32>)> = vec![
+            (3, column(380), column(390)),
+            (400, column(600), column(600)),
+            (900, column(350), column(340)),
+        ];
+        let raw: Vec<(u32, &[u32], &[u32])> = segments
+            .iter()
+            .map(|(base, m, r)| (*base, m.as_slice(), r.as_slice()))
+            .collect();
+        let places = crate::derived::Placement::of_columns(&raw);
+        let reference_position = |row: u32| -> Option<(u32, u32)> {
+            let (base, morton, residual) = raw.iter().rev().find(|(base, _, _)| row >= *base)?;
+            let at = (row - base) as usize;
+            Some(tessera_spatial::morton::unsplit32(
+                tessera_types::MortonCode::new(*morton.get(at)?),
+                *residual.get(at)?,
+            ))
+        };
+
+        for column in &columns {
+            let ordinals = column.len();
+            for (seed, num, den) in [(21u64, 1u32, 1u32), (22, 1, 2), (23, 1, 13)] {
+                let mask = sampled_mask(seed, column.row_count(), num, den);
+                let mut expected = LevelAccumulation::empty(ordinals, true);
+                for row in mask.iter() {
+                    let position = reference_position(row);
+                    column.for_each_label(row, |ordinal| expected.add(ordinal, position));
+                }
+                for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
+                    let what = format!("{:?} seed={seed} chunk={chunk}", column.layout());
+                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk);
+                    assert_eq!(got.counts, expected.counts, "{what}");
+                    assert_eq!(got.placed, expected.placed, "{what}");
+                    assert_eq!(got.sums, expected.sums, "{what}");
+                    assert_eq!(got.boxes, expected.boxes, "{what}");
+                    let counts = column.accumulate_in_chunks(&mask, None, chunk);
+                    assert_eq!(counts.counts, expected.counts, "{what}");
+                    assert!(counts.placed.is_empty() && counts.sums.is_empty());
+                }
+                assert!(
+                    num < den
+                        || expected.placed.iter().sum::<u32>()
+                            < expected.counts.iter().sum::<u32>(),
+                    "some visible rows are unplaced, or the placed count is not being tested"
+                );
             }
         }
     }
