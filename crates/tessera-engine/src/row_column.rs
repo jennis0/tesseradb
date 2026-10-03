@@ -1180,7 +1180,9 @@ impl RowColumn {
     /// caller that passes anything but the composed mask, and it passes the mask narrowed by a
     /// filter.
     pub fn histogram_over(&self, visible: &Bitmap) -> Vec<u32> {
-        self.accumulate(visible, None, &|| {}).counts
+        self.accumulate(visible, None, &|| true)
+            .expect("a walk that is never stopped answers")
+            .counts
     }
 
     /// One pass over the rows of `visible`, folding up every artifact's count and, given
@@ -1199,13 +1201,14 @@ impl RowColumn {
     /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts and
     /// 40 B with the geometry, so a pass holds at most the pool's width of them.
     ///
-    /// `before_chunk` is called before each chunk is walked, and may block.
+    /// `before_chunk` is called before each chunk is walked, and may block. Once it returns
+    /// `false` no further chunk is walked and the pass answers `None`.
     pub fn accumulate(
         &self,
         visible: &Bitmap,
         places: Option<&[Placement<'_>]>,
-        before_chunk: &(dyn Fn() + Sync),
-    ) -> LevelAccumulation {
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
         self.accumulate_in_chunks(visible, places, CHUNK_ROWS, before_chunk)
     }
 
@@ -1214,27 +1217,31 @@ impl RowColumn {
         visible: &Bitmap,
         places: Option<&[Placement<'_>]>,
         chunk_rows: u32,
-        before_chunk: &(dyn Fn() + Sync),
-    ) -> LevelAccumulation {
+        before_chunk: &(dyn Fn() -> bool + Sync),
+    ) -> Option<LevelAccumulation> {
         use rayon::prelude::*;
         use std::sync::{Mutex, PoisonError};
 
         let ordinals = self.len();
         let empty = || LevelAccumulation::empty(ordinals, places.is_some());
         let (Some(first), Some(last)) = (visible.minimum(), visible.maximum()) else {
-            return empty();
+            return Some(empty());
         };
         let places = places.unwrap_or(&[]);
         // The amendment's visible rows, intersected once rather than asked of every row.
         let added = self.added.as_ref().map(|added| (added, added.rows.and(visible)));
         let chunk = u64::from(chunk_rows.max(1));
         let held: Mutex<Vec<LevelAccumulation>> = Mutex::new(Vec::new());
+        let stopped = std::sync::atomic::AtomicBool::new(false);
         (u64::from(first) / chunk..u64::from(last) / chunk + 1)
             .into_par_iter()
             .for_each(|c| {
                 let (lo, end) = (c * chunk, (c + 1) * chunk);
                 let lo = u32::try_from(lo).expect("a chunk starts at or below the mask's last row");
-                before_chunk();
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) || !before_chunk() {
+                    stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
                 let mut acc = held
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -1251,11 +1258,16 @@ impl RowColumn {
                 }
                 held.lock().unwrap_or_else(PoisonError::into_inner).push(acc);
             });
-        held.into_inner()
-            .unwrap_or_else(PoisonError::into_inner)
-            .into_par_iter()
-            .reduce_with(LevelAccumulation::merge)
-            .unwrap_or_else(empty)
+        if stopped.into_inner() {
+            return None;
+        }
+        Some(
+            held.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .into_par_iter()
+                .reduce_with(LevelAccumulation::merge)
+                .unwrap_or_else(empty),
+        )
     }
 
     /// The pack's and the tail's labels over the visible rows of `[lo, end)`, a run at a time.
@@ -2195,12 +2207,12 @@ mod tests {
                 }
                 for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
                     let what = format!("{:?} seed={seed} chunk={chunk}", column.layout());
-                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk, &|| {});
+                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk, &|| true).unwrap();
                     assert_eq!(got.counts, expected.counts, "{what}");
                     assert_eq!(got.placed, expected.placed, "{what}");
                     assert_eq!(got.sums, expected.sums, "{what}");
                     assert_eq!(got.boxes, expected.boxes, "{what}");
-                    let counts = column.accumulate_in_chunks(&mask, None, chunk, &|| {});
+                    let counts = column.accumulate_in_chunks(&mask, None, chunk, &|| true).unwrap();
                     assert_eq!(counts.counts, expected.counts, "{what}");
                     assert!(counts.placed.is_empty() && counts.sums.is_empty());
                 }

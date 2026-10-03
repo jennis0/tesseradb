@@ -350,22 +350,15 @@ impl Engine {
         let key = served
             .mask_identity
             .key(served.name, layer, level, level_version, accumulate.is_some());
-        let cancel: &dyn tessera_cache::Cancel = match &served.cancel {
-            Some(cancel) => cancel,
-            None => &tessera_cache::NeverCancelled,
-        };
         self.masked_counts
-            .get_or_build(key, &served.turn, cancel, || {
+            .get_or_build(key, &served.turn, served.cancel.as_ref(), |build| {
                 let places = accumulate.map(crate::derived::Placement::of_segments);
                 self.count_pool.install(|| {
                     #[cfg(feature = "fault-injection")]
                     self.switches.hold_masked_count_build_if_wanted();
-                    crate::histogram::MaskedCounts::of(
-                        column.accumulate(mask.visible_all(), places.as_deref(), &|| {
-                            self.masked_counts.give_way()
-                        }),
-                        places.is_some(),
-                    )
+                    column
+                        .accumulate(mask.visible_all(), places.as_deref(), &|| build.give_way())
+                        .map(|walked| crate::histogram::MaskedCounts::of(walked, places.is_some()))
                 })
             })
             .map(Some)

@@ -57,25 +57,33 @@
 //!
 //! A build walks every visible row of a level, which on a corpus larger than memory streams from
 //! disk, and a viewport's reads queue behind it. So a build waits between chunks of its walk while
-//! any viewport is drawing points ([`MaskedCountCache::drawing`]), from the start of its sweep to
-//! its last point. A request is not counted while it waits on a build, its own included, so
-//! nothing waits on itself. A drawing request's sends to its client count, so a client that stalls
-//! holds the builds until the stream's stall bound sheds it.
+//! any viewport is drawing points ([`MaskedCountCache::drawing`]): from the start of its sweep to
+//! its last point, less the time it is blocked handing a frame to its client. A build gives way
+//! for at most `serve.masked_count_give_way_ms` from its first wait, and not at all while a
+//! drawing request is itself waiting on a build, since that request's points wait on the builds.
+//! A request is not counted as drawing while it waits on a build, its own included, so nothing
+//! waits on itself. A build, or a build waiting for a place, that every caller has left stops
+//! and holds nothing.
 //!
 //! An entry is 4 B an artifact for counts alone and 40 B with the geometry: a count, a placed
 //! count, two `u64` sums and four `u32` bounds. At 1.4×10⁶ artifacts that is 56 MB a level. The
 //! bound is `serve.masked_count_cache_bytes`, 256 MiB unless configured.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
-use std::sync::{Condvar, Mutex, PoisonError};
-
-use tessera_cache::{Cancel, CacheWeight, SingleFlightCache, WaitEnded};
+use rustc_hash::FxHashMap;
+use tessera_cache::{Cancel, CacheWeight, SingleFlightCache, WaitEnded, WaitingBuildError};
 
 use crate::row_column::LevelAccumulation;
 
 /// How many builds may walk at once.
 const CONCURRENT_BUILDS: usize = 2;
+
+/// How long a build gives way to drawing requests, from its first wait, unless
+/// `serve.masked_count_give_way_ms` says otherwise.
+pub const DEFAULT_GIVE_WAY_MS: u64 = 2_000;
 
 /// How long a connected request waits for another's build before it is refused. Far beyond any
 /// build measured, so it ends a wait only on a build that has stopped making progress.
@@ -299,10 +307,105 @@ pub struct MaskedCountStats {
     pub waiters: u64,
 }
 
-/// One request's part in [`MaskedCountCache::drawing`]: whether it is drawing points, and how
-/// many of its calls are waiting on a build. It counts as drawing only while it is and none is.
+/// One request's part in [`MaskedCountCache::drawing`].
 #[derive(Debug, Default)]
-pub(crate) struct DrawingTurn(Mutex<(bool, usize)>);
+pub(crate) struct DrawingTurn {
+    state: Mutex<TurnState>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TurnState {
+    /// Between the start of the request's sweep and its last point.
+    drawing: bool,
+    /// The request's calls waiting on a build, its own builds included.
+    waiting: usize,
+    /// Blocked handing a frame to its client.
+    sending: bool,
+}
+
+impl TurnState {
+    /// A build gives way to this request.
+    fn draws(self) -> bool {
+        self.drawing && self.waiting == 0 && !self.sending
+    }
+
+    /// This request's points wait on a build, so no build gives way.
+    fn waits_to_draw(self) -> bool {
+        self.drawing && self.waiting > 0
+    }
+}
+
+/// What the builds give way to, across every request.
+#[derive(Debug, Default)]
+struct Drawing {
+    /// Requests that [`TurnState::draws`].
+    draw: usize,
+    /// Requests that [`TurnState::waits_to_draw`].
+    wait_to_draw: usize,
+}
+
+/// The requests waiting for one key's build, the builder included, each by its cancellation.
+/// `None` stands for a caller with no client to lose.
+#[derive(Debug, Default)]
+struct Interest {
+    callers: Mutex<Vec<(u64, Option<crate::CancelToken>)>>,
+}
+
+impl Interest {
+    /// Every caller that wanted this build has gone.
+    fn abandoned(&self) -> bool {
+        let callers = self.callers.lock().unwrap_or_else(PoisonError::into_inner);
+        callers
+            .iter()
+            .all(|(_, cancel)| cancel.as_ref().is_some_and(crate::CancelToken::is_cancelled))
+    }
+}
+
+/// How often a build parked for a place, or giving way, looks at whether anyone still wants it.
+const ABANDON_TICK: Duration = Duration::from_millis(20);
+
+/// One build in flight, handed to the walk.
+pub(crate) struct Build<'a> {
+    cache: &'a MaskedCountCache,
+    interest: &'a Interest,
+    /// When this build first gave way. It gives way for at most the cache's `give_way` after it.
+    first_wait: OnceLock<Instant>,
+}
+
+impl Build<'_> {
+    /// Returns once no request is drawing points, or this build has given way for its budget, or
+    /// some drawing request is waiting on a build. `false` when every caller that wanted this
+    /// build has gone, and the walk should stop. A build calls it between chunks of its walk.
+    ///
+    /// Never called from inside a `self.pool` job: a pool worker held here could be the one a
+    /// drawing request's sweep is waiting for.
+    pub(crate) fn give_way(&self) -> bool {
+        let budget = Duration::from_millis(self.cache.give_way_ms.load(Ordering::Relaxed));
+        let mut drawing = self.cache.drawing.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if self.interest.abandoned() {
+                return false;
+            }
+            if drawing.draw == 0 || drawing.wait_to_draw > 0 {
+                return true;
+            }
+            let now = Instant::now();
+            let until = *self.first_wait.get_or_init(|| now) + budget;
+            if now >= until {
+                return true;
+            }
+            drawing = self
+                .cache
+                .drawn
+                .wait_timeout(drawing, (until - now).min(ABANDON_TICK))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// A walk stopped because every caller that wanted it had gone.
+struct Abandoned;
 
 /// The cache itself, under a byte bound.
 pub struct MaskedCountCache {
@@ -310,9 +413,13 @@ pub struct MaskedCountCache {
     /// Builds walking now, at most [`CONCURRENT_BUILDS`].
     building: Mutex<usize>,
     built: Condvar,
-    /// Requests drawing points now. A build walks only while this is zero.
-    drawing: Mutex<usize>,
+    drawing: Mutex<Drawing>,
     drawn: Condvar,
+    /// How long a build gives way, from its first wait (`serve.masked_count_give_way_ms`).
+    give_way_ms: AtomicU64,
+    /// Who wants each key's build.
+    interest: Mutex<FxHashMap<MaskedCountKey, Arc<Interest>>>,
+    next_caller: AtomicU64,
 }
 
 impl Default for MaskedCountCache {
@@ -339,8 +446,11 @@ impl MaskedCountCache {
             slots,
             building: Mutex::new(0),
             built: Condvar::new(),
-            drawing: Mutex::new(0),
+            drawing: Mutex::new(Drawing::default()),
             drawn: Condvar::new(),
+            give_way_ms: AtomicU64::new(DEFAULT_GIVE_WAY_MS),
+            interest: Mutex::new(FxHashMap::default()),
+            next_caller: AtomicU64::new(0),
         }
     }
 
@@ -349,6 +459,12 @@ impl MaskedCountCache {
     pub fn set_bound_bytes(&self, bound_bytes: u64) {
         self.slots.set_bound_bytes(bound_bytes);
         self.slots.retain_keys(|_| false);
+    }
+
+    /// How long a build gives way to drawing requests, from its first wait.
+    pub fn set_give_way_ms(&self, give_way_ms: u64) {
+        self.give_way_ms.store(give_way_ms, Ordering::Relaxed);
+        self.drawn.notify_all();
     }
 
     pub fn stats(&self) -> MaskedCountStats {
@@ -366,66 +482,145 @@ impl MaskedCountCache {
     /// This key's counts, building them if nothing is held. A request arriving while another
     /// builds the same key waits for that build, while `cancel` holds and up to
     /// [`BUILD_WAIT_MS`], and is handed its result. `turn`'s request is not counted as drawing
-    /// for the duration.
-    pub(crate) fn get_or_build<C: Cancel + ?Sized>(
+    /// for the duration. A build that every caller has left stops, holds nothing, and its
+    /// callers are answered [`WaitEnded::Cancelled`].
+    pub(crate) fn get_or_build(
         &self,
         key: MaskedCountKey,
         turn: &DrawingTurn,
-        cancel: &C,
-        build: impl FnOnce() -> MaskedCounts,
+        cancel: Option<&crate::CancelToken>,
+        walk: impl FnOnce(&Build<'_>) -> Option<MaskedCounts>,
     ) -> Result<Arc<MaskedCounts>, WaitEnded> {
-        self.turn(turn, |t| t.1 += 1);
-        let got = self.slots.get_or_derive_waiting(key, None, cancel, |_| {
-            let _permit = self.build_permit();
-            build()
-        });
-        self.turn(turn, |t| t.1 -= 1);
-        got
+        let _waiting = self.turn_guard(turn, |t| t.waiting += 1, |t| t.waiting -= 1);
+        let (interest, _caller) = self.register(&key, cancel);
+        let polled: &dyn Cancel = match cancel {
+            Some(cancel) => cancel,
+            None => &tessera_cache::NeverCancelled,
+        };
+        self.slots
+            .get_or_try_build_waiting(key, polled, || {
+                let _permit = self.build_permit(&interest).ok_or(Abandoned)?;
+                walk(&Build {
+                    cache: self,
+                    interest: &interest,
+                    first_wait: OnceLock::new(),
+                })
+                .ok_or(Abandoned)
+            })
+            .map_err(|ended| match ended {
+                WaitingBuildError::Wait(ended) => ended,
+                WaitingBuildError::Build(Abandoned) => WaitEnded::Cancelled,
+            })
     }
 
     /// Counts `turn`'s request as drawing points until the guard drops.
     pub(crate) fn drawing<'a>(&'a self, turn: &'a DrawingTurn) -> impl Drop + 'a {
-        struct Drawing<'a>(&'a MaskedCountCache, &'a DrawingTurn);
-        impl Drop for Drawing<'_> {
+        self.turn_guard(turn, |t| t.drawing = true, |t| t.drawing = false)
+    }
+
+    /// Does not count `turn`'s request as drawing until the guard drops: it is blocked on its
+    /// client.
+    pub(crate) fn sending<'a>(&'a self, turn: &'a DrawingTurn) -> impl Drop + 'a {
+        self.turn_guard(turn, |t| t.sending = true, |t| t.sending = false)
+    }
+
+    /// Applies `on` to `turn` now and `off` when the guard drops.
+    fn turn_guard<'a>(
+        &'a self,
+        turn: &'a DrawingTurn,
+        on: impl FnOnce(&mut TurnState),
+        off: impl FnOnce(&mut TurnState) + 'a,
+    ) -> impl Drop + 'a {
+        struct Guard<'a, F: FnOnce(&mut TurnState)> {
+            cache: &'a MaskedCountCache,
+            turn: &'a DrawingTurn,
+            off: Option<F>,
+        }
+        impl<F: FnOnce(&mut TurnState)> Drop for Guard<'_, F> {
             fn drop(&mut self) {
-                self.0.turn(self.1, |t| t.0 = false);
+                if let Some(off) = self.off.take() {
+                    self.cache.turn(self.turn, off);
+                }
             }
         }
-        self.turn(turn, |t| t.0 = true);
-        Drawing(self, turn)
-    }
-
-    /// Returns once no request is drawing points. A build calls it between chunks of its walk.
-    pub(crate) fn give_way(&self) {
-        let mut drawing = self.drawing.lock().unwrap_or_else(PoisonError::into_inner);
-        while *drawing > 0 {
-            drawing = self.drawn.wait(drawing).unwrap_or_else(PoisonError::into_inner);
+        self.turn(turn, on);
+        Guard {
+            cache: self,
+            turn,
+            off: Some(off),
         }
     }
 
-    /// Applies `change` to `turn` and moves the drawing count by what that changed.
-    fn turn(&self, turn: &DrawingTurn, change: impl FnOnce(&mut (bool, usize))) {
-        let counts = |t: &(bool, usize)| t.0 && t.1 == 0;
-        let mut t = turn.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let before = counts(&t);
-        change(&mut t);
-        let after = counts(&t);
-        if before == after {
-            return;
-        }
+    /// Applies `change` to `turn` and moves the counts the builds read by what that changed.
+    fn turn(&self, turn: &DrawingTurn, change: impl FnOnce(&mut TurnState)) {
+        let mut state = turn.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = *state;
+        change(&mut state);
+        let after = *state;
+        let shift = |count: &mut usize, was: bool, is: bool| match (was, is) {
+            (false, true) => *count += 1,
+            (true, false) => *count -= 1,
+            _ => {}
+        };
         let mut drawing = self.drawing.lock().unwrap_or_else(PoisonError::into_inner);
-        if after {
-            *drawing += 1;
-        } else {
-            *drawing -= 1;
-            if *drawing == 0 {
-                self.drawn.notify_all();
+        shift(&mut drawing.draw, before.draws(), after.draws());
+        shift(
+            &mut drawing.wait_to_draw,
+            before.waits_to_draw(),
+            after.waits_to_draw(),
+        );
+        self.drawn.notify_all();
+    }
+
+    /// Adds a caller with `cancel` to `key`'s interest, until the guard drops.
+    fn register<'a>(
+        &'a self,
+        key: &MaskedCountKey,
+        cancel: Option<&crate::CancelToken>,
+    ) -> (Arc<Interest>, impl Drop + 'a) {
+        struct Caller<'a> {
+            cache: &'a MaskedCountCache,
+            key: MaskedCountKey,
+            interest: Arc<Interest>,
+            id: u64,
+        }
+        impl Drop for Caller<'_> {
+            fn drop(&mut self) {
+                let mut map = self.cache.interest.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut callers = self
+                    .interest
+                    .callers
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                callers.retain(|(id, _)| *id != self.id);
+                if callers.is_empty() {
+                    map.remove(&self.key);
+                }
             }
         }
+        let id = self.next_caller.fetch_add(1, Ordering::Relaxed);
+        let interest = {
+            let mut map = self.interest.lock().unwrap_or_else(PoisonError::into_inner);
+            let interest = Arc::clone(map.entry(key.clone()).or_default());
+            interest
+                .callers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((id, cancel.cloned()));
+            interest
+        };
+        let caller = Caller {
+            cache: self,
+            key: key.clone(),
+            interest: Arc::clone(&interest),
+            id,
+        };
+        (interest, caller)
     }
 
-    /// One of the [`CONCURRENT_BUILDS`] places to walk, held until the guard drops.
-    fn build_permit(&self) -> impl Drop + '_ {
+    /// One of the [`CONCURRENT_BUILDS`] places to walk, held until the guard drops. `None` once
+    /// every caller that wanted the build has gone.
+    fn build_permit(&self, interest: &Interest) -> Option<impl Drop + '_> {
         struct Permit<'a>(&'a MaskedCountCache);
         impl Drop for Permit<'_> {
             fn drop(&mut self) {
@@ -435,10 +630,17 @@ impl MaskedCountCache {
         }
         let mut building = self.building.lock().unwrap_or_else(PoisonError::into_inner);
         while *building >= CONCURRENT_BUILDS {
-            building = self.built.wait(building).unwrap_or_else(PoisonError::into_inner);
+            if interest.abandoned() {
+                return None;
+            }
+            building = self
+                .built
+                .wait_timeout(building, ABANDON_TICK)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         *building += 1;
-        Permit(self)
+        Some(Permit(self))
     }
 }
 
@@ -472,7 +674,7 @@ mod tests {
         build: impl FnOnce() -> MaskedCounts,
     ) -> Arc<MaskedCounts> {
         cache
-            .get_or_build(key, &DrawingTurn::default(), &tessera_cache::NeverCancelled, build)
+            .get_or_build(key, &DrawingTurn::default(), None, |_| Some(build()))
             .expect("nothing else is building")
     }
 
@@ -551,7 +753,9 @@ mod tests {
         }
         let gone = crate::CancelToken::new();
         gone.cancel();
-        let waited = cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), &gone, || counts(&[0]));
+        let waited = cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
+            Some(counts(&[0]))
+        });
         assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
         release.send(()).unwrap();
         assert_eq!(builder.join().unwrap(), 7);
@@ -647,6 +851,7 @@ mod tests {
     #[test]
     fn a_build_gives_way_while_a_request_draws() {
         let cache = Arc::new(MaskedCountCache::default());
+        cache.set_give_way_ms(600_000);
         let order = Arc::new(Mutex::new(Vec::new()));
         let (started, walking) = std::sync::mpsc::channel::<()>();
         let turn = DrawingTurn::default();
@@ -654,13 +859,15 @@ mod tests {
         let builder = {
             let (cache, order) = (Arc::clone(&cache), Arc::clone(&order));
             std::thread::spawn(move || {
-                get(&cache, key(1, "a", 0), || {
-                    started.send(()).unwrap();
-                    cache.give_way();
-                    order.lock().unwrap().push("walked");
-                    counts(&[1])
-                })
-                .get(0)
+                cache
+                    .get_or_build(key(1, "a", 0), &DrawingTurn::default(), None, |build| {
+                        started.send(()).unwrap();
+                        assert!(build.give_way());
+                        order.lock().unwrap().push("walked");
+                        Some(counts(&[1]))
+                    })
+                    .unwrap()
+                    .get(0)
             })
         };
         walking.recv().unwrap();
@@ -675,13 +882,14 @@ mod tests {
     #[test]
     fn a_request_waiting_on_a_build_is_not_counted_as_drawing() {
         let cache = Arc::new(MaskedCountCache::default());
+        cache.set_give_way_ms(600_000);
         let turn = DrawingTurn::default();
         let _drawing = cache.drawing(&turn);
 
         let own = cache
-            .get_or_build(key(1, "a", 0), &turn, &tessera_cache::NeverCancelled, || {
-                cache.give_way();
-                counts(&[3])
+            .get_or_build(key(1, "a", 0), &turn, None, |build| {
+                assert!(build.give_way());
+                Some(counts(&[3]))
             })
             .unwrap();
         assert_eq!(own.get(0), 3);
@@ -690,19 +898,129 @@ mod tests {
         let builder = {
             let cache = Arc::clone(&cache);
             std::thread::spawn(move || {
-                get(&cache, key(2, "a", 0), || {
-                    started.send(()).unwrap();
-                    cache.give_way();
-                    counts(&[5])
-                })
-                .get(0)
+                cache
+                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                        started.send(()).unwrap();
+                        assert!(build.give_way());
+                        Some(counts(&[5]))
+                    })
+                    .unwrap()
+                    .get(0)
             })
         };
         walking.recv().unwrap();
         let waited = cache
-            .get_or_build(key(2, "a", 0), &turn, &tessera_cache::NeverCancelled, || counts(&[0]))
+            .get_or_build(key(2, "a", 0), &turn, None, |_| Some(counts(&[0])))
             .unwrap();
         assert_eq!(waited.get(0), 5);
         assert_eq!(builder.join().unwrap(), 5);
+    }
+
+    /// While a drawing request waits on a build, no build gives way to the other drawing requests:
+    /// that request's points wait on the builds.
+    #[test]
+    fn no_build_gives_way_while_a_drawing_request_waits_on_one() {
+        let cache = Arc::new(MaskedCountCache::default());
+        cache.set_give_way_ms(600_000);
+        let other = DrawingTurn::default();
+        let _other_drawing = cache.drawing(&other);
+
+        let (held_tx, held) = std::sync::mpsc::channel::<()>();
+        let (started, building) = std::sync::mpsc::channel::<()>();
+        let slow = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                get(&cache, key(1, "a", 0), || {
+                    started.send(()).unwrap();
+                    held.recv().unwrap();
+                    counts(&[1])
+                })
+                .get(0)
+            })
+        };
+        building.recv().unwrap();
+        let waiting = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                let turn = DrawingTurn::default();
+                let _drawing = cache.drawing(&turn);
+                cache
+                    .get_or_build(key(1, "a", 0), &turn, None, |_| Some(counts(&[0])))
+                    .unwrap()
+                    .get(0)
+            })
+        };
+        while cache.stats().waiters == 0 {
+            std::thread::yield_now();
+        }
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let walker = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                let got = cache
+                    .get_or_build(key(2, "a", 0), &DrawingTurn::default(), None, |build| {
+                        assert!(build.give_way());
+                        Some(counts(&[2]))
+                    })
+                    .unwrap()
+                    .get(0);
+                done.send(got).unwrap();
+            })
+        };
+        let walked = finished.recv_timeout(std::time::Duration::from_secs(60));
+        held_tx.send(()).unwrap();
+        assert_eq!(walked, Ok(2), "the walk gave way while a drawing request waited on a build");
+        walker.join().unwrap();
+        assert_eq!(slow.join().unwrap(), 1);
+        assert_eq!(waiting.join().unwrap(), 1);
+    }
+
+    /// A build waiting for a place stops once every caller that wanted it has gone, and holds
+    /// nothing.
+    #[test]
+    fn a_build_waiting_for_a_place_stops_when_its_callers_go() {
+        let cache = Arc::new(MaskedCountCache::default());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(Mutex::new(held));
+        let (started, building) = std::sync::mpsc::channel::<()>();
+        let walkers: Vec<_> = (0..CONCURRENT_BUILDS as u8)
+            .map(|terms| {
+                let (cache, held, started) = (Arc::clone(&cache), Arc::clone(&held), started.clone());
+                std::thread::spawn(move || {
+                    get(&cache, key(terms, "a", 0), || {
+                        started.send(()).unwrap();
+                        held.lock().unwrap().recv().unwrap();
+                        counts(&[u32::from(terms)])
+                    })
+                    .get(0)
+                })
+            })
+            .collect();
+        for _ in 0..CONCURRENT_BUILDS {
+            building.recv().unwrap();
+        }
+
+        let gone = crate::CancelToken::new();
+        let queued = {
+            let (cache, gone) = (Arc::clone(&cache), gone.clone());
+            std::thread::spawn(move || {
+                cache.get_or_build(key(9, "a", 0), &DrawingTurn::default(), Some(&gone), |_| {
+                    Some(counts(&[9]))
+                })
+            })
+        };
+        while cache.stats().misses <= CONCURRENT_BUILDS as u64 {
+            std::thread::yield_now();
+        }
+        gone.cancel();
+        assert_eq!(queued.join().unwrap().err(), Some(WaitEnded::Cancelled));
+        for _ in 0..CONCURRENT_BUILDS {
+            release.send(()).unwrap();
+        }
+        for walker in walkers {
+            walker.join().unwrap();
+        }
+        assert_eq!(cache.stats().entries, CONCURRENT_BUILDS, "the stopped build holds nothing");
     }
 }

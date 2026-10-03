@@ -52,6 +52,14 @@ pub(crate) struct TestSwitches {
     pub(crate) masked_count_build_hold_wanted: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) masked_count_build_held: AtomicBool,
+    /// Whether the next viewport to start drawing points waits there until this is cleared, and
+    /// whether one is waiting.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) drawing_hold_wanted: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) drawing_held: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) drawing_holding: AtomicBool,
     /// Whether the next ingest batch to pass its handler's check waits there until this
     /// is cleared, and whether one is waiting. The batch that takes the hold clears the first.
     #[cfg(feature = "fault-injection")]
@@ -91,6 +99,20 @@ impl TestSwitches {
             while self.masked_count_build_held.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
+        }
+    }
+
+    /// Called by a viewport as it starts drawing points. Waits if a test asked for the next one to
+    /// be held.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_drawing_if_wanted(&self) {
+        use std::sync::atomic::Ordering;
+        if self.drawing_hold_wanted.swap(false, Ordering::SeqCst) {
+            self.drawing_holding.store(true, Ordering::SeqCst);
+            while self.drawing_held.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.drawing_holding.store(false, Ordering::SeqCst);
         }
     }
 
@@ -154,6 +176,12 @@ impl Default for TestSwitches {
             masked_count_build_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             masked_count_build_held: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            drawing_hold_wanted: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            drawing_held: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            drawing_holding: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             write_check_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]

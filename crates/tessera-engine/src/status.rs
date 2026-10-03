@@ -235,6 +235,13 @@ impl Engine {
         self.masked_counts.set_bound_bytes(bytes);
     }
 
+    /// How long a masked-count build waits, from its first wait, while viewers are drawing points
+    /// (`serve.masked_count_give_way_ms`). Unset, an embedder gets
+    /// [`crate::histogram::DEFAULT_GIVE_WAY_MS`].
+    pub fn set_masked_count_give_way_ms(&self, give_way_ms: u64) {
+        self.masked_counts.set_give_way_ms(give_way_ms);
+    }
+
     /// Bound the region decomposition cache (`serve.region_cache_bytes`).
     pub fn set_region_cache_bytes(&self, bytes: u64) {
         self.region_cache.set_bound_bytes(bytes);
