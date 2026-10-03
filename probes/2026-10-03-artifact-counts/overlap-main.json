@@ -1,0 +1,98 @@
+[
+ {
+  "build": "85% level 1",
+  "points alone, warm session": {
+   "status": 200,
+   "headers_s": 0.081,
+   "last_s": 0.116,
+   "bytes": 3290181
+  },
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.003,
+   "last_s": 9.811,
+   "bytes": 15676713
+  },
+  "points beside, another warm session": {
+   "status": 200,
+   "headers_s": 0.833,
+   "last_s": 0.914,
+   "bytes": 3290181
+  },
+  "points beside, the building session": {
+   "status": 200,
+   "headers_s": 0.883,
+   "last_s": 0.923,
+   "bytes": 1816631
+  }
+ },
+ {
+  "build": "100% level 2",
+  "points alone, warm session": {
+   "status": 200,
+   "headers_s": 0.014,
+   "last_s": 0.038,
+   "bytes": 1816630
+  },
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.002,
+   "last_s": 16.852,
+   "bytes": 167278635
+  },
+  "points beside, another warm session": {
+   "status": 200,
+   "headers_s": 2.081,
+   "last_s": 2.173,
+   "bytes": 1816632
+  },
+  "points beside, the building session": {
+   "status": 200,
+   "headers_s": 2.29,
+   "last_s": 2.346,
+   "bytes": 3290182
+  }
+ },
+ {
+  "build": "7% level 1",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.001,
+   "last_s": 9.25,
+   "bytes": 5483752
+  },
+  "first points of a new 1% session beside it": {
+   "status": 200,
+   "headers_s": 0.222,
+   "last_s": 0.341,
+   "bytes": 232617
+  },
+  "first points of another new 1% session after it": {
+   "status": 200,
+   "headers_s": 0.017,
+   "last_s": 0.021,
+   "bytes": 232616
+  }
+ },
+ {
+  "build": "7% level 2",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.001,
+   "last_s": 5.318,
+   "bytes": 21014889
+  },
+  "first points of a new 85% session beside it": {
+   "status": 200,
+   "headers_s": 0.272,
+   "last_s": 0.433,
+   "bytes": 1816631
+  },
+  "first points of another new 85% session after it": {
+   "status": 200,
+   "headers_s": 0.122,
+   "last_s": 0.146,
+   "bytes": 1816631
+  }
+ }
+]

@@ -1,0 +1,66 @@
+[
+ {
+  "build": "85% level 1",
+  "points token": "the building one",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.19,
+   "last_s": 7.871,
+   "bytes": 15676713
+  },
+  "points": {
+   "status": 200,
+   "headers_s": 3.359,
+   "last_s": 7.355,
+   "bytes": 1816633
+  }
+ },
+ {
+  "build": "100% level 1",
+  "points token": "another new one",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.156,
+   "last_s": 7.723,
+   "bytes": 22326569
+  },
+  "points": {
+   "status": 200,
+   "headers_s": 2.555,
+   "last_s": 5.249,
+   "bytes": 3290184
+  }
+ },
+ {
+  "build": "85% level 2",
+  "points token": "another new one",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.286,
+   "last_s": 10.119,
+   "bytes": 91113899
+  },
+  "points": {
+   "status": 200,
+   "headers_s": 0.387,
+   "last_s": 0.568,
+   "bytes": 1816632
+  }
+ },
+ {
+  "build": "100% level 2",
+  "points token": "the building one",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.15,
+   "last_s": 9.541,
+   "bytes": 167278634
+  },
+  "points": {
+   "status": 200,
+   "headers_s": 0.327,
+   "last_s": 0.791,
+   "bytes": 3290182
+  }
+ }
+]

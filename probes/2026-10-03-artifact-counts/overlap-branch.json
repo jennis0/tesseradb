@@ -1,0 +1,98 @@
+[
+ {
+  "build": "85% level 1",
+  "points alone, warm session": {
+   "status": 200,
+   "headers_s": 0.082,
+   "last_s": 0.119,
+   "bytes": 3290181
+  },
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.003,
+   "last_s": 8.77,
+   "bytes": 15676713
+  },
+  "points beside, another warm session": {
+   "status": 200,
+   "headers_s": 0.267,
+   "last_s": 0.32,
+   "bytes": 3290182
+  },
+  "points beside, the building session": {
+   "status": 200,
+   "headers_s": 0.243,
+   "last_s": 0.283,
+   "bytes": 1816632
+  }
+ },
+ {
+  "build": "100% level 2",
+  "points alone, warm session": {
+   "status": 200,
+   "headers_s": 0.014,
+   "last_s": 0.037,
+   "bytes": 1816630
+  },
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.002,
+   "last_s": 11.091,
+   "bytes": 167278635
+  },
+  "points beside, another warm session": {
+   "status": 200,
+   "headers_s": 0.117,
+   "last_s": 0.147,
+   "bytes": 1816631
+  },
+  "points beside, the building session": {
+   "status": 200,
+   "headers_s": 0.115,
+   "last_s": 0.162,
+   "bytes": 3290181
+  }
+ },
+ {
+  "build": "7% level 1",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.001,
+   "last_s": 0.778,
+   "bytes": 5483751
+  },
+  "first points of a new 1% session beside it": {
+   "status": 200,
+   "headers_s": 0.575,
+   "last_s": 0.697,
+   "bytes": 232618
+  },
+  "first points of another new 1% session after it": {
+   "status": 200,
+   "headers_s": 0.017,
+   "last_s": 0.021,
+   "bytes": 232616
+  }
+ },
+ {
+  "build": "7% level 2",
+  "artifacts": {
+   "status": 200,
+   "headers_s": 0.001,
+   "last_s": 0.776,
+   "bytes": 21014888
+  },
+  "first points of a new 85% session beside it": {
+   "status": 200,
+   "headers_s": 0.411,
+   "last_s": 0.567,
+   "bytes": 1816631
+  },
+  "first points of another new 85% session after it": {
+   "status": 200,
+   "headers_s": 0.117,
+   "last_s": 0.14,
+   "bytes": 1816631
+  }
+ }
+]
