@@ -9,12 +9,12 @@
 //!
 //! ```text
 //! kind 1  tiles      Arrow stream; exactly one, first
-//! kind 5  artifacts  Arrow stream, full or identity projection; at most one, after tiles and
-//!                    before any points, absent when no artifact is served
 //! kind 2  sub-cells  Arrow stream; present exactly when the request asked for the underlay,
 //!                    with zero rows when it is empty
 //! kind 3  points     Arrow stream; zero or more, whole tiles per frame, concatenating to the
 //!                    full points set
+//! kind 5  artifacts  Arrow stream, full or identity projection; at most one, after tiles and
+//!                    every points frame, absent when no artifact is served
 //! kind 4  trailer    JSON; exactly one, last. Its presence says the body is complete
 //! ```
 //!

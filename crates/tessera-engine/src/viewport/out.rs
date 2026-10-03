@@ -55,8 +55,8 @@ pub struct PointColumns {
     /// One buffer per render scalar, in declaration order — see [`ViewportOut::scalar_names`]. A
     /// `filter`-only or blob-resident column has no slot here.
     pub scalars: Vec<PointScalar>,
-    /// One column per layer this response served artifacts from: the deepest served artifact
-    /// each point belongs to, or `None` — see [`crate::membership_column`]. Empty if none served.
+    /// One column per requested layer with a point tagged: the deepest served artifact each
+    /// point belongs to, or `None` — see [`crate::membership_column`].
     pub membership: Vec<crate::membership_column::MembershipColumn>,
     /// One bit per point: whether it satisfies the request's `highlight`. `None` where the
     /// request carried none — an absent column, not an all-false one. Sits after the render
@@ -466,7 +466,8 @@ pub struct SinkClosed;
 pub type SinkResult = std::result::Result<(), SinkClosed>;
 
 /// Where [`Engine::viewport_stream`] delivers a response, in strict order: `head`, then
-/// `counts`, then zero or more `points` chunks. The producer returning `Ok` is the completeness
+/// `counts`, then zero or more `points` chunks, then at most one `artifacts`. The producer
+/// returning `Ok` is the completeness
 /// signal; there is no `done` callback. Every callback may refuse with [`SinkClosed`], which
 /// aborts the request as a cancellation: the remaining work is abandoned and the caller gets
 /// [`EngineError::Cancelled`].
@@ -477,9 +478,10 @@ pub trait ViewportSink {
     /// points. `sub_cells` is `None` when the request did not ask for the underlay and `Some`
     /// (possibly empty) when it did.
     fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult;
-    /// The artifacts intersecting the request's tiles. At most once, after `counts`, never with
-    /// an empty slice: an absent frame and an empty one carry the same information. Required
-    /// rather than defaulted, so a consumer cannot compile against a response it never renders.
+    /// The artifacts intersecting the request's tiles. At most once, after the last points
+    /// chunk, never with an empty slice: an absent frame and an empty one carry the same
+    /// information. Required rather than defaulted, so a consumer cannot compile against a
+    /// response it never renders.
     fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult;
     /// One flush chunk: whole tiles' worth of points, in response order, ascending by
     /// `tessera_id` within each tile. Never called with an empty chunk.
@@ -487,12 +489,13 @@ pub trait ViewportSink {
 }
 
 /// The columns every points chunk of one response carries: the render columns the head published,
-/// read from the view's segments, and the membership resolver where the artifacts frame carried
-/// anything to resolve against. `point_rows` narrows the first, and `"highlight"` empties both.
+/// read from the view's segments, and each requested layer's membership column where any point
+/// has a tag. `point_rows` narrows the first, and `"highlight"` empties both.
 pub(super) struct PointSchema<'a> {
     pub(super) render_scalars: &'a [DeclaredScalar],
     pub(super) segments: &'a [(&'a SegmentData, u32)],
-    pub(super) membership: Option<crate::membership_column::Resolved>,
+    /// Each membership column over every point the pass gathers, in the order it gathers them.
+    pub(super) membership: Vec<crate::membership_column::MembershipColumn>,
 }
 
 /// The emit pass: gather and hand off, serial, in response order. A chunk is delivered once its
@@ -518,23 +521,34 @@ pub(super) fn emit_points<'a>(
             .collect(),
         membership: schema
             .membership
-            .as_ref()
-            .map(|m| m.empty_columns())
-            .unwrap_or_default(),
+            .iter()
+            .map(|column| crate::membership_column::MembershipColumn {
+                layer: column.layer.clone(),
+                ids: Vec::new(),
+            })
+            .collect(),
         highlighted: mask.has_highlight().then(Vec::new),
     };
     let mut buf = seed();
     let mut buf_bytes = 0usize;
     let mut gather = Gather::new(schema.segments, swept, schema.render_scalars)?;
     probe.lap(|t| &mut t.gather_ns);
+    let mut gathered = 0usize;
     for (at, ts) in swept.iter().enumerate() {
         // Per-tile cancellation checkpoint, so an abandoned stream stops within one tile.
         check_cancelled(cancel)?;
         let mut stats = TileProbe::new();
         let mut tile_points = gather.tile(swept, at);
-        if let Some(membership) = &schema.membership {
-            tile_points.membership = membership.columns_for(&ts.rows);
-        }
+        let here = gathered..gathered + ts.rows.len();
+        gathered = here.end;
+        tile_points.membership = schema
+            .membership
+            .iter()
+            .map(|column| crate::membership_column::MembershipColumn {
+                layer: column.layer.clone(),
+                ids: column.ids[here.clone()].to_vec(),
+            })
+            .collect();
         // One `contains` per served point against the crossed highlight set — at most
         // `k_max_marks` lookups for the whole response.
         if mask.has_highlight() {

@@ -33,6 +33,9 @@ pub(crate) struct TestSwitches {
     /// The zoom from which a map request is answered by the shipped scan rather than the identity
     /// bands ([`crate::bands::BANDS_BELOW_ZOOM`]).
     pub(crate) bands_below_zoom: AtomicU8,
+    /// Whether a layer with no lineage tags its points from its labels; off, every layer tags them
+    /// from the walk's served set, the reference the labels are tested against.
+    pub(crate) tags_from_labels: AtomicBool,
     /// The fewest rows of the view one chunk of an aggregate's cell count spans.
     pub(crate) aggregate_min_chunk_rows: AtomicU64,
     /// The rows past which an aggregate's run of cells is sent as a page of its own.
@@ -125,6 +128,7 @@ impl Default for TestSwitches {
             occupancy_stage_enabled: AtomicBool::new(true),
             serial_fallback_max_rows: AtomicU64::new(crate::viewport::SERIAL_FALLBACK_MAX_ROWS),
             bands_below_zoom: AtomicU8::new(crate::bands::BANDS_BELOW_ZOOM),
+            tags_from_labels: AtomicBool::new(true),
             aggregate_min_chunk_rows: AtomicU64::new(crate::aggregate::MIN_CHUNK_ROWS),
             aggregate_alone_rows: AtomicU64::new(crate::aggregate::ALONE_ROWS),
             #[cfg(feature = "fault-injection")]

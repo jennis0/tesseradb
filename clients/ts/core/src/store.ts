@@ -1579,7 +1579,9 @@ export function createStore(options: StoreOptions): Store {
 
   function resolves(band: Band, layer: string, colourMap: ReadonlyMap<number, Rgba>): boolean {
     const m = band.membership[layer];
-    if (!m) return false;
+    // A layer the band's request named and the band carries no column for tagged none of its
+    // points: absent is all null, not unasked.
+    if (!m) return band.layersAsked === 'all' || (band.layersAsked?.includes(layer) ?? false);
     for (let i = 0; i < m.distinct.length; i++) {
       if (table.resolve(m.distinct[i]!, colourMap) === 0) return false;
     }

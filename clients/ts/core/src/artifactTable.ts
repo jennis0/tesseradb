@@ -161,6 +161,11 @@ export class SessionArtifactTable implements ArtifactTable {
   private ordinals = new Map<string, number>();
   private free: number[] = [];
   /**
+   * The ordinals named by a ref that carried no `rung`, as a point's membership names an artifact
+   * whose response sends its artifacts after the points. The first ref carrying one sets it.
+   */
+  private unranked = new Set<number>();
+  /**
    * Incremented whenever an ordinal is named or freed, a centroid arrives, or a link is set on an
    * entry that already existed. Callers derive their colours under it.
    */
@@ -238,7 +243,8 @@ export class SessionArtifactTable implements ArtifactTable {
    * Takes one reference on each of `refs`, assigning an ordinal to any artifact the table does not
    * hold, and returns their ordinals in order. Each ref's parent links are set to the parents the
    * table holds, in the ref's order. Links already held survive a batch that carries the child
-   * alone or resolves only some of its parents. A centroid for an entry that had none is recorded.
+   * alone or resolves only some of its parents. A centroid for an entry that had none is recorded,
+   * and so is a `rung` for an entry named without one.
    */
   take(refs: readonly ArtifactRef[]): Uint32Array {
     const ordinals = new Uint32Array(refs.length);
@@ -253,12 +259,21 @@ export class SessionArtifactTable implements ArtifactTable {
         this.entries[ordinal] = {tesseraId: ref.tesseraId, layer: ref.layer, parentOrdinals: [], rung: ref.rung ?? 0, centroid: ref.centroid ?? null};
         this.refs[ordinal] = 0;
         this.ordinals.set(key, ordinal);
+        if (ref.rung === undefined) this.unranked.add(ordinal);
         namedHere.add(ordinal);
         this.record(ordinal, 'named');
-      } else if (ref.centroid && !this.entries[ordinal]!.centroid) {
-        // A centroid arriving late is a colour arriving late, on the same identity.
-        this.entries[ordinal] = {...this.entries[ordinal]!, centroid: ref.centroid};
-        this.record(ordinal, 'placed');
+      } else {
+        if (ref.centroid && !this.entries[ordinal]!.centroid) {
+          // A centroid arriving late is a colour arriving late, on the same identity.
+          this.entries[ordinal] = {...this.entries[ordinal]!, centroid: ref.centroid};
+          this.record(ordinal, 'placed');
+        }
+        if (ref.rung !== undefined && this.unranked.delete(ordinal) && ref.rung !== this.entries[ordinal]!.rung) {
+          // A level arriving late moves where a walk with a level to colour at stops, here and
+          // below.
+          this.entries[ordinal] = {...this.entries[ordinal]!, rung: ref.rung};
+          this.record(ordinal, 'linked');
+        }
       }
       this.refs[ordinal]! += 1;
       ordinals[i] = ordinal;
@@ -317,6 +332,7 @@ export class SessionArtifactTable implements ArtifactTable {
       }
       this.refs[ordinal] = 0;
       this.entries[ordinal] = null;
+      this.unranked.delete(ordinal);
       this.ordinals.delete(keyOf(entry.layer, entry.tesseraId));
       this.free.push(ordinal);
       this.record(ordinal, 'freed');
@@ -344,6 +360,7 @@ export class SessionArtifactTable implements ArtifactTable {
     this.refs = [0];
     this.ordinals.clear();
     this.free = [];
+    this.unranked.clear();
     this.stamp += 1;
     // The journal restarts at the new version, so no reader patches across a clear.
     this.journal = [];

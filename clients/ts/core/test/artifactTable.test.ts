@@ -293,6 +293,24 @@ describe('changesSince', () => {
     expect(table.changesSince(before)).toEqual([{ordinal: a, kind: 'freed'}]);
   });
 
+  it('takes the level of an artifact a point named before its response sent the artifacts', () => {
+    const table = new SessionArtifactTable();
+    // A point's membership names it with no level, as a points frame arrives before the
+    // artifacts frame; the walk then reads it at level 0 and stops there.
+    const [a] = table.take([{tesseraId: 7n, layer: 'l', parentIds: []}]);
+    expect(table.resolve(a!, new Set([a!]), 1)).toBe(a);
+    const named = table.version;
+    table.take([{tesseraId: 7n, layer: 'l', parentIds: [], rung: 2}]);
+    expect(table.entry(a!)!.rung).toBe(2);
+    expect(table.changesSince(named)).toEqual([{ordinal: a, kind: 'linked'}]);
+    expect(table.resolve(a!, new Set([a!]), 1)).toBe(NO_ORDINAL);
+    // A level once given is not moved by a later ref.
+    const ranked = table.version;
+    table.take([{tesseraId: 7n, layer: 'l', parentIds: [], rung: 0}]);
+    expect(table.entry(a!)!.rung).toBe(2);
+    expect(table.changesSince(ranked)).toEqual([]);
+  });
+
   it('answers nothing for a reader further behind than the journal, or across a clear', () => {
     const table = new SessionArtifactTable();
     // Far enough behind that the journal has dropped the reader's version: rebuild whole.

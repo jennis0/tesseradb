@@ -1,14 +1,15 @@
-//! The per-point membership column (D12): for each served point and each layer the response
-//! served artifacts from, the `tessera_id` of the **deepest served** artifact the point belongs
-//! to — in *this* response — or null (`client-components.md` §5.10, decision 0099).
+//! The per-point membership column: for each served point and each requested layer, the
+//! `tessera_id` of the **deepest served** artifact the point belongs to, or null.
 //!
-//! **Bounded to the response's own artifacts frame, structurally.** The resolver is handed the
-//! served set after it is settled — after the verdicts, the cut and the dependent drop — and
-//! nothing else: it holds no route to an artifact the response withheld, so the column can name
-//! only an identifier the artifacts frame already carries. That is the same construction the
-//! parent identifiers take (architecture Appendix C, C29), inverted from artifact→artifact to
-//! point→artifact. Deepest served rather than the leaf is what keeps finer structure out: a point
-//! whose leaf cluster was cut to its parent names the parent, and says nothing about the leaf.
+//! **Bounded to the response's own artifacts frame.** A layer with a lineage, or one depending
+//! on another layer the request names, is resolved here against the walk's served set after it
+//! is settled (after the verdicts, the cut and the dependent drop), so the column can name only
+//! an identifier the frame carries. Deepest served rather than the leaf is what keeps finer
+//! structure out: a point whose leaf cluster was cut to its parent names the parent, and says
+//! nothing about the leaf. Every other layer is tagged from its levels' labels and this viewer's
+//! verdict on each ([`crate::viewport`]'s `tag`), before the walk and without it; the cut serves
+//! every artifact that passes on such a layer, so the two answers are the same, and the frame
+//! that follows the points carries every artifact either names.
 //!
 //! **Both axes of the value are already disclosed.** The point is one the selection served — after
 //! masking, as every point is (I7) — and the artifact passed its own criterion against this
@@ -16,7 +17,7 @@
 //! box already draws for a layer declaring one; for a layer declaring neither it is the first
 //! time a viewer learns which of two served clusters a served point sits in.
 //!
-//! # Two routes, one answer
+//! # Two layouts, one answer
 //!
 //! A level is served in one of two families of layout (decision 0094), and the column is read off
 //! whichever the level has, so a request never pays a second structure for it:
@@ -111,21 +112,17 @@ impl Resolved {
     /// `rows` is every row the emit pass will gather, in any order; it is sorted here once. Layers
     /// with no served level contribute no column — the wire's rule that an absent column and an
     /// all-null one say the same thing.
-    pub fn new(mut rows: Vec<u32>, layers: &[ServedLayer]) -> Self {
+    pub fn new<'a>(mut rows: Vec<u32>, layers: impl IntoIterator<Item = &'a ServedLayer>) -> Self {
         rows.sort_unstable();
         rows.dedup();
         let mut bitmap = Bitmap::new();
         bitmap.add_many(&rows);
         let columns = layers
-            .iter()
+            .into_iter()
             .filter(|layer| layer.levels.iter().any(|l| !l.served.is_empty()))
             .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer)))
             .collect();
         Resolved { rows, columns }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
     }
 
     /// The membership columns for one chunk of gathered rows, in the resolver's layer order.
@@ -142,17 +139,6 @@ impl Resolved {
                         self.rows.binary_search(row).ok().and_then(|i| ids[i])
                     })
                     .collect(),
-            })
-            .collect()
-    }
-
-    /// Empty columns in the resolver's layer order — the seed for a chunk with no points yet.
-    pub fn empty_columns(&self) -> Vec<MembershipColumn> {
-        self.columns
-            .iter()
-            .map(|(layer, _)| MembershipColumn {
-                layer: layer.clone(),
-                ids: Vec::new(),
             })
             .collect()
     }

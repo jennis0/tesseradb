@@ -378,6 +378,10 @@
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
+    "max_aggregate_cells": 1048576,
+    "max_aggregate_groupings": 16,
+    "max_aggregate_named": 1000,
+    "max_aggregate_top": 1000,
     "max_browse_rows": 200,
     "max_category_values": 1000,
     "max_k": 1000,

@@ -1,3 +1,5 @@
+import {readFileSync} from 'node:fs';
+import {join} from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {tableToIPC, Table} from 'apache-arrow';
 import {TesseraClient} from '../src/client.js';
@@ -104,6 +106,20 @@ describe('a streamed viewport response', () => {
       expect(response.contentKey).toBe('c1');
       expect(response.identityKey).toBe('i1');
     }
+  });
+
+  it('hands over the artifacts frame that follows the points with the response', async () => {
+    // A captured body naming a layer: its points carry a membership column and its artifacts
+    // frame follows them.
+    const body = new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')));
+    const whole = decodeViewport(body);
+    expect(whole.artifacts.length).toBeGreaterThan(0);
+    vi.stubGlobal('fetch', async () => chunked(body, 97, {headers: HEADERS}));
+    const parts: ViewportPart[] = [];
+    const response = await ask(client(), (p) => parts.push(p));
+    expect(parts.length).toBeGreaterThan(0);
+    expect(parts.flatMap((p) => [...p.result.ids])).toEqual([...whole.ids]);
+    expect(response.result.artifacts).toEqual(whole.artifacts);
   });
 
   it('hands over the counts and the first tiles before the last points frame has arrived', async () => {

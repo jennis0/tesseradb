@@ -908,8 +908,8 @@ impl ViewportSink for WireSink {
         self.producer.open(first)
     }
 
-    /// Never called with an empty slice. Sent as a body frame after the first flush, so the
-    /// counts are never delayed behind the artifact sweep.
+    /// Never called with an empty slice. Sent as a body frame after the last points frame, so
+    /// neither the counts nor the points wait on the artifact sweep.
     fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
         let serialise_start = Instant::now();
         self.shape_guard_fired += artifacts.iter().filter(|a| a.shape_guard_fired).count() as u64;

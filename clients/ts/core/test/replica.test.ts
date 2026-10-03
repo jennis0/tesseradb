@@ -2,7 +2,8 @@ import {describe, expect, it} from 'vitest';
 import {Replica} from '../src/replica.js';
 import {mortonOfTile, tileOfCode, tileToCellBox, tileXY} from '../src/coords.js';
 import type {Quantisation, ViewportResponse} from '../src/types.js';
-import {response, result, tile} from './support.js';
+import {artifact, response, result, tile} from './support.js';
+import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 
 const Q: Quantisation = {xMin: 0, xMax: 1, yMin: 0, yMax: 1};
 
@@ -276,5 +277,42 @@ describe('counts held before their points', () => {
     const {ask} = counting();
     expect(await ask(0, 30n, 'ik', 'ck')).toEqual([30n]);
     expect(await ask(1, 7n, 'ik-other', 'ck')).toEqual([7n]);
+  });
+});
+
+describe('a streamed piece whose artifacts frame follows its points', () => {
+  it('gives the artifacts its points named their levels and parents, so a coarser level climbs', async () => {
+    const table = new SessionArtifactTable();
+    // The artifact channel holds the parent at level 0.
+    const [parent] = table.take([{tesseraId: 100n, layer: 'tree', parentIds: [], rung: 0}]);
+    const zoom = 1;
+    const t = mortonOfTile(0, 0, zoom);
+    const points = result({
+      tiles: [tile(t, 2n, {served: 2n})],
+      ids: BigUint64Array.from([1n, 2n]),
+      codes: new BigUint64Array(2),
+      positions: new Float64Array(4),
+      world: new Float32Array(4),
+      // Both points are in the child, the deepest artifact served over them.
+      membership: {tree: {index: Uint16Array.from([1, 1]), ids: BigUint64Array.from([200n])}}
+    });
+    const frame = [artifact(100n, {layer: 'tree', rung: 0}), artifact(200n, {layer: 'tree', rung: 1, parentIds: [100n]})];
+    const r = new Replica(
+      async (_req, _signal, _background, onPart) => {
+        await onPart!({result: points, identityKey: 'ik', contentKey: 'ck'});
+        // The response resolves with the frame that arrived after the points, and no points.
+        return response(result({tiles: points.tiles, artifacts: frame}));
+      },
+      Q,
+      {view: 's', now: () => 0, revalidateAfterMs: Infinity, table}
+    );
+    r.reset();
+    await r.fetchRegion(world(zoom), zoom, 10);
+    const child = table.ordinalOf('tree', 200n);
+    expect(child).not.toBe(NO_ORDINAL);
+    expect(table.entry(child)!.rung).toBe(1);
+    expect(table.entry(child)!.parentOrdinals).toEqual([parent]);
+    // Coloured at level 0, the child's points take the parent's colour.
+    expect(table.resolve(child, new Set([parent!]), 0)).toBe(parent);
   });
 });
