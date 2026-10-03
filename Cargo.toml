@@ -29,7 +29,7 @@ members = [
 license = "Apache-2.0"
 
 [workspace.dependencies]
-croaring = "2"
+croaring = "2.8.0"
 rayon = "1"
 proptest = "1"
 # **Pinned exactly.** `tessera_store::columns` writes `columns.arrow` in place by learning the
