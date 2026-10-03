@@ -3,12 +3,12 @@
 //!
 //! ## Why a second route into the same bytes
 //!
-//! [`crate::write::write_columns`] takes whole columns by value and hands them to Arrow's
-//! `FileWriter`. That is the right shape for a producer that holds its columns — the flush, the
-//! merge, a test — and the wrong one for the build, whose row order arrives one Morton bucket at
-//! a time and whose columns at rung 6 are 42 GB. Materialising them to hand over is the row-sized
-//! anonymous structure the bounded-assembly rule forbids, and materialising them into mapped
-//! scratch is the same bytes written to disk twice.
+//! [`crate::write::SegmentWriter`] spools each column to a file as rows arrive and hands the
+//! spools to Arrow's `FileWriter`. That is the right shape for a producer that walks rows in order
+//! — the flush, the merge, a test — and the wrong one for the build, whose row order arrives one
+//! Morton bucket at a time and whose columns at rung 6 are 42 GB. Spooling them is the same bytes
+//! written to disk twice, and materialising them to hand over is the row-sized anonymous structure
+//! the bounded-assembly rule forbids.
 //!
 //! The layout of an Arrow IPC file carrying **one** record batch of non-nullable fixed-width
 //! columns is a function of the schema and the row count alone: every length in the IPC metadata
@@ -94,7 +94,7 @@ pub struct ColumnsPlan {
 impl ColumnsPlan {
     /// The plan for a segment of `rows` rows carrying the two fixed columns of contracts §2.6 and
     /// then `scalars` in declared order — the same schema, in the same order, that
-    /// [`crate::write::write_columns`] builds from the same inputs.
+    /// [`crate::write::SegmentWriter`] builds from the same inputs.
     pub fn new(scalars: &[(String, ScalarType)], rows: usize) -> io::Result<ColumnsPlan> {
         let mut fields = vec![
             Field::new("tessera_id", DataType::UInt64, false),

@@ -3485,8 +3485,8 @@ pub(crate) fn value_column_is_owed(
 /// nowhere, which is what the `render` term above refuses.
 ///
 /// **`render` is refused on every string type at the declaration**
-/// (`config::compile_attributes`), and `write_columns` refuses one that reaches it anyway, so that
-/// term fires only for a `Schema` assembled programmatically.
+/// (`config::compile_attributes`), and `ColumnsPlan::new` refuses one that reaches it anyway, so
+/// that term fires only for a `Schema` assembled programmatically.
 ///
 /// **A group-scoped family is not asked.** Its columns are the scoped pass's own, one per view,
 /// and the join that fills them is `write_scoped_columns`'s rather than this one's (`views.md`
@@ -5893,7 +5893,7 @@ mod tests {
             (ScalarType::Keyword, true, false, true),
             (ScalarType::Utf8, true, false, true),
             // Rendered: the row tail reads the column at an entity. ⊘ `render` on a string type
-            // is refused at the declaration and `write_columns` refuses one that arrives anyway,
+            // is refused at the declaration and `ColumnsPlan::new` refuses one that arrives anyway,
             // so this arm is reachable only from a `Schema` built programmatically.
             (ScalarType::Keyword, false, true, false),
             // A fixed-width column is a slot and is never spilled, whatever its flags say.
