@@ -111,6 +111,38 @@ impl LevelLabels {
     }
 }
 
+/// Each label's tag at one level, decided once a request: indexed by ordinal where the level is
+/// small enough, and in a map otherwise.
+enum Verdicts {
+    Dense(Vec<Option<Option<u64>>>),
+    Sparse(FxHashMap<u32, Option<u64>>),
+}
+
+impl Verdicts {
+    /// The most ordinals a level is indexed over: 16 MiB a request at most.
+    const DENSE_MAX: usize = 1 << 20;
+
+    fn over(ordinals: usize) -> Self {
+        if ordinals <= Self::DENSE_MAX {
+            Verdicts::Dense(vec![None; ordinals])
+        } else {
+            Verdicts::Sparse(FxHashMap::default())
+        }
+    }
+
+    fn get_or(&mut self, ordinal: u32, decide: impl FnOnce() -> Option<u64>) -> Option<u64> {
+        match self {
+            Verdicts::Dense(held) => match held.get_mut(ordinal as usize) {
+                Some(Some(tag)) => *tag,
+                Some(slot) => *slot.insert(decide()),
+                // An ordinal past the level's end names no artifact.
+                None => None,
+            },
+            Verdicts::Sparse(held) => *held.entry(ordinal).or_insert_with(decide),
+        }
+    }
+}
+
 impl Engine {
     /// How each of `names` is tagged, in the same order.
     pub(super) fn taggings(&self, served: &ServedView<'_>, names: &[String]) -> Vec<Tagging> {
@@ -235,9 +267,9 @@ impl Engine {
                 counts,
             };
             let mut contents: Option<Arc<crate::artifact_content::LevelContent>> = None;
-            let mut verdicts: FxHashMap<u32, Option<u64>> = FxHashMap::default();
+            let mut verdicts = Verdicts::over(rows.len());
             let mut tessera_id = |ordinal: u32| -> Option<u64> {
-                *verdicts.entry(ordinal).or_insert_with(|| {
+                verdicts.get_or(ordinal, || {
                     let entity = runs.entity_of(ordinal as u64).map(EntityId::new)?;
                     let rank = view.serves_visible_member(entity, ordinal).ok()?;
                     // The walk withholds an artifact whose content cannot be read back.

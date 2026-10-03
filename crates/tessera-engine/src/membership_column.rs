@@ -107,44 +107,22 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-    /// The columns of a response whose layers are tagged by two routes: those in `walk_names`
-    /// resolved against the walk's `walked` layers, and `labelled`, each aligned to `gathered`,
-    /// tagged from their labels. Ordered as `order` names them. A labelled layer tagging no point
-    /// contributes no column, as a walked layer with nothing served does not.
-    pub fn joined(
-        gathered: Vec<u32>,
-        walked: &[ServedLayer],
-        walk_names: &[&str],
-        labelled: Vec<(String, Vec<Option<u64>>)>,
-        order: &[String],
-    ) -> Self {
-        let mut at: Vec<(u32, usize)> = gathered.iter().copied().zip(0..).collect();
-        at.sort_unstable();
-        at.dedup_by_key(|(row, _)| *row);
-        let walked: Vec<&ServedLayer> = walked
-            .iter()
-            .filter(|layer| walk_names.contains(&layer.name.as_str()))
-            .collect();
+    /// Resolve the response's rows against its served layers.
+    ///
+    /// `rows` is every row the emit pass will gather, in any order; it is sorted here once. Layers
+    /// with no served level contribute no column — the wire's rule that an absent column and an
+    /// all-null one say the same thing.
+    pub fn new<'a>(mut rows: Vec<u32>, layers: impl IntoIterator<Item = &'a ServedLayer>) -> Self {
+        rows.sort_unstable();
+        rows.dedup();
         let mut bitmap = Bitmap::new();
-        bitmap.add_many(&gathered);
-        let rows: Vec<u32> = at.iter().map(|&(row, _)| row).collect();
-        let mut columns: Vec<(String, Vec<Option<u64>>)> = walked
+        bitmap.add_many(&rows);
+        let columns = layers
             .into_iter()
             .filter(|layer| layer.levels.iter().any(|l| !l.served.is_empty()))
             .map(|layer| (layer.name.clone(), resolve_layer(&rows, &bitmap, layer)))
             .collect();
-        columns.extend(
-            labelled
-                .into_iter()
-                .filter(|(_, tags)| tags.iter().any(Option::is_some))
-                .map(|(layer, tags)| (layer, at.iter().map(|&(_, i)| tags[i]).collect())),
-        );
-        columns.sort_by_key(|(layer, _)| order.iter().position(|name| name == layer));
         Resolved { rows, columns }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
     }
 
     /// The membership columns for one chunk of gathered rows, in the resolver's layer order.
@@ -161,17 +139,6 @@ impl Resolved {
                         self.rows.binary_search(row).ok().and_then(|i| ids[i])
                     })
                     .collect(),
-            })
-            .collect()
-    }
-
-    /// Empty columns in the resolver's layer order — the seed for a chunk with no points yet.
-    pub fn empty_columns(&self) -> Vec<MembershipColumn> {
-        self.columns
-            .iter()
-            .map(|(layer, _)| MembershipColumn {
-                layer: layer.clone(),
-                ids: Vec::new(),
             })
             .collect()
     }
@@ -242,12 +209,6 @@ mod tests {
     use super::*;
     use crate::row_column::RowColumn;
     use tessera_types::layer::ServingLayout;
-
-    /// Every layer resolved against the walk, as a response whose layers all have a lineage is.
-    fn resolved(rows: Vec<u32>, layers: &[ServedLayer]) -> Resolved {
-        let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
-        Resolved::joined(rows, layers, &names, Vec::new(), &[])
-    }
 
     /// Served artifacts with their response-local rung: the longest chain to each through the
     /// served set alone, which is what the serving path computes over the response's links.
@@ -375,10 +336,10 @@ mod tests {
         let column = |sets: &[Option<&[u32]>], lineage: &Arc<Lineage>| {
             let (artifact_major, row_major) = both_routes(sets, 3, lineage, &served);
             (
-                resolved(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+                Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
                     .ids
                     .clone(),
-                resolved(rows.clone(), &[row_major]).columns_for(&rows)[0]
+                Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
                     .ids
                     .clone(),
             )
@@ -403,8 +364,8 @@ mod tests {
     ) {
         let (artifact_major, row_major) = both_routes(sets, row_count, lineage, served);
         let rows: Vec<u32> = (0..row_count).collect();
-        let a = resolved(rows.clone(), &[artifact_major]);
-        let r = resolved(rows.clone(), &[row_major]);
+        let a = Resolved::new(rows.clone(), &[artifact_major]);
+        let r = Resolved::new(rows.clone(), &[row_major]);
         let a = &a.columns_for(&rows)[0].ids;
         let r = &r.columns_for(&rows)[0].ids;
         let want: Vec<Option<u64>> = rows
@@ -427,7 +388,7 @@ mod tests {
         assert_both_routes_agree(&sets, 6, &lineage, &served);
         let (artifact_major, _) = both_routes(&sets, 6, &lineage, &served);
         let rows: Vec<u32> = (0..6).collect();
-        let ids = resolved(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
+        let ids = Resolved::new(rows.clone(), &[artifact_major]).columns_for(&rows)[0]
             .ids
             .clone();
         assert_eq!(
@@ -469,7 +430,7 @@ mod tests {
         assert_both_routes_agree(&sets, 10, &lineage, &served);
         let (_, row_major) = both_routes(&sets, 10, &lineage, &served);
         let rows: Vec<u32> = (0..10).collect();
-        let ids = resolved(rows.clone(), &[row_major]).columns_for(&rows)[0]
+        let ids = Resolved::new(rows.clone(), &[row_major]).columns_for(&rows)[0]
             .ids
             .clone();
         assert_eq!(

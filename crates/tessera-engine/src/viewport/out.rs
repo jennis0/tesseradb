@@ -494,7 +494,8 @@ pub trait ViewportSink {
 pub(super) struct PointSchema<'a> {
     pub(super) render_scalars: &'a [DeclaredScalar],
     pub(super) segments: &'a [(&'a SegmentData, u32)],
-    pub(super) membership: Option<crate::membership_column::Resolved>,
+    /// Each membership column over every point the pass gathers, in the order it gathers them.
+    pub(super) membership: Vec<crate::membership_column::MembershipColumn>,
 }
 
 /// The emit pass: gather and hand off, serial, in response order. A chunk is delivered once its
@@ -520,23 +521,34 @@ pub(super) fn emit_points<'a>(
             .collect(),
         membership: schema
             .membership
-            .as_ref()
-            .map(|m| m.empty_columns())
-            .unwrap_or_default(),
+            .iter()
+            .map(|column| crate::membership_column::MembershipColumn {
+                layer: column.layer.clone(),
+                ids: Vec::new(),
+            })
+            .collect(),
         highlighted: mask.has_highlight().then(Vec::new),
     };
     let mut buf = seed();
     let mut buf_bytes = 0usize;
     let mut gather = Gather::new(schema.segments, swept, schema.render_scalars)?;
     probe.lap(|t| &mut t.gather_ns);
+    let mut gathered = 0usize;
     for (at, ts) in swept.iter().enumerate() {
         // Per-tile cancellation checkpoint, so an abandoned stream stops within one tile.
         check_cancelled(cancel)?;
         let mut stats = TileProbe::new();
         let mut tile_points = gather.tile(swept, at);
-        if let Some(membership) = &schema.membership {
-            tile_points.membership = membership.columns_for(&ts.rows);
-        }
+        let here = gathered..gathered + ts.rows.len();
+        gathered = here.end;
+        tile_points.membership = schema
+            .membership
+            .iter()
+            .map(|column| crate::membership_column::MembershipColumn {
+                layer: column.layer.clone(),
+                ids: column.ids[here.clone()].to_vec(),
+            })
+            .collect();
         // One `contains` per served point against the crossed highlight set — at most
         // `k_max_marks` lookups for the whole response.
         if mask.has_highlight() {

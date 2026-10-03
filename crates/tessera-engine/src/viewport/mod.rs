@@ -346,17 +346,30 @@ impl Engine {
                 .filter(|(_, tagging)| matches!(tagging, Tagging::Walk))
                 .map(|(name, _)| name.as_str())
                 .collect();
-            let walked = walked_first.as_ref().map_or(&[][..], |(_, layers)| &layers[..]);
-            let resolved = crate::membership_column::Resolved::joined(
-                points.iter().map(|p| p.row).collect(),
-                walked,
-                &walk_names,
-                labelled,
-                &names,
+            let rows: Vec<u32> = points.iter().map(|p| p.row).collect();
+            let mut columns = walked_first
+                .as_ref()
+                .map(|(_, layers)| {
+                    crate::membership_column::Resolved::new(
+                        rows.clone(),
+                        layers
+                            .iter()
+                            .filter(|layer| walk_names.contains(&layer.name.as_str())),
+                    )
+                    .columns_for(&rows)
+                })
+                .unwrap_or_default();
+            // A layer tagging no point has no column, as a walked layer serving nothing has none.
+            columns.extend(
+                labelled
+                    .into_iter()
+                    .filter(|(_, ids)| ids.iter().any(Option::is_some))
+                    .map(|(layer, ids)| crate::membership_column::MembershipColumn { layer, ids }),
             );
-            (!resolved.is_empty()).then_some(resolved)
+            columns.sort_by_key(|column| names.iter().position(|name| *name == column.layer));
+            columns
         } else {
-            None
+            Vec::new()
         };
         probe.skip();
 
