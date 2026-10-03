@@ -1,8 +1,8 @@
 import {BandBudget, BandCache, bandSplitter, type Band, type CountedTile, type Resolved} from './bands.js';
-import type {SessionArtifactTable} from './artifactTable.js';
+import {NO_ORDINAL, type SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
-import type {Quantisation, TileCounts, ViewportCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
+import type {Artifact, Quantisation, TileCounts, ViewportCounts, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
  * The read-through replica: callers ask for a region of tiles at a depth and get bands back.
@@ -434,6 +434,7 @@ export class Replica {
         for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
       } else {
         this.observe(response);
+        this.learnArtifacts(response.result.artifacts);
       }
       fetched = fetched.concat(piece.landed);
       // Once per response, since eviction sorts every held band.
@@ -508,8 +509,29 @@ export class Replica {
    * The caller marks a region covered only after the whole response, so a redraw between slices
    * sees the arrived bands as exact and the rest as stand-ins, with no hole.
    */
+  /**
+   * A streamed piece's artifacts frame follows its points, so the artifacts its points named were
+   * taken into the table without their levels, parents or centroids. Those the table still holds
+   * learn them here; the references taken are given back at once, so nothing new is held.
+   */
+  private learnArtifacts(artifacts: readonly Artifact[]): void {
+    const table = this.opts.table;
+    if (!table || artifacts.length === 0) return;
+    const named = artifacts.filter((a) => table.ordinalOf(a.layer, a.tesseraId) !== NO_ORDINAL);
+    if (named.length === 0) return;
+    table.release(
+      table.take(named.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentIds: a.parentIds, centroid: a.centroid, rung: a.rung})))
+    );
+  }
+
   private async absorb(
-    arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string; columnsAsked?: readonly string[] | null},
+    arrival: {
+      result: ViewportResponse['result'];
+      identityKey: string;
+      contentKey: string;
+      columnsAsked?: readonly string[] | null;
+      layersAsked?: readonly string[] | 'all';
+    },
     depth: number,
     k: number,
     /** The touch time every band of one piece shares: the piece's start. */
@@ -524,6 +546,7 @@ export class Replica {
       capUsed: k,
       now: at,
       columnsAsked: arrival.columnsAsked,
+      layersAsked: arrival.layersAsked,
       table: this.opts.table,
       onRemap: (ms) => this.opts.onPhase?.('remap', ms, arrival.result.ids.length)
     });

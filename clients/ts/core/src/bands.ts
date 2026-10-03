@@ -131,6 +131,11 @@ export type Band = {
    * for every one.
    */
   columnsAsked?: readonly string[] | null;
+  /**
+   * The layers the band's request named; a named layer with no membership column on the band
+   * tagged none of its points. Absent where that is not known.
+   */
+  layersAsked?: readonly string[] | 'all';
 };
 
 /**
@@ -307,6 +312,7 @@ export function bandSplitter(
     capUsed: number;
     now: number;
     columnsAsked?: readonly string[] | null;
+    layersAsked?: readonly string[] | 'all';
     table?: SessionArtifactTable;
     onRemap?: (ms: number) => void;
   }
@@ -371,7 +377,8 @@ export function bandSplitter(
           contentKey: meta.contentKey,
           bytes: bandBytes(ids, positions, scalars, membership, highlightBits),
           touchedAt: meta.now,
-          columnsAsked: meta.columnsAsked ?? null
+          columnsAsked: meta.columnsAsked ?? null,
+          ...(meta.layersAsked === undefined ? {} : {layersAsked: meta.layersAsked})
         });
         offset = end;
       }

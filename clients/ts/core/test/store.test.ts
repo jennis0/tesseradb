@@ -1039,7 +1039,7 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       drawn('topics', {hierarchy: {kind: 'tiered', pruneChildren: false}, levels}),
       drawn('topic_names', {computedContent: [], suppliedContent: ['label'], depsOn: ['topics']}),
       drawn('kmeans'),
-      layer('mesh')
+      drawn('mesh')
     ]
   };
   const row = (layerName: string, id: bigint, target: bigint | null = null): Artifact =>
@@ -1051,7 +1051,8 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
       content: target === null ? [] : ['a name'],
       target
     });
-  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)], subtopics: [row('subtopics', 41n)]};
+  // `mesh` serves an artifact that holds none of the points served.
+  const ROWS: Record<string, Artifact[]> = {topics: [row('topics', 11n)], topic_names: [row('topic_names', 21n, 11n)], kmeans: [row('kmeans', 31n)], subtopics: [row('subtopics', 41n)], mesh: [row('mesh', 51n)]};
 
   /**
    * Answers as the server does: the artifacts of every layer named, and on a point request a
@@ -1064,10 +1065,10 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     if (req.k !== 0) {
       for (const name of named) {
         const first = ROWS[name]?.[0];
-        if (first && first.target === null) membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.tesseraId)};
+        if (first && first.target === null && name !== 'mesh') membership[name] = {index: Uint16Array.from(r.result.ids, () => 1), ids: BigUint64Array.of(first.tesseraId)};
       }
     }
-    return {...r, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
+    return {...r, layersAsked: named, result: {...r.result, membership, artifacts: named.flatMap((n) => ROWS[n] ?? []), artifactsIdentity: null}};
   }
 
   async function open(traces: {kind: string; fields: Record<string, number | string>}[] = [], declared: Meta = LAYERED) {
@@ -1121,6 +1122,25 @@ describe('the layers drawn and the layer coloured by are two settings', () => {
     expect(layersOf(a.colourServed)).toEqual(['topics']);
     // The coloured cluster is named by the label attached to it.
     expect(a.colourServed.map((x) => artifactName(x, a.attached))).toEqual(['a name']);
+  });
+
+  it('reads a named layer’s absent column as all null, so no band is asked for again', async () => {
+    const traces: {kind: string; fields: Record<string, number | string>}[] = [];
+    const {store, settle, asked} = await open(traces);
+    // `mesh` is named on every point request and tags no point, so no band carries its column.
+    store.setColourBy('cluster:mesh');
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await settle();
+    const points = () => asked().filter((r) => r.k !== 0).length;
+    const before = points();
+    expect(before).toBeGreaterThan(0);
+    for (const band of store.get('marks').bands) expect(band.membership['mesh']).toBeUndefined();
+    await settle();
+    await settle();
+    expect(points()).toBe(before);
+    const coverage = traces.filter((t) => t.kind === 'coverage');
+    expect(coverage.length).toBeGreaterThan(0);
+    expect(coverage[coverage.length - 1]!.fields['stale']).toBe(0);
   });
 
   it('keeps a drawn dependent layer that declares geometry on the point path, and drops only its labels', async () => {

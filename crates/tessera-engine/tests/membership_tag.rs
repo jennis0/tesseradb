@@ -111,6 +111,41 @@ struct Compared {
     banded: u64,
 }
 
+/// Ask one request twice, from the labels and from the walk, and require the same answer. Returns
+/// the answer from the labels.
+fn compare_one(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    request: ViewportRequest<'_>,
+    layers: &[&str],
+    at: &str,
+    compared: &mut Compared,
+) -> ViewportOut {
+    engine.set_tags_from_labels_for_test(false);
+    let walked = engine.viewport(session, request.clone()).unwrap();
+    engine.set_tags_from_labels_for_test(true);
+    let labelled = engine.viewport(session, request).unwrap();
+    assert_eq!(
+        labelled.points.tessera_ids, walked.points.tessera_ids,
+        "{at}: the points"
+    );
+    let frame = |out: &ViewportOut| -> BTreeSet<(String, u64)> {
+        out.artifacts
+            .iter()
+            .map(|a| (a.layer.clone(), a.tessera_id.raw()))
+            .collect()
+    };
+    assert_eq!(frame(&labelled), frame(&walked), "{at}: the frame");
+    for layer in layers {
+        let tags = column(&labelled, layer);
+        assert_eq!(tags, column(&walked, layer), "{at}: {layer}");
+        *compared.tagged.entry(layer.to_string()).or_default() += tags.iter().flatten().count();
+    }
+    assert_joined(&labelled);
+    compared.banded += labelled.timings.tiles_from_bands;
+    labelled
+}
+
 /// Ask every case twice, from the labels and from the walk, and require the same answer.
 fn assert_tags_match(
     engine: &Engine,
@@ -126,30 +161,8 @@ fn assert_tags_match(
             for &(zoom, bbox, k) in cases {
                 let request =
                     ViewportRequest::new("s0", zoom, bbox, k).layers(LayerSelection::Named(layers));
-                engine.set_tags_from_labels_for_test(false);
-                let walked = engine.viewport(&session, request.clone()).unwrap();
-                engine.set_tags_from_labels_for_test(true);
-                let labelled = engine.viewport(&session, request).unwrap();
                 let at = format!("{stage}: layers {layers:?} at zoom {zoom} over {bbox:?}");
-                assert_eq!(
-                    labelled.points.tessera_ids, walked.points.tessera_ids,
-                    "{at}: the points"
-                );
-                let frame = |out: &ViewportOut| -> BTreeSet<(String, u64)> {
-                    out.artifacts
-                        .iter()
-                        .map(|a| (a.layer.clone(), a.tessera_id.raw()))
-                        .collect()
-                };
-                assert_eq!(frame(&labelled), frame(&walked), "{at}: the frame");
-                for layer in layers.iter() {
-                    let tags = column(&labelled, layer);
-                    assert_eq!(tags, column(&walked, layer), "{at}: {layer}");
-                    *compared.tagged.entry(layer.to_string()).or_default() +=
-                        tags.iter().flatten().count();
-                }
-                assert_joined(&labelled);
-                compared.banded += labelled.timings.tiles_from_bands;
+                compare_one(engine, &session, request, layers, &at, &mut compared);
             }
         }
     }
@@ -393,6 +406,146 @@ fn labels_tag_points_as_the_walk_does_through_growth_ingest_fold_and_suppression
     fold(&engine);
     assert!(has_labels(&engine, TIERED, 1));
     assert_tags_match(&engine, "refolded", &credentials, &selections, &cases);
+}
+
+const LABELLED: &str = "clusters/labelled";
+const CONTENT: &str = "clusters/content";
+const FRACTION: &str = "clusters/fraction";
+
+/// `id` among the sources below `bound`, as a filter or a highlight: the unique index answers `in`.
+fn id_below(bound: i64) -> tessera_engine::filter::FilterExpr {
+    use tessera_engine::filter::{FilterExpr, FilterOperand, Scalar};
+    FilterExpr::Leaf {
+        column: "id".into(),
+        operand: FilterOperand::NumIn((0..bound).map(|v| Scalar::Int(i128::from(v))).collect()),
+    }
+}
+
+/// An artifact's own label, content a viewer must see all of, and a fraction criterion each
+/// withhold a label for one principal and not the other; a filter and a highlight leave the tags
+/// as the walk has them; content read back from the record store after a restart tags as before.
+#[test]
+fn own_labels_content_fractions_filters_and_highlights_tag_as_the_walk_does() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    build_fixture_n(
+        &root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+        ROWS,
+    );
+    let map = source_to_new_map(&root, "v00000");
+    let entity = |source: u64| EntityId::new(map[&source]);
+    let quarter = |a: u64| (0..ROWS).filter(move |s| s % 4 == a).map(entity);
+
+    let engine = open(&root, tmp.path());
+    let mut labelled = declaration(LABELLED, HierarchyKind::Flat, None);
+    labelled.artifact_visibility = tessera_types::layer::ArtifactVisibility::carried("visibility");
+    engine.register_layer(labelled).unwrap();
+    let mut content = declaration(CONTENT, HierarchyKind::Flat, None);
+    content.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        name: "name".into(),
+        ty: "text".into(),
+        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+    }];
+    engine.register_layer(content).unwrap();
+    let mut fraction = tiered();
+    fraction.name = FRACTION.into();
+    fraction.require_member_visibility = Some(ExistenceCriterion::Fraction(0.5));
+    engine.register_layer(fraction).unwrap();
+
+    // `l1` is labelled for the subset principal's term and `l2` for the broad one's.
+    let own = (0..4u64)
+        .map(|a| {
+            let mut artifact = IncomingArtifact::from_entities(Some(format!("l{a}")), quarter(a));
+            artifact.access = Some(match a {
+                1 => vec![b"1".to_vec()],
+                2 => vec![b"0".to_vec()],
+                _ => Vec::new(),
+            });
+            artifact
+        })
+        .collect();
+    engine.publish_artifacts(LABELLED.into(), 0, own).unwrap();
+    // `c0`'s name was generated from items the subset principal sees all of; `c1`'s from items it
+    // sees a third of.
+    let named = (0..4u64)
+        .map(|a| {
+            let from: Vec<EntityId> = match a {
+                0 => (0..ROWS).filter(|s| s % 4 == 0 && s % 3 == 0).map(entity).collect(),
+                _ => quarter(a).collect(),
+            };
+            IncomingArtifact::with_content(
+                Some(format!("c{a}")),
+                quarter(a),
+                vec![tessera_lifecycle::membership::IncomingContent::new(vec![format!("c{a}")], from)],
+            )
+        })
+        .collect();
+    engine.publish_artifacts(CONTENT.into(), 0, named).unwrap();
+    for level in 0..2u32 {
+        let parts = if level == 0 { 4 } else { 20 };
+        let artifacts = (0..parts)
+            .map(|a| {
+                IncomingArtifact::from_entities(
+                    Some(format!("x{level}-{a}")),
+                    (0..ROWS).filter(|s| s % parts == a).map(entity),
+                )
+            })
+            .collect();
+        engine.publish_artifacts(FRACTION.into(), level, artifacts).unwrap();
+    }
+    tick(&engine);
+
+    let layers: [&str; 3] = [LABELLED, CONTENT, FRACTION];
+    let check = |engine: &Engine, stage: &str| {
+        let mut compared = Compared::default();
+        let mut keys: BTreeMap<(usize, &str), BTreeSet<String>> = BTreeMap::new();
+        for (who, credential) in [full_coverage_credential(), subset_credential()].iter().enumerate() {
+            let session = engine.authorise(credential).unwrap();
+            for (zoom, bbox, k) in cases() {
+                for shape in 0..3 {
+                    let mut request = ViewportRequest::new("s0", zoom, bbox, k)
+                        .layers(LayerSelection::Named(&layers));
+                    match shape {
+                        1 => request = request.filter(id_below(1_500)),
+                        2 => request = request.highlight(id_below(700)),
+                        _ => {}
+                    }
+                    let at = format!("{stage}: principal {who}, shape {shape}, zoom {zoom}");
+                    let out = compare_one(engine, &session, request, &layers, &at, &mut compared);
+                    let key_of: BTreeMap<u64, String> = out
+                        .artifacts
+                        .iter()
+                        .map(|a| (a.tessera_id.raw(), a.key.clone().unwrap_or_default()))
+                        .collect();
+                    for layer in layers {
+                        for id in column(&out, layer).into_iter().flatten() {
+                            keys.entry((who, layer)).or_default().insert(key_of[&id].clone());
+                        }
+                    }
+                }
+            }
+        }
+        let tagged = |who: usize, layer: &str| keys.get(&(who, layer)).cloned().unwrap_or_default();
+        // The own label: each principal is told of the labelled artifact it holds the term for.
+        assert!(!tagged(0, LABELLED).contains("l1") && tagged(0, LABELLED).contains("l2"), "{stage}");
+        assert!(!tagged(1, LABELLED).contains("l2") && tagged(1, LABELLED).contains("l1"), "{stage}");
+        assert!(tagged(0, LABELLED).contains("l0") && tagged(1, LABELLED).contains("l0"), "{stage}");
+        // The content: the subset principal holds all of `c0`'s generating set and none of the others'.
+        assert_eq!(tagged(1, CONTENT), BTreeSet::from(["c0".to_string()]), "{stage}");
+        assert_eq!(tagged(0, CONTENT).len(), 4, "{stage}");
+        // The fraction: a third of each artifact is under half.
+        assert!(tagged(1, FRACTION).is_empty(), "{stage}");
+        assert!(tagged(0, FRACTION).iter().any(|k| k.starts_with("x1-")), "{stage}");
+    };
+    check(&engine, "published");
+    fold(&engine);
+    check(&engine, "folded");
+    drop(engine);
+    // Restarted, the folded content is read back from the record store.
+    let engine = open(&root, tmp.path());
+    check(&engine, "restarted");
 }
 
 // ---------------------------------------------------------------------------------------------

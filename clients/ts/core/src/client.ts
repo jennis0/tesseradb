@@ -541,10 +541,11 @@ export class TesseraClient {
     const counts = req.k === 0;
     const keys = {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey};
     const columnsAsked = Array.isArray(req.pointRows) ? [...req.pointRows] : null;
+    const layersAsked: readonly string[] | 'all' = req.layers === 'all' ? 'all' : [...(req.layers ?? [])];
     const underlay = Boolean(req.underlayOffset);
     const decoded =
       onPart && !counts
-        ? await this.streamed(response, {...keys, columnsAsked}, onPart, background, underlay, onCounts)
+        ? await this.streamed(response, {...keys, columnsAsked, layersAsked}, onPart, background, underlay, onCounts)
         : await this.whole(response, counts, background, onCounts && countsWatch(onCounts, underlay, keys));
     this.opts.onDecode?.(decoded.ms, decoded.bytes, decoded.points, decoded.workerMs);
     return {
@@ -557,6 +558,7 @@ export class TesseraClient {
       },
       ...coordinates,
       columnsAsked,
+      layersAsked,
       bytes: decoded.bytes
     };
   }
@@ -602,7 +604,7 @@ export class TesseraClient {
    */
   private async streamed(
     response: Response,
-    coordinates: {identityKey: string; contentKey: string; columnsAsked: readonly string[] | null},
+    coordinates: {identityKey: string; contentKey: string; columnsAsked: readonly string[] | null; layersAsked: readonly string[] | 'all'},
     onPart: PartSink,
     background: boolean,
     underlay: boolean,

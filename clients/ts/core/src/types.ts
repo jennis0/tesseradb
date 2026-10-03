@@ -1085,6 +1085,8 @@ export type ViewportPart = {
   contentKey: string;
   /** As {@link ViewportResponse.columnsAsked}. */
   columnsAsked?: readonly string[] | null;
+  /** As {@link ViewportResponse.layersAsked}. */
+  layersAsked?: readonly string[] | 'all';
 };
 
 /**
@@ -1144,6 +1146,12 @@ export type ViewportResponse = {
    * named none: a column outside the list is absent because it was not asked for.
    */
   columnsAsked?: readonly string[] | null;
+  /**
+   * The layers the request named in {@link ViewportRequest.layers}: a points frame carries a
+   * membership column for a named layer only where some point has a tag, so an absent column of a
+   * named layer is a column of nulls.
+   */
+  layersAsked?: readonly string[] | 'all';
   /**
    * The generation this response was answered from (`x-tessera-pin`, a JSON string). Send it back
    * as {@link ViewportRequest.stamp}; its only effect is {@link ViewportResponse.stale}. Until the

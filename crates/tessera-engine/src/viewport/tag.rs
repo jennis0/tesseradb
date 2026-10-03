@@ -18,7 +18,6 @@
 //! walk: one with a lineage, where the cut and the budget decide what is served, and one depending
 //! on a layer the same request names, whose artifact goes when its target is not served.
 
-use rustc_hash::FxHashMap;
 use tessera_store::bands::BandLabels;
 use tessera_store::membership::{LabelColumnPack, ROW_COLUMN_HOLE};
 use tessera_types::layer::RegisteredLayer;
@@ -111,35 +110,30 @@ impl LevelLabels {
     }
 }
 
-/// Each label's tag at one level, decided once a request: indexed by ordinal where the level is
-/// small enough, and in a map otherwise.
-enum Verdicts {
-    Dense(Vec<Option<Option<u64>>>),
-    Sparse(FxHashMap<u32, Option<u64>>),
+/// Each label's tag at one level, decided once a request: one `u32` an ordinal, `0` while the
+/// label is undecided and otherwise one past its place among the decided. The table is
+/// zero-allocated, so the pages of ordinals no point names are never touched.
+struct Verdicts {
+    at: Vec<u32>,
+    decided: Vec<Option<u64>>,
 }
 
 impl Verdicts {
-    /// The most ordinals a level is indexed over: 16 MiB a request at most.
-    const DENSE_MAX: usize = 1 << 20;
-
     fn over(ordinals: usize) -> Self {
-        if ordinals <= Self::DENSE_MAX {
-            Verdicts::Dense(vec![None; ordinals])
-        } else {
-            Verdicts::Sparse(FxHashMap::default())
+        Verdicts {
+            at: vec![0; ordinals],
+            decided: Vec::new(),
         }
     }
 
     fn get_or(&mut self, ordinal: u32, decide: impl FnOnce() -> Option<u64>) -> Option<u64> {
-        match self {
-            Verdicts::Dense(held) => match held.get_mut(ordinal as usize) {
-                Some(Some(tag)) => *tag,
-                Some(slot) => *slot.insert(decide()),
-                // An ordinal past the level's end names no artifact.
-                None => None,
-            },
-            Verdicts::Sparse(held) => *held.entry(ordinal).or_insert_with(decide),
+        // An ordinal past the level's end names no artifact.
+        let slot = self.at.get_mut(ordinal as usize)?;
+        if *slot == 0 {
+            self.decided.push(decide());
+            *slot = self.decided.len() as u32;
         }
+        self.decided[*slot as usize - 1]
     }
 }
 
@@ -327,23 +321,37 @@ impl Engine {
                 }
             }
             if !unread.is_empty() {
-                let mut at: FxHashMap<u32, usize> = FxHashMap::default();
+                // Each unread point's row, ascending, beside the point it is.
+                let mut at: Vec<(u32, usize)> = unread.iter().map(|&i| (points[i].row, i)).collect();
+                at.sort_unstable();
                 let mut set = croaring::Bitmap::new();
-                for &i in &unread {
-                    at.insert(points[i].row, i);
-                    set.add(points[i].row);
-                }
-                let mut found: FxHashMap<usize, Vec<u32>> = FxHashMap::default();
+                set.add_many(&at.iter().map(|&(row, _)| row).collect::<Vec<u32>>());
+                // `(point, label)` for every membership one of those rows holds.
+                let mut found: Vec<(usize, u32)> = Vec::new();
                 for ordinal in rows.index().candidates(&set).iter() {
                     let Some(members) = rows.get(ordinal) else {
                         continue;
                     };
                     for row in members.and(&set).iter() {
-                        found.entry(at[&row]).or_default().push(ordinal);
+                        if let Ok(k) = at.binary_search_by_key(&row, |&(r, _)| r) {
+                            found.push((at[k].1, ordinal));
+                        }
                     }
                 }
-                for i in unread {
-                    match found.get(&i).and_then(|labels| lowest(labels)) {
+                found.sort_unstable();
+                let mut labels: Vec<u32> = Vec::new();
+                let mut next = 0;
+                unread.sort_unstable();
+                for &i in &unread {
+                    labels.clear();
+                    while next < found.len() && found[next].0 < i {
+                        next += 1;
+                    }
+                    while next < found.len() && found[next].0 == i {
+                        labels.push(found[next].1);
+                        next += 1;
+                    }
+                    match lowest(&labels) {
                         Some(id) => tags[i] = Some(id),
                         None => still_open.push(i),
                     }
