@@ -370,7 +370,8 @@ struct RawServe {
     ///
     /// Default: `1073741824` (1 GiB).
     fragment_cache_bytes: Option<u64>,
-    /// Bytes of per-viewer artifact counts kept for layers served from one bitmap per artifact.
+    /// Bytes of artifact counts, centroids and boxes kept for annotation layers stored by row,
+    /// shared by every viewer with the same grant.
     ///
     /// Default: `268435456` (256 MiB).
     masked_count_cache_bytes: Option<u64>,

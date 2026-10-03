@@ -1544,6 +1544,39 @@ impl LabelColumnPack {
         }
     }
 
+    /// Every labelled row of `[from, to)` with its ordinal, in row order, holes skipped. The same
+    /// answer as [`Self::label`] row by row, with the width resolved once for the range.
+    pub fn for_each_row_label(&self, from: usize, to: usize, mut visit: impl FnMut(u32, u32)) {
+        let rows = self.rows as usize;
+        let (from, to) = (from.min(rows), to.min(rows));
+        if from >= to {
+            return;
+        }
+        let width = usize::from(self.width);
+        let hole = hole_at(self.width);
+        let raw = &self.bytes.as_slice()[LABEL_HEADER_LEN + from * width..LABEL_HEADER_LEN + to * width];
+        let mut row = from as u32;
+        let mut each = |value: u32| {
+            if value != hole {
+                visit(row, value);
+            }
+            row += 1;
+        };
+        match self.width {
+            1 => raw.iter().for_each(|byte| each(u32::from(*byte))),
+            2 => raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .for_each(|v| each(u32::from(u16::from_le_bytes(*v)))),
+            _ => raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .for_each(|v| each(u32::from_le_bytes(*v))),
+        }
+    }
+
     /// This column's bytes, exactly as they would be written — so the durable form and the
     /// in-memory form cannot be produced by two different encoders.
     pub fn as_bytes(&self) -> &[u8] {
@@ -2421,6 +2454,18 @@ mod tests {
                 }
                 // A row past the column is a hole, not a panic and not ordinal 0.
                 assert_eq!(pack.label(5), ROW_COLUMN_HOLE);
+                // The range reader gives every labelled row of every range, and no hole.
+                for from in 0..=6 {
+                    for to in from..=6 {
+                        let mut seen = Vec::new();
+                        pack.for_each_row_label(from, to, |row, label| seen.push((row, label)));
+                        let expected: Vec<(u32, u32)> = (from..to.min(5))
+                            .map(|row| (row as u32, pack.label(row)))
+                            .filter(|(_, label)| *label != ROW_COLUMN_HOLE)
+                            .collect();
+                        assert_eq!(seen, expected, "{from}..{to} at width {width}");
+                    }
+                }
             }
             assert_eq!(mapped.as_bytes(), owned.as_bytes());
         }

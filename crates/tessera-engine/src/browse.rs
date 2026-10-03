@@ -299,7 +299,7 @@ impl crate::Engine {
         // is given one and its laps are dropped. Named `_probe` rather than silenced afterwards,
         // so that a stage field arriving here is a change to this line and not to a discard.
         let mut _probe = crate::timing::Probe::new();
-        let (geometry, _) =
+        let (geometry, key) =
             self.session_geometry(session, &generation, view, view_data, &None, &mut _probe)?;
         let denied = generation
             .denied()
@@ -323,7 +323,8 @@ impl crate::Engine {
             data: view_data,
             segments: segments_with_row_bases(view, view_data)?,
             denied,
-            mask_identity: self.mask_identity(session, &generation, &geometry),
+            mask_identity: self.mask_identity(session, &generation, &geometry, key.segments_version),
+            cancel: None,
         };
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it
@@ -351,7 +352,7 @@ impl crate::Engine {
         let shard = generation.bundle.manifest.identity.shard_id;
         for (walked, runs) in layer.runs.iter().enumerate() {
             let walked = walked as u32;
-            let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false);
+            let mut level_read = self.read_level(&served_view, &mask, &layer, walked, false)?;
             if let Some(filter_rows) = &filter_rows {
                 level_read.filtered = level_read.filtered_counts(self, &mask, filter_rows);
             }
@@ -460,7 +461,9 @@ impl crate::Engine {
                     .filter(|label| label.declaration.depends_on.iter().any(|d| d == req.layer))
                     .map(|label| {
                         let levels = (0..label.runs.len() as u32)
-                            .map(|level| self.read_level(&served_view, &mask, &label, level, false))
+                            .filter_map(|level| {
+                                ctx.held(self.read_level(&served_view, &mask, &label, level, false))
+                            })
                             .collect();
                         (label, levels)
                     })
@@ -716,11 +719,13 @@ impl crate::Engine {
             .collect();
         parent_rows.sort_by_key(|row| row.tessera_id.raw());
         parent_rows.dedup_by_key(|row| row.tessera_id.raw());
+        let artifacts = page
+            .iter()
+            .map(|&at| row_of(&gated[at], &children))
+            .collect();
+        ctx.finish()?;
         Ok(BrowseOut {
-            artifacts: page
-                .iter()
-                .map(|&at| row_of(&gated[at], &children))
-                .collect(),
+            artifacts,
             parents: parent_rows,
             next,
         })

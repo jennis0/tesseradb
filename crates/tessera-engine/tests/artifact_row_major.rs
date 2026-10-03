@@ -134,6 +134,20 @@ impl Fixture {
         engine
     }
 
+    fn open_with(&self, config: tessera_engine::EngineConfig) -> Engine {
+        let mut engine = Engine::open(
+            &self.root,
+            &self.cache,
+            &self.wal,
+            tessera_plugin::Passthrough::new(),
+            config,
+        )
+        .expect("the engine opens");
+        engine.start_write_executor(8).expect("the executor starts once");
+        engine.set_background_refresh_for_test(false);
+        engine
+    }
+
     fn members(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
         source_ids.map(|s| EntityId::new(self.map[&s])).collect()
     }
@@ -367,6 +381,16 @@ fn published(
     treed_layout: Option<ServingLayout>,
 ) -> Engine {
     let engine = fx.open();
+    publish_into(fx, &engine, flat, treed_layout);
+    engine
+}
+
+fn publish_into(
+    fx: &Fixture,
+    engine: &Engine,
+    flat: Option<ServingLayout>,
+    treed_layout: Option<ServingLayout>,
+) {
     engine
         .register_layer(declaration(
             FLAT,
@@ -389,8 +413,34 @@ fn published(
     engine
         .publish_artifacts(TREED.into(), 0, treed(fx))
         .unwrap();
-    wait_for_publication(fx, &engine, 1);
+    wait_for_publication(fx, engine, 1);
+}
+
+/// `n` points ingested at spread positions, every other one visible to the subset principal as
+/// well as the full one.
+fn ingest_points(engine: &Engine, batch: &str, n: u64) -> Vec<EntityId> {
+    let rows = (0..n)
+        .map(|i| {
+            let descriptors = if i % 2 == 0 {
+                vec![b"0".to_vec(), b"1".to_vec()]
+            } else {
+                vec![b"0".to_vec()]
+            };
+            tessera_lifecycle::UnallocatedRow {
+                view: "s0".to_string(),
+                join: None,
+                terms: engine.resolve_terms(&descriptors),
+                descriptors,
+                x: ((i * 97) % 1000) as f64 + 0.5,
+                y: ((i * 61) % 1000) as f64 + 0.5,
+                scalars: Vec::new(),
+                scoped: Vec::new(),
+            }
+        })
+        .collect();
     engine
+        .ingest_rows(rows, batch.to_string(), [0u8; 32])
+        .expect("ingest is accepted")
 }
 
 /// **The stage's spine.** The same corpus under each layout, swept over principals × viewports,
@@ -491,6 +541,34 @@ fn the_two_layouts_answer_identically() {
         fold(&major);
         fold(&minor);
         assert_same(&sweep(&major), &sweep(&minor), "after a fold");
+
+        // **Rows above the fold's base, in a segment of their own, labelled by an amendment.**
+        // Points ingested now are published by a flush into a new segment, and a growth puts them
+        // in an artifact of each layer, so the counts and the geometry are read across segments
+        // and from the column's amendment as well as its pack.
+        for engine in [&major, &minor] {
+            let fresh = ingest_points(engine, "past-the-fold", 40);
+            tick(engine);
+            let growth = |key: &str, members: &[EntityId]| {
+                tessera_lifecycle::IncomingGrowth::from_entities(key.into(), members.to_vec())
+            };
+            engine
+                .grow_memberships(FLAT.into(), 0, vec![growth("p3", &fresh[..20])])
+                .expect("a growth into an artifact that exists");
+            engine
+                .grow_memberships(
+                    TREED.into(),
+                    0,
+                    vec![growth("t2", &fresh[20..]), growth("t2.1", &fresh[20..])],
+                )
+                .expect("a growth into an artifact that exists");
+            tick(engine);
+        }
+        assert_same(
+            &sweep(&major),
+            &sweep(&minor),
+            "after a flush and a growth past the fold",
+        );
 
         // And an unsuppress, which must **re-derive**: `delete → suppress → unsuppress` leaves the
         // entity deleted, and the two routes have to agree about that too.
@@ -1473,4 +1551,234 @@ fn a_growth_in_the_tick_that_recomposes_the_column_counts_each_row_once() {
             "ordinal {ordinal}: the recomposed column counts a row twice"
         );
     }
+}
+
+/// Every artifact of the flat layer one session is served over the whole map: its count and its
+/// derived geometry, by key.
+fn flat_served(engine: &Engine, session: &tessera_engine::Session) -> BTreeMap<Option<String>, Served> {
+    let response = engine
+        .viewport(
+            session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport");
+    served(&response.artifacts)
+        .into_iter()
+        .filter(|a| a.layer == FLAT)
+        .map(|a| (a.key.clone(), a))
+        .collect()
+}
+
+/// **Sessions holding one term set share one build of a level's counts, and a suppression still
+/// reaches the next request of each.** The level is folded first, so it is served from its column
+/// alone and its centroids and boxes are in the shared entry too.
+#[test]
+fn sessions_with_one_term_set_share_the_counts_and_a_suppression_reaches_the_next_request() {
+    let fx = fixture();
+    let engine = published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    fold(&engine);
+    let builds = || engine.masked_count_cache_stats().misses;
+
+    let first = engine.authorise(&full_coverage_credential()).unwrap();
+    let seen = flat_served(&engine, &first);
+    assert!(seen.values().any(|a| a.centroid.is_some() && a.bbox.is_some()));
+    assert!(
+        !engine
+            .held_artifact_form_for_test("s0", FLAT, 0)
+            .expect("the level's form is held")
+            .membership()
+            .rows_held(),
+        "the level is served from its column, so its geometry comes from the shared entry"
+    );
+    let after_first = builds();
+    assert!(after_first > 0);
+
+    let second = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(flat_served(&engine, &second), seen);
+    assert_eq!(
+        builds(),
+        after_first,
+        "a second session with the same terms reads the first session's counts"
+    );
+
+    let narrower = engine.authorise(&subset_credential()).unwrap();
+    assert_ne!(flat_served(&engine, &narrower), seen);
+    assert!(
+        builds() > after_first,
+        "a session with other terms builds its own counts"
+    );
+
+    // Source id 400 is in block `p0`, visible to the full principal. Its suppression is accepted
+    // between the first session's request and the second's.
+    engine
+        .accept_change(fx.member(400), ChangeOp::Suppress)
+        .unwrap();
+    let before_rebuild = builds();
+    let corrected = flat_served(&engine, &second);
+    let p0 = Some("p0".to_string());
+    assert_eq!(
+        corrected[&p0].masked_count,
+        seen[&p0].masked_count - 1,
+        "the request after the suppression is served the corrected count"
+    );
+    assert_ne!(corrected[&p0].centroid, None);
+    let rebuilt = builds() - before_rebuild;
+    assert!(rebuilt > 0);
+    assert_eq!(flat_served(&engine, &first), corrected);
+    assert_eq!(
+        builds() - before_rebuild,
+        rebuilt,
+        "and the first session reads the rebuilt entry"
+    );
+}
+
+/// **Requests arriving while a level's counts are building wait for that build** rather than
+/// walking the mask a second time.
+#[test]
+fn concurrent_requests_with_one_term_set_wait_for_one_build() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    let wait = std::time::Duration::from_secs(60);
+    let ask = |engine: std::sync::Arc<Engine>| {
+        std::thread::spawn(move || {
+            let session = engine.authorise(&full_coverage_credential()).unwrap();
+            flat_served(&engine, &session)
+        })
+    };
+
+    engine.hold_next_masked_count_build_for_test();
+    let first = ask(std::sync::Arc::clone(&engine));
+    wait_until("the held build never started", wait, || {
+        engine.masked_count_cache_stats().misses > 0
+    });
+    let second = ask(std::sync::Arc::clone(&engine));
+    wait_until("the second request never waited for the build", wait, || {
+        engine.masked_count_cache_stats().waiters > 0
+    });
+    engine.release_masked_count_build_for_test();
+    let (first, second) = (first.join().unwrap(), second.join().unwrap());
+    assert!(!first.is_empty());
+    assert_eq!(first, second);
+    let stats = engine.masked_count_cache_stats();
+    assert_eq!(
+        stats.misses as usize, stats.entries,
+        "every key the two requests read was built once"
+    );
+}
+
+/// **A points request does not wait for a count build.** With one compute thread, a build on the
+/// compute pool would hold the thread every points request needs. The build is held on its own
+/// pool and the points request completes while it is held.
+#[test]
+fn a_points_request_does_not_wait_for_a_count_build() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(fx.open_with(tessera_engine::EngineConfig {
+        compute_threads: 1,
+        ..config()
+    }));
+    publish_into(
+        &fx,
+        &engine,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    );
+    // Every points request takes the pool rather than the calling thread.
+    engine.set_serial_fallback_max_rows_for_test(0);
+    let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+    let points = |engine: &Engine, session: &tessera_engine::Session| {
+        engine
+            .viewport(
+                session,
+                ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                    .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+            )
+            .expect("a points viewport")
+            .points
+            .len()
+    };
+    // The session's projection is built before the hold, so the points request below needs
+    // nothing but the compute pool.
+    assert!(points(&engine, &session) > 0);
+
+    let wait = std::time::Duration::from_secs(60);
+    engine.hold_next_masked_count_build_for_test();
+    let clusters = {
+        let (engine, session) = (std::sync::Arc::clone(&engine), std::sync::Arc::clone(&session));
+        std::thread::spawn(move || flat_served(&engine, &session))
+    };
+    wait_until("the held build never started", wait, || {
+        engine.masked_count_cache_stats().misses > 0
+    });
+    let (done, finished) = std::sync::mpsc::channel();
+    let pointer = {
+        let (engine, session) = (std::sync::Arc::clone(&engine), std::sync::Arc::clone(&session));
+        std::thread::spawn(move || {
+            let _ = done.send(points(&engine, &session));
+        })
+    };
+    let served = finished.recv_timeout(wait);
+    engine.release_masked_count_build_for_test();
+    assert!(!clusters.join().unwrap().is_empty());
+    pointer.join().unwrap();
+    assert!(
+        served.is_ok_and(|n| n > 0),
+        "the points request waited for the count build"
+    );
+}
+
+/// **A suppression accepted while a build is in flight is never served that build.** The build
+/// began under the pre-suppression overlay; every request that starts after the acknowledgement
+/// reads a key of its own, so it neither reads the held result nor waits for it.
+#[test]
+fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    let p0 = Some("p0".to_string());
+    let wait = std::time::Duration::from_secs(60);
+
+    engine.hold_next_masked_count_build_for_test();
+    let before = {
+        let engine = std::sync::Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let session = engine.authorise(&full_coverage_credential()).unwrap();
+            flat_served(&engine, &session)
+        })
+    };
+    wait_until("the held build never started", wait, || {
+        engine.masked_count_cache_stats().misses > 0
+    });
+
+    // Source id 400 is a visible member of `p0`.
+    engine
+        .accept_change(fx.member(400), ChangeOp::Suppress)
+        .unwrap();
+    let after = engine.authorise(&full_coverage_credential()).unwrap();
+    let corrected = flat_served(&engine, &after);
+    assert_eq!(
+        engine.masked_count_cache_stats().waiters,
+        0,
+        "the request after the suppression did not wait on the held build"
+    );
+
+    engine.release_masked_count_build_for_test();
+    let held = before.join().unwrap();
+    assert_eq!(
+        corrected[&p0].masked_count,
+        held[&p0].masked_count - 1,
+        "the request after the suppression is served a count without the suppressed member"
+    );
+    let later = engine.authorise(&full_coverage_credential()).unwrap();
+    assert_eq!(flat_served(&engine, &later), corrected);
 }

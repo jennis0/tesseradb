@@ -89,6 +89,9 @@ pub enum EngineError {
     /// non-blocking-waiters rule and 429 mapping as [`Self::ProjectionBuilding`]: this call does
     /// not wait, and the caller is told to retry rather than handed a fail-closed 500.
     FragmentBuilding,
+    /// A level's masked counts were being built by a concurrent request, and this request waited
+    /// past the bound on such a wait. Same 429 as [`Self::ProjectionBuilding`].
+    CountsBuilding,
     /// The caller's [`crate::cancel::CancelToken`] was observed flipped mid-request — a client
     /// that aborted a fetch it no longer needs. Whole-request abort: no partial `ViewportOut` is
     /// ever constructed past that point.
@@ -170,6 +173,10 @@ impl std::fmt::Display for EngineError {
                 f,
                 "this credential's mask fragment is being built by a concurrent request; retry \
                  shortly"
+            ),
+            EngineError::CountsBuilding => write!(
+                f,
+                "this layer's counts are being built by a concurrent request; retry shortly"
             ),
             EngineError::Cancelled => write!(f, "request cancelled"),
             EngineError::ThreadPoolBuild(detail) => {

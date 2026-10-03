@@ -227,6 +227,11 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
             retry_after_s: RETRY_AFTER_SECS,
             cause: ShedCause::SingleFlight,
         },
+        // Another request is building a level's masked counts for this term set.
+        EngineError::CountsBuilding => ApiError::Backpressure {
+            retry_after_s: RETRY_AFTER_SECS,
+            cause: ShedCause::SingleFlight,
+        },
         // Another `authorise` call is building this credential's mask fragment.
         EngineError::FragmentBuilding => ApiError::Backpressure {
             retry_after_s: RETRY_AFTER_SECS,
@@ -629,6 +634,12 @@ mod tests {
     #[test]
     fn map_engine_error_takes_projection_building_to_backpressure() {
         assert_single_flight_429(map_engine_error(EngineError::ProjectionBuilding));
+    }
+
+    /// `CountsBuilding` is the same 429.
+    #[test]
+    fn map_engine_error_takes_counts_building_to_backpressure() {
+        assert_single_flight_429(map_engine_error(EngineError::CountsBuilding));
     }
 
     /// `FragmentBuilding` is the same 429.

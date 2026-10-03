@@ -245,7 +245,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     }
 
     /// An artifact-major level intersects its own membership with the composed mask; a row-major
-    /// level has no per-artifact membership, and takes the count from the per-session histogram.
+    /// level has no per-artifact membership, and takes the count from the level's masked counts.
     fn masked_count(&self, ordinal: u32) -> u64 {
         if self.rows.layout().is_row_major() {
             if let Some(counts) = &self.counts {

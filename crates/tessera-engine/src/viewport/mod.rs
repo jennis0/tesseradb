@@ -336,10 +336,11 @@ impl Engine {
                         &dependency_served,
                         registered,
                         &points,
-                    );
+                    )?;
                     labelled.push((registered.declaration.name.clone(), tags));
                 }
             }
+            ctx.finish()?;
             let walk_names: Vec<&str> = names
                 .iter()
                 .zip(&taggings)

@@ -37,7 +37,15 @@ parentPort.on('message', async (m) => {
     const r = await fetch(url, {...init, signal: controller.signal});
     t.headers = now();
     parentPort.postMessage({id, head: {status: r.status, headers: [...r.headers]}, t: t.headers});
-    let pending = new Uint8Array(0);
+    // Frames are read as they stream past: a 5-byte header (kind, then a u32 LE length) and a
+    // payload, kept only for the trailer. Nothing is copied but the header and the trailer, so a
+    // frame of any size costs the time its bytes take to arrive.
+    const header = new Uint8Array(5);
+    let headerFill = 0;
+    let kind = 0;
+    let remaining = -1;
+    let trailer = null;
+    let trailerFill = 0;
     let bytes = 0;
     const reader = r.body.getReader();
     for (;;) {
@@ -46,20 +54,32 @@ parentPort.on('message', async (m) => {
       if (done) break;
       t.firstByte ??= at;
       bytes += value.byteLength;
-      const joined = new Uint8Array(pending.length + value.length);
-      joined.set(pending);
-      joined.set(value, pending.length);
-      let off = 0;
-      while (off + 5 <= joined.length) {
-        const len = new DataView(joined.buffer, off + 1, 4).getUint32(0, true);
-        if (off + 5 + len > joined.length) break;
-        const kind = joined[off];
+      let i = 0;
+      for (;;) {
+        if (remaining < 0) {
+          const n = Math.min(5 - headerFill, value.length - i);
+          header.set(value.subarray(i, i + n), headerFill);
+          headerFill += n;
+          i += n;
+          if (headerFill < 5) break;
+          headerFill = 0;
+          kind = header[0];
+          remaining = new DataView(header.buffer).getUint32(1, true);
+          trailer = kind === 4 ? new Uint8Array(remaining) : null;
+          trailerFill = 0;
+        }
+        const n = Math.min(remaining, value.length - i);
+        if (trailer) trailer.set(value.subarray(i, i + n), trailerFill);
+        trailerFill += n;
+        i += n;
+        remaining -= n;
+        if (remaining > 0) break;
         if (kind === 1) t.counts ??= at;
         if (kind === 3) t.points ??= at;
-        if (kind === 4) t.trailer = JSON.parse(new TextDecoder().decode(joined.subarray(off + 5, off + 5 + len)));
-        off += 5 + len;
+        if (kind === 4) t.trailer = JSON.parse(new TextDecoder().decode(trailer));
+        remaining = -1;
+        if (i === value.length) break;
       }
-      pending = joined.slice(off);
       parentPort.postMessage({id, chunk: value}, [value.buffer]);
     }
     t.lastByte = now();

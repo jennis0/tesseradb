@@ -103,7 +103,7 @@ impl Engine {
         layer: &RegisteredLayer,
         level: u32,
         geometry: bool,
-    ) -> ReadLevel {
+    ) -> Result<ReadLevel> {
         let generation = served.generation;
         let name = layer.declaration.name.as_str();
         let vocabulary = crate::viewport::predicate_vocabulary(generation, &layer.declaration);
@@ -141,8 +141,7 @@ impl Engine {
             )
         });
         let counts = self.masked_counts(
-            &served.mask_identity,
-            served.name,
+            served,
             name,
             level,
             level_version,
@@ -150,7 +149,7 @@ impl Engine {
             mask,
             (geometry && crate::artifacts::derives_accumulated_geometry(&layer.declaration))
                 .then_some(&served.segments[..]),
-        );
+        )?;
         let contents = match layer.runs.get(level as usize) {
             Some(runs) if !layer.declaration.content.supplied.is_empty() => {
                 Some(self.level_contents.get_or_build(
@@ -163,13 +162,13 @@ impl Engine {
             }
             _ => None,
         };
-        ReadLevel {
+        Ok(ReadLevel {
             level,
             rows,
             counts,
             filtered: None,
             contents,
-        }
+        })
     }
 }
 

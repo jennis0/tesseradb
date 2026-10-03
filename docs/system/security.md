@@ -29,8 +29,19 @@ An operator drives the control plane: ingest, deletion, suppression and compacti
 treats this party as trusted, and every route on the control plane, without exception, requires
 the operator's own credential.
 
-Every cache that holds a viewer's visible set is keyed to one session and is never read by
-another session.
+Every cache that holds a viewer's visible set, or a quantity computed from it, is keyed to one
+session and is never read by another session, with two exceptions keyed on the set of terms the
+credential resolved to. The authorised set is shared by every session whose credential resolved to
+the same terms. The per-artifact counts, centroids and boxes of an annotation layer stored by row
+are shared by every session with the same terms whose visible set was composed from the same
+inputs. That key names each input to the visible set: the term set, the build of the authorised set
+the session's projection came from, the generation that projection was built at, the segment set,
+which every flush and compaction replaces, and a counter that every accepted deletion, suppression,
+lift and ingest moves. A request reads both once, at its start, so a request that starts after a
+suppression is accepted cannot read an entry built before it, and cannot wait on a build begun
+before it. Two sessions that share an entry have the same visible set, so neither is served
+anything the other could not see. What the sharing does disclose, through response time, is in the
+residual table below.
 
 A client (the TypeScript or Python library, or a component built on it) is not a trust boundary at
 all. Every count, sample and label it receives has already been computed inside the viewer's own
@@ -260,7 +271,7 @@ with the visible set, which puts this route in the timing row below.
 
 ## Residual disclosure
 
-Six channels let a viewer learn something beyond the items they are entitled to see, past what
+Seven channels let a viewer learn something beyond the items they are entitled to see, past what
 the properties above bound. Each row states its own status: most channels are accepted for the
 reason given, and one, the per-tile timing channel, remains open.
 
@@ -272,6 +283,7 @@ reason given, and one, the per-tile timing channel, remains open.
 | That their visible items in a region group together, a fact about structure that includes unseen items | A minimum-visible-count threshold a layer declares bounds how finely a grouping's presence is exposed against the viewer's own visible set, and filtering cannot deepen it | Low | The threshold decides whether a grouping's existence is announced, not whether its count is protected: a viewport and the density layer already serve exact masked counts over any region a viewer can name, whatever threshold a layer declares | C1 |
 | That an item they were never entitled to see has been deleted, when a permissive annotation layer's membership set loses it | Under a layer declared permissive, content generated from a deleted item keeps serving until compaction removes the deleted member from the generating set. At that point the content stops serving for every viewer who satisfies the surviving members, including one who never satisfied the original generating set, telling them an item they were never entitled to see has been deleted | Medium | Bounded by the caller's own declaration: strict is the default and never shrinks, so an undeclared layer never signals this. Permissive is a caller's choice for a set where losing one member changes nothing the content asserts | C7 |
 | Which of their visible items share a full set of access terms, and so, where two such groups show the same labels the viewer holds, that items in at least one of them carry terms the viewer does not hold; roughly in which build batch or ingest window each arrived or was last edited; and a hint of the order in which terms they do not hold first appeared | A bulk read of items in stored order returns items in entity id order, which groups them by full term set, and their positions or unique values show where one set ends and the next begins ([reading in bulk](#reading-in-bulk)) | Medium | Bounded to how the viewer's own visible items group: no term's name, no count of the items the viewer cannot see, and nothing about any one item outside their visible set. Map order returns the same rows and fields and discloses none of it | none |
+| That another session holding the same terms, which includes every anonymous viewer of a public deployment, recently authorised or read a layer's level in this view; and, weakly, how busy sessions under other grants are | Two caches are shared by every session whose credential resolved to the same terms: the authorised set, built at authorisation, and the per-artifact counts, centroids and boxes of a layer stored by row, built on a level's first read. A read the cache already holds answers in milliseconds and one that builds it takes up to seconds, so the time an authorisation or a level's first response takes says whether another such session asked for it since the last write. Eviction is least recently used across all grants, so an entry that was expected to be held and has to be built again says other sessions have been busy | Low | It discloses activity and nothing about any item: the shared entry is computed from a visible set equal to the asker's own, and an entry built before a deletion, suppression, ingest or compaction is never read after it | none |
 
 A caller-declared quantity the service serves as declared, rather than a viewer's own inference, is
 not a residual channel and does not appear above: a caller-declared generating set, an authored

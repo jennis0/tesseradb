@@ -1,0 +1,268 @@
+{
+ "binary": "/tmp/claude-1000/-home-joe-code-tessera/b29a6b6a-02f4-4972-8667-cea5f3f5d6a9/scratchpad/tessera-main",
+ "levels": [
+  {
+   "status": 200,
+   "headers_s": 0.177,
+   "last_s": 12.241,
+   "bytes": 1783593,
+   "level": 0,
+   "principal": "100%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.149,
+   "last_s": 9.924,
+   "bytes": 1783592,
+   "level": 0,
+   "principal": "100%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.179,
+   "last_s": 9.103,
+   "bytes": 1584488,
+   "level": 0,
+   "principal": "85%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.185,
+   "last_s": 9.878,
+   "bytes": 1584488,
+   "level": 0,
+   "principal": "85%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.076,
+   "last_s": 5.286,
+   "bytes": 947047,
+   "level": 0,
+   "principal": "7%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.004,
+   "last_s": 4.694,
+   "bytes": 947047,
+   "level": 0,
+   "principal": "7%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.007,
+   "last_s": 1.677,
+   "bytes": 697255,
+   "level": 0,
+   "principal": "1%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.005,
+   "last_s": 0.443,
+   "bytes": 697254,
+   "level": 0,
+   "principal": "1%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.127,
+   "last_s": 16.648,
+   "bytes": 22326570,
+   "level": 1,
+   "principal": "100%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.161,
+   "last_s": 13.465,
+   "bytes": 22326570,
+   "level": 1,
+   "principal": "100%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.178,
+   "last_s": 9.794,
+   "bytes": 15676713,
+   "level": 1,
+   "principal": "85%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.179,
+   "last_s": 11.746,
+   "bytes": 15676714,
+   "level": 1,
+   "principal": "85%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.074,
+   "last_s": 6.669,
+   "bytes": 5483752,
+   "level": 1,
+   "principal": "7%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.006,
+   "last_s": 5.224,
+   "bytes": 5483752,
+   "level": 1,
+   "principal": "7%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.011,
+   "last_s": 2.119,
+   "bytes": 3743272,
+   "level": 1,
+   "principal": "1%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.006,
+   "last_s": 0.519,
+   "bytes": 3743271,
+   "level": 1,
+   "principal": "1%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.143,
+   "last_s": 22.69,
+   "bytes": 167278635,
+   "level": 2,
+   "principal": "100%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.124,
+   "last_s": 17.471,
+   "bytes": 167278635,
+   "level": 2,
+   "principal": "100%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.175,
+   "last_s": 13.176,
+   "bytes": 91113899,
+   "level": 2,
+   "principal": "85%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.18,
+   "last_s": 13.355,
+   "bytes": 91113899,
+   "level": 2,
+   "principal": "85%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.074,
+   "last_s": 6.54,
+   "bytes": 21014889,
+   "level": 2,
+   "principal": "7%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.005,
+   "last_s": 5.208,
+   "bytes": 21014889,
+   "level": 2,
+   "principal": "7%",
+   "which": "second session"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.055,
+   "last_s": 2.632,
+   "bytes": 13391017,
+   "level": 2,
+   "principal": "1%",
+   "which": "new"
+  },
+  {
+   "status": 200,
+   "headers_s": 0.006,
+   "last_s": 1.3,
+   "bytes": 13391017,
+   "level": 2,
+   "principal": "1%",
+   "which": "second session"
+  }
+ ],
+ "overlap": [
+  {
+   "case": "bench opening, 100%",
+   "counts": {
+    "status": 200,
+    "headers_s": 0.314,
+    "last_s": 0.318,
+    "bytes": 1846618
+   },
+   "marks": {
+    "status": 200,
+    "headers_s": 0.172,
+    "last_s": 13.686,
+    "bytes": 6187810
+   },
+   "artifacts": {
+    "status": 200,
+    "headers_s": 0.162,
+    "last_s": 13.469,
+    "bytes": 1783593
+   }
+  },
+  {
+   "case": "points with no layer beside a level-1 build, 85%",
+   "points": {
+    "status": 200,
+    "headers_s": 4.445,
+    "last_s": 17.021,
+    "bytes": 1816634
+   },
+   "artifacts": {
+    "status": 200,
+    "headers_s": 0.233,
+    "last_s": 17.396,
+    "bytes": 15676714
+   }
+  },
+  {
+   "case": "points with no layer alone, 85%",
+   "points": {
+    "status": 200,
+    "headers_s": 0.3,
+    "last_s": 0.356,
+    "bytes": 1816631
+   }
+  }
+ ]
+}

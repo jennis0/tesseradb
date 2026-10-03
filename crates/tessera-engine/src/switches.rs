@@ -47,6 +47,11 @@ pub(crate) struct TestSwitches {
     pub(crate) projection_build_hold_wanted: AtomicBool,
     #[cfg(feature = "fault-injection")]
     pub(crate) projection_build_held: AtomicBool,
+    /// The same pair for a level's masked-count build, held on the count pool.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) masked_count_build_hold_wanted: AtomicBool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) masked_count_build_held: AtomicBool,
     /// Whether the next ingest batch to pass its handler's check waits there until this
     /// is cleared, and whether one is waiting. The batch that takes the hold clears the first.
     #[cfg(feature = "fault-injection")]
@@ -74,6 +79,16 @@ impl TestSwitches {
         // publication by the `Ordering::` beside the call.
         if self.projection_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
             while self.projection_build_held.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// Called inside a masked-count build. Waits if a test asked for the next build to be held.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn hold_masked_count_build_if_wanted(&self) {
+        if self.masked_count_build_hold_wanted.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            while self.masked_count_build_held.load(std::sync::atomic::Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -135,6 +150,10 @@ impl Default for TestSwitches {
             projection_build_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             projection_build_held: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            masked_count_build_hold_wanted: AtomicBool::new(false),
+            #[cfg(feature = "fault-injection")]
+            masked_count_build_held: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]
             write_check_hold_wanted: AtomicBool::new(false),
             #[cfg(feature = "fault-injection")]

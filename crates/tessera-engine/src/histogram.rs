@@ -1,130 +1,109 @@
-//! The masked-count histogram cache — **the one structure sized by the artifact population that a
-//! session is allowed to hold**, and the reasons it is allowed are narrow.
+//! The masked counts of a level served from its column: per artifact, how many rows of the
+//! composed mask carry its label, and where the level's geometry is accumulated, the position sum
+//! and bounding box of those rows.
 //!
-//! [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
-//! rules that nothing sized by the artifact population is held per token: there are a great many
-//! tokens, principals do not share masks, and at 10⁷ artifacts a per-token structure is 0.85–1.7 s
-//! of setup and ~40 MB of state per token per generation. It names **one exception**, and this is
-//! it: a **row-major** layer may hold a masked-count histogram per `(session, layer)`.
+//! A level that holds one bitmap per artifact counts one artifact at a time, so a request's
+//! budget bounds the work. A level served from its column has no per-artifact membership, and its
+//! only route to a count is a walk of every visible row ([`crate::row_column::RowColumn::accumulate`]).
+//! On a large view that walk takes seconds, so its result is held.
 //!
-//! What makes this the one place the rule gives way is that a row-major level has **no other route**
-//! to the quantity the disclosure rule requires. An artifact-major level answers
-//! `|membership ∩ M_auth|` one artifact at a time, so a request's budget bounds the work; a
-//! row-major level has no per-artifact membership to intersect, and its only route is a walk of the
-//! mask reading off which artifact each visible row belongs to. Declining the exception would not
-//! save that walk — it would pay it on every request instead of once a session.
+//! # What an entry is shared by
 //!
-//! # The key is the whole of the safety, and one of its terms is a deny
+//! An entry is a function of the composed mask and of the level's column, and the key names every
+//! input to each. The composed mask is a function of the session's satisfied term set, the
+//! fragment its projection was built from, and the generation's segments, overlay and buffer
+//! ([`crate::compose::compose`]); nothing else about a session reaches it. So the key carries a
+//! digest of the term set in place of the session, and every session holding the same term set at
+//! the same coordinates reads one entry and shares one build.
 //!
-//! A histogram is a function of the composed mask and of the level's column, so every term below is
-//! a reason one of those two moved:
+//! - `terms`: SHA-256 over the sorted satisfied terms, four bytes each.
+//! - `view`, `layer`, `level`: what the column is of.
+//! - `level_version`: the version of the row form the walk read, which is not always the store's.
+//!   A form waiting for a tick's delta stands at the earlier version, and it comes back from
+//!   `ArtifactProjections::get_or_build` beside the form so the two cannot disagree.
+//! - `geometry`: whether the entry carries the position sums and boxes. A browse page wants the
+//!   counts alone and a viewport deriving a centroid wants both, so each pays for what it reads.
+//! - `segments_version`: row ids mean something only within one geometry. A flush and a fold
+//!   both move it.
+//! - `projection_segments_version`: the generation the session's row projection was built at.
+//!   A session may be served a projection one generation stale, which the rest of the key would
+//!   not otherwise tell from a fresh one.
+//! - `overlay_version`: moved by every overlay or buffer publication, which is every accepted
+//!   deletion, suppression, lift and ingest. A request loads its generation once, at its start, so
+//!   a request that starts after a suppression is accepted reads a key no earlier entry or build
+//!   holds. An unsuppress moves it again and the entry is built afresh, which is why
+//!   `delete, suppress, unsuppress` leaves the entity deleted here too.
+//! - `fragment_identity` and `fragment_watermark`: the fragment the session's projection was built
+//!   from. A fold rotates the identity.
 //!
-//! - **`token_id`** — the mask is the principal's. Never the bearer token itself, and never reused
-//!   within a process (`crate::cache::RowProjectionKey`'s fact 1 is what makes that sound).
-//! - **`view`**, **`layer`**, **`level`** — what the column is *of*.
-//! - **`level_version`** — a publication adds artifacts the column has never labelled, so a stale
-//!   histogram is short for the new ones and, worse, is indexed by ordinals that have since moved.
-//!   **The version of the row form the walk read, which is not always the store's**: a form waiting
-//!   for a tick's delta stands at the earlier version, so a caller that read the store instead
-//!   would file a histogram of the pre-delta column under the post-delta key, and every request in
-//!   the session would then read it as the grown column's. It comes back from
-//!   `ArtifactProjections::get_or_build` beside the form, which is the only place the two are read
-//!   together. On a row-major level this decides existence and not only the number beside it: an
-//!   artifact whose only visible rows arrived in the growth would be withheld for the life of the
-//!   key.
-//! - **`segments_version`** — row ids mean something only within one geometry.
-//! - **`overlay_version`**, and this is the disclosure-adjacent one. A suppression or a deletion
-//!   removes rows from the composed mask, so a count taken before it is **high** — an artifact
-//!   served with a number counting documents the viewer may no longer see, and possibly one served
-//!   at all where its existence criterion would now fail it. `annotation-write-cycle.md` §3.4 puts
-//!   the response to a deny at **accept**, so the correction may not wait for a refresh: the
-//!   overlay's own counter moves at the acknowledgement's publication, and a key carrying it cannot
-//!   name an entry taken before it. An **unsuppress re-derives** rather than subtracts, which is why
-//!   `delete → suppress → unsuppress` leaves the entity deleted here too — this cache never
-//!   subtracts anything, it only rotates keys.
-//! - **the fragment's identity and watermark** — a session may be served a one-generation-stale
-//!   projection (decision 0044), so two requests at one `segments_version` can compose against
-//!   different fragments. A histogram is per fragment or it is a count over someone else's idea of
-//!   the session's own visible set.
+//! The filter is not a term: the count beside an artifact does not depend on a filter, so a
+//! filtered request and an unfiltered one read the same entry.
 //!
-//! **The filter is deliberately not a term**, and must not become one: the count beside an artifact
-//! is filter-blind (**I12** — a filter may move the frontier up, never down), so a filtered request
-//! and an unfiltered one at the same key want the same histogram.
+//! # Single flight, removal only, and a byte bound
 //!
-//! # Removal only, and a byte budget
+//! Concurrent requests for one key share one build ([`tessera_cache::SingleFlightCache`]). A
+//! request waits for another's build for as long as its client stays connected, up to
+//! [`BUILD_WAIT_MS`]. A build on a large view takes longer than `serve.single_flight_wait_ms`,
+//! and a viewport has sent its head before it reads the counts, so a refusal at that budget would
+//! cut a response that the build was about to complete. At most
+//! [`CONCURRENT_BUILDS`] builds walk at once, each holding an accumulator per worker of the count
+//! pool, so live ingest moving `overlay_version` under many term sets queues their rebuilds
+//! rather than holding every accumulator at once. Nothing
+//! mutates a held value: eviction only removes, and a rebuild walks the same mask over the same
+//! column, so the bound decides what is resident and never what is served. An entry larger than
+//! the whole bound is handed to its caller and not admitted.
 //!
-//! Nothing here mutates a cached value. Eviction and `forget` only ever *remove*, so a rebuilt
-//! histogram is identical to the evicted one — the miss path walks the same composed mask over the
-//! same column, both of which the key names. That is the row-projection cache's own rule
-//! (`crate::cache`), and it is what makes a byte budget a residency policy rather than a
-//! correctness one.
-//!
-//! The budget is ~4 B per artifact for an entry of counts alone, which is 4 MB at 10⁶ artifacts and
-//! 40 MB at 10⁷ — the figures 0093 quotes — and it is answered to by eviction of the least recently
-//! used entry, exactly as the row-projection cache's is.
-//!
-//! **An entry carrying the accumulated geometry is 36 B an artifact, nine times that**: a `u32`
-//! count, two `u64` sums and four `u32` box bounds beside the 4 B count
-//! ([`MaskedGeometry`]). At the rung 6 corpus's 1.65×10⁶ artifacts that is **59 MB a level per
-//! session** against the counts' 6.6, and against `tessera-server`'s 256 MB default bound. **The
-//! default does not move for it**: the bound is a residency policy and not a correctness one — an
-//! entry too large for the whole bound is handed to its caller and simply not admitted — so a
-//! deployment that holds fewer levels resident is slower and never wrong, and raising the default
-//! would spend memory on every deployment for the few that hold several such levels at once. An
-//! operator who wants them resident raises `selection.masked_count_cache_bytes`.
-//!
-//! **Two entries for one level is by design, not a duplication.** A viewport over a layer deriving
-//! a centroid or a box wants the geometry; a browse page over the same level wants the counts and
-//! nothing else, and building the geometry for it would read a position per visible row for a
-//! number no browse row carries. The `geometry` term of the key is what keeps the two apart, so a
-//! browse page cannot be handed an entry without the geometry a viewport then needs, nor made to
-//! pay for one it does not.
+//! An entry is 4 B an artifact for counts alone and 40 B with the geometry: a count, a placed
+//! count, two `u64` sums and four `u32` bounds. At 1.4×10⁶ artifacts that is 56 MB a level. The
+//! bound is `serve.masked_count_cache_bytes`, 256 MiB unless configured.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-/// What one histogram is a function of. See the module doc: every term is a reason the composed
-/// mask or the column moved.
+use std::sync::{Condvar, Mutex, PoisonError};
+
+use tessera_cache::{Cancel, CacheWeight, SingleFlightCache, WaitEnded};
+
+use crate::row_column::LevelAccumulation;
+
+/// How many builds may walk at once.
+const CONCURRENT_BUILDS: usize = 2;
+
+/// How long a connected request waits for another's build before it is refused. Far beyond any
+/// build measured, so it ends a wait only on a build that has stopped making progress.
+const BUILD_WAIT_MS: u64 = 600_000;
+
+/// What one entry is a function of. See the module doc for each term.
 ///
-/// **Named fields rather than a tuple**, on `crate::cache::RowProjectionKey`'s argument: four of the
-/// terms are `u64`, so a transposition at the construction site would compile, run, and key one
-/// principal's counts under another's — cross-principal count reuse presenting as a cache-hit-rate
-/// improvement.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Named fields rather than a tuple: five of the terms are integers of one type, and a
+/// transposition at the construction site would compile.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MaskedCountKey {
-    /// The session's process-local identity, never the bearer token itself.
-    pub token_id: u64,
+    pub terms: [u8; 32],
     pub view: String,
     pub layer: String,
     pub level: u32,
-    /// The level's artifact-write counter — what the column and the ordinals are valid for.
     pub level_version: u64,
-    /// Whether the entry carries the accumulated geometry beside the counts
-    /// ([`MaskedGeometry`]). A term of the key rather than something a caller checks for, so an
-    /// entry built for a caller that wanted counts alone can never be handed to one that wants
-    /// the geometry and find it absent.
     pub geometry: bool,
-    /// The geometry this row space belongs to.
     pub segments_version: u64,
-    /// The overlay's own counter, bumped by every deny publication. See the module doc.
+    pub projection_segments_version: u64,
     pub overlay_version: u64,
-    /// The bundle identity of the fragment cache that produced the session's fragment.
     pub fragment_identity: [u8; 32],
-    /// The fragment's watermark.
     pub fragment_watermark: u64,
 }
 
-/// Everything about one request's composed mask that a histogram is a function of, gathered once
-/// per request rather than at each level.
-///
-/// **A value rather than five arguments**, on [`MaskedCountKey`]'s argument one call earlier: four
-/// of the five are `u64`, and a transposition among them would key one principal's counts under
-/// another's.
+/// Everything about one request's composed mask that a cache keyed on the mask is a function of,
+/// gathered once per request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MaskIdentity {
+    /// The session's process-local identity, for the caches held per session.
     pub token_id: u64,
+    /// The session's satisfied term set ([`crate::Session::terms_digest`]), for the caches every
+    /// session holding that term set shares.
+    pub terms: [u8; 32],
     pub segments_version: u64,
+    /// The generation the session's row projection was built at, one behind `segments_version`
+    /// while a stale projection is served.
+    pub projection_segments_version: u64,
     pub overlay_version: u64,
     pub fragment_identity: [u8; 32],
     pub fragment_watermark: u64,
@@ -141,13 +120,14 @@ impl MaskIdentity {
         geometry: bool,
     ) -> MaskedCountKey {
         MaskedCountKey {
-            token_id: self.token_id,
+            terms: self.terms,
             view: view.to_string(),
             layer: layer.to_string(),
             level,
             level_version,
             geometry,
             segments_version: self.segments_version,
+            projection_segments_version: self.projection_segments_version,
             overlay_version: self.overlay_version,
             fragment_identity: self.fragment_identity,
             fragment_watermark: self.fragment_watermark,
@@ -159,43 +139,25 @@ impl MaskIdentity {
 #[derive(Debug)]
 pub struct MaskedCounts {
     counts: Vec<u32>,
-    /// **The two accumulated derived properties, where the level is served from its column alone**
-    /// — see [`MaskedGeometry`]. `None` on every other level, whose derived content is computed
-    /// from the artifact's own row bitmap one artifact at a time.
+    /// The accumulated geometry, where the level is served from its column alone. `None` on every
+    /// other level, whose derived content is computed from each artifact's own row bitmap.
     geometry: Option<MaskedGeometry>,
 }
 
-/// Per ordinal, `membership ∩ M_auth`'s position sum and bounding box — the input a centroid and a
-/// box are functions of, accumulated in the same pass as the counts
-/// ([`crate::row_column::RowColumn::accumulate_over`]).
-///
-/// **Per `(session, level)` and not per artifact**, which is the whole reason it exists: a level
-/// served from its column alone has no per-artifact membership, and taking one artifact's rows out
-/// of the column costs the visible rows inside its extent — the whole visible set for a scattered
-/// artifact. One pass answers for every artifact of the level at once.
-///
-/// **A derived property is still a function of `membership ∩ M_auth` and of nothing else**
-/// (`annotations.md` §4.2): the pass reads only rows the composed mask admits, so an artifact's sum
-/// and box are over exactly the members this viewer may see.
+/// Per ordinal, the position sum and bounding box of the members this viewer may see: the inputs a
+/// centroid and a box are functions of, accumulated in the pass that counts them. The pass reads
+/// only rows the composed mask admits.
 #[derive(Debug)]
 pub struct MaskedGeometry {
     /// How many of the counted rows the row space could place — the divisor for the mean. Not the
     /// masked count, which counts every visible row.
     placed: Vec<u32>,
-    /// Exact: see [`crate::row_column::LevelAccumulation::sums`].
+    /// Exact: see [`LevelAccumulation::sums`].
     sums: Vec<[u64; 2]>,
     boxes: Vec<[u32; 4]>,
 }
 
 impl MaskedGeometry {
-    pub(crate) fn new(placed: Vec<u32>, sums: Vec<[u64; 2]>, boxes: Vec<[u32; 4]>) -> Self {
-        MaskedGeometry {
-            placed,
-            sums,
-            boxes,
-        }
-    }
-
     /// The mean position of the members this viewer may see, or `None` where they see none.
     pub fn centroid(&self, ordinal: u32) -> Option<[f64; 2]> {
         let i = ordinal as usize;
@@ -223,6 +185,7 @@ impl MaskedGeometry {
 }
 
 impl MaskedCounts {
+    #[cfg(test)]
     pub(crate) fn new(counts: Vec<u32>) -> Self {
         MaskedCounts {
             counts,
@@ -230,11 +193,21 @@ impl MaskedCounts {
         }
     }
 
-    /// The same counts with the accumulated geometry beside them — see [`MaskedGeometry`].
-    pub(crate) fn with_geometry(counts: Vec<u32>, geometry: MaskedGeometry) -> Self {
+    /// What one pass folded up, with the geometry where the pass was given positions.
+    pub(crate) fn of(accumulation: LevelAccumulation, geometry: bool) -> Self {
+        let LevelAccumulation {
+            counts,
+            placed,
+            sums,
+            boxes,
+        } = accumulation;
         MaskedCounts {
             counts,
-            geometry: Some(geometry),
+            geometry: geometry.then_some(MaskedGeometry {
+                placed,
+                sums,
+                boxes,
+            }),
         }
     }
 
@@ -295,38 +268,34 @@ impl MaskedCounts {
     }
 }
 
-/// The gauges an operator reads. Names no artifact and no principal — a count of structures.
+impl CacheWeight for MaskedCounts {
+    fn cache_weight_bytes(&self) -> u64 {
+        self.weight_bytes()
+    }
+}
+
+/// The gauges an operator reads. Names no artifact and no principal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MaskedCountStats {
+    /// Requests answered from a held entry, or from another request's build of it.
     pub hits: u64,
+    /// Builds started.
     pub misses: u64,
     pub evictions: u64,
     /// Bytes currently held.
     pub resident_bytes: u64,
-    /// Entries currently held.
+    /// Entries currently held, and builds in flight.
     pub entries: usize,
+    /// Requests waiting at this instant for another request's build of their key.
+    pub waiters: u64,
 }
 
-struct Entry {
-    counts: Arc<MaskedCounts>,
-    /// Monotone stamp, for the least-recently-used choice.
-    touched: u64,
-}
-
-#[derive(Default)]
-struct Inner {
-    entries: BTreeMap<MaskedCountKey, Entry>,
-    resident: u64,
-    clock: u64,
-}
-
-/// The cache itself: `(session, layer, level)` → masked counts, under a byte bound.
+/// The cache itself, under a byte bound.
 pub struct MaskedCountCache {
-    inner: Mutex<Inner>,
-    bound_bytes: AtomicU64,
-    hits: AtomicU64,
-    misses: AtomicU64,
-    evictions: AtomicU64,
+    slots: SingleFlightCache<MaskedCountKey, MaskedCounts>,
+    /// Builds walking now, at most [`CONCURRENT_BUILDS`].
+    building: Mutex<usize>,
+    built: Condvar,
 }
 
 impl Default for MaskedCountCache {
@@ -344,152 +313,67 @@ impl std::fmt::Debug for MaskedCountCache {
 }
 
 impl MaskedCountCache {
-    /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means "no bound" — what every
-    /// construction site outside the server gets until [`Self::set_bound_bytes`] is called.
+    /// `bound_bytes` is the resident-byte ceiling. `u64::MAX` means no bound, which every
+    /// construction site outside the server has until [`Self::set_bound_bytes`] is called.
     pub fn new(bound_bytes: u64) -> Self {
+        let slots = SingleFlightCache::new(bound_bytes);
+        slots.set_wait_budget_ms(BUILD_WAIT_MS);
         MaskedCountCache {
-            inner: Mutex::new(Inner::default()),
-            bound_bytes: AtomicU64::new(bound_bytes),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
+            slots,
+            building: Mutex::new(0),
+            built: Condvar::new(),
         }
     }
 
-    /// Move the ceiling, evicting down to it at once rather than at the next insertion — an
-    /// operator lowering a bound wants the memory back.
+    /// Move the ceiling, and drop what is held so the memory comes back at once rather than at
+    /// the next build.
     pub fn set_bound_bytes(&self, bound_bytes: u64) {
-        self.bound_bytes.store(bound_bytes, Ordering::Relaxed);
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        self.evict_to_bound(&mut inner);
+        self.slots.set_bound_bytes(bound_bytes);
+        self.slots.retain_keys(|_| false);
     }
 
     pub fn stats(&self) -> MaskedCountStats {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let stats = self.slots.stats();
         MaskedCountStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
-            evictions: self.evictions.load(Ordering::Relaxed),
-            resident_bytes: inner.resident,
-            entries: inner.entries.len(),
+            hits: stats.hits,
+            misses: stats.misses,
+            evictions: stats.evictions,
+            resident_bytes: stats.bytes,
+            entries: stats.entries,
+            waiters: stats.waiters_now,
         }
     }
 
-    /// This key's counts, building them if nothing valid is held.
-    ///
-    /// **The build runs outside the lock**, so a session's whole-mask walk does not block every
-    /// other session's lookup behind it. Two callers racing one key both build and the last one
-    /// wins; the key fixes the mask and the column, so the two results are equal and the waste is
-    /// one walk rather than a wrong answer.
-    ///
-    /// An entry larger than the whole bound is **not** admitted, and is returned to the caller
-    /// anyway: the request that needs it has it, and the cache does not evict everything else to
-    /// hold one level nothing else can fit beside.
-    pub(crate) fn get_or_build(
+    /// This key's counts, building them if nothing is held. A request arriving while another
+    /// builds the same key waits for that build, while `cancel` holds and up to
+    /// [`BUILD_WAIT_MS`], and is handed its result.
+    pub(crate) fn get_or_build<C: Cancel + ?Sized>(
         &self,
         key: MaskedCountKey,
+        cancel: &C,
         build: impl FnOnce() -> MaskedCounts,
-    ) -> Arc<MaskedCounts> {
-        {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.clock += 1;
-            let clock = inner.clock;
-            if let Some(entry) = inner.entries.get_mut(&key) {
-                entry.touched = clock;
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return Arc::clone(&entry.counts);
-            }
-        }
-        self.misses.fetch_add(1, Ordering::Relaxed);
-        let counts = Arc::new(build());
-        let weight = counts.weight_bytes();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if weight <= self.bound_bytes.load(Ordering::Relaxed) {
-            inner.clock += 1;
-            let touched = inner.clock;
-            if let Some(previous) = inner.entries.insert(
-                key,
-                Entry {
-                    counts: Arc::clone(&counts),
-                    touched,
-                },
-            ) {
-                inner.resident -= previous.counts.weight_bytes();
-            }
-            inner.resident += weight;
-            self.evict_to_bound(&mut inner);
-        }
-        counts
+    ) -> Result<Arc<MaskedCounts>, WaitEnded> {
+        self.slots.get_or_derive_waiting(key, None, cancel, |_| {
+            let _permit = self.build_permit();
+            build()
+        })
     }
 
-    /// Drop everything held for one layer, in every view and for every session.
-    ///
-    /// **Called when the layer is dropped**, beside `ArtifactProjections::forget` and for the same
-    /// reason: a dropped name is tombstoned for ever and the serving path resolves the layer through
-    /// the registry before it reaches here, so an entry left behind could never be handed to
-    /// anybody — what it could do is stay, at ~40 MB per session per level at the campaign's target.
-    ///
-    /// The hazard the call site must name is **drop and re-register**: a layer name reused after a
-    /// drop must not alias the old layer's cached counts. It cannot, because the level version
-    /// restarts and the key carries it — but the entries would still be dead weight, which is what
-    /// this removes.
-    pub fn forget(&self, layer: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let doomed: Vec<MaskedCountKey> = inner
-            .entries
-            .keys()
-            .filter(|key| key.layer == layer)
-            .cloned()
-            .collect();
-        for key in doomed {
-            if let Some(entry) = inner.entries.remove(&key) {
-                inner.resident -= entry.counts.weight_bytes();
+    /// One of the [`CONCURRENT_BUILDS`] places to walk, held until the guard drops.
+    fn build_permit(&self) -> impl Drop + '_ {
+        struct Permit<'a>(&'a MaskedCountCache);
+        impl Drop for Permit<'_> {
+            fn drop(&mut self) {
+                *self.0.building.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+                self.0.built.notify_one();
             }
         }
-    }
-
-    /// Remove every histogram belonging to one session. Called when a session is revoked, beside
-    /// `RowProjectionCache::prune_token` and with that method's argument: it only removes, so its
-    /// worst failure is a needless rebuild, and what makes the keys safe to drop is that a
-    /// `token_id` is never reused within a process.
-    pub fn prune_token(&self, token_id: u64) {
-        self.prune_tokens(&std::iter::once(token_id).collect());
-    }
-
-    /// The same removal for a set of sessions, in one pass — the expiry sweep's form. See
-    /// `RowProjectionCache::prune_tokens` for why a batch is not a loop over single removals.
-    pub fn prune_tokens(&self, token_ids: &rustc_hash::FxHashSet<u64>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let doomed: Vec<MaskedCountKey> = inner
-            .entries
-            .keys()
-            .filter(|key| token_ids.contains(&key.token_id))
-            .cloned()
-            .collect();
-        for key in doomed {
-            if let Some(entry) = inner.entries.remove(&key) {
-                inner.resident -= entry.counts.weight_bytes();
-            }
+        let mut building = self.building.lock().unwrap_or_else(PoisonError::into_inner);
+        while *building >= CONCURRENT_BUILDS {
+            building = self.built.wait(building).unwrap_or_else(PoisonError::into_inner);
         }
-    }
-
-    /// Least recently used first, until the bound is met.
-    fn evict_to_bound(&self, inner: &mut Inner) {
-        let bound = self.bound_bytes.load(Ordering::Relaxed);
-        while inner.resident > bound {
-            let Some(victim) = inner
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.touched)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            if let Some(entry) = inner.entries.remove(&victim) {
-                inner.resident -= entry.counts.weight_bytes();
-                self.evictions.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        *building += 1;
+        Permit(self)
     }
 }
 
@@ -497,15 +381,16 @@ impl MaskedCountCache {
 mod tests {
     use super::*;
 
-    fn key(token: u64, layer: &str, overlay: u64) -> MaskedCountKey {
+    fn key(terms: u8, layer: &str, overlay: u64) -> MaskedCountKey {
         MaskedCountKey {
             geometry: false,
-            token_id: token,
+            terms: [terms; 32],
             view: "s0".into(),
             layer: layer.into(),
             level: 0,
             level_version: 1,
             segments_version: 1,
+            projection_segments_version: 1,
             overlay_version: overlay,
             fragment_identity: [7u8; 32],
             fragment_watermark: 0,
@@ -516,114 +401,180 @@ mod tests {
         MaskedCounts::new(values.to_vec())
     }
 
+    fn get(
+        cache: &MaskedCountCache,
+        key: MaskedCountKey,
+        build: impl FnOnce() -> MaskedCounts,
+    ) -> Arc<MaskedCounts> {
+        cache
+            .get_or_build(key, &tessera_cache::NeverCancelled, build)
+            .expect("nothing else is building")
+    }
+
     /// A hit does not rebuild, and a miss does.
     #[test]
     fn one_walk_per_key() {
         let cache = MaskedCountCache::default();
-        let mut built = 0;
+        let built = std::sync::atomic::AtomicU32::new(0);
         for _ in 0..3 {
-            let held = cache.get_or_build(key(1, "a", 0), || {
-                built += 1;
+            let held = get(&cache, key(1, "a", 0), || {
+                built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 counts(&[5, 6])
             });
             assert_eq!(held.get(0), 5);
             assert_eq!(held.get(1), 6);
             assert_eq!(held.get(9), 0, "past the level is zero, not a panic");
         }
-        assert_eq!(built, 1);
+        assert_eq!(built.into_inner(), 1);
         assert_eq!(cache.stats().hits, 2);
         assert_eq!(cache.stats().misses, 1);
     }
 
-    /// **The deny edge.** A suppression moves the overlay's counter, so the key a request produces
-    /// after the acknowledgement is not the key the pre-deny histogram sits under — and the count
-    /// the viewer is served is the corrected one on the *next* request rather than at the next
-    /// refresh. An unsuppress moves it again and re-derives, which is what leaves
-    /// `delete → suppress → unsuppress` deleted.
+    /// Requests that arrive while a key is building wait for that build rather than walking the
+    /// mask again, and are handed what it built.
+    #[test]
+    fn concurrent_requests_for_one_key_share_one_build() {
+        let cache = Arc::new(MaskedCountCache::default());
+        let builds = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Arc::new(std::sync::Mutex::new(held));
+        let askers: Vec<_> = (0..4)
+            .map(|_| {
+                let (cache, builds, held) = (Arc::clone(&cache), Arc::clone(&builds), Arc::clone(&held));
+                std::thread::spawn(move || {
+                    get(&cache, key(1, "a", 0), || {
+                        builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        held.lock().unwrap().recv().unwrap();
+                        counts(&[3, 4])
+                    })
+                    .get(1)
+                })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while cache.stats().waiters < 3 {
+            assert!(std::time::Instant::now() < deadline, "the other requests never waited");
+            std::thread::yield_now();
+        }
+        release.send(()).unwrap();
+        for asker in askers {
+            assert_eq!(asker.join().unwrap(), 4);
+        }
+        assert_eq!(builds.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().hits, 3);
+    }
+
+    /// A waiter whose request goes away stops waiting, and the build it was waiting for is
+    /// unaffected.
+    #[test]
+    fn a_waiter_leaves_when_its_request_does() {
+        let cache = Arc::new(MaskedCountCache::default());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let builder = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                get(&cache, key(1, "a", 0), || {
+                    held.recv().unwrap();
+                    counts(&[7])
+                })
+                .get(0)
+            })
+        };
+        while cache.stats().misses == 0 {
+            std::thread::yield_now();
+        }
+        let gone = crate::CancelToken::new();
+        gone.cancel();
+        let waited = cache.get_or_build(key(1, "a", 0), &gone, || counts(&[0]));
+        assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
+        release.send(()).unwrap();
+        assert_eq!(builder.join().unwrap(), 7);
+    }
+
+    /// No more than [`CONCURRENT_BUILDS`] builds walk at once, whatever their keys: the rest have
+    /// claimed their keys and wait for a place.
+    #[test]
+    fn builds_beyond_the_limit_queue() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let cache = Arc::new(MaskedCountCache::default());
+        let walking = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let open = Arc::new(AtomicBool::new(false));
+        let builders: Vec<_> = (0..6u8)
+            .map(|terms| {
+                let (cache, walking, most, open) =
+                    (Arc::clone(&cache), Arc::clone(&walking), Arc::clone(&most), Arc::clone(&open));
+                std::thread::spawn(move || {
+                    get(&cache, key(terms, "a", 0), || {
+                        most.fetch_max(walking.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        while !open.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                        walking.fetch_sub(1, Ordering::SeqCst);
+                        counts(&[u32::from(terms)])
+                    })
+                    .get(0)
+                })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while cache.stats().misses < 6 || walking.load(Ordering::SeqCst) < CONCURRENT_BUILDS {
+            assert!(std::time::Instant::now() < deadline, "the builds never started");
+            std::thread::yield_now();
+        }
+        open.store(true, Ordering::SeqCst);
+        for (terms, builder) in builders.into_iter().enumerate() {
+            assert_eq!(builder.join().unwrap(), terms as u64);
+        }
+        assert_eq!(most.load(Ordering::SeqCst), CONCURRENT_BUILDS);
+    }
+
+    /// A deny moves the overlay's counter, so the key a request produces after the acknowledgement
+    /// is not the key the pre-deny entry sits under. The pre-deny entry is not edited.
     #[test]
     fn a_deny_rotates_the_key_rather_than_editing_the_entry() {
         let cache = MaskedCountCache::default();
-        let before = cache.get_or_build(key(1, "a", 4), || counts(&[10]));
+        let before = get(&cache, key(1, "a", 4), || counts(&[10]));
         assert_eq!(before.get(0), 10);
-
-        // The deny is acknowledged; the overlay publishes; the counter moves.
-        let after = cache.get_or_build(key(1, "a", 5), || counts(&[9]));
+        let after = get(&cache, key(1, "a", 5), || counts(&[9]));
         assert_eq!(after.get(0), 9, "the corrected count, not the held one");
-        // And the pre-deny entry is still exactly what it was — nothing here mutates a value.
         assert_eq!(
-            cache.get_or_build(key(1, "a", 4), || counts(&[0])).get(0),
+            get(&cache, key(1, "a", 4), || counts(&[0])).get(0),
             10
         );
     }
 
-    /// Two principals do not share counts, whatever else their keys have in common.
+    /// Two term sets do not share counts, whatever else their keys have in common.
     #[test]
-    fn the_counts_are_the_principals_own() {
+    fn the_counts_are_the_term_sets_own() {
         let cache = MaskedCountCache::default();
-        assert_eq!(
-            cache.get_or_build(key(1, "a", 0), || counts(&[3])).get(0),
-            3
-        );
-        assert_eq!(
-            cache.get_or_build(key(2, "a", 0), || counts(&[8])).get(0),
-            8
-        );
-        assert_eq!(
-            cache.get_or_build(key(1, "a", 0), || counts(&[0])).get(0),
-            3
-        );
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[3])).get(0), 3);
+        assert_eq!(get(&cache, key(2, "a", 0), || counts(&[8])).get(0), 8);
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0])).get(0), 3);
     }
 
-    /// The budget evicts least-recently-used, and lowering it reclaims at once.
+    /// The bound evicts the least recently used, lowering it reclaims at once, and an entry
+    /// larger than the whole bound is served and not admitted.
     #[test]
     fn the_budget_bounds_what_is_resident() {
-        // Three entries of two counts each: 8 bytes apiece.
-        let cache = MaskedCountCache::new(16);
-        cache.get_or_build(key(1, "a", 0), || counts(&[1, 1]));
-        cache.get_or_build(key(2, "a", 0), || counts(&[2, 2]));
+        let floor = tessera_cache::PER_ENTRY_FLOOR_BYTES;
+        let cache = MaskedCountCache::new(2 * floor);
+        get(&cache, key(1, "a", 0), || counts(&[1, 1]));
+        get(&cache, key(2, "a", 0), || counts(&[2, 2]));
         assert_eq!(cache.stats().entries, 2);
-        assert_eq!(cache.stats().resident_bytes, 16);
 
-        // Touch the first so the second is the least recently used.
-        cache.get_or_build(key(1, "a", 0), || counts(&[0, 0]));
-        cache.get_or_build(key(3, "a", 0), || counts(&[3, 3]));
+        get(&cache, key(1, "a", 0), || counts(&[0, 0]));
+        get(&cache, key(3, "a", 0), || counts(&[3, 3]));
         assert_eq!(cache.stats().entries, 2);
         assert_eq!(cache.stats().evictions, 1);
-        assert_eq!(
-            cache
-                .get_or_build(key(1, "a", 0), || counts(&[0, 0]))
-                .get(0),
-            1
-        );
+        assert_eq!(get(&cache, key(1, "a", 0), || counts(&[0, 0])).get(0), 1);
 
-        // Lowering the bound reclaims immediately rather than at the next insertion.
-        cache.set_bound_bytes(8);
-        assert_eq!(cache.stats().entries, 1);
         cache.set_bound_bytes(0);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().resident_bytes, 0);
-
-        // An entry larger than the whole bound is served and not admitted.
-        let held = cache.get_or_build(key(4, "a", 0), || counts(&[9, 9]));
+        let held = get(&cache, key(4, "a", 0), || counts(&[9, 9]));
         assert_eq!(held.get(0), 9);
         assert_eq!(cache.stats().entries, 0);
-    }
-
-    /// A dropped layer's entries go, and one session's revocation takes only that session's.
-    #[test]
-    fn forget_and_prune_remove_and_only_remove() {
-        let cache = MaskedCountCache::default();
-        cache.get_or_build(key(1, "a", 0), || counts(&[1]));
-        cache.get_or_build(key(1, "b", 0), || counts(&[1]));
-        cache.get_or_build(key(2, "a", 0), || counts(&[1]));
-        assert_eq!(cache.stats().entries, 3);
-
-        cache.forget("a");
-        assert_eq!(cache.stats().entries, 1);
-        assert_eq!(cache.stats().resident_bytes, 4);
-
-        cache.get_or_build(key(2, "b", 0), || counts(&[1]));
-        cache.prune_token(1);
-        assert_eq!(cache.stats().entries, 1);
     }
 }
