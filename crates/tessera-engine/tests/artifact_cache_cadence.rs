@@ -605,26 +605,25 @@ fn two_principals_over_one_artifact_get_two_shapes() {
 // The pruners: what a revoked session takes with it.
 // ---------------------------------------------------------------------------------------------
 
-/// The three per-session gauges a prune must move, read together so one assertion names all of
-/// them: masked counts, the occupancy ladder and derived geometry.
-fn per_session_entries(engine: &Engine) -> [usize; 3] {
+/// The two per-session gauges a prune must move, read together so one assertion names both: the
+/// occupancy ladder and derived geometry.
+fn per_session_entries(engine: &Engine) -> [usize; 2] {
     [
-        engine.masked_count_cache_stats().entries,
         engine.occupancy_cache_stats().entries,
         engine.derived_cache_stats().entries,
     ]
 }
 
-/// A level served row-major, which is the only shape a masked-count histogram is built for: the
-/// column has no per-artifact route to a count, so the histogram is what answers.
+/// A level served row-major, which is the only shape masked counts are held for. They are keyed
+/// on the term set rather than the session, so a prune leaves them.
 fn row_major(name: &str) -> LayerDeclaration {
     let mut declaration = flat(name);
     declaration.layout = Some(tessera_types::layer::ServingLayout::RowMajorLabel);
     declaration
 }
 
-/// Two layers, because the two caches want different ones: a masked-count histogram is built only
-/// for a level served column-only, and a hull is what a shape is held for. The background fill is
+/// Two layers: masked counts are held only for a level served by row, and a hull is what a shape
+/// is held for. The background fill is
 /// off so every entry below is one a request made.
 fn pruning_fixture(fx: &Fixture) -> Engine {
     let engine = fx.open();
@@ -660,14 +659,14 @@ fn warm(engine: &Engine, session: &tessera_engine::Session) {
     }
 }
 
-/// **A prune drops every cache the session warmed, not only its row projections.**
+/// **A prune drops every per-session cache the session warmed, not only its row projections.**
 ///
-/// The revoked session's masked-count histograms, occupancy rungs and derived shapes are each the
-/// largest per-session structure in their own right — a masked-count histogram alone is ~4 B per
-/// artifact — and nothing else holds them once the session is gone. The surviving session keeps
-/// all of its own and is still served.
+/// The revoked session's occupancy rungs and derived shapes are each a large per-session
+/// structure, and nothing else holds them once the session is gone. The surviving session keeps
+/// all of its own and is still served. The level's masked counts are keyed on the term set, which
+/// another session may hold, so the prune leaves them.
 #[test]
-fn a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes() {
+fn a_prune_drops_the_tokens_occupancy_and_shapes() {
     let fx = fixture();
     let engine = pruning_fixture(&fx);
 
@@ -690,7 +689,10 @@ fn a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes() {
         );
     }
 
+    let counts = engine.masked_count_cache_stats().entries;
+    assert!(counts > 0);
     engine.prune_token(doomed.token_id());
+    assert_eq!(engine.masked_count_cache_stats().entries, counts);
 
     let after = per_session_entries(&engine);
     for (cache, ((&after, &both), &doomed)) in after
@@ -715,7 +717,7 @@ fn a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes() {
     );
 }
 
-/// [`a_prune_drops_the_tokens_masked_counts_occupancy_and_shapes`] through the sweep's batch form,
+/// [`a_prune_drops_the_tokens_occupancy_and_shapes`] through the sweep's batch form,
 /// which walks each cache once with a set membership test rather than once per victim.
 #[test]
 fn a_batch_prune_drops_the_same_caches_as_a_single_one() {
