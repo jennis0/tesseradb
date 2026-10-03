@@ -1,0 +1,74 @@
+[
+ {
+  "status": 200,
+  "headers_s": 0.343,
+  "last_s": 9.101,
+  "bytes": 1783593,
+  "level": 0,
+  "principal": "100%",
+  "which": "new"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.293,
+  "last_s": 0.319,
+  "bytes": 1783591,
+  "level": 0,
+  "principal": "100%",
+  "which": "second session"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.196,
+  "last_s": 8.127,
+  "bytes": 1584489,
+  "level": 0,
+  "principal": "85%",
+  "which": "new"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.372,
+  "last_s": 0.388,
+  "bytes": 1584487,
+  "level": 0,
+  "principal": "85%",
+  "which": "second session"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.005,
+  "last_s": 0.431,
+  "bytes": 947046,
+  "level": 0,
+  "principal": "7%",
+  "which": "new"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.005,
+  "last_s": 0.014,
+  "bytes": 947045,
+  "level": 0,
+  "principal": "7%",
+  "which": "second session"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.005,
+  "last_s": 1.475,
+  "bytes": 697255,
+  "level": 0,
+  "principal": "1%",
+  "which": "new"
+ },
+ {
+  "status": 200,
+  "headers_s": 0.006,
+  "last_s": 0.014,
+  "bytes": 697253,
+  "level": 0,
+  "principal": "1%",
+  "which": "second session"
+ }
+]

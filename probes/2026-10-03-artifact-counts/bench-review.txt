@@ -1,0 +1,252 @@
+measurement                                           n  median ms     p95 ms     max ms  shed/failed
+session.1%.authorise.first                            1       53.9       53.9       53.9  
+session.1%.counts.first                               1      174.7      174.7      174.7  
+session.1%.first_points.first                         1     1888.1     1888.1     1888.1  
+session.1%.last_byte.first                            1     2851.4     2851.4     2851.4  
+session.1%.settled.first                              1     2851.4     2851.4     2851.4  
+session.1%.authorise.again                            1        2.0        2.0        2.0  
+session.1%.counts.again                               1       23.0       23.0       23.0  
+session.1%.first_points.again                         1       34.4       34.4       34.4  
+session.1%.last_byte.again                            1      212.6      212.6      212.6  
+session.1%.settled.again                              1      279.9      279.9      279.9  
+session.7%.authorise.first                            1       18.7       18.7       18.7  
+session.7%.counts.first                               1       23.1       23.1       23.1  
+session.7%.first_points.first                         1      198.6      198.6      198.6  
+session.7%.last_byte.first                            1     1765.3     1765.3     1765.3  
+session.7%.settled.first                              1     1765.3     1765.3     1765.3  
+session.7%.authorise.again                            1        1.7        1.7        1.7  
+session.7%.counts.again                               1       19.8       19.8       19.8  
+session.7%.first_points.again                         1       35.7       35.7       35.7  
+session.7%.last_byte.again                            1      682.6      682.6      682.6  
+session.7%.settled.again                              1      682.6      682.6      682.6  
+session.85%.authorise.first                           1      224.9      224.9      224.9  
+session.85%.counts.first                              1      170.2      170.2      170.2  
+session.85%.first_points.first                        1     4323.4     4323.4     4323.4  
+session.85%.last_byte.first                           1    13159.5    13159.5    13159.5  
+session.85%.settled.first                             1    13159.5    13159.5    13159.5  
+session.85%.authorise.again                           1        1.7        1.7        1.7  
+session.85%.counts.again                              1      176.7      176.7      176.7  
+session.85%.first_points.again                        1      294.7      294.7      294.7  
+session.85%.last_byte.again                           1     5186.9     5186.9     5186.9  
+session.85%.settled.again                             1     5186.9     5186.9     5186.9  
+session.100%.authorise.first                          1      326.1      326.1      326.1  
+session.100%.counts.first                             1      143.7      143.7      143.7  
+session.100%.first_points.first                       1     1540.9     1540.9     1540.9  
+session.100%.last_byte.first                          1     5180.5     5180.5     5180.5  
+session.100%.settled.first                            1     5182.3     5182.3     5182.3  
+session.100%.authorise.again                          1        1.8        1.8        1.8  
+session.100%.counts.again                             1      211.1      211.1      211.1  
+session.100%.first_points.again                       1      606.5      606.5      606.5  
+session.100%.last_byte.again                          1      662.4      662.4      662.4  
+session.100%.settled.again                            1      662.4      662.4      662.4  
+map.1%.z1-4.zoom_in.counts                            2       26.0      187.0      187.0  
+map.1%.z1-4.zoom_in.first_points                      2       41.5      212.3      212.3  
+map.1%.z1-4.zoom_in.last_byte                         2      498.3      841.3      841.3  
+map.1%.z5-8.zoom_in.counts                            2       11.9       12.8       12.8  
+map.1%.z5-8.zoom_in.first_points                      2       18.6       66.2       66.2  
+map.1%.z5-8.zoom_in.last_byte                         2      536.5     1324.1     1324.1  
+map.1%.z5-8.pan.counts                                2       10.7       20.4       20.4  
+map.1%.z5-8.pan.first_points                          2       15.8       25.8       25.8  
+map.1%.z5-8.pan.last_byte                             2      157.5     1042.8     1042.8  
+map.1%.z9-11.zoom_in.counts                           2       10.1       13.4       13.4  
+map.1%.z9-11.zoom_in.first_points                     2       14.0       25.3       25.3  
+map.1%.z9-11.zoom_in.last_byte                        2      405.7     1241.8     1241.8  
+map.1%.z9-11.pan.counts                               2        6.0        8.7        8.7  
+map.1%.z9-11.pan.first_points                         2        7.4       11.5       11.5  
+map.1%.z9-11.pan.last_byte                            2       74.0       84.7       84.7  
+map.1%.z12-14.pan.counts                              1        9.2        9.2        9.2  
+map.1%.z12-14.pan.first_points                        1       12.3       12.3       12.3  
+map.1%.z12-14.pan.last_byte                           1      251.0      251.0      251.0  
+map.7%.z1-4.zoom_in.counts                            1      590.6      590.6      590.6  
+map.7%.z1-4.zoom_in.first_points                      1      629.7      629.7      629.7  
+map.7%.z1-4.zoom_in.last_byte                         1     1861.4     1861.4     1861.4  
+map.7%.z5-8.zoom_in.counts                            2       12.8       73.6       73.6  
+map.7%.z5-8.zoom_in.first_points                      2       20.7      489.1      489.1  
+map.7%.z5-8.zoom_in.last_byte                         2      719.4     1569.7     1569.7  
+map.7%.z5-8.pan.counts                                2        9.0       11.9       11.9  
+map.7%.z5-8.pan.first_points                          2       10.1       21.7       21.7  
+map.7%.z5-8.pan.last_byte                             2       97.6      487.3      487.3  
+map.7%.z9-11.zoom_in.counts                           2       11.6       28.4       28.4  
+map.7%.z9-11.zoom_in.first_points                     2       16.8       40.6       40.6  
+map.7%.z9-11.zoom_in.last_byte                        2      514.6     1265.8     1265.8  
+map.7%.z9-11.pan.counts                               2        8.1       25.6       25.6  
+map.7%.z9-11.pan.first_points                         2        9.5       31.5       31.5  
+map.7%.z9-11.pan.last_byte                            2       59.0      595.6      595.6  
+map.7%.z12-14.zoom_in.counts                          1       27.7       27.7       27.7  
+map.7%.z12-14.zoom_in.first_points                    1       31.2       31.2       31.2  
+map.7%.z12-14.zoom_in.last_byte                       1       98.4       98.4       98.4  
+map.85%.z1-4.zoom_in.counts                           1       42.3       42.3       42.3  
+map.85%.z1-4.zoom_in.first_points                     1       89.0       89.0       89.0  
+map.85%.z1-4.zoom_in.last_byte                        1     3393.9     3393.9     3393.9  
+map.85%.z5-8.zoom_in.counts                           2      792.3     7649.8     7649.8  
+map.85%.z5-8.zoom_in.first_points                     2     1082.4     8221.4     8221.4  
+map.85%.z5-8.zoom_in.last_byte                        2     3191.7    11576.6    11576.6  
+map.85%.z5-8.pan.counts                               2       13.0      201.5      201.5  
+map.85%.z5-8.pan.first_points                         2       16.6      236.9      236.9  
+map.85%.z5-8.pan.last_byte                            2       72.7     1511.8     1511.8  
+map.85%.z9-11.zoom_in.counts                          2       26.7      182.2      182.2  
+map.85%.z9-11.zoom_in.first_points                    2       52.2      226.9      226.9  
+map.85%.z9-11.zoom_in.last_byte                       2      523.8     8248.8     8248.8  
+map.85%.z9-11.pan.counts                              2        7.3       20.2       20.2  
+map.85%.z9-11.pan.first_points                        2       11.2       26.6       26.6  
+map.85%.z9-11.pan.last_byte                           2      256.1      369.2      369.2  
+map.85%.z12-14.zoom_in.counts                         2        5.5      259.4      259.4  
+map.85%.z12-14.zoom_in.first_points                   2        5.6      260.1      260.1  
+map.85%.z12-14.zoom_in.last_byte                      2       13.3      399.5      399.5  
+map.100%.z1-4.zoom_in.counts                          1       27.7       27.7       27.7  
+map.100%.z1-4.zoom_in.first_points                    1       61.7       61.7       61.7  
+map.100%.z1-4.zoom_in.last_byte                       1     4798.5     4798.5     4798.5  
+map.100%.z5-8.zoom_in.counts                          2      650.9     5177.1     5177.1  
+map.100%.z5-8.zoom_in.first_points                    2      986.1     6855.0     6855.0  
+map.100%.z5-8.zoom_in.last_byte                       2     3131.7    11244.2    11244.2  
+map.100%.z5-8.pan.counts                              2       10.4      117.7      117.7  
+map.100%.z5-8.pan.first_points                        2       13.1      128.4      128.4  
+map.100%.z5-8.pan.last_byte                           2      421.8     1272.4     1272.4  
+map.100%.z9-11.zoom_in.counts                         2       18.1      312.8      312.8  
+map.100%.z9-11.zoom_in.first_points                   2       28.4      359.7      359.7  
+map.100%.z9-11.zoom_in.last_byte                      2     1689.8    10236.2    10236.2  
+map.100%.z9-11.pan.counts                             2        4.4       92.8       92.8  
+map.100%.z9-11.pan.first_points                       2        5.0       94.8       94.8  
+map.100%.z9-11.pan.last_byte                          2       40.7      446.6      446.6  
+map.100%.z12-14.zoom_in.counts                        1        3.6        3.6        3.6  
+map.100%.z12-14.zoom_in.first_points                  1        4.0        4.0        4.0  
+map.100%.z12-14.zoom_in.last_byte                     1       14.1       14.1       14.1  
+map.100%.z12-14.pan.counts                            2        2.6      535.8      535.8  
+map.100%.z12-14.pan.first_points                      2        2.7      535.9      535.9  
+map.100%.z12-14.pan.last_byte                         2        9.7      562.4      562.4  
+requests.artifacts.last_byte                         16      784.0     9190.0     9190.0  
+requests.counts.last_byte                             8      143.0      213.0      213.0  
+requests.marks.last_byte                            181       29.6     2706.4     9423.6  
+requests.promotion.last_byte                          8      289.7     3124.5     3124.5  
+lookup.1%.item_card                                 200        1.0       37.7      116.2  
+lookup.1%.filter_eq_gbifid                          200        1.2       15.6       19.2  
+lookup.100%.item_card                               200       24.0       54.6       65.7  
+lookup.100%.filter_eq_gbifid                        200        6.8       16.7       21.1  
+ran 566.5 s; wrote probes/2026-10-03-artifact-counts/bench-review.json
+
+measurement                                          old n/median   new n/median   change   old p95   new p95  old/new shed/failed
+session.1%.authorise.first                                 1/70.1         1/53.9     -23%      70.1      53.9  - / -
+session.1%.counts.first                                   1/406.7        1/174.7     -57%     406.7     174.7  - / -
+session.1%.first_points.first                            1/1352.8       1/1888.1     +40%    1352.8    1888.1  - / -
+session.1%.last_byte.first                               1/3831.6       1/2851.4     -26%    3831.6    2851.4  - / -
+session.1%.settled.first                                 1/3831.6       1/2851.4     -26%    3831.6    2851.4  - / -
+session.1%.authorise.again                                  1/1.8          1/2.0     +11%       1.8       2.0  - / -
+session.1%.counts.again                                    1/29.2         1/23.0     -21%      29.2      23.0  - / -
+session.1%.first_points.again                              1/52.7         1/34.4     -35%      52.7      34.4  - / -
+session.1%.last_byte.again                                1/831.3        1/212.6     -74%     831.3     212.6  - / -
+session.1%.settled.again                                  1/831.3        1/279.9     -66%     831.3     279.9  - / -
+session.7%.authorise.first                                 1/20.1         1/18.7      -7%      20.1      18.7  - / -
+session.7%.counts.first                                    1/21.4         1/23.1      +8%      21.4      23.1  - / -
+session.7%.first_points.first                             1/662.8        1/198.6     -70%     662.8     198.6  - / -
+session.7%.last_byte.first                               1/8162.9       1/1765.3     -78%    8162.9    1765.3  - / -
+session.7%.settled.first                                1/11566.2       1/1765.3     -85%   11566.2    1765.3  - / -
+session.7%.authorise.again                                  1/1.7          1/1.7      +0%       1.7       1.7  - / -
+session.7%.counts.again                                    1/28.9         1/19.8     -31%      28.9      19.8  - / -
+session.7%.first_points.again                              1/69.2         1/35.7     -48%      69.2      35.7  - / -
+session.7%.last_byte.again                               1/9741.9        1/682.6     -93%    9741.9     682.6  - / -
+session.7%.settled.again                                 1/9741.9        1/682.6     -93%    9741.9     682.6  - / -
+session.85%.authorise.first                               1/320.9        1/224.9     -30%     320.9     224.9  - / -
+session.85%.counts.first                                  1/152.8        1/170.2     +11%     152.8     170.2  - / -
+session.85%.first_points.first                           1/2043.6       1/4323.4    +112%    2043.6    4323.4  - / -
+session.85%.last_byte.first                             1/28479.3      1/13159.5     -54%   28479.3   13159.5  - / -
+session.85%.settled.first                               1/28479.3      1/13159.5     -54%   28479.3   13159.5  - / -
+session.85%.authorise.again                                 1/1.7          1/1.7      +0%       1.7       1.7  - / -
+session.85%.counts.again                                  1/192.3        1/176.7      -8%     192.3     176.7  - / -
+session.85%.first_points.again                           1/3543.7        1/294.7     -92%    3543.7     294.7  - / -
+session.85%.last_byte.again                             1/19942.5       1/5186.9     -74%   19942.5    5186.9  - / -
+session.85%.settled.again                               1/19942.5       1/5186.9     -74%   19942.5    5186.9  - / -
+session.100%.authorise.first                              1/305.9        1/326.1      +7%     305.9     326.1  - / -
+session.100%.counts.first                                 1/147.5        1/143.7      -3%     147.5     143.7  - / -
+session.100%.first_points.first                         1/13085.1       1/1540.9     -88%   13085.1    1540.9  - / -
+session.100%.last_byte.first                            1/13650.3       1/5180.5     -62%   13650.3    5180.5  - / -
+session.100%.settled.first                              1/13650.3       1/5182.3     -62%   13650.3    5182.3  - / -
+session.100%.authorise.again                                1/2.2          1/1.8     -18%       2.2       1.8  - / -
+session.100%.counts.again                                 1/164.6        1/211.1     +28%     164.6     211.1  - / -
+session.100%.first_points.again                          1/1704.9        1/606.5     -64%    1704.9     606.5  - / -
+session.100%.last_byte.again                            1/20196.4        1/662.4     -97%   20196.4     662.4  - / -
+session.100%.settled.again                              1/20204.3        1/662.4     -97%   20204.3     662.4  - / -
+map.1%.z1-4.zoom_in.counts                                 2/24.2         2/26.0      +7%     202.6     187.0  - / -
+map.1%.z1-4.zoom_in.first_points                           2/42.7         2/41.5      -3%     231.7     212.3  - / -
+map.1%.z1-4.zoom_in.last_byte                             2/537.7        2/498.3      -7%     850.9     841.3  - / -
+map.1%.z5-8.zoom_in.counts                                 2/10.0         2/11.9     +19%      13.0      12.8  - / -
+map.1%.z5-8.zoom_in.first_points                           2/21.1         2/18.6     -12%      81.5      66.2  - / -
+map.1%.z5-8.zoom_in.last_byte                             2/553.5        2/536.5      -3%    1998.0    1324.1  - / -
+map.1%.z5-8.pan.counts                                     2/13.9         2/10.7     -23%      21.5      20.4  - / -
+map.1%.z5-8.pan.first_points                               2/21.3         2/15.8     -26%      29.3      25.8  - / -
+map.1%.z5-8.pan.last_byte                                 2/188.4        2/157.5     -16%    1011.3    1042.8  - / -
+map.1%.z9-11.zoom_in.counts                                2/11.8         2/10.1     -14%      15.1      13.4  - / -
+map.1%.z9-11.zoom_in.first_points                          2/17.7         2/14.0     -21%      47.4      25.3  - / -
+map.1%.z9-11.zoom_in.last_byte                            2/384.8        2/405.7      +5%    2229.3    1241.8  - / -
+map.1%.z9-11.pan.counts                                     2/7.2          2/6.0     -17%       9.2       8.7  - / -
+map.1%.z9-11.pan.first_points                               2/9.2          2/7.4     -20%      14.3      11.5  - / -
+map.1%.z9-11.pan.last_byte                                 2/82.8         2/74.0     -11%      89.3      84.7  - / -
+map.1%.z12-14.pan.counts                                   1/10.3          1/9.2     -11%      10.3       9.2  - / -
+map.1%.z12-14.pan.first_points                             1/13.7         1/12.3     -10%      13.7      12.3  - / -
+map.1%.z12-14.pan.last_byte                               1/754.8        1/251.0     -67%     754.8     251.0  - / -
+map.7%.z1-4.zoom_in.counts                                1/591.0        1/590.6      -0%     591.0     590.6  - / -
+map.7%.z1-4.zoom_in.first_points                          1/632.8        1/629.7      -0%     632.8     629.7  - / -
+map.7%.z1-4.zoom_in.last_byte                            1/1895.5       1/1861.4      -2%    1895.5    1861.4  - / -
+map.7%.z5-8.zoom_in.counts                                 2/12.6         2/12.8      +2%      72.4      73.6  - / -
+map.7%.z5-8.zoom_in.first_points                           2/22.7         2/20.7      -9%     532.1     489.1  - / -
+map.7%.z5-8.zoom_in.last_byte                             2/719.2        2/719.4      +0%    6737.5    1569.7  - / -
+map.7%.z5-8.pan.counts                                      2/8.2          2/9.0     +10%       8.5      11.9  - / -
+map.7%.z5-8.pan.first_points                                2/9.5         2/10.1      +6%      21.4      21.7  - / -
+map.7%.z5-8.pan.last_byte                                  2/88.9         2/97.6     +10%     523.8     487.3  - / -
+map.7%.z9-11.zoom_in.counts                                 2/9.4         2/11.6     +23%      30.7      28.4  - / -
+map.7%.z9-11.zoom_in.first_points                          2/16.7         2/16.8      +1%     116.4      40.6  - / -
+map.7%.z9-11.zoom_in.last_byte                            2/483.0        2/514.6      +7%   12033.0    1265.8  - / -
+map.7%.z9-11.pan.counts                                     2/8.6          2/8.1      -6%      25.5      25.6  - / -
+map.7%.z9-11.pan.first_points                              2/10.0          2/9.5      -5%      36.1      31.5  - / -
+map.7%.z9-11.pan.last_byte                                 2/60.3         2/59.0      -2%     817.0     595.6  - / -
+map.7%.z12-14.zoom_in.counts                               1/30.2         1/27.7      -8%      30.2      27.7  - / -
+map.7%.z12-14.zoom_in.first_points                         1/36.0         1/31.2     -13%      36.0      31.2  - / -
+map.7%.z12-14.zoom_in.last_byte                           1/105.9         1/98.4      -7%     105.9      98.4  - / -
+map.85%.z1-4.zoom_in.counts                                1/53.1         1/42.3     -20%      53.1      42.3  - / -
+map.85%.z1-4.zoom_in.first_points                         1/133.1         1/89.0     -33%     133.1      89.0  - / -
+map.85%.z1-4.zoom_in.last_byte                           1/3663.4       1/3393.9      -7%    3663.4    3393.9  - / -
+map.85%.z5-8.zoom_in.counts                              2/1753.0        2/792.3     -55%    9392.8    7649.8  - / -
+map.85%.z5-8.zoom_in.first_points                        2/2682.2       2/1082.4     -60%   14286.2    8221.4  - / -
+map.85%.z5-8.zoom_in.last_byte                           2/5385.9       2/3191.7     -41%   34189.0   11576.6  - / -
+map.85%.z5-8.pan.counts                                    2/15.9         2/13.0     -18%     499.5     201.5  - / -
+map.85%.z5-8.pan.first_points                              2/38.2         2/16.6     -57%     593.3     236.9  - / -
+map.85%.z5-8.pan.last_byte                                 2/96.6         2/72.7     -25%    2194.3    1511.8  - / -
+map.85%.z9-11.zoom_in.counts                               2/29.0         2/26.7      -8%     264.9     182.2  - / -
+map.85%.z9-11.zoom_in.first_points                         2/88.7         2/52.2     -41%     802.7     226.9  - / -
+map.85%.z9-11.zoom_in.last_byte                           2/948.5        2/523.8     -45%   24860.0    8248.8  - / -
+map.85%.z9-11.pan.counts                                    2/8.1          2/7.3     -10%      91.4      20.2  - / -
+map.85%.z9-11.pan.first_points                             2/14.3         2/11.2     -22%     164.1      26.6  - / -
+map.85%.z9-11.pan.last_byte                               2/279.8        2/256.1      -8%     791.1     369.2  - / -
+map.85%.z12-14.zoom_in.counts                               2/6.2          2/5.5     -11%     341.4     259.4  - / -
+map.85%.z12-14.zoom_in.first_points                         2/6.2          2/5.6     -10%     349.0     260.1  - / -
+map.85%.z12-14.zoom_in.last_byte                           2/13.0         2/13.3      +2%     412.9     399.5  - / -
+map.100%.z1-4.zoom_in.counts                               1/37.8         1/27.7     -27%      37.8      27.7  - / -
+map.100%.z1-4.zoom_in.first_points                        1/114.0         1/61.7     -46%     114.0      61.7  - / -
+map.100%.z1-4.zoom_in.last_byte                          1/4221.8       1/4798.5     +14%    4221.8    4798.5  - / -
+map.100%.z5-8.zoom_in.counts                             2/1368.6        2/650.9     -52%   16347.5    5177.1  - / -
+map.100%.z5-8.zoom_in.first_points                       2/2248.2        2/986.1     -56%   17262.3    6855.0  - / -
+map.100%.z5-8.zoom_in.last_byte                          2/4665.3       2/3131.7     -33%   22047.0   11244.2  - / -
+map.100%.z5-8.pan.counts                                    2/9.1         2/10.4     +14%      91.7     117.7  - / -
+map.100%.z5-8.pan.first_points                             2/23.3         2/13.1     -44%     183.7     128.4  - / -
+map.100%.z5-8.pan.last_byte                               2/535.0        2/421.8     -21%    1305.8    1272.4  - / -
+map.100%.z9-11.zoom_in.counts                              2/20.8         2/18.1     -13%     362.2     312.8  - / -
+map.100%.z9-11.zoom_in.first_points                       2/110.2         2/28.4     -74%    1649.6     359.7  - / -
+map.100%.z9-11.zoom_in.last_byte                         2/2128.6       2/1689.8     -21%   26785.3   10236.2  - / -
+map.100%.z9-11.pan.counts                                   2/4.9          2/4.4     -10%      80.3      92.8  - / -
+map.100%.z9-11.pan.first_points                             2/5.4          2/5.0      -7%     172.8      94.8  - / -
+map.100%.z9-11.pan.last_byte                               2/42.9         2/40.7      -5%     905.1     446.6  - / -
+map.100%.z12-14.zoom_in.counts                              1/7.9          1/3.6     -54%       7.9       3.6  - / -
+map.100%.z12-14.zoom_in.first_points                        1/8.1          1/4.0     -51%       8.1       4.0  - / -
+map.100%.z12-14.zoom_in.last_byte                          1/16.0         1/14.1     -12%      16.0      14.1  - / -
+map.100%.z12-14.pan.counts                                  2/2.8          2/2.6      -7%     569.7     535.8  - / -
+map.100%.z12-14.pan.first_points                            2/2.8          2/2.7      -4%     572.6     535.9  - / -
+map.100%.z12-14.pan.last_byte                               2/8.8          2/9.7     +10%     590.4     562.4  - / -
+requests.artifacts.last_byte                           16/11362.9       16/784.0     -93%   30167.4    9190.0  - / -
+requests.counts.last_byte                                 8/144.6        8/143.0      -1%     400.5     213.0  - / -
+requests.marks.last_byte                                 181/36.7       181/29.6     -19%    9140.4    2706.4  - / -
+requests.promotion.last_byte                             8/2208.0        8/289.7     -87%  211955.9    3124.5  - / -
+lookup.1%.item_card                                       200/1.1        200/1.0      -9%      37.7      37.7  - / -
+lookup.1%.filter_eq_gbifid                                200/1.3        200/1.2      -8%      15.8      15.6  - / -
+lookup.100%.item_card                                    200/31.7       200/24.0     -24%      60.8      54.6  - / -
+lookup.100%.filter_eq_gbifid                              200/8.6        200/6.8     -21%      17.0      16.7  - / -
+
+requests: identical (317 requests)
