@@ -355,13 +355,15 @@ impl Engine {
             None => &tessera_cache::NeverCancelled,
         };
         self.masked_counts
-            .get_or_build(key, cancel, || {
+            .get_or_build(key, &served.turn, cancel, || {
                 let places = accumulate.map(crate::derived::Placement::of_segments);
                 self.count_pool.install(|| {
                     #[cfg(feature = "fault-injection")]
                     self.switches.hold_masked_count_build_if_wanted();
                     crate::histogram::MaskedCounts::of(
-                        column.accumulate(mask.visible_all(), places.as_deref()),
+                        column.accumulate(mask.visible_all(), places.as_deref(), &|| {
+                            self.masked_counts.give_way()
+                        }),
                         places.is_some(),
                     )
                 })
@@ -569,6 +571,7 @@ impl Engine {
             denied,
             mask_identity,
             cancel: None,
+            turn: Default::default(),
         };
         let Some(gated) = self.gated_artifact(&served, &mask, id)?
         else {

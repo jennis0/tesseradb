@@ -295,6 +295,8 @@ impl Engine {
         // Reset the clock so the head's delivery is not charged to the stage that follows.
         probe.skip();
 
+        // From here to the last point, a masked-count build waits between chunks of its walk.
+        let drawing = self.masked_counts.drawing(&served.turn);
         let Swept {
             tile_counts,
             sub_cells,
@@ -387,6 +389,7 @@ impl Engine {
             &mut probe,
             sink,
         )?;
+        drop(drawing);
 
         // The artifacts, after every point: no point waits on a frame its tag does not need.
         let (artifacts, _) = match walked_first {

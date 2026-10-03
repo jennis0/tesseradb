@@ -119,6 +119,7 @@ impl Engine {
             denied,
             mask_identity,
             cancel: cancel.clone(),
+            turn: Default::default(),
         };
 
         let mask = compose(

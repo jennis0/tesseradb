@@ -325,6 +325,7 @@ impl crate::Engine {
             denied,
             mask_identity: self.mask_identity(session, &generation, &geometry, key.segments_version),
             cancel: None,
+            turn: Default::default(),
         };
 
         // **The filter, evaluated once for the request and over the whole view.** Every route it

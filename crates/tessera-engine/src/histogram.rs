@@ -53,6 +53,15 @@
 //! column, so the bound decides what is resident and never what is served. An entry larger than
 //! the whole bound is handed to its caller and not admitted.
 //!
+//! # A build gives way to points
+//!
+//! A build walks every visible row of a level, which on a corpus larger than memory streams from
+//! disk, and a viewport's reads queue behind it. So a build waits between chunks of its walk while
+//! any viewport is drawing points ([`MaskedCountCache::drawing`]), from the start of its sweep to
+//! its last point. A request is not counted while it waits on a build, its own included, so
+//! nothing waits on itself. A drawing request's sends to its client count, so a client that stalls
+//! holds the builds until the stream's stall bound sheds it.
+//!
 //! An entry is 4 B an artifact for counts alone and 40 B with the geometry: a count, a placed
 //! count, two `u64` sums and four `u32` bounds. At 1.4×10⁶ artifacts that is 56 MB a level. The
 //! bound is `serve.masked_count_cache_bytes`, 256 MiB unless configured.
@@ -290,12 +299,20 @@ pub struct MaskedCountStats {
     pub waiters: u64,
 }
 
+/// One request's part in [`MaskedCountCache::drawing`]: whether it is drawing points, and how
+/// many of its calls are waiting on a build. It counts as drawing only while it is and none is.
+#[derive(Debug, Default)]
+pub(crate) struct DrawingTurn(Mutex<(bool, usize)>);
+
 /// The cache itself, under a byte bound.
 pub struct MaskedCountCache {
     slots: SingleFlightCache<MaskedCountKey, MaskedCounts>,
     /// Builds walking now, at most [`CONCURRENT_BUILDS`].
     building: Mutex<usize>,
     built: Condvar,
+    /// Requests drawing points now. A build walks only while this is zero.
+    drawing: Mutex<usize>,
+    drawn: Condvar,
 }
 
 impl Default for MaskedCountCache {
@@ -322,6 +339,8 @@ impl MaskedCountCache {
             slots,
             building: Mutex::new(0),
             built: Condvar::new(),
+            drawing: Mutex::new(0),
+            drawn: Condvar::new(),
         }
     }
 
@@ -346,17 +365,63 @@ impl MaskedCountCache {
 
     /// This key's counts, building them if nothing is held. A request arriving while another
     /// builds the same key waits for that build, while `cancel` holds and up to
-    /// [`BUILD_WAIT_MS`], and is handed its result.
+    /// [`BUILD_WAIT_MS`], and is handed its result. `turn`'s request is not counted as drawing
+    /// for the duration.
     pub(crate) fn get_or_build<C: Cancel + ?Sized>(
         &self,
         key: MaskedCountKey,
+        turn: &DrawingTurn,
         cancel: &C,
         build: impl FnOnce() -> MaskedCounts,
     ) -> Result<Arc<MaskedCounts>, WaitEnded> {
-        self.slots.get_or_derive_waiting(key, None, cancel, |_| {
+        self.turn(turn, |t| t.1 += 1);
+        let got = self.slots.get_or_derive_waiting(key, None, cancel, |_| {
             let _permit = self.build_permit();
             build()
-        })
+        });
+        self.turn(turn, |t| t.1 -= 1);
+        got
+    }
+
+    /// Counts `turn`'s request as drawing points until the guard drops.
+    pub(crate) fn drawing<'a>(&'a self, turn: &'a DrawingTurn) -> impl Drop + 'a {
+        struct Drawing<'a>(&'a MaskedCountCache, &'a DrawingTurn);
+        impl Drop for Drawing<'_> {
+            fn drop(&mut self) {
+                self.0.turn(self.1, |t| t.0 = false);
+            }
+        }
+        self.turn(turn, |t| t.0 = true);
+        Drawing(self, turn)
+    }
+
+    /// Returns once no request is drawing points. A build calls it between chunks of its walk.
+    pub(crate) fn give_way(&self) {
+        let mut drawing = self.drawing.lock().unwrap_or_else(PoisonError::into_inner);
+        while *drawing > 0 {
+            drawing = self.drawn.wait(drawing).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Applies `change` to `turn` and moves the drawing count by what that changed.
+    fn turn(&self, turn: &DrawingTurn, change: impl FnOnce(&mut (bool, usize))) {
+        let counts = |t: &(bool, usize)| t.0 && t.1 == 0;
+        let mut t = turn.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = counts(&t);
+        change(&mut t);
+        let after = counts(&t);
+        if before == after {
+            return;
+        }
+        let mut drawing = self.drawing.lock().unwrap_or_else(PoisonError::into_inner);
+        if after {
+            *drawing += 1;
+        } else {
+            *drawing -= 1;
+            if *drawing == 0 {
+                self.drawn.notify_all();
+            }
+        }
     }
 
     /// One of the [`CONCURRENT_BUILDS`] places to walk, held until the guard drops.
@@ -407,7 +472,7 @@ mod tests {
         build: impl FnOnce() -> MaskedCounts,
     ) -> Arc<MaskedCounts> {
         cache
-            .get_or_build(key, &tessera_cache::NeverCancelled, build)
+            .get_or_build(key, &DrawingTurn::default(), &tessera_cache::NeverCancelled, build)
             .expect("nothing else is building")
     }
 
@@ -486,7 +551,7 @@ mod tests {
         }
         let gone = crate::CancelToken::new();
         gone.cancel();
-        let waited = cache.get_or_build(key(1, "a", 0), &gone, || counts(&[0]));
+        let waited = cache.get_or_build(key(1, "a", 0), &DrawingTurn::default(), &gone, || counts(&[0]));
         assert_eq!(waited.err(), Some(WaitEnded::Cancelled));
         release.send(()).unwrap();
         assert_eq!(builder.join().unwrap(), 7);
@@ -576,5 +641,68 @@ mod tests {
         let held = get(&cache, key(4, "a", 0), || counts(&[9, 9]));
         assert_eq!(held.get(0), 9);
         assert_eq!(cache.stats().entries, 0);
+    }
+
+    /// A build's walk waits while a request draws points, and goes on when it stops.
+    #[test]
+    fn a_build_gives_way_while_a_request_draws() {
+        let cache = Arc::new(MaskedCountCache::default());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (started, walking) = std::sync::mpsc::channel::<()>();
+        let turn = DrawingTurn::default();
+        let drawing = cache.drawing(&turn);
+        let builder = {
+            let (cache, order) = (Arc::clone(&cache), Arc::clone(&order));
+            std::thread::spawn(move || {
+                get(&cache, key(1, "a", 0), || {
+                    started.send(()).unwrap();
+                    cache.give_way();
+                    order.lock().unwrap().push("walked");
+                    counts(&[1])
+                })
+                .get(0)
+            })
+        };
+        walking.recv().unwrap();
+        order.lock().unwrap().push("drawn");
+        drop(drawing);
+        assert_eq!(builder.join().unwrap(), 1);
+        assert_eq!(*order.lock().unwrap(), ["drawn", "walked"]);
+    }
+
+    /// A drawing request that builds counts, or waits on another's build of them, is not counted
+    /// as drawing meanwhile, so neither build waits on it.
+    #[test]
+    fn a_request_waiting_on_a_build_is_not_counted_as_drawing() {
+        let cache = Arc::new(MaskedCountCache::default());
+        let turn = DrawingTurn::default();
+        let _drawing = cache.drawing(&turn);
+
+        let own = cache
+            .get_or_build(key(1, "a", 0), &turn, &tessera_cache::NeverCancelled, || {
+                cache.give_way();
+                counts(&[3])
+            })
+            .unwrap();
+        assert_eq!(own.get(0), 3);
+
+        let (started, walking) = std::sync::mpsc::channel::<()>();
+        let builder = {
+            let cache = Arc::clone(&cache);
+            std::thread::spawn(move || {
+                get(&cache, key(2, "a", 0), || {
+                    started.send(()).unwrap();
+                    cache.give_way();
+                    counts(&[5])
+                })
+                .get(0)
+            })
+        };
+        walking.recv().unwrap();
+        let waited = cache
+            .get_or_build(key(2, "a", 0), &turn, &tessera_cache::NeverCancelled, || counts(&[0]))
+            .unwrap();
+        assert_eq!(waited.get(0), 5);
+        assert_eq!(builder.join().unwrap(), 5);
     }
 }

@@ -1180,7 +1180,7 @@ impl RowColumn {
     /// caller that passes anything but the composed mask, and it passes the mask narrowed by a
     /// filter.
     pub fn histogram_over(&self, visible: &Bitmap) -> Vec<u32> {
-        self.accumulate(visible, None).counts
+        self.accumulate(visible, None, &|| {}).counts
     }
 
     /// One pass over the rows of `visible`, folding up every artifact's count and, given
@@ -1198,8 +1198,15 @@ impl RowColumn {
     ///
     /// Each worker holds one accumulator for the whole pass: 4 B an ordinal for the counts and
     /// 40 B with the geometry, so a pass holds at most the pool's width of them.
-    pub fn accumulate(&self, visible: &Bitmap, places: Option<&[Placement<'_>]>) -> LevelAccumulation {
-        self.accumulate_in_chunks(visible, places, CHUNK_ROWS)
+    ///
+    /// `before_chunk` is called before each chunk is walked, and may block.
+    pub fn accumulate(
+        &self,
+        visible: &Bitmap,
+        places: Option<&[Placement<'_>]>,
+        before_chunk: &(dyn Fn() + Sync),
+    ) -> LevelAccumulation {
+        self.accumulate_in_chunks(visible, places, CHUNK_ROWS, before_chunk)
     }
 
     fn accumulate_in_chunks(
@@ -1207,6 +1214,7 @@ impl RowColumn {
         visible: &Bitmap,
         places: Option<&[Placement<'_>]>,
         chunk_rows: u32,
+        before_chunk: &(dyn Fn() + Sync),
     ) -> LevelAccumulation {
         use rayon::prelude::*;
         use std::sync::{Mutex, PoisonError};
@@ -1226,6 +1234,7 @@ impl RowColumn {
             .for_each(|c| {
                 let (lo, end) = (c * chunk, (c + 1) * chunk);
                 let lo = u32::try_from(lo).expect("a chunk starts at or below the mask's last row");
+                before_chunk();
                 let mut acc = held
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -2186,12 +2195,12 @@ mod tests {
                 }
                 for chunk in [1u32, 7, 64, 333, CHUNK_ROWS] {
                     let what = format!("{:?} seed={seed} chunk={chunk}", column.layout());
-                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk);
+                    let got = column.accumulate_in_chunks(&mask, Some(&places), chunk, &|| {});
                     assert_eq!(got.counts, expected.counts, "{what}");
                     assert_eq!(got.placed, expected.placed, "{what}");
                     assert_eq!(got.sums, expected.sums, "{what}");
                     assert_eq!(got.boxes, expected.boxes, "{what}");
-                    let counts = column.accumulate_in_chunks(&mask, None, chunk);
+                    let counts = column.accumulate_in_chunks(&mask, None, chunk, &|| {});
                     assert_eq!(counts.counts, expected.counts, "{what}");
                     assert!(counts.placed.is_empty() && counts.sums.is_empty());
                 }

@@ -27,4 +27,6 @@ pub(crate) struct ServedView<'a> {
     pub(crate) mask_identity: crate::histogram::MaskIdentity,
     /// The request's cancellation, which a wait on another request's build observes.
     pub(crate) cancel: Option<crate::CancelToken>,
+    /// Whether the request is drawing points, which a masked-count build gives way to.
+    pub(crate) turn: crate::histogram::DrawingTurn,
 }
