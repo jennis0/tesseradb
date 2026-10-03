@@ -375,6 +375,11 @@ struct RawServe {
     ///
     /// Default: `268435456` (256 MiB).
     masked_count_cache_bytes: Option<u64>,
+    /// Milliseconds a build of the counts for an annotation layer stored by row waits, from its
+    /// first wait, while viewers are drawing points, so that their reads do not queue behind it.
+    ///
+    /// Default: `2000`.
+    masked_count_give_way_ms: Option<u64>,
     /// Bytes of per-viewer counts of occupied tiles, from which the sampling threshold is derived.
     ///
     /// Default: `33554432` (32 MiB).
@@ -625,6 +630,7 @@ pub struct Config {
     pub coalesce_width: usize,
     pub row_projection_cache_bytes: u64,
     pub masked_count_cache_bytes: u64,
+    pub masked_count_give_way_ms: u64,
     pub occupancy_cache_bytes: u64,
     pub fragment_cache_bytes: u64,
 }
@@ -1051,6 +1057,9 @@ fn parse(text: &str) -> Result<Config> {
         masked_count_cache_bytes: serve
             .masked_count_cache_bytes
             .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
+        masked_count_give_way_ms: serve
+            .masked_count_give_way_ms
+            .unwrap_or(tessera_engine::histogram::DEFAULT_GIVE_WAY_MS),
         occupancy_cache_bytes: serve
             .occupancy_cache_bytes
             .unwrap_or(tessera_engine::occupancy::DEFAULT_OCCUPANCY_CACHE_BYTES),

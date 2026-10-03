@@ -240,6 +240,28 @@ impl Engine {
             .store(false, Ordering::SeqCst);
     }
 
+    /// Hold the next viewport that starts drawing points inside its drawing span, before its
+    /// sweep, until [`Self::release_drawing_for_test`].
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn hold_next_drawing_for_test(&self) {
+        self.switches.drawing_held.store(true, Ordering::SeqCst);
+        self.switches.drawing_hold_wanted.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a viewport is held by [`Self::hold_next_drawing_for_test`] now.
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn drawing_is_held_for_test(&self) -> bool {
+        self.switches.drawing_holding.load(Ordering::SeqCst)
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[doc(hidden)]
+    pub fn release_drawing_for_test(&self) {
+        self.switches.drawing_held.store(false, Ordering::SeqCst);
+    }
+
     /// Turn the row-space merge off.
     #[cfg(feature = "fault-injection")]
     #[doc(hidden)]

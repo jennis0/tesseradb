@@ -295,6 +295,16 @@ impl Engine {
         // Reset the clock so the head's delivery is not charged to the stage that follows.
         probe.skip();
 
+        // From here to the last point, a masked-count build waits between chunks of its walk,
+        // except while this request is blocked on its client.
+        let drawing = self.masked_counts.drawing(&served.turn);
+        let mut sending = Sending {
+            sink: &mut *sink,
+            cache: &self.masked_counts,
+            turn: &served.turn,
+        };
+        #[cfg(feature = "fault-injection")]
+        self.switches.hold_drawing_if_wanted();
         let Swept {
             tile_counts,
             sub_cells,
@@ -303,7 +313,7 @@ impl Engine {
 
         // The first flush: every count, before any point. `None`, not an empty slice, when the
         // underlay was not requested — the wire's frame-presence rule needs that distinction.
-        sink.counts(
+        sending.counts(
             &tile_counts,
             tiling.underlay_offset.map(|_| sub_cells.as_slice()),
         )
@@ -385,8 +395,9 @@ impl Engine {
             flush_bytes,
             &req.cancel,
             &mut probe,
-            sink,
+            &mut sending,
         )?;
+        drop(drawing);
 
         // The artifacts, after every point: no point waits on a frame its tag does not need.
         let (artifacts, _) = match walked_first {
@@ -402,5 +413,35 @@ impl Engine {
         // `total_ns` is this call's wall clock, which under streaming includes the sink's sends —
         // consumer-paced time, not compute.
         Ok(probe.finish())
+    }
+}
+
+/// A drawing request's sink: while a call blocks on the client, the request is not counted as
+/// drawing, so a slow reader holds no build.
+struct Sending<'a> {
+    sink: &'a mut dyn ViewportSink,
+    cache: &'a crate::histogram::MaskedCountCache,
+    turn: &'a crate::histogram::DrawingTurn,
+}
+
+impl ViewportSink for Sending<'_> {
+    fn head(&mut self, head: ViewportHead) -> SinkResult {
+        let _sending = self.cache.sending(self.turn);
+        self.sink.head(head)
+    }
+
+    fn counts(&mut self, tiles: &[TileCount], sub_cells: Option<&[SubCellCount]>) -> SinkResult {
+        let _sending = self.cache.sending(self.turn);
+        self.sink.counts(tiles, sub_cells)
+    }
+
+    fn artifacts(&mut self, artifacts: &[ArtifactOut]) -> SinkResult {
+        let _sending = self.cache.sending(self.turn);
+        self.sink.artifacts(artifacts)
+    }
+
+    fn points(&mut self, chunk: PointColumns) -> SinkResult {
+        let _sending = self.cache.sending(self.turn);
+        self.sink.points(chunk)
     }
 }

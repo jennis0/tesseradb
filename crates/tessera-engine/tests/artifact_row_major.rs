@@ -1782,3 +1782,192 @@ fn a_build_in_flight_at_a_suppression_is_not_served_after_it() {
     let later = engine.authorise(&full_coverage_credential()).unwrap();
     assert_eq!(flat_served(&engine, &later), corrected);
 }
+
+/// A counts-only request for every layer's artifacts: its masked counts are read after its
+/// drawing span, so its builds are the ones that give way.
+fn artifacts_only(
+    engine: &Engine,
+    session: &tessera_engine::Session,
+    cancel: Option<tessera_engine::CancelToken>,
+) -> Result<usize, tessera_engine::EngineError> {
+    engine
+        .viewport(
+            session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).cancel(cancel),
+        )
+        .map(|response| response.artifacts.len())
+}
+
+/// A points request with no layers, held in its drawing span by the test hook, on its own thread.
+fn held_drawing(
+    engine: &std::sync::Arc<Engine>,
+    session: &std::sync::Arc<tessera_engine::Session>,
+) -> std::thread::JoinHandle<usize> {
+    engine.hold_next_drawing_for_test();
+    let drawer = {
+        let (engine, session) = (std::sync::Arc::clone(engine), std::sync::Arc::clone(session));
+        std::thread::spawn(move || {
+            engine
+                .viewport(
+                    &session,
+                    ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                        .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+                )
+                .expect("a points viewport")
+                .points
+                .len()
+        })
+    };
+    wait_until(
+        "the points request never started drawing",
+        std::time::Duration::from_secs(60),
+        || engine.drawing_is_held_for_test(),
+    );
+    drawer
+}
+
+/// **A build stops giving way once it has waited its budget**, so a steady run of points
+/// requests delays a level's counts by about the budget and no more.
+#[test]
+fn a_build_under_continuous_drawing_finishes_after_its_budget() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    engine.set_masked_count_give_way_ms(200);
+    let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+    let drawer = held_drawing(&engine, &session);
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let builder = {
+        let (engine, session) = (std::sync::Arc::clone(&engine), std::sync::Arc::clone(&session));
+        std::thread::spawn(move || {
+            let _ = done.send(artifacts_only(&engine, &session, None));
+        })
+    };
+    let served = finished.recv_timeout(std::time::Duration::from_secs(60));
+    let still_drawing = engine.drawing_is_held_for_test();
+    engine.release_drawing_for_test();
+    builder.join().unwrap();
+    assert!(drawer.join().unwrap() > 0);
+    assert!(
+        matches!(served, Ok(Ok(n)) if n > 0),
+        "the build never stopped giving way: {served:?}"
+    );
+    assert!(still_drawing, "the build finished while the points request was drawing");
+}
+
+/// **A build every caller has left stops, and holds nothing**, even while it is giving way.
+#[test]
+fn a_build_whose_callers_have_gone_stops() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    engine.set_masked_count_give_way_ms(600_000);
+    let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+    let drawer = held_drawing(&engine, &session);
+
+    let gone = tessera_engine::CancelToken::new();
+    let (done, finished) = std::sync::mpsc::channel();
+    let builder = {
+        let (engine, session, gone) = (
+            std::sync::Arc::clone(&engine),
+            std::sync::Arc::clone(&session),
+            gone.clone(),
+        );
+        std::thread::spawn(move || {
+            let _ = done.send(artifacts_only(&engine, &session, Some(gone)));
+        })
+    };
+    wait_until("the build never started", std::time::Duration::from_secs(60), || {
+        engine.masked_count_cache_stats().misses > 0
+    });
+    gone.cancel();
+    let answered = finished.recv_timeout(std::time::Duration::from_secs(60));
+    let held = engine.masked_count_cache_stats().entries;
+    engine.release_drawing_for_test();
+    builder.join().unwrap();
+    assert!(drawer.join().unwrap() > 0);
+    assert!(
+        matches!(answered, Ok(Err(tessera_engine::EngineError::Cancelled))),
+        "the abandoned build went on giving way: {answered:?}"
+    );
+    assert_eq!(held, 0, "a stopped build holds nothing");
+}
+
+/// A sink whose counts frame blocks until the test lets it go, as a client that stops reading.
+struct StalledSink(std::sync::mpsc::Receiver<()>);
+
+impl tessera_engine::ViewportSink for StalledSink {
+    fn head(&mut self, _: tessera_engine::ViewportHead) -> tessera_engine::SinkResult {
+        Ok(())
+    }
+
+    fn counts(
+        &mut self,
+        _: &[tessera_engine::TileCount],
+        _: Option<&[tessera_engine::SubCellCount]>,
+    ) -> tessera_engine::SinkResult {
+        let _ = self.0.recv();
+        Ok(())
+    }
+
+    fn artifacts(&mut self, _: &[ArtifactOut]) -> tessera_engine::SinkResult {
+        Ok(())
+    }
+
+    fn points(&mut self, _: tessera_engine::PointColumns) -> tessera_engine::SinkResult {
+        Ok(())
+    }
+}
+
+/// **A points request blocked on its client holds no build.** The stalled request is between its
+/// sweep and its last point, but sending, so a build need not wait for the stream to be shed.
+#[test]
+fn a_stalled_stream_holds_no_build() {
+    let fx = fixture();
+    let engine = std::sync::Arc::new(published(
+        &fx,
+        Some(ServingLayout::RowMajorLabel),
+        Some(ServingLayout::ArtifactMajor),
+    ));
+    engine.set_masked_count_give_way_ms(600_000);
+    let session = std::sync::Arc::new(engine.authorise(&full_coverage_credential()).unwrap());
+
+    let (unstall, stalled) = std::sync::mpsc::channel::<()>();
+    let reader = {
+        let (engine, session) = (std::sync::Arc::clone(&engine), std::sync::Arc::clone(&session));
+        std::thread::spawn(move || {
+            engine
+                .viewport_stream(
+                    &session,
+                    ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                        .layers(tessera_engine::viewport::LayerSelection::Named(&[])),
+                    1 << 20,
+                    &mut StalledSink(stalled),
+                )
+                .is_ok()
+        })
+    };
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let builder = {
+        let (engine, session) = (std::sync::Arc::clone(&engine), std::sync::Arc::clone(&session));
+        std::thread::spawn(move || {
+            let _ = done.send(artifacts_only(&engine, &session, None));
+        })
+    };
+    let served = finished.recv_timeout(std::time::Duration::from_secs(60));
+    unstall.send(()).unwrap();
+    builder.join().unwrap();
+    assert!(reader.join().unwrap());
+    assert!(
+        matches!(served, Ok(Ok(n)) if n > 0),
+        "the build waited on a stream blocked on its client: {served:?}"
+    );
+}

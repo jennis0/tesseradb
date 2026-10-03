@@ -103,6 +103,7 @@ How `tessera serve` listens, whom it admits, and the limits on each request. `te
 | `row_projection_cache_bytes` | integer | `2147483648` (2 GiB) | Bytes of each viewer's projection of the rows they may see, kept between requests. |
 | `fragment_cache_bytes` | integer | `1073741824` (1 GiB) | Bytes of cached visibility masks kept in memory. Masks also persist in the `[bundle]` cache directory, which this does not bound. |
 | `masked_count_cache_bytes` | integer | `268435456` (256 MiB) | Bytes of artifact counts, centroids and boxes kept for annotation layers stored by row, shared by every viewer with the same grant. |
+| `masked_count_give_way_ms` | integer | `2000` | Milliseconds a build of the counts for an annotation layer stored by row waits, from its first wait, while viewers are drawing points, so that their reads do not queue behind it. |
 | `occupancy_cache_bytes` | integer | `33554432` (32 MiB) | Bytes of per-viewer counts of occupied tiles, from which the sampling threshold is derived. |
 | `segment_floor_bytes` | integer | `16777216` (16 MiB) | Segments at or below this size are treated as one size tier when choosing which to merge. |
 | `tier_width` | integer | `4` | How many segments of one size tier are merged together. `tessera serve` refuses to start with a value below 2. |
