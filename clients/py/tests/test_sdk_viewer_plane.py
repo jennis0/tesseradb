@@ -182,14 +182,18 @@ def test_a_layer_is_dropped_and_its_name_is_not_freed(db):
     assert "clusters" not in [layer["name"] for layer in db.meta()["layers"]]
 
 
-def test_a_session_is_revoked_by_its_handle_and_the_token_stops_reading(db):
-    """The capability never transits a second time: what is sent is the `token_id`."""
+def test_a_revoked_token_stops_reading_and_a_reader_holding_its_credential_renews(db):
+    """The capability never transits a second time: what is sent is the `token_id`. The token
+    ends, and a reader holding the `Token` gets another from the credential that made it."""
     token = authorise(db.session_url, db.operator_credential, terms=["public"])
-    viewer = connect(db.viewer_url, token)
-    assert viewer.meta()["views"]
+    holding = connect(db.viewer_url, token)
+    bare = connect(db.viewer_url, token.token)
+    assert holding.meta()["views"]
+    assert bare.meta()["views"]
 
     db.revoke(token)
     with pytest.raises(Refusal):
-        viewer.meta()
+        bare.meta()
+    assert holding.meta()["views"]
     # A handle naming no live session is accepted in silence.
     db.revoke(token)

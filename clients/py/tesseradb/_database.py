@@ -1838,6 +1838,7 @@ class Database:
         - `token`: the `Token`, or its `token_id`.
 
         Only the token's id is sent. An id that names no live token is accepted without comment.
+        A reader holding the `Token` gets another with its `renew()`, as `tesseradb.revoke` says.
         """
         self.serve()
         revoke(self.session_url, self.operator_credential, token)

@@ -191,9 +191,9 @@ def authorise(
 
     A token for a principal carries its terms and its `read` and `write`, never its `read-all`,
     and the principal must hold `read`. A token for `terms` holds those terms and `read`. The
-    operator's token holds `read-all`: it reads every item that is not deleted or suppressed. The token's `renew()` makes a
-    fresh one with the same credential, which stays in this process. A `Database` does this for
-    you: `db.token(terms)` and `db.viewer(terms)`.
+    operator's token holds `read-all`: it reads every item that is not deleted or suppressed. The
+    token's `renew()` makes a fresh one with the same credential, which stays in this process. A
+    `Database` does this for you: `db.token(terms)` and `db.viewer(terms)`.
 
     An empty `session_url` or `credential`, or anything but exactly one target, raises
     `ValueError`, and a request the server refuses raises `PermissionError` with its status and
@@ -263,6 +263,9 @@ def revoke(
     An id that names no such live token is accepted without comment, so the answer says nothing
     about which tokens exist. An empty `session_url` or `credential`, or a `Token` with no
     `token_id`, raises `ValueError`, and a request the server refuses raises `PermissionError`.
+
+    The token ends, not the credential that made it: a reader holding the `Token` gets another
+    with its `renew()`. A reader given the token as a string has none to get.
 
         tesseradb.revoke(session_url, credential, token)
     """

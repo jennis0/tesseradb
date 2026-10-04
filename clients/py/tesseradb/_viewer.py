@@ -1339,8 +1339,8 @@ class Viewer:
         """One request: the answer, open for its body to be read as it arrives, or a refusal with
         what the server said.
 
-        A `403 expired-token` says the session ended before its expiry, as a catalogue change
-        ends it. Where this reader can get another token, it gets one and sends the request once
+        A `403 expired-token` says the session ended before its expiry, as a catalogue change or a
+        revoke ends it. Where this reader can get another token, it gets one and sends the request once
         more.
         """
         for attempt in (0, 1):
