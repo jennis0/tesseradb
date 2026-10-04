@@ -298,7 +298,7 @@ struct RawServe {
     /// than `/healthz` and `/readyz`: when it started, its route and body, the session's
     /// `token_id`, its status, bytes sent, time to headers and to the end of the body, how long it
     /// waited for admission, and whether the client went away before the body ended. Request
-    /// bodies are written, including `/session/authorise`'s, so that a session can be
+    /// bodies are written, including `/session/authorise`'s, with any `password`, `api_key` or `access_token` blanked, so that a session can be
     /// replayed, and the file is created readable by its owner only. Tokens and the credentials in
     /// headers are never written. The file is written by its own thread and flushed whenever it
     /// has caught up, and a restarted server appends to it, marking its lines with a new `run`.

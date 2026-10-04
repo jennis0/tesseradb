@@ -295,6 +295,60 @@ async fn a_deployment_naming_no_log_writes_none() {
     assert!(new.is_empty(), "no file but the server's own: {new:?}");
 }
 
+/// A credential sent in a body, to log in or to authorise as an OIDC identity, is logged blank,
+/// however its key is spelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_credential_in_a_body_is_logged_blank() {
+    let tmp = TempDir::new().unwrap();
+    let deployment = write_deployment(tmp.path(), "127.0.0.1:0", "request_log = \"requests.jsonl\"");
+    let log = tmp.path().join("requests.jsonl");
+    let server = start(&deployment).await;
+    let client = reqwest::Client::new();
+    let sent = [
+        (
+            format!("{}/v1/login", server.viewer),
+            None,
+            r#"{"principal": "ann", "password": "password-secret"}"#,
+        ),
+        (
+            format!("{}/v1/login", server.viewer),
+            None,
+            r#"{"api_k\u0065y": "api-key-secret"}"#,
+        ),
+        (
+            format!("{}/session/authorise", server.session),
+            Some(OPERATOR_CREDENTIAL),
+            r#"{"access_token": "access-token-secret"}"#,
+        ),
+    ];
+    for (url, bearer, body) in &sent {
+        let mut request = client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(*body);
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        request.send().await.unwrap().bytes().await.unwrap();
+    }
+    drop(client);
+    server.stop().await;
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    for secret in ["password-secret", "api-key-secret", "access-token-secret"] {
+        assert!(!text.contains(secret), "the log must not hold {secret:?}");
+    }
+    let bodies: Vec<Value> = lines(&log).into_iter().map(|l| l["body"].clone()).collect();
+    assert_eq!(
+        bodies,
+        [
+            json!({"principal": "ann", "password": ""}),
+            json!({"api_key": ""}),
+            json!({"access_token": ""}),
+        ]
+    );
+}
+
 /// A body larger than the log keeps is logged by its size alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_body_too_large_to_keep_is_logged_by_its_size() {

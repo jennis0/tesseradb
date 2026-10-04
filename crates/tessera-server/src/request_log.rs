@@ -13,8 +13,9 @@
 //! again in each process.
 //!
 //! Request bodies are written, including `/session/authorise`'s, which is what replaying a session
-//! needs; the file is created readable by its owner only. Never written: the bearer token, the
-//! session plane's credential, any other header, and every response body. The
+//! needs; the file is created readable by its owner only. A body's top-level `password`, `api_key`
+//! and `access_token` are written as `""`. Never written: the bearer token, the session plane's
+//! credential, any other header, and every response body. The
 //! `token_id` an authorisation issued is noted by the handler rather than read from the response.
 
 use std::fs::File;
@@ -325,14 +326,27 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
-/// The body as JSON to embed, if it is JSON: as sent, unless it spans lines.
+/// The fields of `/v1/login`'s and `/session/authorise`'s bodies that are themselves credentials.
+const SECRET_FIELDS: [&str; 3] = ["password", "api_key", "access_token"];
+
+/// The body as JSON to embed, if it is JSON: as sent, unless it spans lines or may name a secret
+/// field, whose value is then blanked. A key spelled with an escape holds a backslash, so a body
+/// with neither a backslash nor a secret field's name holds none.
 fn json_body(bytes: &[u8]) -> Option<Box<RawValue>> {
     let raw: Box<RawValue> = serde_json::from_slice(bytes).ok()?;
-    if raw.get().contains(['\n', '\r']) {
-        let value: serde_json::Value = serde_json::from_str(raw.get()).ok()?;
-        return RawValue::from_string(value.to_string()).ok();
+    let text = raw.get();
+    if !text.contains(['\n', '\r', '\\']) && !SECRET_FIELDS.iter().any(|f| text.contains(f)) {
+        return Some(raw);
     }
-    Some(raw)
+    let mut value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if let Some(object) = value.as_object_mut() {
+        for field in SECRET_FIELDS {
+            if let Some(secret) = object.get_mut(field) {
+                *secret = serde_json::Value::from("");
+            }
+        }
+    }
+    RawValue::from_string(value.to_string()).ok()
 }
 
 impl Queued {
