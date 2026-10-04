@@ -296,7 +296,8 @@ async fn a_deployment_naming_no_log_writes_none() {
 }
 
 /// A credential sent in a body, to log in or to authorise as an OIDC identity, is logged blank,
-/// however its key is spelled.
+/// however its key is spelled, and a body that is not an object, which can carry one by position,
+/// is logged by its size alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_credential_in_a_body_is_logged_blank() {
     let tmp = TempDir::new().unwrap();
@@ -304,47 +305,50 @@ async fn a_credential_in_a_body_is_logged_blank() {
     let log = tmp.path().join("requests.jsonl");
     let server = start(&deployment).await;
     let client = reqwest::Client::new();
+    let login = format!("{}/v1/login", server.viewer);
+    let authorise = format!("{}/session/authorise", server.session);
     let sent = [
-        (
-            format!("{}/v1/login", server.viewer),
-            None,
-            r#"{"principal": "ann", "password": "password-secret"}"#,
-        ),
-        (
-            format!("{}/v1/login", server.viewer),
-            None,
-            r#"{"api_k\u0065y": "api-key-secret"}"#,
-        ),
-        (
-            format!("{}/session/authorise", server.session),
-            Some(OPERATOR_CREDENTIAL),
-            r#"{"access_token": "access-token-secret"}"#,
-        ),
+        (&login, r#"{"password": {"principal": "ann", "password": "password-secret"}}"#),
+        (&login, r#"{"password": ["ann", "positional-secret"]}"#),
+        (&login, r#"{"api_k\u0065y": "api-key-secret"}"#),
+        (&authorise, r#"{"access_token": "access-token-secret"}"#),
+        (&authorise, r#"[null, "array-secret", null, null]"#),
     ];
-    for (url, bearer, body) in &sent {
-        let mut request = client
-            .post(url)
+    for (url, body) in &sent {
+        client
+            .post(url.as_str())
+            .bearer_auth(OPERATOR_CREDENTIAL)
             .header("content-type", "application/json")
-            .body(*body);
-        if let Some(bearer) = bearer {
-            request = request.bearer_auth(bearer);
-        }
-        request.send().await.unwrap().bytes().await.unwrap();
+            .body(*body)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
     }
     drop(client);
     server.stop().await;
 
     let text = std::fs::read_to_string(&log).unwrap();
-    for secret in ["password-secret", "api-key-secret", "access-token-secret"] {
+    for secret in [
+        "password-secret",
+        "positional-secret",
+        "api-key-secret",
+        "access-token-secret",
+        "array-secret",
+    ] {
         assert!(!text.contains(secret), "the log must not hold {secret:?}");
     }
     let bodies: Vec<Value> = lines(&log).into_iter().map(|l| l["body"].clone()).collect();
     assert_eq!(
         bodies,
         [
-            json!({"principal": "ann", "password": ""}),
+            json!({"password": {"principal": "ann", "password": ""}}),
+            json!({"password": ""}),
             json!({"api_key": ""}),
             json!({"access_token": ""}),
+            Value::Null,
         ]
     );
 }
